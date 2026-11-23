@@ -7,14 +7,19 @@ import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 import 'package:libdivecomputer_plugin/src/dive_computer_service.dart'
     show DownloadEvent;
 
+import 'package:submersion/features/dive_computer/domain/entities/clock_sync.dart';
 import 'package:submersion/features/dive_computer/domain/entities/device_model.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/discovery_providers.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/download_providers.dart';
 import 'package:submersion/features/dive_computer/presentation/widgets/download_step_widget.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
 
 // ---------------------------------------------------------------------------
 // Fake service -- avoids platform channels entirely
@@ -39,6 +44,7 @@ class _FakeDiveComputerService implements pigeon.DiveComputerService {
   Future<void> startDownload(
     pigeon.DiscoveredDevice device, {
     String? fingerprint,
+    bool syncClock = false,
   }) async {}
   @override
   Future<void> cancelDownload() async {}
@@ -57,6 +63,9 @@ class _FakeDiveComputerService implements pigeon.DiveComputerService {
     int totalDives,
     String? serialNumber,
     String? firmwareVersion,
+    String? clockSyncStatus,
+    String? reportedProduct,
+    int? reportedModel,
   ) {}
   @override
   void onError(pigeon.DiveComputerError error) {}
@@ -119,6 +128,23 @@ class _StubbedDownloadNotifier extends DownloadNotifier {
 // Test device
 // ---------------------------------------------------------------------------
 
+/// A USB HID computer, the shape issue #1271 added. libdivecomputer declares
+/// the G2 TEK as USBHID | BLE, and the native layer reports the HID bit as usb.
+final _usbHidDevice = DiscoveredDevice(
+  id: 'scubapro_g2_tek',
+  name: 'G2 TEK',
+  connectionType: DeviceConnectionType.usb,
+  address: 'scubapro_g2_tek',
+  recognizedModel: const DeviceModel(
+    id: 'scubapro_g2_tek',
+    manufacturer: 'Scubapro',
+    model: 'G2 TEK',
+    connectionTypes: [DeviceConnectionType.usb],
+    dcModel: 0x31,
+  ),
+  discoveredAt: DateTime(2026, 3, 20),
+);
+
 final _testDevice = DiscoveredDevice(
   id: 'test-device-1',
   name: 'Shearwater Perdix',
@@ -144,6 +170,53 @@ Widget _buildWidget({
   DownloadState initialState = const DownloadState(),
   VoidCallback? onComplete,
   void Function(String)? onError,
+  VoidCallback? onImportPartial,
+  ThemeData? theme,
+  AppSettings? settings,
+}) {
+  return ProviderScope(
+    overrides: [
+      if (settings != null)
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier(settings)),
+      diveComputerServiceProvider.overrideWithValue(_FakeDiveComputerService()),
+      diveComputerRepositoryProvider.overrideWithValue(
+        _FakeDiveComputerRepository(),
+      ),
+      downloadNotifierProvider.overrideWith((ref) {
+        final notifier = _StubbedDownloadNotifier();
+        notifier.state = initialState;
+        return notifier;
+      }),
+    ],
+    child: MaterialApp(
+      theme: theme,
+      // Pinned because every assertion below matches an English literal.
+      // flutter_test forwards the HOST machine's locale list rather than a
+      // fixed en_US, and this app supports eleven locales, so on a developer
+      // machine set to one of them an unpinned MaterialApp renders the
+      // translation and every find.textContaining fails. CI is en_US, so that
+      // breaks only for the contributor.
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: DownloadStepWidget(
+          device: device ?? _testDevice,
+          onComplete: onComplete ?? () {},
+          onError: onError ?? (_) {},
+          onImportPartial: onImportPartial,
+        ),
+      ),
+    ),
+  );
+}
+
+/// Builds the widget with a genuinely null device.
+///
+/// `_buildWidget` substitutes `_testDevice` for a null argument, which is what
+/// every other test wants, so the no-device case needs its own builder.
+Widget _buildWidgetWithoutDevice({
+  DownloadState initialState = const DownloadState(),
 }) {
   return ProviderScope(
     overrides: [
@@ -158,13 +231,15 @@ Widget _buildWidget({
       }),
     ],
     child: MaterialApp(
+      // Pinned for the same reason as _buildWidget above.
+      locale: const Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: DownloadStepWidget(
-          device: device ?? _testDevice,
-          onComplete: onComplete ?? () {},
-          onError: onError ?? (_) {},
+          device: null,
+          onComplete: () {},
+          onError: (_) {},
         ),
       ),
     ),
@@ -353,6 +428,70 @@ void main() {
       expect(find.text('Cancel'), findsNothing);
     });
 
+    // -----------------------------------------------------------------------
+    // Clock sync result (issue #1216)
+    // -----------------------------------------------------------------------
+
+    Future<void> pumpComplete(
+      WidgetTester tester,
+      ClockSyncStatus? status,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.complete,
+            progress: DownloadProgress.complete(1),
+            clockSyncStatus: status,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('reports a synced clock on completion', (tester) async {
+      await pumpComplete(tester, ClockSyncStatus.synced);
+      expect(find.byKey(const ValueKey('clock_sync_result')), findsOneWidget);
+      expect(find.text('Clock synced'), findsOneWidget);
+    });
+
+    testWidgets('reports an unsupported model on completion', (tester) async {
+      await pumpComplete(tester, ClockSyncStatus.unsupported);
+      expect(
+        find.text('Clock sync is not supported by this model'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('reports a failed sync on completion', (tester) async {
+      await pumpComplete(tester, ClockSyncStatus.failed);
+      expect(find.text('Clock sync failed'), findsOneWidget);
+    });
+
+    testWidgets('shows nothing when no sync was requested', (tester) async {
+      await pumpComplete(tester, ClockSyncStatus.notRequested);
+      expect(find.byKey(const ValueKey('clock_sync_result')), findsNothing);
+    });
+
+    testWidgets('shows nothing before a completion arrives', (tester) async {
+      await pumpComplete(tester, null);
+      expect(find.byKey(const ValueKey('clock_sync_result')), findsNothing);
+    });
+
+    testWidgets('shows nothing while still downloading', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.downloading,
+            progress: DownloadProgress.downloading(1, 2),
+            clockSyncStatus: ClockSyncStatus.synced,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('clock_sync_result')), findsNothing);
+    });
+
     testWidgets('shows downloaded dives list when dives are present', (
       tester,
     ) async {
@@ -406,7 +545,7 @@ void main() {
       expect(find.text('25.5m'), findsOneWidget);
       expect(find.text('45min'), findsOneWidget);
       expect(find.text('avg 15.3m'), findsOneWidget);
-      expect(find.text('20C'), findsOneWidget);
+      expect(find.text('20°C'), findsOneWidget);
     });
 
     testWidgets('shows deco algorithm and gradient factors', (tester) async {
@@ -454,6 +593,104 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('EAN32'), findsOneWidget);
+    });
+
+    // Issue #2956: under Console dark, tertiary fell back to secondary, the
+    // same navy as the card, so the gas label painted invisibly and pushed the
+    // deco text sideways by its width.
+    testWidgets('gas mix label stays visible when tertiary matches the card', (
+      tester,
+    ) async {
+      const card = Color(0xFF1A2230);
+      final theme = ThemeData(
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF4AE0C0),
+          tertiary: card,
+        ),
+        cardTheme: const CardThemeData(color: card),
+      );
+      final dives = [
+        _makeDive(
+          diveNumber: 1,
+          tanks: const [DownloadedTank(index: 0, o2Percent: 100.0)],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildWidget(
+          theme: theme,
+          initialState: DownloadState(
+            phase: DownloadPhase.complete,
+            progress: DownloadProgress.complete(1),
+            downloadedDives: dives,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final label = tester.widget<Text>(find.text('O2'));
+      expect(label.style?.color, theme.colorScheme.primary);
+    });
+
+    testWidgets('formats depth and temperature in the diver\'s units', (
+      tester,
+    ) async {
+      final dives = [
+        _makeDive(
+          diveNumber: 1,
+          maxDepth: 30.0,
+          avgDepth: 15.0,
+          minTemperature: 20.0,
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildWidget(
+          settings: const AppSettings(
+            depthUnit: DepthUnit.feet,
+            temperatureUnit: TemperatureUnit.fahrenheit,
+          ),
+          initialState: DownloadState(
+            phase: DownloadPhase.complete,
+            progress: DownloadProgress.complete(1),
+            downloadedDives: dives,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('98.4ft'), findsOneWidget);
+      expect(find.text('avg 49.2ft'), findsOneWidget);
+      expect(find.text('68°F'), findsOneWidget);
+      expect(find.text('30.0m'), findsNothing);
+    });
+
+    // A CCR carries a trimix diluent and an oxygen cylinder; calling them
+    // EAN10 and EAN100 misnames both.
+    testWidgets('names trimix and oxygen mixes by their gas', (tester) async {
+      final dives = [
+        _makeDive(
+          diveNumber: 1,
+          tanks: const [
+            DownloadedTank(index: 0, o2Percent: 10.0, hePercent: 50.0),
+            DownloadedTank(index: 1, o2Percent: 100.0),
+            DownloadedTank(index: 2, o2Percent: 20.9),
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.complete,
+            progress: DownloadProgress.complete(1),
+            downloadedDives: dives,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Tx 10/50, O2'), findsOneWidget);
     });
 
     testWidgets('does not show gas mix chip for air tanks', (tester) async {
@@ -561,6 +798,162 @@ void main() {
       expect(find.text('Cancel'), findsNothing);
     });
 
+    // -----------------------------------------------------------------------
+    // Partial import: an interrupted download that already delivered dives
+    // (issue #480). Because dives are delivered oldest-first, the retained
+    // prefix is a contiguous run of the oldest dives, so importing it and
+    // advancing the fingerprint gives a correct resume point.
+    // -----------------------------------------------------------------------
+
+    testWidgets(
+      'shows import-partial button in error state when dives were delivered',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildWidget(
+            initialState: DownloadState(
+              phase: DownloadPhase.error,
+              errorMessage: 'Connection timed out',
+              downloadedDives: [_makeDive(diveNumber: 1), _makeDive()],
+            ),
+            onImportPartial: () {},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The error is still shown, and an explicit action to keep the dives
+        // pulled before the failure is offered alongside Retry.
+        expect(find.text('Connection timed out'), findsOneWidget);
+        expect(find.text('Import 2 downloaded dives'), findsOneWidget);
+        expect(find.text('Retry'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'does not show import-partial button in error state with no dives',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildWidget(
+            initialState: const DownloadState(
+              phase: DownloadPhase.error,
+              errorMessage: 'Connection timed out',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('downloaded dives'), findsNothing);
+        expect(find.text('Retry'), findsOneWidget);
+      },
+    );
+
+    testWidgets('import-partial button fires onImportPartial when tapped', (
+      tester,
+    ) async {
+      var importPartialCalled = false;
+
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.error,
+            errorMessage: 'Connection timed out',
+            downloadedDives: [_makeDive(diveNumber: 1)],
+          ),
+          onImportPartial: () => importPartialCalled = true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A single dive uses the grammatical singular form.
+      await tester.tap(find.text('Import 1 downloaded dive'));
+      await tester.pumpAndSettle();
+
+      expect(importPartialCalled, isTrue);
+    });
+
+    testWidgets('import-partial button uses singular label for one dive', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.error,
+            errorMessage: 'Connection timed out',
+            downloadedDives: [_makeDive(diveNumber: 1)],
+          ),
+          onImportPartial: () {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Import 1 downloaded dive'), findsOneWidget);
+      expect(find.text('Import 1 downloaded dives'), findsNothing);
+    });
+
+    testWidgets('tapping Retry with no partial dives restarts the download', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorMessage: 'Connection timed out',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No onImportPartial and no dives: Retry is the sole FilledButton.
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+
+      // The stubbed notifier makes the restart a no-op; the widget survives.
+      expect(find.byType(DownloadStepWidget), findsOneWidget);
+    });
+
+    testWidgets(
+      'tapping Retry alongside import-partial restarts the download',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildWidget(
+            initialState: DownloadState(
+              phase: DownloadPhase.cancelled,
+              downloadedDives: [_makeDive(diveNumber: 1)],
+            ),
+            onImportPartial: () {},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // With partial dives, Retry is the secondary OutlinedButton.
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+
+        expect(find.byType(DownloadStepWidget), findsOneWidget);
+      },
+    );
+
+    testWidgets('shows import-partial button in cancelled state with dives', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: DownloadState(
+            phase: DownloadPhase.cancelled,
+            downloadedDives: [
+              _makeDive(diveNumber: 1),
+              _makeDive(),
+              _makeDive(),
+            ],
+          ),
+          onImportPartial: () {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Import 3 downloaded dives'), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+    });
+
     testWidgets('shows fallback error text when errorMessage is null', (
       tester,
     ) async {
@@ -588,6 +981,197 @@ void main() {
 
       // The localized string for no_serial_ports
       expect(find.textContaining('USB serial ports'), findsOneWidget);
+    });
+
+    // Issue #865: an out-of-date pairing record cannot be cleared from inside
+    // the app on Apple platforms, so the error has to name the one thing that
+    // does fix it instead of showing the generic connect failure. The native
+    // message is deliberately ignored in favour of the localized advice.
+    testWidgets('shows stale_pairing localized error', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'stale_pairing',
+            errorMessage: 'Failed to connect to device',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Bluetooth settings'), findsOneWidget);
+      expect(find.text('Failed to connect to device'), findsNothing);
+    });
+
+    testWidgets('shows discovery_stalled localized error', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'discovery_stalled',
+            errorMessage: 'Failed to connect to device',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('stopped responding'), findsOneWidget);
+      expect(find.text('Failed to connect to device'), findsNothing);
+    });
+
+    // Issue #4094: Windows used to report every BLE connect failure as the
+    // same "Failed to connect to device", so a Petrel 2 report carried no
+    // cause. The transport now names the step that broke, and the codes a
+    // diver can act on get localized advice instead of the native English.
+    testWidgets('shows ble_device_not_found localized error', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'ble_device_not_found',
+            errorMessage: 'No Bluetooth LE device for 0013437214EE',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('scan again'), findsOneWidget);
+      expect(
+        find.textContaining('No Bluetooth LE device for 0013437214EE'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('shows pairing_required localized error', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'pairing_required',
+            errorMessage: 'Service discovery failed: access denied',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('paired'), findsOneWidget);
+      expect(find.textContaining('access denied'), findsNothing);
+    });
+
+    testWidgets('shows device_unreachable localized error', (tester) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'device_unreachable',
+            errorMessage: 'Service discovery failed: unreachable',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('did not answer'), findsOneWidget);
+      expect(find.textContaining('Service discovery failed'), findsNothing);
+    });
+
+    // An unclassified failure keeps the native detail on screen, so the step
+    // that broke can be read straight off a screenshot.
+    testWidgets('shows connect_failed with its diagnostic details', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'connect_failed',
+            errorMessage: 'Service discovery failed: protocol error',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Diagnostic details'), findsOneWidget);
+      expect(
+        find.textContaining('Service discovery failed: protocol error'),
+        findsOneWidget,
+      );
+    });
+
+    // Issue #1271: a USB HID computer (the Scubapro G2 family, the Suunto EON
+    // Steel family) has no serial port to go looking for, so the no_serial_ports
+    // wording would send the diver hunting for the wrong thing. The native
+    // message says the same thing but only in English, so the model name is
+    // taken from the device and the sentence around it is localized.
+    testWidgets('shows no_usb_device localized error naming the model', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          device: _usbHidDevice,
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'no_usb_device',
+            errorMessage:
+                'No G2 TEK found over USB. Is it connected to this computer '
+                'and powered on?',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The model comes from the descriptor, not from the native sentence.
+      expect(find.textContaining('Scubapro G2 TEK'), findsOneWidget);
+      expect(find.textContaining('over USB'), findsOneWidget);
+      // The serial advice must not appear: there is no port to look for.
+      expect(find.textContaining('USB serial ports'), findsNothing);
+    });
+
+    // A device the descriptor table did not recognise still has a name from the
+    // scan, and naming it beats falling back to the English native message.
+    testWidgets('names an unrecognized device by its discovered name', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidget(
+          device: DiscoveredDevice(
+            id: 'unknown-hid-1',
+            name: 'Aladin Square',
+            connectionType: DeviceConnectionType.usb,
+            address: 'unknown-hid-1',
+            discoveredAt: DateTime(2026, 3, 20),
+          ),
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'no_usb_device',
+            errorMessage: 'No Aladin Square found over USB.',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Aladin Square'), findsOneWidget);
+      expect(find.textContaining('USB serial ports'), findsNothing);
+    });
+
+    // With no device there is no model to name, so the native message is the
+    // best available text. Unreachable in the wizard, which will not start a
+    // download without a device, but the fallback is what keeps the diver from
+    // seeing an empty error if that ever changes.
+    testWidgets('falls back to the native message when there is no device', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildWidgetWithoutDevice(
+          initialState: const DownloadState(
+            phase: DownloadPhase.error,
+            errorCode: 'no_usb_device',
+            errorMessage: 'No dive computer found over USB.',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('No dive computer found over USB.'), findsOneWidget);
     });
 
     testWidgets('calls onError when error phase is entered', (tester) async {

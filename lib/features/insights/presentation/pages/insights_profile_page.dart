@@ -1,0 +1,523 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:submersion/core/providers/provider.dart';
+
+import 'package:submersion/core/accessibility/semantic_helpers.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/deco_analysis_progress.dart';
+import 'package:submersion/features/insights/data/dive_filter_sql.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/insights/presentation/providers/dive_deco_status_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/widgets/chart_row_link.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_charts.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/time_at_depth_format.dart';
+import 'package:submersion/features/insights/presentation/widgets/vertical_distance/vertical_distance_cards.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+/// Opens one group of the deco card's dives under the row name given.
+typedef _OpenDeco =
+    Future<void> Function(
+      String row,
+      List<String> Function(DecoDiveIds ids) pick,
+    );
+
+/// A depth band label cut down to where the band starts: "120-150" becomes
+/// "120". The open-ended last band ("210+") is short already and keeps its
+/// plus, which is what says it has no lower neighbour.
+String _bandStart(String label) =>
+    label.endsWith('+') ? label : label.split('-').first;
+
+class InsightsProfilePage extends ConsumerWidget {
+  final bool embedded;
+
+  const InsightsProfilePage({super.key, this.embedded = false});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
+
+    final content = SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildAscentDescentSection(context, ref, units),
+          const SizedBox(height: 16),
+          const VerticalDistanceCards(),
+          const SizedBox(height: 16),
+          _buildTimeAtDepthSection(context, ref, units),
+          const SizedBox(height: 16),
+          _buildDecoSection(context, ref),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_profile_appBar_title,
+      body: content,
+    );
+  }
+
+  Widget _buildAscentDescentSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final ratesAsync = ref.watch(ascentDescentRatesProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_profile_ascentDescent_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_profile_ascentDescent_title,
+        summary: context.l10n.info_insights_ascentDescent_summary,
+        terms: const [DiveTerm.ascentRate, DiveTerm.descentRate],
+      ),
+      subtitle: context.l10n.insights_profile_ascentDescent_subtitle,
+      child: ratesAsync.when(
+        data: (data) {
+          if (data.avgAscent == null && data.avgDescent == null) {
+            return StatEmptyState(
+              icon: Icons.trending_up,
+              message: context.l10n.insights_profile_ascentDescent_empty,
+            );
+          }
+
+          return Row(
+            children: [
+              if (data.avgAscent != null)
+                Expanded(
+                  child: _buildRateStat(
+                    context,
+                    context.l10n.insights_profile_avgAscent,
+                    '${units.convertDepth(data.avgAscent!).toStringAsFixed(1)} ${units.depthRateSymbol}',
+                    Icons.arrow_upward,
+                    Colors.green,
+                  ),
+                ),
+              if (data.avgAscent != null && data.avgDescent != null)
+                const SizedBox(width: 16),
+              if (data.avgDescent != null)
+                Expanded(
+                  child: _buildRateStat(
+                    context,
+                    context.l10n.insights_profile_avgDescent,
+                    '${units.convertDepth(data.avgDescent!).toStringAsFixed(1)} ${units.depthRateSymbol}',
+                    Icons.arrow_downward,
+                    Colors.blue,
+                  ),
+                ),
+            ],
+          );
+        },
+        loading: () => const SizedBox(
+          height: 100,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_profile_ascentDescent_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRateStat(
+    BuildContext context,
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Semantics(
+      label: statLabel(name: label, value: value),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            ExcludeSemantics(child: Icon(icon, color: color, size: 32)),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimeAtDepthSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final depthRangesAsync = ref.watch(timeAtDepthRangesProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_profile_timeAtDepth_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_profile_timeAtDepth_title,
+        summary: context.l10n.info_insights_timeAtDepth_summary,
+      ),
+      subtitle: context.l10n.insights_profile_timeAtDepth_subtitle,
+      child: depthRangesAsync.when(
+        data: (data) {
+          if (data.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.layers,
+              message: context.l10n.insights_profile_timeAtDepth_empty,
+            );
+          }
+          // The provider bands the samples in the diver's own depth unit, so
+          // the edges go on the ticks as they come. The shared unit ("m" or
+          // "ft") shows once on the x-axis label.
+          final l10n = context.l10n;
+          // A log big enough that its largest bar passes ten hours reads in
+          // hours, on the axis and in each bar's value (issue #4600).
+          final hours = timeAtDepthUsesHours(
+            data.map((d) => d.minutes).reduce(math.max),
+          );
+          return CategoryBarChart(
+            data: [
+              for (final d in data)
+                (
+                  label: d.upperDepth == null
+                      ? '${d.lowerDepth}+'
+                      : '${d.lowerDepth}-${d.upperDepth}',
+                  count: d.minutes,
+                ),
+            ],
+            barColor: Colors.indigo,
+            valueFormatter: (value) =>
+                formatTimeAtDepth(l10n, value, hours: hours),
+            xAxisLabel: units.depthSymbol,
+            yAxisLabel: hours
+                ? l10n.units_profileMetric_h
+                : l10n.units_profileMetric_min,
+            yAxisScale: hours ? 60 : 1,
+            // Seven or eight bands on a phone leave no room for "120-150"
+            // under each bar, so crowded labels fall back to the depth each
+            // band starts at. A marked bar still names its whole range.
+            compactXLabelFormatter: _bandStart,
+            compactXLabelsToFit: true,
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_profile_timeAtDepth_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDecoSection(BuildContext context, WidgetRef ref) {
+    final decoAsync = ref.watch(decoObligationStatsProvider);
+
+    Future<void> openDeco(
+      String row,
+      List<String> Function(DecoDiveIds ids) pick,
+    ) => openChartDives(
+      context,
+      ref,
+      chart: context.l10n.insights_profile_deco_title,
+      row: row,
+      load: (_, _, _) async => pick(await ref.read(decoDiveIdsProvider.future)),
+    );
+
+    return StatSectionCard(
+      title: context.l10n.insights_profile_deco_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_profile_deco_title,
+        summary: context.l10n.info_insights_decoObligation_summary,
+        terms: const [DiveTerm.decoStatus, DiveTerm.decoStops],
+      ),
+      subtitle: context.l10n.insights_profile_deco_subtitle,
+      child: decoAsync.when(
+        data: (data) {
+          // The rate is over classified dives only. Dives whose source
+          // recorded no deco data and whose profile cannot be analyzed are
+          // reported separately rather than folded into the no-deco count,
+          // which is what made this card claim 0% for a library of deco
+          // dives (#623).
+          final classified = data.decoCount + data.noDecoCount;
+          if (classified == 0 && data.unknownCount == 0) {
+            return StatEmptyState(
+              icon: Icons.stop_circle,
+              message: context.l10n.insights_profile_deco_empty,
+            );
+          }
+
+          return _buildDecoBreakdown(context, data, onOpen: openDeco);
+        },
+        // In its own Consumer so a pass moving on rebuilds this card rather
+        // than the whole page, once per dive.
+        loading: () => Consumer(
+          builder: (context, ref, _) {
+            // The card's own pass, else the verdict cache's pass an Insights
+            // filter naming deco makes it wait for (#4461). That pass judges
+            // every dive the diver logged, not the card's, so it shows no
+            // counts. Only under such a filter: a pass run for the dive
+            // list's filter is not what this card is waiting for.
+            final waits = ref.watch(
+              insightsFilterTablesProvider.select(
+                (t) => t.contains(kDiveDecoStatusTable),
+              ),
+            );
+            final writer = waits
+                ? ref.watch(diveDecoStatusProgressProvider)
+                : null;
+            final progress =
+                ref.watch(decoClassificationProgressProvider) ??
+                (writer == null
+                    ? null
+                    : (
+                        stats: (decoCount: 0, noDecoCount: 0, unknownCount: 0),
+                        analyzed: writer.analyzed,
+                        total: writer.total,
+                      ));
+            if (progress == null) {
+              return const SizedBox(
+                height: 100,
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            return _buildDecoProgress(context, progress);
+          },
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_profile_deco_error,
+        ),
+      ),
+    );
+  }
+
+  /// The card during a first pass over the library (#3807): whatever is known
+  /// so far, then how far the pass has got.
+  Widget _buildDecoProgress(
+    BuildContext context,
+    DecoClassificationProgress progress,
+  ) {
+    final stats = progress.stats;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (stats.decoCount + stats.noDecoCount + stats.unknownCount > 0) ...[
+          _buildDecoBreakdown(context, stats),
+          const SizedBox(height: 16),
+        ],
+        DecoAnalysisProgressBar(
+          analyzed: progress.analyzed,
+          total: progress.total,
+        ),
+      ],
+    );
+  }
+
+  /// [onOpen] is null while a pass is still sorting the dives: the numbers
+  /// are partial, and the links would wait for the pass to finish.
+  Widget _buildDecoBreakdown(
+    BuildContext context,
+    DecoObligationStats data, {
+    _OpenDeco? onOpen,
+  }) {
+    final classified = data.decoCount + data.noDecoCount;
+    final percentage = classified == 0
+        ? 0.0
+        : data.decoCount / classified * 100;
+
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildDecoStat(
+              context,
+              context.l10n.insights_profile_deco_decoDives,
+              data.decoCount.toString(),
+              Colors.orange,
+              onTap: onOpen == null || data.decoCount == 0
+                  ? null
+                  : () => onOpen(
+                      context.l10n.insights_profile_deco_decoDives,
+                      (ids) => ids.deco,
+                    ),
+            ),
+            _buildDecoStat(
+              context,
+              context.l10n.insights_profile_deco_noDeco,
+              data.noDecoCount.toString(),
+              Colors.green,
+              onTap: onOpen == null || data.noDecoCount == 0
+                  ? null
+                  : () => onOpen(
+                      context.l10n.insights_profile_deco_noDeco,
+                      (ids) => ids.noDeco,
+                    ),
+            ),
+            _buildDecoStat(
+              context,
+              context.l10n.insights_profile_deco_decoRate,
+              '${percentage.toStringAsFixed(1)}%',
+              Colors.blue,
+            ),
+          ],
+        ),
+        if (data.unknownCount > 0) ...[
+          const SizedBox(height: 8),
+          _buildDecoHint(context, data.unknownCount, onOpen),
+        ],
+        const SizedBox(height: 16),
+        Semantics(
+          label: context.l10n.insights_profile_deco_semanticLabel(
+            percentage.toStringAsFixed(1),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: LinearProgressIndicator(
+              value: percentage / 100,
+              backgroundColor: Colors.green.withValues(alpha: 0.3),
+              valueColor: const AlwaysStoppedAnimation(Colors.orange),
+              minHeight: 12,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // The bar paints the deco share in orange from the leading edge and
+        // leaves the no-deco remainder in green, so the legend has to name
+        // them in that order. Row and LinearProgressIndicator are both
+        // direction-aware, which keeps the pairing intact in RTL locales.
+        ExcludeSemantics(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                context.l10n.insights_profile_deco_decoLabel,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.orange),
+              ),
+              Text(
+                context.l10n.insights_profile_deco_noDeco,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.green),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDecoHint(BuildContext context, int count, _OpenDeco? onOpen) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    final hint = Text(
+      context.l10n.insights_profile_deco_notRecordedHint(count),
+      textAlign: TextAlign.center,
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color),
+    );
+    if (onOpen == null) return hint;
+    return ChartRowLink(
+      onTap: () =>
+          onOpen(context.l10n.insights_chart_notRecorded, (ids) => ids.unknown),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Flexible(child: hint),
+          Icon(Icons.chevron_right, size: 16, color: color),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDecoStat(
+    BuildContext context,
+    String label,
+    String value,
+    Color color, {
+    VoidCallback? onTap,
+  }) {
+    final tile = Column(
+      children: [
+        Text(
+          value,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                label,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            if (onTap != null)
+              Icon(
+                Icons.chevron_right,
+                size: 14,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+          ],
+        ),
+      ],
+    );
+    return Semantics(
+      label: statLabel(name: label, value: value),
+      button: onTap != null,
+      onTap: onTap,
+      excludeSemantics: onTap != null,
+      child: onTap == null
+          ? tile
+          : InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: tile,
+              ),
+            ),
+    );
+  }
+}

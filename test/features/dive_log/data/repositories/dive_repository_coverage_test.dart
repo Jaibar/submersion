@@ -4,10 +4,13 @@ import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
 import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
 
 import '../../../../helpers/test_database.dart';
+import '../../../../helpers/unique_ids.dart';
 
 void main() {
   late DiveRepository repository;
@@ -36,7 +39,7 @@ void main() {
     double? waterTemp,
     int? diveDateTimeMs,
   }) async {
-    final diveId = id ?? 'dive-${DateTime.now().microsecondsSinceEpoch}';
+    final diveId = id ?? uniqueTestId('dive');
     final now = DateTime.now().millisecondsSinceEpoch;
     await db
         .into(db.dives)
@@ -247,11 +250,11 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  // getStatistics - SUM(COALESCE(runtime, bottom_time))
+  // getStatistics - the sum of measured runtimes
   // ---------------------------------------------------------------------------
 
   group('getStatistics', () {
-    test('falls back to bottom_time when runtime is null', () async {
+    test('a dive with only a bottom time adds no time', () async {
       await insertDive(
         id: 'dive-stat1',
         diveNumber: 1,
@@ -270,8 +273,8 @@ void main() {
       final stats = await repository.getStatistics();
 
       expect(stats.totalDives, 2);
-      // No runtime set → falls back to bottom times: 30 + 45 = 75 minutes
-      expect(stats.totalTimeSeconds, (30 + 45) * 60);
+      // Bottom time is no runtime, so both dives count but add no time.
+      expect(stats.totalTimeSeconds, 0);
     });
 
     test('prefers runtime over bottom_time when both are set', () async {
@@ -296,9 +299,162 @@ void main() {
       final stats = await repository.getStatistics();
 
       expect(stats.totalDives, 2);
-      // Dive 1 contributes runtime (40), dive 2 falls back to bottom_time (45)
-      expect(stats.totalTimeSeconds, (40 + 45) * 60);
+      // Dive 1 contributes its runtime (40); dive 2 measured none.
+      expect(stats.totalTimeSeconds, 40 * 60);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // getStatistics - depth distribution buckets (issue #641)
+  // ---------------------------------------------------------------------------
+
+  group('getStatistics depth distribution', () {
+    test(
+      'buckets max depth into 10m ranges up to 130m, with an open-ended tail',
+      () async {
+        await insertDive(id: 'dive-5m', maxDepth: 5.0);
+        await insertDive(id: 'dive-35m', maxDepth: 35.0);
+        await insertDive(id: 'dive-40m', maxDepth: 40.0);
+        await insertDive(id: 'dive-125m', maxDepth: 125.0);
+        await insertDive(id: 'dive-150m', maxDepth: 150.0);
+
+        final stats = await repository.getStatistics();
+        final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+        expect(stats.depthDistribution.length, 14);
+        expect(byLabel['0-10m']!.count, 1);
+        expect(byLabel['30-40m']!.count, 1);
+        // A dive at exactly 40m now falls in its own 40-50m bucket instead of
+        // the old open-ended "40m+" catch-all.
+        expect(byLabel['40-50m']!.count, 1);
+        expect(byLabel['40-50m']!.openEnded, isFalse);
+        expect(byLabel['120-130m']!.count, 1);
+        expect(byLabel['130m+']!.count, 1);
+        expect(byLabel['130m+']!.openEnded, isTrue);
+      },
+    );
+
+    test(
+      'dives under 40m are still counted correctly (no regression)',
+      () async {
+        await insertDive(id: 'dive-a', maxDepth: 12.0);
+        await insertDive(id: 'dive-b', maxDepth: 12.0);
+        await insertDive(id: 'dive-c', maxDepth: 38.0);
+
+        final stats = await repository.getStatistics();
+        final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+        expect(byLabel['10-20m']!.count, 2);
+        expect(byLabel['30-40m']!.count, 1);
+      },
+    );
+
+    test('sums measured runtimes per bucket, never a bottom time '
+        '(issues #641, #3304)', () async {
+      await insertDive(
+        id: 'dive-a',
+        maxDepth: 12.0,
+        bottomTimeSeconds: 20 * 60,
+        runtimeSeconds: 25 * 60,
+      );
+      await insertDive(
+        id: 'dive-b',
+        maxDepth: 15.0,
+        bottomTimeSeconds: 30 * 60,
+      );
+      await insertDive(
+        id: 'dive-c',
+        maxDepth: 38.0,
+        bottomTimeSeconds: 45 * 60,
+      );
+
+      final stats = await repository.getStatistics();
+      final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+      // dive-a reads its runtime (25m) over its bottom_time (20m); dive-b and
+      // dive-c measured no runtime, so they count but add no time.
+      expect(byLabel['10-20m']!.count, 2);
+      expect(byLabel['10-20m']!.totalDurationSeconds, 25 * 60);
+      expect(byLabel['30-40m']!.count, 1);
+      expect(byLabel['30-40m']!.totalDurationSeconds, 0);
+      expect(byLabel['0-10m']!.totalDurationSeconds, 0);
+    });
+
+    test('falls back to the profile span when runtime, entry/exit time, and '
+        'bottom_time are all missing (issue #641 follow-up)', () async {
+      // No runtime/entryTime/exitTime/bottomTime: measuredRuntime can only
+      // resolve via the profile-derived fallback (30 min span).
+      await repository.createDive(
+        domain.Dive(
+          id: 'dive-profile-only',
+          dateTime: DateTime.utc(2026, 3, 28, 10),
+          maxDepth: 22.0,
+          profile: [
+            for (var t = 0; t <= 1800; t += 10)
+              domain.DiveProfilePoint(
+                timestamp: t,
+                depth: t == 0 || t == 1800 ? 0 : 22,
+              ),
+          ],
+        ),
+      );
+      await insertDive(
+        id: 'dive-with-bottom-time',
+        maxDepth: 22.0,
+        bottomTimeSeconds: 10 * 60,
+      );
+
+      final stats = await repository.getStatistics();
+      final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+      // dive-profile-only contributes its 30 min profile span; dive-with-
+      // bottom-time measured no runtime, so it counts but adds no time.
+      expect(byLabel['20-30m']!.totalDurationSeconds, 30 * 60);
+      expect(byLabel['20-30m']!.count, 2);
+    });
+
+    test('falls back to exit - entry when there is no runtime, ahead of the '
+        'profile span and bottom_time (issue #641 follow-up)', () async {
+      await repository.createDive(
+        domain.Dive(
+          id: 'dive-entry-exit',
+          dateTime: DateTime.utc(2026, 3, 29, 10),
+          maxDepth: 45.0,
+          entryTime: DateTime.utc(2026, 3, 29, 10),
+          exitTime: DateTime.utc(2026, 3, 29, 10, 50),
+          bottomTime: const Duration(minutes: 20),
+          profile: [
+            for (var t = 0; t <= 600; t += 10)
+              domain.DiveProfilePoint(
+                timestamp: t,
+                depth: t == 0 || t == 600 ? 0 : 45,
+              ),
+          ],
+        ),
+      );
+
+      final stats = await repository.getStatistics();
+      final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+      // 50 min from the timestamps, not the 10 min profile span and not the
+      // 20 min bottom_time: both sit later in the chain.
+      expect(byLabel['40-50m']!.totalDurationSeconds, 50 * 60);
+    });
+
+    test(
+      'reports zero time for a bucket whose dives carry no duration at all',
+      () async {
+        await insertDive(id: 'dive-untimed', maxDepth: 18.0);
+
+        final stats = await repository.getStatistics();
+        final byLabel = {for (final d in stats.depthDistribution) d.label: d};
+
+        // SUM over an all-NULL column is NULL; the bucket still reports its
+        // dive, with no time behind it.
+        expect(byLabel['10-20m']!.count, 1);
+        expect(byLabel['10-20m']!.totalDurationSeconds, 0);
+      },
+    );
   });
 
   // ---------------------------------------------------------------------------
@@ -311,6 +467,7 @@ void main() {
         id: 'dive-record',
         diveNumber: 1,
         bottomTimeSeconds: 45 * 60,
+        runtimeSeconds: 50 * 60,
         maxDepth: 30.0,
         waterTemp: 22.0,
         diveDateTimeMs: DateTime(2026, 3, 28, 10, 0).millisecondsSinceEpoch,
@@ -322,18 +479,18 @@ void main() {
       expect(records.longestDive!.bottomTime, const Duration(minutes: 45));
     });
 
-    test('longestDive query orders by bottom_time DESC', () async {
+    test('longestDive query orders by measured runtime DESC', () async {
       await insertDive(
         id: 'dive-short-rec',
         diveNumber: 1,
-        bottomTimeSeconds: 20 * 60,
+        runtimeSeconds: 20 * 60,
         maxDepth: 20.0,
         diveDateTimeMs: DateTime(2026, 3, 28, 10, 0).millisecondsSinceEpoch,
       );
       await insertDive(
         id: 'dive-long-rec',
         diveNumber: 2,
-        bottomTimeSeconds: 60 * 60,
+        runtimeSeconds: 60 * 60,
         maxDepth: 25.0,
         diveDateTimeMs: DateTime(2026, 3, 28, 11, 0).millisecondsSinceEpoch,
       );
@@ -342,7 +499,7 @@ void main() {
 
       expect(records.longestDive, isNotNull);
       expect(records.longestDive!.diveId, 'dive-long-rec');
-      expect(records.longestDive!.bottomTime, const Duration(minutes: 60));
+      expect(records.longestDive!.runtime, const Duration(minutes: 60));
     });
 
     test('handles null bottom_time in records', () async {

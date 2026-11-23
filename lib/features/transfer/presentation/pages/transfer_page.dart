@@ -1,19 +1,25 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:submersion/shared/widgets/export_destination_sheet.dart';
+import 'package:submersion/core/services/export/models/uddf_export_options.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
-import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/features/documents/presentation/helpers/document_export_flow.dart';
+import 'package:submersion/features/settings/presentation/providers/csv_unit_mode_provider.dart';
 import 'package:submersion/features/settings/presentation/providers/export_providers.dart';
+import 'package:submersion/features/transfer/presentation/widgets/cloud_section_content.dart';
+import 'package:submersion/features/transfer/presentation/widgets/computers_section_content.dart';
 import 'package:submersion/features/transfer/presentation/widgets/csv_export_dialog.dart';
+import 'package:submersion/features/transfer/presentation/widgets/inventory_report_sheet.dart';
 import 'package:submersion/features/transfer/presentation/widgets/pdf_export_dialog.dart';
+import 'package:submersion/features/transfer/presentation/widgets/service_report_sheet.dart';
 import 'package:submersion/features/transfer/presentation/widgets/transfer_list_content.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
 
 /// Main transfer page with master-detail layout on desktop.
 ///
@@ -71,7 +77,9 @@ class TransferPage extends ConsumerWidget {
       case 'export':
         return _ExportSectionContent(ref: ref);
       case 'computers':
-        return _ComputersSectionContent(ref: ref);
+        return const ComputersSectionContent();
+      case 'cloud':
+        return const CloudSectionContent();
       default:
         return Center(
           child: Text(context.l10n.transfer_unknownSection(sectionId)),
@@ -81,13 +89,19 @@ class TransferPage extends ConsumerWidget {
 }
 
 /// Mobile content showing section list for navigation.
-class TransferMobileContent extends StatelessWidget {
+class TransferMobileContent extends ConsumerWidget {
   const TransferMobileContent({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final transferSections = ref.watch(transferSectionsProvider);
     return Scaffold(
-      appBar: AppBar(title: Text(context.l10n.transfer_appBar_title)),
+      appBar: AppBar(
+        title: FeatureAppBarTitle(
+          featureId: 'transfer',
+          title: context.l10n.transfer_appBar_title,
+        ),
+      ),
       body: ListView.separated(
         padding: const EdgeInsets.symmetric(vertical: 8),
         itemCount: transferSections.length,
@@ -114,7 +128,8 @@ class _TransferSectionDetailPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Find the section title
-    final section = transferSections
+    final section = ref
+        .watch(transferSectionsProvider)
         .where((s) => s.id == sectionId)
         .firstOrNull;
     final title =
@@ -140,7 +155,9 @@ class _TransferSectionDetailPage extends ConsumerWidget {
       case 'export':
         return _ExportSectionContent(ref: ref);
       case 'computers':
-        return _ComputersSectionContent(ref: ref);
+        return const ComputersSectionContent();
+      case 'cloud':
+        return const CloudSectionContent();
       default:
         return Center(
           child: Text(context.l10n.transfer_unknownSection(sectionId)),
@@ -213,7 +230,7 @@ class _ImportSectionContent extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionHeader(
+          transferSectionHeader(
             context,
             context.l10n.transfer_import_sectionHeader,
           ),
@@ -298,7 +315,7 @@ class _ExportSectionContent extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionHeader(
+          transferSectionHeader(
             context,
             context.l10n.transfer_export_sectionHeader,
           ),
@@ -319,16 +336,19 @@ class _ExportSectionContent extends ConsumerWidget {
                   title: Text(context.l10n.transfer_export_uddfTitle),
                   subtitle: Text(context.l10n.transfer_export_uddfSubtitle),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _showExportOptions(
-                    context,
-                    ref,
-                    title: context.l10n.transfer_export_uddfTitle,
-                    shareAction: () => ref
-                        .read(exportNotifierProvider.notifier)
-                        .exportDivesToUddf(),
-                    saveAction: () => ref
-                        .read(exportNotifierProvider.notifier)
-                        .saveUddfToFile(),
+                  onTap: () => unawaited(
+                    _showExportOptions(
+                      context,
+                      ref,
+                      title: context.l10n.transfer_export_uddfTitle,
+                      offerRawData: true,
+                      shareAction: (options) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .exportDivesToUddf(options),
+                      saveAction: (options) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .saveUddfToFile(options),
+                    ),
                   ),
                 ),
                 const Divider(height: 1),
@@ -339,11 +359,21 @@ class _ExportSectionContent extends ConsumerWidget {
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _handleCsvExport(context, ref),
                 ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.folder_zip_outlined),
+                  title: Text(context.l10n.transfer_export_documentsTitle),
+                  subtitle: Text(
+                    context.l10n.transfer_export_documentsSubtitle,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(exportAllDocuments(context, ref)),
+                ),
               ],
             ),
           ),
           const SizedBox(height: 16),
-          _buildSectionHeader(
+          transferSectionHeader(
             context,
             context.l10n.transfer_export_multiFormatHeader,
           ),
@@ -356,16 +386,60 @@ class _ExportSectionContent extends ConsumerWidget {
                   title: Text(context.l10n.transfer_export_excelTitle),
                   subtitle: Text(context.l10n.transfer_export_excelSubtitle),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _showExportOptions(
-                    context,
-                    ref,
-                    title: context.l10n.transfer_export_excelTitle,
-                    shareAction: () => ref
-                        .read(exportNotifierProvider.notifier)
-                        .exportToExcel(),
-                    saveAction: () => ref
-                        .read(exportNotifierProvider.notifier)
-                        .saveExcelToFile(),
+                  onTap: () => unawaited(
+                    _showExportOptions(
+                      context,
+                      ref,
+                      title: context.l10n.transfer_export_excelTitle,
+                      shareAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .exportToExcel(),
+                      saveAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .saveExcelToFile(),
+                    ),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.inventory_2_outlined),
+                  title: Text(context.l10n.transfer_export_inventoryTitle),
+                  subtitle: Text(
+                    context.l10n.transfer_export_inventorySubtitle,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(_exportInventory(context, ref)),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.fact_check_outlined),
+                  title: Text(context.l10n.transfer_export_serviceReportTitle),
+                  subtitle: Text(
+                    context.l10n.transfer_export_serviceReportSubtitle,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(_exportServiceReport(context, ref)),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.build_circle_outlined),
+                  title: Text(context.l10n.transfer_export_maintenanceTitle),
+                  subtitle: Text(
+                    context.l10n.transfer_export_maintenanceSubtitle,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(
+                    _showExportOptions(
+                      context,
+                      ref,
+                      title: context.l10n.transfer_export_maintenanceTitle,
+                      shareAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .exportMaintenanceLog(),
+                      saveAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .saveMaintenanceLogToFile(),
+                    ),
                   ),
                 ),
                 const Divider(height: 1),
@@ -374,15 +448,18 @@ class _ExportSectionContent extends ConsumerWidget {
                   title: Text(context.l10n.transfer_export_kmlTitle),
                   subtitle: Text(context.l10n.transfer_export_kmlSubtitle),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _showExportOptions(
-                    context,
-                    ref,
-                    title: context.l10n.transfer_export_kmlTitle,
-                    shareAction: () =>
-                        ref.read(exportNotifierProvider.notifier).exportToKml(),
-                    saveAction: () => ref
-                        .read(exportNotifierProvider.notifier)
-                        .saveKmlToFile(),
+                  onTap: () => unawaited(
+                    _showExportOptions(
+                      context,
+                      ref,
+                      title: context.l10n.transfer_export_kmlTitle,
+                      shareAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .exportToKml(),
+                      saveAction: (_) => ref
+                          .read(exportNotifierProvider.notifier)
+                          .saveKmlToFile(),
+                    ),
                   ),
                 ),
               ],
@@ -412,47 +489,70 @@ class _ExportSectionContent extends ConsumerWidget {
     if (options == null || !context.mounted) return;
 
     // Now show share/save options
-    _showExportOptions(
+    await _showExportOptions(
       context,
       ref,
       title: context.l10n.transfer_export_pdfTitle,
-      shareAction: () =>
+      shareAction: (_) =>
           ref.read(exportNotifierProvider.notifier).exportDivesToPdf(options),
-      saveAction: () =>
+      saveAction: (_) =>
           ref.read(exportNotifierProvider.notifier).savePdfToFile(options),
     );
   }
 
-  /// Handle CSV export with type selection dialog, then share/save options.
+  /// Handle CSV export with type and units dialog, then share/save options.
   Future<void> _handleCsvExport(BuildContext context, WidgetRef ref) async {
-    final type = await CsvExportDialog.show(context);
-    if (type == null || !context.mounted) return;
+    final request = await CsvExportDialog.show(
+      context,
+      initialUnitMode: ref.read(csvUnitModeProvider),
+    );
+    if (request == null || !context.mounted) return;
+    if (request.type.hasUnits) {
+      unawaited(ref.read(csvUnitModeProvider.notifier).set(request.unitMode));
+    }
+    final mode = request.unitMode;
 
     final notifier = ref.read(exportNotifierProvider.notifier);
-    switch (type) {
+    switch (request.type) {
       case CsvExportType.dives:
-        _showExportOptions(
+        await _showExportOptions(
           context,
           ref,
           title: context.l10n.transfer_csvExport_optionDivesTitle,
-          shareAction: () => notifier.exportDivesToCsv(),
-          saveAction: () => notifier.saveDivesCsvToFile(),
+          shareAction: (_) => notifier.exportDivesToCsv(unitMode: mode),
+          saveAction: (_) => notifier.saveDivesCsvToFile(unitMode: mode),
         );
       case CsvExportType.sites:
-        _showExportOptions(
+        await _showExportOptions(
           context,
           ref,
           title: context.l10n.transfer_csvExport_optionSitesTitle,
-          shareAction: () => notifier.exportSitesToCsv(),
-          saveAction: () => notifier.saveSitesCsvToFile(),
+          shareAction: (_) => notifier.exportSitesToCsv(unitMode: mode),
+          saveAction: (_) => notifier.saveSitesCsvToFile(unitMode: mode),
         );
       case CsvExportType.equipment:
-        _showExportOptions(
+        await _showExportOptions(
           context,
           ref,
           title: context.l10n.transfer_csvExport_optionEquipmentTitle,
-          shareAction: () => notifier.exportEquipmentToCsv(),
-          saveAction: () => notifier.saveEquipmentCsvToFile(),
+          shareAction: (_) => notifier.exportEquipmentToCsv(unitMode: mode),
+          saveAction: (_) => notifier.saveEquipmentCsvToFile(unitMode: mode),
+        );
+      case CsvExportType.fills:
+        await _showExportOptions(
+          context,
+          ref,
+          title: context.l10n.transfer_csvExport_optionFillsTitle,
+          shareAction: (_) => notifier.exportFillsToCsv(unitMode: mode),
+          saveAction: (_) => notifier.saveFillsCsvToFile(unitMode: mode),
+        );
+      case CsvExportType.observations:
+        await _showExportOptions(
+          context,
+          ref,
+          title: context.l10n.transfer_csvExport_optionObservationsTitle,
+          shareAction: (_) => notifier.exportObservationsToCsv(),
+          saveAction: (_) => notifier.saveObservationsCsvToFile(),
         );
     }
   }
@@ -515,300 +615,60 @@ class _ExportSectionContent extends ConsumerWidget {
     }
   }
 
+  /// The inventory's options, then the usual Share or Save choice.
+  Future<void> _exportInventory(BuildContext context, WidgetRef ref) async {
+    final options = await InventoryReportSheet.show(context);
+    if (options == null || !context.mounted) return;
+    final notifier = ref.read(exportNotifierProvider.notifier);
+    await _showExportOptions(
+      context,
+      ref,
+      title: context.l10n.transfer_export_inventoryTitle,
+      shareAction: (_) =>
+          notifier.exportEquipmentInventory(options, save: false),
+      saveAction: (_) => notifier.exportEquipmentInventory(options, save: true),
+    );
+  }
+
+  /// The service report's options, then the usual Share or Save choice.
+  Future<void> _exportServiceReport(BuildContext context, WidgetRef ref) async {
+    final options = await ServiceReportSheet.show(context);
+    if (options == null || !context.mounted) return;
+    final notifier = ref.read(exportNotifierProvider.notifier);
+    await _showExportOptions(
+      context,
+      ref,
+      title: context.l10n.transfer_export_serviceReportTitle,
+      shareAction: (_) => notifier.exportServiceReport(options, save: false),
+      saveAction: (_) => notifier.exportServiceReport(options, save: true),
+    );
+  }
+
   /// Show export options dialog (Share vs Save to File).
-  void _showExportOptions(
+  Future<void> _showExportOptions(
     BuildContext context,
     WidgetRef ref, {
     required String title,
-    required Future<void> Function() shareAction,
-    required Future<void> Function() saveAction,
-  }) {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (bottomSheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-              ),
-              const SizedBox(height: 16),
-              ListTile(
-                leading: const Icon(Icons.share),
-                title: Text(context.l10n.transfer_export_optionShareTitle),
-                subtitle: Text(
-                  context.l10n.transfer_export_optionShareSubtitle,
-                ),
-                onTap: () {
-                  Navigator.of(bottomSheetContext).pop();
-                  _handleExport(context, ref, shareAction);
-                },
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.save_alt),
-                title: Text(context.l10n.transfer_export_optionSaveTitle),
-                subtitle: Text(context.l10n.transfer_export_optionSaveSubtitle),
-                onTap: () {
-                  Navigator.of(bottomSheetContext).pop();
-                  _handleExport(context, ref, saveAction);
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
+    required Future<void> Function(UddfExportOptions options) shareAction,
+    required Future<void> Function(UddfExportOptions options) saveAction,
+    bool offerRawData = false,
+  }) async {
+    // The shared sheet, not a second copy of it. This page used to inline its
+    // own share/save sheet built from the same four l10n keys; keeping both
+    // meant the raw data toggle would have to be added and maintained twice.
+    final choice = await showExportDestinationSheetWithOptions(
+      context,
+      title: title,
+      showRawDataToggle: offerRawData,
     );
-  }
-}
+    if (choice == null || !context.mounted) return;
 
-/// Dive Computers section content
-class _ComputersSectionContent extends ConsumerWidget {
-  final WidgetRef ref;
-
-  const _ComputersSectionContent({required this.ref});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final computersAsync = ref.watch(allDiveComputersProvider);
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Connect new computer
-          Card(
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              onTap: () => context.push('/dive-computers/discover'),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: colorScheme.primary.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        Icons.bluetooth_searching,
-                        color: colorScheme.primary,
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            context.l10n.transfer_computers_connectTitle,
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            context.l10n.transfer_computers_connectSubtitle,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Icon(
-                      Icons.chevron_right,
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // Known computers list
-          computersAsync.when(
-            data: (computers) {
-              if (computers.isEmpty) return const SizedBox.shrink();
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 16),
-                  _buildSectionHeader(context, 'Known Computers'),
-                  const SizedBox(height: 8),
-                  ...computers.map(
-                    (computer) => _buildComputerCard(
-                      context,
-                      computer,
-                      theme,
-                      colorScheme,
-                    ),
-                  ),
-                ],
-              );
-            },
-            loading: () => const Padding(
-              padding: EdgeInsets.all(32),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-            error: (_, _) => const SizedBox.shrink(),
-          ),
-
-          if (Platform.isIOS) ...[
-            const SizedBox(height: 16),
-            _buildSectionHeader(
-              context,
-              context.l10n.transfer_computers_appleWatchHeader,
-            ),
-            const SizedBox(height: 8),
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.watch),
-                title: Text(context.l10n.transfer_computers_appleWatchTitle),
-                subtitle: Text(
-                  context.l10n.transfer_computers_appleWatchSubtitle,
-                ),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => context.push('/settings/wearable-import'),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildComputerCard(
-    BuildContext context,
-    DiveComputer computer,
-    ThemeData theme,
-    ColorScheme colorScheme,
-  ) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        onTap: () => context.push('/dive-computers/${computer.id}'),
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: computer.isFavorite
-                      ? colorScheme.primaryContainer
-                      : colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  _getConnectionIcon(computer.connectionType),
-                  size: 20,
-                  color: computer.isFavorite
-                      ? colorScheme.onPrimaryContainer
-                      : colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            computer.displayName,
-                            style: theme.textTheme.titleSmall,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (computer.isFavorite)
-                          Icon(
-                            Icons.star,
-                            size: 16,
-                            color: colorScheme.primary,
-                          ),
-                      ],
-                    ),
-                    Text(
-                      computer.fullName,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.scuba_diving,
-                          size: 12,
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${computer.diveCount} dives',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                            fontSize: 11,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Icon(
-                          Icons.access_time,
-                          size: 12,
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          computer.lastDownloadFormatted,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                onPressed: () =>
-                    context.push('/dive-computers/${computer.id}/download'),
-                icon: const Icon(Icons.download, size: 20),
-                tooltip: 'Download dives',
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  IconData _getConnectionIcon(String? connectionType) {
-    switch (connectionType?.toLowerCase()) {
-      case 'bluetooth':
-        return Icons.bluetooth;
-      case 'ble':
-        return Icons.bluetooth;
-      case 'usb':
-        return Icons.usb;
-      default:
-        return Icons.watch;
-    }
+    final options = choice.options;
+    final action = switch (choice.destination) {
+      ExportDestination.share => shareAction,
+      ExportDestination.saveToFile => saveAction,
+    };
+    _handleExport(context, ref, () => action(options));
   }
 }
 
@@ -859,16 +719,6 @@ class _TransferSummaryWidget extends StatelessWidget {
 // ============================================================================
 // HELPER WIDGETS
 // ============================================================================
-
-Widget _buildSectionHeader(BuildContext context, String title) {
-  return Text(
-    title,
-    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-      color: Theme.of(context).colorScheme.primary,
-      fontWeight: FontWeight.bold,
-    ),
-  );
-}
 
 Widget _buildInfoCard(
   BuildContext context,

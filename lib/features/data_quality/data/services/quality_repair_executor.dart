@@ -1,0 +1,827 @@
+import 'package:drift/drift.dart'
+    show BooleanExpressionOperators, Value, Variable;
+
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/data_quality/data/repositories/quality_findings_repository.dart';
+import 'package:submersion/features/data_quality/data/services/hundredfold_gas_mix_repair.dart';
+import 'package:submersion/features/data_quality/data/services/profile_repair_service.dart';
+import 'package:submersion/features/data_quality/data/services/quality_scan_service.dart';
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/data_quality/domain/quality_thresholds.dart';
+import 'package:submersion/features/data_quality/domain/repairs/quality_repair_action.dart'
+    show SwitchToAdd;
+import 'package:submersion/features/data_quality/domain/repairs/repair_predicates.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/source_clock_repository.dart';
+import 'package:submersion/features/dive_log/data/services/source_timeline_shift.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_role_repair_repository.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/transmitter_serial.dart';
+import 'package:submersion/features/transmitters/data/repositories/transmitter_repository.dart';
+import 'package:submersion/features/transmitters/domain/entities/transmitter.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
+import 'package:submersion/features/dive_log/data/services/diver_gas_switch_writer.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:uuid/uuid.dart';
+
+const _uuid = Uuid();
+
+typedef RepairUndo = Future<void> Function();
+
+/// What a repair attempt actually did.
+///
+/// A repair that changes nothing must say so: marking the finding resolved
+/// would only have it reopened by the very next scan, and writing an
+/// unchanged profile stacks another edited-profile layer for no reason.
+class RepairResult {
+  const RepairResult.applied([this.undo]) : changed = true;
+  const RepairResult.noChange() : changed = false, undo = null;
+
+  /// Whether anything was written.
+  final bool changed;
+
+  /// Inverse of the write, when the operation has one.
+  final RepairUndo? undo;
+}
+
+/// Executes data repairs with one uniform contract: write -> single notify ->
+/// mark finding resolved -> queue a targeted rescan -> return the undo
+/// closure (absent when the operation has no inverse). Operations that find
+/// nothing to do return [RepairResult.noChange] and leave the finding open.
+class QualityRepairExecutor {
+  /// [restoreDocuments] puts back documents an undone delete removed; the
+  /// app passes one that also re-arms their expiry reminders.
+  QualityRepairExecutor({
+    DiveRepository? diveRepository,
+    TankPressureRepository? tankPressureRepository,
+    QualityFindingsRepository? findingsRepository,
+    ProfileRepairService? profileRepairService,
+    HundredfoldGasMixRepair? gasMixRepair,
+    TankRoleRepairRepository? tankRoleRepository,
+    TransmitterRepository? transmitterRepository,
+    SourceClockRepository? sourceClockRepository,
+    DiverGasSwitchWriter? gasSwitchWriter,
+    SourceTimelineShifter? sourceTimelineShifter,
+    Future<void> Function(List<DocumentSnapshotEntry> snapshot)?
+    restoreDocuments,
+  }) : _diveRepo = diveRepository ?? DiveRepository(),
+       _sourceClocks = sourceClockRepository ?? SourceClockRepository(),
+       _injectedSwitchWriter = gasSwitchWriter,
+       _sourceTimelines = sourceTimelineShifter ?? SourceTimelineShifter(),
+       _tankRoles = tankRoleRepository ?? TankRoleRepairRepository(),
+       _transmitters = transmitterRepository ?? TransmitterRepository(),
+       _tankRepo = tankPressureRepository ?? TankPressureRepository(),
+       _findings = findingsRepository ?? QualityFindingsRepository(),
+       _profiles = profileRepairService ?? ProfileRepairService(),
+       _gasMixes = gasMixRepair ?? HundredfoldGasMixRepair(),
+       _restoreDocuments =
+           restoreDocuments ?? DocumentRepository().restoreSnapshot;
+
+  final Future<void> Function(List<DocumentSnapshotEntry> snapshot)
+  _restoreDocuments;
+  final DiveRepository _diveRepo;
+  final SourceClockRepository _sourceClocks;
+  final DiverGasSwitchWriter? _injectedSwitchWriter;
+
+  /// Built on use, like [_db]: the writer reads the database when it is
+  /// made, and an executor must be buildable while it is migrating or not
+  /// yet open.
+  DiverGasSwitchWriter get _switchWriter =>
+      _injectedSwitchWriter ?? DiverGasSwitchWriter();
+  final SourceTimelineShifter _sourceTimelines;
+  final TankRoleRepairRepository _tankRoles;
+  final TransmitterRepository _transmitters;
+  final TankPressureRepository _tankRepo;
+  final QualityFindingsRepository _findings;
+  final ProfileRepairService _profiles;
+  final HundredfoldGasMixRepair _gasMixes;
+  AppDatabase get _db => DatabaseService.instance.database;
+  static const _log = LoggerService('QualityRepairExecutor');
+
+  /// Queues the targeted quality rescan and a forced rebuild of the
+  /// dives' sensor summaries, which the condition engine reads. Forced
+  /// because a repair (or its undo) can rewrite a profile or pressure
+  /// series without touching the dive's updated_at, which is what marks a
+  /// stored summary current.
+  static void _rescan(Iterable<String> diveIds) {
+    scheduleQualityScan(diveIds);
+    scheduleSensorSummaryRefresh(diveIds, force: true);
+    scheduleDerivedMetricsRefresh(diveIds, force: true);
+  }
+
+  Future<void> _finish(String findingId, Iterable<String> affected) async {
+    await _findings.setStatus(findingId, QualityStatus.resolved);
+    _rescan(affected);
+  }
+
+  /// Dives sharing this dive's importId (for "shift the whole import").
+  /// Falls back to just the dive when it has no importId.
+  Future<List<String>> divesInSameImport(String diveId) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT b.id AS id FROM dives a JOIN dives b '
+          'ON a.import_id IS NOT NULL AND b.import_id = a.import_id '
+          'WHERE a.id = ?1',
+          variables: [Variable.withString(diveId)],
+        )
+        .get();
+    final ids = [for (final r in rows) r.read<String>('id')];
+    return ids.isEmpty ? [diveId] : ids;
+  }
+
+  /// Moves the logbook times of [diveIds], and each dive's primary source
+  /// with them: the primary is the recording the logbook mirrors, so a
+  /// logbook clock that was wrong was that source's clock too. Left behind,
+  /// it would go on disagreeing with every other source, and the clock
+  /// finding the shift answered would reopen on the next scan (#3655).
+  Future<RepairResult> shiftTimes({
+    required List<String> diveIds,
+    required Duration offset,
+    required String findingId,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.qualityRepair,
+    body: () => _shiftTimesInner(
+      diveIds: diveIds,
+      offset: offset,
+      findingId: findingId,
+    ),
+  );
+
+  Future<RepairResult> _shiftTimesInner({
+    required List<String> diveIds,
+    required Duration offset,
+    required String findingId,
+  }) async {
+    final snapshot = await _diveRepo.getDiveTimesSnapshot(diveIds);
+    final primaries = await _sourceClocks.snapshot(
+      await _sourceClocks.primarySourceIds(diveIds),
+    );
+    await _db.transaction(() async {
+      await _diveRepo.bulkShiftDiveTimes(diveIds, offset);
+      await _sourceClocks.shift(primaries, offset);
+    });
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, diveIds);
+    return RepairResult.applied(() async {
+      await _db.transaction(() async {
+        await _diveRepo.restoreDiveTimes(snapshot);
+        await _sourceClocks.restore(primaries);
+      });
+      SyncEventBus.notifyLocalChange();
+      _rescan(diveIds);
+    });
+  }
+
+  /// Whether [sourceId] names a registered computer now, so "fix this
+  /// computer on every dive" can reach anything.
+  Future<bool> sourceNamesComputer(String sourceId) =>
+      _sourceClocks.namesComputer(sourceId);
+
+  /// [sourceId] and every other source its computer recorded off by the
+  /// same whole hours, for "fix this computer on every dive" (#3655).
+  Future<List<String>> sourcesWithSameClockOffset({
+    required String sourceId,
+    required Duration offset,
+  }) => _sourceClocks.sourcesSharingClockOffset(
+    sourceId: sourceId,
+    offset: offset,
+    toleranceMinutes: QualityThresholds.hourOffsetRemainderToleranceMin,
+  );
+
+  /// Corrects the clock of [sourceIds] alone, leaving each dive's logbook
+  /// times as they are: the repair for a secondary computer whose clock was
+  /// wrong while the primary was right (#3655).
+  Future<RepairResult> shiftSourceTimes({
+    required List<String> sourceIds,
+    required Duration offset,
+    required String findingId,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.qualityRepair,
+    body: () => _shiftSourceTimesInner(
+      sourceIds: sourceIds,
+      offset: offset,
+      findingId: findingId,
+    ),
+  );
+
+  Future<RepairResult> _shiftSourceTimesInner({
+    required List<String> sourceIds,
+    required Duration offset,
+    required String findingId,
+  }) async {
+    final snapshot = await _sourceClocks.snapshot(sourceIds);
+    if (snapshot.isEmpty || offset == Duration.zero) {
+      return const RepairResult.noChange();
+    }
+    await _db.transaction(() => _sourceClocks.shift(snapshot, offset));
+    SyncEventBus.notifyLocalChange();
+    final diveIds = {for (final s in snapshot) s.diveId};
+    await _finish(findingId, diveIds);
+    return RepairResult.applied(() async {
+      await _db.transaction(() => _sourceClocks.restore(snapshot));
+      SyncEventBus.notifyLocalChange();
+      _rescan(diveIds);
+    });
+  }
+
+  /// Lines one source of [diveId] up with the primary by its profile: moves
+  /// its samples, events and recorded offset by [seconds] along the
+  /// primary's timeline, and its own clock window with them (#4296).
+  Future<RepairResult> shiftSourceProfile({
+    required String diveId,
+    required String sourceId,
+    required int seconds,
+    required String findingId,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.qualityRepair,
+    body: () async {
+      final record = await _sourceTimelines.shift(
+        diveId: diveId,
+        sourceId: sourceId,
+        seconds: seconds,
+      );
+      if (record == null) return const RepairResult.noChange();
+      SyncEventBus.notifyLocalChange();
+      await _finish(findingId, [diveId]);
+      return RepairResult.applied(() async {
+        await _sourceTimelines.undo(record);
+        SyncEventBus.notifyLocalChange();
+        _rescan([diveId]);
+      });
+    },
+  );
+
+  /// [compute] is one of ProfileRepairService's pure functions.
+  ///
+  /// A computed series identical to the stored one means the repair found
+  /// nothing it could fix: writing it would demote the originals and insert a
+  /// byte-identical copy as the new primary, and resolving the finding would
+  /// only have the next scan reopen it.
+  Future<RepairResult> applyProfileRepair({
+    required String diveId,
+    required String findingId,
+    required List<domain.DiveProfilePoint> Function(
+      List<domain.DiveProfilePoint>,
+    )
+    compute,
+  }) async {
+    final current = await _profiles.currentPrimaryProfile(diveId);
+    if (current.isEmpty) return const RepairResult.noChange();
+    final repaired = compute(current);
+    if (_sameSeries(current, repaired)) return const RepairResult.noChange();
+    // saveEditedProfile notifies internally.
+    await _profiles.applyEdited(diveId, repaired);
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await _profiles.undo(diveId); // restoreOriginalProfile notifies
+      _rescan([diveId]);
+    });
+  }
+
+  /// Whole-sample equality: DiveProfilePoint is Equatable over all of its
+  /// fields, so a repair that touches any channel -- not just depth and
+  /// temperature -- still counts as a change.
+  static bool _sameSeries(
+    List<domain.DiveProfilePoint> a,
+    List<domain.DiveProfilePoint> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  Future<RepairResult> recomputeMetrics({
+    required String diveId,
+    required String findingId,
+  }) async {
+    final dive = await _diveRepo.getDiveById(diveId);
+    if (dive == null) return const RepairResult.noChange();
+    final prior = (maxDepth: dive.maxDepth, avgDepth: dive.avgDepth);
+    await _db.transaction(() => _profiles.recomputeMetrics(diveId));
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await _db.transaction(
+        () => _diveRepo.bulkUpdateFields(
+          [diveId],
+          DivesCompanion(
+            maxDepth: Value(prior.maxDepth),
+            avgDepth: Value(prior.avgDepth),
+          ),
+        ),
+      );
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    });
+  }
+
+  /// Reinterpret the dive's recorded water temperature on the scale it was
+  /// really logged on. The sample-channel equivalent goes through
+  /// [applyProfileRepair] with ProfileRepairService.convertTemperature; this
+  /// one rewrites the single scalar column and nothing else.
+  Future<RepairResult> convertWaterTemp({
+    required String diveId,
+    required bool kelvinScale,
+    required String findingId,
+  }) async {
+    final dive = await _diveRepo.getDiveById(diveId);
+    final prior = dive?.waterTemp;
+    if (prior == null) return const RepairResult.noChange();
+    // Re-test convergence against the CURRENT value rather than trusting the
+    // finding's params. The dive may have been corrected by hand since the
+    // scan, and converting an already-plausible reading would corrupt it.
+    // Refusing also subsumes the degenerate -40 case, where Celsius and
+    // Fahrenheit coincide and the conversion could never change anything.
+    if (!RepairPredicates.convertedChannelIsPlausible([
+      prior,
+    ], kelvinScale: kelvinScale)) {
+      return const RepairResult.noChange();
+    }
+    final converted = RepairPredicates.convertToCelsius(
+      prior,
+      kelvinScale: kelvinScale,
+    );
+
+    Future<void> write(double value) async {
+      await _db.transaction(
+        () => _diveRepo.bulkUpdateFields([
+          diveId,
+        ], DivesCompanion(waterTemp: Value(value))),
+      );
+      SyncEventBus.notifyLocalChange();
+    }
+
+    await write(converted);
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await write(prior);
+      _rescan([diveId]);
+    });
+  }
+
+  /// Divide a cylinder's mix stored 100 times too high back to [mix]
+  /// (issue #4714), while the stored mix still divides to it: the launch
+  /// repair's write for one cylinder that arrived since, say by sync.
+  Future<RepairResult> rescaleGasMix({
+    required String diveId,
+    required String tankId,
+    required domain.GasMix mix,
+    required String findingId,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.qualityRepair,
+    body: () async {
+      final prior = await _gasMixes.rescale(
+        diveId: diveId,
+        tankId: tankId,
+        mix: mix,
+      );
+      if (prior == null) return const RepairResult.noChange();
+      await _finish(findingId, [diveId]);
+      // No undo: this is what the launch repair writes anyway, so putting
+      // the impossible mix back would last only until the next launch.
+      return const RepairResult.applied();
+    },
+  );
+
+  Future<RepairResult> swapTankRecordPressures({
+    required String diveId,
+    required String tankId,
+    required double newStartBar,
+    required double newEndBar,
+    required String findingId,
+  }) async {
+    await _db.transaction(
+      () => _diveRepo.updateTankRecordPressures(
+        diveId: diveId,
+        tankId: tankId,
+        startPressure: newStartBar,
+        endPressure: newEndBar,
+      ),
+    );
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await _db.transaction(
+        () => _diveRepo.updateTankRecordPressures(
+          diveId: diveId,
+          tankId: tankId,
+          startPressure: newEndBar,
+          endPressure: newStartBar,
+        ),
+      );
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    });
+  }
+
+  /// Set ONE endpoint of a tank record from its sensor series (the
+  /// endpoint-mismatch repair). Never touches the other endpoint.
+  Future<RepairResult> setTankRecordEndpoint({
+    required String diveId,
+    required String tankId,
+    required String endpoint, // 'start' | 'end'
+    required double bar,
+    required String findingId,
+  }) async {
+    final dive = await _diveRepo.getDiveById(diveId);
+    final tank = dive?.tanks.where((t) => t.id == tankId).firstOrNull;
+    if (tank == null) return const RepairResult.noChange();
+    final prior = endpoint == 'start' ? tank.startPressure : tank.endPressure;
+    Future<void> write(double? value) => _db.transaction(
+      () => _diveRepo.updateTankRecordPressures(
+        diveId: diveId,
+        tankId: tankId,
+        startPressure: endpoint == 'start' ? value : null,
+        endPressure: endpoint == 'end' ? value : null,
+      ),
+    );
+    await write(bar);
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId]);
+    if (prior == null) return const RepairResult.applied();
+    return RepairResult.applied(() async {
+      await write(prior);
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    });
+  }
+
+  /// Makes a name-derived transmitter tank the bailout on [diveId] (issue
+  /// #3307), merging the computer's duplicate bailout cylinder when it is
+  /// still as imported. The tank takes that cylinder's open-circuit role
+  /// ([role]: bailout, or a deco or stage gas). With [registerTransmitter]
+  /// and a [serial], the transmitter is also registered with that role (an
+  /// existing entry for the serial has its role changed) and the entry is
+  /// applied to every other dive with it. Undo reverts this dive only: the
+  /// registry entry stays. [mixesKept] counts the other dives that found no
+  /// mix, and [registered] says whether the registry entry was written.
+  Future<
+    ({RepairResult result, int mixesKept, bool registered, TankRole? role})
+  >
+  useAsBailout({
+    required String diveId,
+    required String tankId,
+    required String ocTankId,
+    required String findingId,
+    required bool registerTransmitter,
+    String? serial,
+    String? label,
+    String? diverId,
+  }) async {
+    final outcome = await _db.transaction(
+      () => _tankRoles.useAsBailout(
+        diveId: diveId,
+        tankId: tankId,
+        ocTankId: ocTankId,
+      ),
+    );
+    if (outcome == null) {
+      return (
+        result: const RepairResult.noChange(),
+        mixesKept: 0,
+        registered: false,
+        role: null,
+      );
+    }
+    SyncEventBus.notifyLocalChange();
+
+    var mixesKept = 0;
+    var registered = false;
+    final normalized = normalizeTransmitterSerial(serial);
+    if (registerTransmitter && normalized != null) {
+      // This dive's repair is committed: a registry failure must not take
+      // its undo away or leave the finding open.
+      try {
+        final entry = await _registerRole(
+          normalized,
+          label,
+          diverId,
+          outcome.role,
+        );
+        if (entry != null) {
+          registered = true;
+          mixesKept = (await _transmitters.applyToExistingDives(
+            entry,
+          )).mixesKept;
+        }
+      } catch (e, stackTrace) {
+        _log.error(
+          'Registering bailout transmitter failed',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    await _finish(findingId, [diveId]);
+    return (
+      result: RepairResult.applied(() async {
+        await _db.transaction(() => _tankRoles.undoUseAsBailout(outcome.undo));
+        SyncEventBus.notifyLocalChange();
+        _rescan([diveId]);
+      }),
+      mixesKept: mixesKept,
+      registered: registered,
+      role: outcome.role,
+    );
+  }
+
+  /// The diver's registry entry for [serial], now with [role] (the one the
+  /// repair gave the tank): an existing one is updated, otherwise one is
+  /// created. Null when the registry refuses it (a conflicting entry).
+  Future<Transmitter?> _registerRole(
+    String serial,
+    String? label,
+    String? diverId,
+    TankRole role,
+  ) async {
+    final existing = (await _transmitters.getForDiver(diverId))
+        .where((t) => normalizeTransmitterSerial(t.transmitterSerial) == serial)
+        .firstOrNull;
+    try {
+      if (existing != null) {
+        final updated = existing.copyWith(role: role);
+        if (existing.role != role) {
+          await _transmitters.update(updated);
+        }
+        return updated;
+      }
+      final now = DateTime.now();
+      return await _transmitters.create(
+        Transmitter(
+          id: '',
+          diverId: diverId,
+          transmitterSerial: serial,
+          label: (label == null || label.isEmpty) ? serial : label,
+          role: role,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+    } on TransmitterConflictException {
+      return null;
+    }
+  }
+
+  Future<RepairResult> swapPressureSeries({
+    required String diveId,
+    required String tankIdA,
+    required String tankIdB,
+    required String findingId,
+  }) async {
+    await _db.transaction(
+      () => _tankRepo.swapTankPressureSeries(
+        diveId: diveId,
+        tankIdA: tankIdA,
+        tankIdB: tankIdB,
+      ),
+    );
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await _db.transaction(
+        () => _tankRepo.swapTankPressureSeries(
+          diveId: diveId,
+          tankIdA: tankIdA,
+          tankIdB: tankIdB,
+        ),
+      );
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    });
+  }
+
+  Future<RepairResult> reassignPressureSeries({
+    required String diveId,
+    required String fromTankId,
+    required String toTankId,
+    required String findingId,
+  }) async {
+    await _db.transaction(
+      () => _tankRepo.reassignTankPressureSeries(
+        diveId: diveId,
+        fromTankId: fromTankId,
+        toTankId: toTankId,
+      ),
+    );
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      await _db.transaction(
+        () => _tankRepo.reassignTankPressureSeries(
+          diveId: diveId,
+          fromTankId: toTankId,
+          toTankId: fromTankId,
+        ),
+      );
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    });
+  }
+
+  /// Write the gas switches a missing-switch finding offers (issue #165).
+  ///
+  /// The write goes through [DiverGasSwitchWriter], the dive editor's own
+  /// path: the switches are untagged so they apply to every computer on the
+  /// dive, the dive's switch list becomes the diver's (a re-parse or file
+  /// resync leaves it alone), and its stored safety review is dropped so it
+  /// is rebuilt from them. A dive that has gained a switch since the scan is
+  /// left alone, since the finding was written for a dive with none and
+  /// adding to the diver's own would mix two timelines; so is one that has
+  /// lost a cylinder a switch names, and one whose list the diver has since
+  /// emptied in the editor, which the detector skips. All are checked in the
+  /// transaction that writes. Undo deletes exactly the switches written here
+  /// and hands the list back to the dive's computers, unless a switch added
+  /// since (in the editor, or by a peer) is still there: that list is the
+  /// diver's, and a re-parse must leave it alone.
+  Future<RepairResult> addGasSwitches({
+    required String diveId,
+    required List<SwitchToAdd> switches,
+    required String findingId,
+  }) async {
+    if (switches.isEmpty) return const RepairResult.noChange();
+    final rows = [
+      for (final s in switches)
+        GasSwitch(
+          id: _uuid.v4(),
+          diveId: diveId,
+          timestamp: s.t,
+          tankId: s.tankId,
+          depth: s.depth,
+          createdAt: DateTime.now().toUtc(),
+        ),
+    ];
+    final written = await _db.transaction<bool>(() async {
+      final existing = await (_db.select(
+        _db.gasSwitches,
+      )..where((t) => t.diveId.equals(diveId))).get();
+      if (existing.isNotEmpty) return false;
+      final tankIds = {
+        for (final row in await (_db.select(
+          _db.diveTanks,
+        )..where((t) => t.diveId.equals(diveId))).get())
+          row.id,
+      };
+      if (!switches.every((s) => tankIds.contains(s.tankId))) return false;
+      final dive = await (_db.select(
+        _db.dives,
+      )..where((t) => t.id.equals(diveId))).getSingleOrNull();
+      if (dive == null || dive.gasSwitchesEdited) return false;
+      return _switchWriter.save(
+        diveId: diveId,
+        switches: rows,
+        loadedIds: const {},
+      );
+    });
+    if (!written) return const RepairResult.noChange();
+    await _finish(findingId, [diveId]);
+    return RepairResult.applied(() async {
+      final added = {for (final r in rows) r.id};
+      await _db.transaction(() async {
+        final later = await (_db.select(
+          _db.gasSwitches,
+        )..where((t) => t.diveId.equals(diveId) & t.id.isNotIn(added))).get();
+        await _switchWriter.save(
+          diveId: diveId,
+          switches: const [],
+          loadedIds: added,
+          edited: later.isNotEmpty,
+        );
+      });
+      _rescan([diveId]);
+    });
+  }
+
+  /// Delete the redundant copy of a dive downloaded twice from one computer.
+  ///
+  /// Goes through [DiveRepository.deleteDive], the same path as the dive
+  /// list's own delete: row delete, sync tombstone, local-change notify. A
+  /// bare row delete would have the next sync resurrect the copy from any
+  /// peer that still holds it. Undo re-creates the dive from the entity read
+  /// beforehand, and the documents the delete took with it, the way the
+  /// list's bulk-delete Undo does; both ids are rescanned so the pair's
+  /// finding retires on the survivor.
+  Future<RepairResult> deleteDuplicate({
+    required String keepDiveId,
+    required String deleteDiveId,
+    required String findingId,
+  }) async {
+    if (keepDiveId == deleteDiveId) {
+      throw ArgumentError.value(
+        deleteDiveId,
+        'deleteDiveId',
+        'must differ from keepDiveId',
+      );
+    }
+    final doomed = await _diveRepo.getDivesByIds([deleteDiveId]);
+    // Already gone (deleted by hand, or by sync, since the scan). Nothing to
+    // do; the finding is left to the rescan rather than resolved on a fact
+    // this tap did not establish.
+    if (doomed.isEmpty) return const RepairResult.noChange();
+    final snapshot = doomed.single;
+    // The delete takes the dive's documents with it (issue #2613).
+    final documents = await DocumentRepository().captureForOwners(
+      DocumentOwnerKind.dive,
+      [deleteDiveId],
+    );
+    await _diveRepo.deleteDive(deleteDiveId);
+    await _finish(findingId, [keepDiveId, deleteDiveId]);
+    return RepairResult.applied(() async {
+      await _diveRepo.createDive(snapshot);
+      await _restoreDocuments(documents);
+      _rescan([keepDiveId, deleteDiveId]);
+    });
+  }
+
+  /// Removes each of [equipmentIds] on the dive, and everything attached
+  /// through it, from one dive of a shared gear pair (issue #2853). The removal writes a gear
+  /// diff and a dive bump, so it runs in one transaction; undo writes the
+  /// dive's previous gear rows back. Rescans both dives of the pair.
+  Future<RepairResult> removeGearFromDive({
+    required String diveId,
+    required String otherDiveId,
+    required List<String> equipmentIds,
+    required String findingId,
+  }) async {
+    final snapshot = [
+      for (final r in await (_db.select(
+        _db.diveEquipment,
+      )..where((t) => t.diveId.equals(diveId))).get())
+        GearProvenance(
+          equipmentId: r.equipmentId,
+          viaEquipmentId: r.viaEquipmentId,
+          viaSetId: r.viaSetId,
+        ),
+    ];
+    final onDive = {for (final g in snapshot) g.equipmentId};
+    final present = [
+      for (final id in equipmentIds)
+        if (onDive.contains(id)) id,
+    ];
+    if (present.isEmpty) return const RepairResult.noChange();
+    await _db.transaction(
+      () => _diveRepo.bulkRemoveEquipment([diveId], present),
+    );
+    SyncEventBus.notifyLocalChange();
+    await _finish(findingId, [diveId, otherDiveId]);
+    return RepairResult.applied(() async {
+      await _db.transaction(() => _diveRepo.replaceGearRows(diveId, snapshot));
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId, otherDiveId]);
+    });
+  }
+
+  /// Exchange two tanks' computer bundles from the dive page, outside any
+  /// finding. Same write, notify and undo contract as [swapPressureSeries];
+  /// the targeted rescan lets a twin-tank finding clear itself.
+  Future<RepairResult> exchangeTankSources({
+    required String diveId,
+    required String tankIdA,
+    required String tankIdB,
+  }) async {
+    Future<void> run() async {
+      await _db.transaction(
+        () => _tankRepo.exchangeTankSources(
+          diveId: diveId,
+          tankIdA: tankIdA,
+          tankIdB: tankIdB,
+        ),
+      );
+      SyncEventBus.notifyLocalChange();
+      _rescan([diveId]);
+    }
+
+    await run();
+    return RepairResult.applied(run);
+  }
+
+  Future<RepairResult> setPrimarySource({
+    required String diveId,
+    required String sourceId,
+    required String findingId,
+  }) async {
+    await _diveRepo.setPrimaryDataSource(
+      diveId: diveId,
+      computerReadingId: sourceId,
+    );
+    await _finish(findingId, [diveId]);
+    // set-primary has its own UI affordance to set back
+    return const RepairResult.applied();
+  }
+}

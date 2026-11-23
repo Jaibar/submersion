@@ -1,0 +1,122 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/dive_detail_section_pairs.dart';
+import 'package:submersion/core/constants/dive_detail_sections.dart';
+
+void main() {
+  group('DiveDetailSectionPair', () {
+    test('partnerOf resolves either half and rejects outsiders', () {
+      const pair = DiveDetailSectionPair(
+        DiveDetailSectionId.tanks,
+        DiveDetailSectionId.weights,
+      );
+
+      expect(pair.partnerOf(DiveDetailSectionId.tanks), pair.right);
+      expect(pair.partnerOf(DiveDetailSectionId.weights), pair.left);
+      expect(pair.partnerOf(DiveDetailSectionId.notes), isNull);
+    });
+  });
+
+  group('kDiveDetailSectionPairs', () {
+    test('pairs the six card pairs, left half first', () {
+      expect(kDiveDetailSectionPairs.map((p) => (p.left, p.right)), [
+        (DiveDetailSectionId.decoStatus, DiveDetailSectionId.tissueLoading),
+        (DiveDetailSectionId.tanks, DiveDetailSectionId.sacSegments),
+        (DiveDetailSectionId.details, DiveDetailSectionId.environment),
+        (DiveDetailSectionId.surfaceGps, DiveDetailSectionId.tide),
+        (DiveDetailSectionId.weights, DiveDetailSectionId.buoyancy),
+        (DiveDetailSectionId.buddies, DiveDetailSectionId.signatures),
+      ]);
+    });
+
+    // The Cylinders row takes the slot Gas consumption by segment already
+    // had, so it lands above Details and the Surface GPS + Tide row.
+    test('default order puts Cylinders directly after Safety Review', () {
+      final order = DiveDetailSectionConfig.defaultSections
+          .map((s) => s.id)
+          .toList();
+
+      expect(
+        order.indexOf(DiveDetailSectionId.tanks),
+        order.indexOf(DiveDetailSectionId.safetyReview) + 1,
+      );
+      expect(
+        order.indexOf(DiveDetailSectionId.sacSegments),
+        lessThan(order.indexOf(DiveDetailSectionId.details)),
+      );
+    });
+
+    // The deco column pads itself to the tissue card's height, so that pair
+    // stretches and pairs at the 600px the combined panel used; the rest keep
+    // their intrinsic heights and the default 700px threshold.
+    test('only the deco/tissue pair stretches, at its own threshold', () {
+      final stretching = kDiveDetailSectionPairs.where((p) => p.stretch);
+      expect(stretching.map((p) => p.left), [DiveDetailSectionId.decoStatus]);
+      expect(stretching.single.minRowWidth, 600);
+      expect(
+        kDiveDetailSectionPairs
+            .where((p) => !p.stretch)
+            .every((p) => p.minRowWidth == 700),
+        isTrue,
+      );
+    });
+
+    // diveDetailSectionPairFor returns the first match, so a section in two
+    // pairs would silently lose one of them.
+    test('no section appears in more than one pair', () {
+      final seen = <DiveDetailSectionId>{};
+      for (final pair in kDiveDetailSectionPairs) {
+        expect(seen.add(pair.left), isTrue, reason: '${pair.left} repeats');
+        expect(seen.add(pair.right), isTrue, reason: '${pair.right} repeats');
+      }
+    });
+
+    // Pairing looks ahead, so a gap would still pair -- but the settings list
+    // reads as the page renders only while the halves sit together.
+    test('default order lists each pair adjacently, left half first', () {
+      final order = DiveDetailSectionConfig.defaultSections
+          .map((s) => s.id)
+          .toList();
+
+      for (final pair in kDiveDetailSectionPairs) {
+        expect(
+          order.indexOf(pair.right),
+          order.indexOf(pair.left) + 1,
+          reason: '${pair.left} should be followed by ${pair.right}',
+        );
+      }
+    });
+
+    test('the declaration order matches the default section order', () {
+      expect(
+        DiveDetailSectionConfig.defaultSections.map((s) => s.id),
+        DiveDetailSectionId.values,
+      );
+    });
+  });
+
+  group('diveDetailSectionPairFor', () {
+    test('finds the pair from either half', () {
+      expect(
+        diveDetailSectionPairFor(DiveDetailSectionId.tide)?.left,
+        DiveDetailSectionId.surfaceGps,
+      );
+      expect(
+        diveDetailSectionPairFor(DiveDetailSectionId.surfaceGps)?.right,
+        DiveDetailSectionId.tide,
+      );
+      expect(
+        diveDetailSectionPairFor(DiveDetailSectionId.sacSegments)?.left,
+        DiveDetailSectionId.tanks,
+      );
+      expect(
+        diveDetailSectionPairFor(DiveDetailSectionId.buoyancy)?.left,
+        DiveDetailSectionId.weights,
+      );
+    });
+
+    test('returns null for a section that never pairs', () {
+      expect(diveDetailSectionPairFor(DiveDetailSectionId.altitude), isNull);
+      expect(diveDetailSectionPairFor(DiveDetailSectionId.navTrack), isNull);
+    });
+  });
+}

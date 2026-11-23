@@ -1,0 +1,276 @@
+import 'package:drift/drift.dart' show GeneratedDatabase, Variable;
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/core/database/change_log/change_log_policy.dart';
+import 'package:submersion/core/database/change_log/change_log_trigger_sql.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/sync/child_column_clears.dart';
+import 'package:submersion/core/services/sync/device_local_fields.dart';
+import 'package:submersion/core/services/sync/sync_fact_groups.dart';
+import 'package:submersion/features/settings/presentation/conflicts/catalogue/conflict_field_catalogue.dart';
+
+import '../../../helpers/test_database.dart';
+
+Map<String, Set<String>> _columnsByTable(GeneratedDatabase db) => {
+  for (final table in db.allTables)
+    table.actualTableName: {for (final c in table.$columns) c.name},
+  for (final spec in changeLogRawTableSpecs) spec.table: spec.columns.toSet(),
+};
+
+void main() {
+  late AppDatabase db;
+
+  setUp(() => db = createTestDatabase());
+  tearDown(() => db.close());
+
+  test('every table in allTables is classified', () {
+    final real = _columnsByTable(db).keys.toSet();
+    expect(
+      real.difference(changeLogTables.keys.toSet()),
+      isEmpty,
+      reason: 'new tables need a ChangeLogClass',
+    );
+    expect(
+      changeLogTables.keys.toSet().difference(real),
+      isEmpty,
+      reason: 'these keys are not real tables',
+    );
+  });
+
+  test('a raw table spec names the columns the table has', () async {
+    for (final spec in changeLogRawTableSpecs) {
+      final rows = await db
+          .customSelect(
+            'SELECT name FROM pragma_table_info(?)',
+            variables: [Variable.withString(spec.table)],
+          )
+          .get();
+      expect(
+        {for (final row in rows) row.read<String>('name')},
+        spec.columns.toSet(),
+        reason: spec.table,
+      );
+    }
+  });
+
+  test('every tracked table has a key', () {
+    for (final spec in changeLogSpecsFor(db)) {
+      if (changeLogTables[spec.table] == ChangeLogClass.excluded) continue;
+      expect(spec.keyColumns, isNotEmpty, reason: spec.table);
+    }
+  });
+
+  test('the log itself is never logged', () {
+    for (final table in changeLogTables.keys.where(
+      (t) => t.startsWith('change_log_'),
+    )) {
+      expect(changeLogTables[table], ChangeLogClass.excluded, reason: table);
+    }
+  });
+
+  test('every child parent column exists on that table', () {
+    final columns = _columnsByTable(db);
+    for (final entry in changeLogParents.entries) {
+      expect(columns, contains(entry.key));
+      expect(
+        columns[entry.key],
+        contains(entry.value.column),
+        reason: '${entry.key}.${entry.value.column}',
+      );
+      expect(
+        columns,
+        contains(entry.value.rootTable),
+        reason: entry.value.rootTable,
+      );
+    }
+  });
+
+  test('every machine owner column exists', () {
+    final columns = _columnsByTable(db);
+    for (final entry in changeLogMachineOwners.entries) {
+      for (final owner in entry.value.entries) {
+        expect(columns[entry.key], contains(owner.key), reason: entry.key);
+        expect(columns, contains(owner.value));
+      }
+    }
+  });
+
+  test('parent chains end', () {
+    for (final start in changeLogParents.keys) {
+      final seen = <String>{};
+      var table = start;
+      while (changeLogParents.containsKey(table)) {
+        expect(seen.add(table), isTrue, reason: 'cycle through $table');
+        table = changeLogParents[table]!.rootTable;
+      }
+    }
+  });
+
+  test('a table with a dive_id child link roots at dives', () {
+    expect(changeLogParents['dive_tanks']?.rootTable, 'dives');
+    expect(changeLogParents['dive_tanks']?.column, 'dive_id');
+    expect(changeLogParents['dive_equipment']?.rootTable, 'dives');
+    expect(
+      changeLogParents['course_requirement_dives']?.rootTable,
+      'course_requirements',
+    );
+  });
+
+  test('what a set carries besides gear is logged as an edit to the set '
+      '(issue #4525)', () {
+    for (final table in [
+      'equipment_set_includes',
+      'equipment_set_weight_presets',
+      'equipment_set_cylinder_configs',
+    ]) {
+      expect(
+        changeLogParents[table]?.rootTable,
+        'equipment_sets',
+        reason: table,
+      );
+      expect(changeLogParents[table]?.column, 'set_id', reason: table);
+    }
+  });
+
+  test('the bookkeeping columns match the conflict catalogue', () {
+    final expected = {
+      for (final key in conflictBookkeepingColumns)
+        if (key != 'id') changeLogSqlName(key),
+    };
+    expect(changeLogBookkeepingColumns, expected);
+  });
+
+  test('ignored columns cover bookkeeping, device facts and device locals', () {
+    final media = changeLogIgnoredColumns('media');
+    expect(media, containsAll(changeLogBookkeepingColumns));
+    for (final group in SyncFactGroups.of('media')) {
+      expect(media, contains(group.clockColumn));
+      expect(media, containsAll(group.columns.values));
+    }
+    final settings = changeLogIgnoredColumns('diver_settings');
+    for (final key in deviceLocalSyncColumns['diverSettings']!) {
+      expect(settings, contains(changeLogSqlName(key)));
+    }
+    expect(settings, contains('dive_list_sort'));
+    expect(settings, contains('list_arrangement_hlc'));
+  });
+
+  test('the SQL name helper inverts columnJsonKey', () {
+    for (final name in ['dive_list_sort', 'theme_mode', 'hlc', 'bbox_x']) {
+      expect(changeLogSqlName(columnJsonKey(name)), name);
+    }
+  });
+
+  test('every opt-in column exists on its table, an opt-in table', () {
+    final columns = _columnsByTable(db);
+    for (final entry in changeLogOptInUpdateColumns.entries) {
+      expect(changeLogOptInUpdateTables, contains(entry.key));
+      for (final column in entry.value) {
+        expect(columns[entry.key], contains(column), reason: entry.key);
+      }
+    }
+  });
+
+  // A shown column on a table whose updates are never recorded, or one the
+  // update trigger leaves out, would make an entry silently list nothing.
+  test('every shown machine column is a recordable column of an opt-in '
+      'machine table', () {
+    final columns = _columnsByTable(db);
+    for (final MapEntry(key: table, value: shown)
+        in changeLogShownMachineColumns.entries) {
+      expect(changeLogTables[table], ChangeLogClass.deleteCopyOnly);
+      expect(changeLogOptInUpdateTables, contains(table));
+      final only = changeLogOptInUpdateColumns[table];
+      for (final column in shown) {
+        final name = '$table.$column';
+        expect(columns[table], contains(column), reason: name);
+        expect(changeLogIgnoredColumns(table), isNot(contains(column)));
+        if (only != null) expect(only, contains(column), reason: name);
+      }
+    }
+    expect(
+      changeLogShownMachineColumns.keys,
+      containsAll(changeLogRevertsWithEntryOnly),
+    );
+  });
+
+  test('an opted-in operation keeps delete copies only of tables whose '
+      'opt-in is not limited to some columns', () {
+    expect(changeLogOptInKeepsDeletes('tank_pressure_series'), isTrue);
+    expect(changeLogOptInKeepsDeletes('dive_profile_series'), isTrue);
+    expect(changeLogOptInKeepsDeletes('dive_safety_findings'), isFalse);
+    expect(changeLogOptInKeepsDeletes('dives'), isFalse);
+  });
+
+  // A re-parse deletes a series and its lineage row, and its revert must
+  // put both back and take the new series away (issue #4848).
+  test('an opted-in operation keeps a series lineage row, and notes the '
+      'series it adds but not their lineage', () {
+    expect(changeLogOptInKeepsDeletes('dive_profile_series_history'), isTrue);
+    expect(changeLogOptInLogsInserts('dive_profile_series'), isTrue);
+    expect(changeLogOptInLogsInserts('tank_pressure_series'), isTrue);
+    expect(changeLogOptInLogsInserts('dive_profile_series_history'), isFalse);
+    expect(changeLogOptInLogsInserts('dive_safety_findings'), isFalse);
+    expect(changeLogOptInLogsInserts('dives'), isFalse);
+  });
+
+  test('every reading column exists on a table whose inserts are noted', () {
+    final columns = _columnsByTable(db);
+    for (final MapEntry(key: table, value: reading)
+        in changeLogReadingColumns.entries) {
+      expect(changeLogOptInLogsInserts(table), isTrue, reason: table);
+      // A row with no source is named by its computer, and only a row
+      // written since a delete supersedes it.
+      for (final column in [...reading, 'computer_id', 'created_at']) {
+        expect(columns[table], contains(column), reason: '$table.$column');
+      }
+      expect(reading.first, 'dive_id', reason: table);
+    }
+  });
+
+  // A gear item's sitting dismisses its condition findings (issue #4527,
+  // phase 3): logged as the dive's safety findings are, under the item.
+  test('equipment findings are delete copy only, under their item', () {
+    expect(
+      changeLogTables['equipment_findings'],
+      ChangeLogClass.deleteCopyOnly,
+    );
+    final parent = changeLogParents['equipment_findings']!;
+    expect(parent.rootTable, 'equipment');
+    expect(parent.column, 'equipment_id');
+    expect(changeLogOptInUpdateTables, contains('equipment_findings'));
+    expect(changeLogOptInUpdateColumns['equipment_findings'], {'dismissed_at'});
+    expect(changeLogShownMachineColumns['equipment_findings'], {
+      'dismissed_at',
+    });
+    expect(changeLogOptInKeepsDeletes('equipment_findings'), isFalse);
+  });
+
+  test('a sitting opts in to machine rows; a free manual label does not', () {
+    expect(
+      changeLogOptsInMachineRows(
+        label: 'record_edit:dives:dive:tanks',
+        source: 'manual',
+      ),
+      isTrue,
+    );
+    expect(
+      changeLogOptsInMachineRows(label: 'record_editor', source: 'manual'),
+      isFalse,
+    );
+    expect(changeLogOptsInMachineRows(label: null, source: 'manual'), isFalse);
+    expect(
+      changeLogOptsInMachineRows(label: 'remove_source', source: 'manual'),
+      isTrue,
+    );
+    expect(changeLogOptsInMachineRows(label: 'x', source: 'agent'), isTrue);
+  });
+
+  test('a device-local settings key is filtered out of the triggers', () {
+    expect(
+      changeLogRowGuard('settings', 'NEW'),
+      allOf(contains('NEW."key"'), contains("'active_diver_id'")),
+    );
+    expect(changeLogRowGuard('dives', 'NEW'), isNull);
+  });
+}

@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/constants/dive_field_column_sizing.dart';
+import 'package:submersion/core/constants/dive_field_labels.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/constants/entity_field.dart';
 
 export 'package:submersion/core/constants/dive_field_column_sizing.dart';
 export 'package:submersion/core/constants/dive_field_extractor.dart';
 export 'package:submersion/core/constants/dive_field_formatter.dart';
+export 'package:submersion/core/constants/dive_field_labels.dart';
 
 /// Categories grouping related dive fields together.
 enum DiveFieldCategory {
@@ -24,11 +29,12 @@ enum DiveFieldCategory {
 
 /// Enumeration of every field from the Dive entity that can appear in
 /// table or card views.
-enum DiveField {
+enum DiveField implements EntityField {
   // Core
   diveNumber,
   dateTime,
   siteName,
+  diveName,
   maxDepth,
   avgDepth,
   bottomTime,
@@ -51,6 +57,7 @@ enum DiveField {
   precipitation,
   humidity,
   weatherDescription,
+  surfaceConditions,
 
   // Gas
   primaryGas,
@@ -60,7 +67,8 @@ enum DiveField {
   tankCount,
   startPressure,
   endPressure,
-  sacRate,
+  sac,
+  rmv,
   gasConsumed,
 
   // Weight
@@ -93,6 +101,9 @@ enum DiveField {
   // Location
   siteLocation,
   diveCenterName,
+  diveOperator,
+  boatName,
+  boatCaptain,
   siteLatitude,
   siteLongitude,
 
@@ -108,13 +119,22 @@ enum DiveField {
   tags,
   importSource,
   diveTypeName,
-  surfaceInterval;
+  surfaceInterval,
+
+  // Appended for the table editor (#3422); saved layouts store members by
+  // name, so new members always go last.
+  excludedFromStats,
+  excludedFromGasStats,
+  windDirection,
+  scrubberType,
+  scrubberDuration;
 
   /// Set of fields available on [DiveSummary] (used for optimized list display).
   static const Set<DiveField> summaryFields = {
     DiveField.diveNumber,
     DiveField.dateTime,
     DiveField.siteName,
+    DiveField.diveName,
     DiveField.siteLocation,
     DiveField.maxDepth,
     DiveField.bottomTime,
@@ -132,6 +152,90 @@ enum DiveField {
   static List<DiveField> fieldsForCategory(DiveFieldCategory category) {
     return DiveField.values.where((f) => f.category == category).toList();
   }
+
+  // EntityField (#2984), so the dive table runs on the shared
+  // EntityTableView. The logic stays in the extensions; these forward to it.
+  @override
+  String get name => toString().split('.').last;
+  @override
+  String get displayName => DiveFieldMetadata(this).displayName;
+  @override
+  String get shortLabel => DiveFieldMetadata(this).shortLabel;
+  @override
+  String localizedDisplayName(AppLocalizations l10n) => labelFor(l10n);
+  @override
+  String localizedShortLabel(AppLocalizations l10n) => shortLabelFor(l10n);
+  @override
+  IconData? get icon => DiveFieldMetadata(this).icon;
+  @override
+  double get defaultWidth => DiveFieldColumnSizing(this).defaultWidth;
+  @override
+  double get minWidth => DiveFieldColumnSizing(this).minWidth;
+  @override
+  bool get sortable => DiveFieldMetadata(this).sortable;
+  @override
+  String get categoryName => DiveFieldMetadata(this).category.name;
+  @override
+  bool get isRightAligned => _rightAligned.contains(this);
+
+  /// Numeric columns, right-aligned (moved from the dive table view).
+  static const Set<DiveField> _rightAligned = {
+    diveNumber,
+    maxDepth,
+    avgDepth,
+    bottomTime,
+    runtime,
+    waterTemp,
+    airTemp,
+    swellHeight,
+    altitude,
+    surfacePressure,
+    windSpeed,
+    humidity,
+    tankCount,
+    startPressure,
+    endPressure,
+    sac,
+    rmv,
+    gasConsumed,
+    totalWeight,
+    gradientFactorLow,
+    gradientFactorHigh,
+    cnsStart,
+    cnsEnd,
+    otu,
+    setpointLow,
+    setpointHigh,
+    setpointDeco,
+    ratingStars,
+    surfaceInterval,
+    siteLatitude,
+    siteLongitude,
+  };
+}
+
+/// Field names that saved layouts may still carry, mapped to the field that
+/// replaced them.
+///
+/// Saved layouts persist [DiveField.name] verbatim. The v170 migration
+/// rewrites the layouts already on the device, but a layout synced from an
+/// older build arrives after that migration has run, so these aliases are
+/// permanent rather than a migration-window convenience.
+const Map<String, DiveField> _legacyDiveFieldNames = {
+  // Split into sac and rmv (discussions #354, #803).
+  'sacRate': DiveField.sac,
+};
+
+/// Resolves a persisted [DiveField.name], honouring names that were renamed
+/// after a layout was saved. Returns null when the name is not recognized at
+/// all, leaving the fallback to the caller.
+DiveField? diveFieldFromName(String name) {
+  final legacy = _legacyDiveFieldNames[name];
+  if (legacy != null) return legacy;
+  for (final field in DiveField.values) {
+    if (field.name == name) return field;
+  }
+  return null;
 }
 
 extension DiveFieldMetadata on DiveField {
@@ -141,6 +245,7 @@ extension DiveFieldMetadata on DiveField {
       case DiveField.diveNumber:
       case DiveField.dateTime:
       case DiveField.siteName:
+      case DiveField.diveName:
       case DiveField.maxDepth:
       case DiveField.avgDepth:
       case DiveField.bottomTime:
@@ -159,10 +264,12 @@ extension DiveFieldMetadata on DiveField {
       case DiveField.altitude:
       case DiveField.surfacePressure:
       case DiveField.windSpeed:
+      case DiveField.windDirection:
       case DiveField.cloudCover:
       case DiveField.precipitation:
       case DiveField.humidity:
       case DiveField.weatherDescription:
+      case DiveField.surfaceConditions:
         return DiveFieldCategory.environment;
 
       case DiveField.primaryGas:
@@ -172,7 +279,8 @@ extension DiveFieldMetadata on DiveField {
       case DiveField.tankCount:
       case DiveField.startPressure:
       case DiveField.endPressure:
-      case DiveField.sacRate:
+      case DiveField.sac:
+      case DiveField.rmv:
       case DiveField.gasConsumed:
         return DiveFieldCategory.tank;
 
@@ -197,6 +305,8 @@ extension DiveFieldMetadata on DiveField {
       case DiveField.setpointLow:
       case DiveField.setpointHigh:
       case DiveField.setpointDeco:
+      case DiveField.scrubberType:
+      case DiveField.scrubberDuration:
         return DiveFieldCategory.rebreather;
 
       case DiveField.buddy:
@@ -205,6 +315,9 @@ extension DiveFieldMetadata on DiveField {
 
       case DiveField.siteLocation:
       case DiveField.diveCenterName:
+      case DiveField.diveOperator:
+      case DiveField.boatName:
+      case DiveField.boatCaptain:
       case DiveField.siteLatitude:
       case DiveField.siteLongitude:
         return DiveFieldCategory.location;
@@ -214,6 +327,8 @@ extension DiveFieldMetadata on DiveField {
 
       case DiveField.ratingStars:
       case DiveField.isFavorite:
+      case DiveField.excludedFromStats:
+      case DiveField.excludedFromGasStats:
         return DiveFieldCategory.rating;
 
       case DiveField.notes:
@@ -234,6 +349,8 @@ extension DiveFieldMetadata on DiveField {
         return 'Date & Time';
       case DiveField.siteName:
         return 'Site Name';
+      case DiveField.diveName:
+        return 'Dive Name';
       case DiveField.maxDepth:
         return 'Max Depth';
       case DiveField.avgDepth:
@@ -274,6 +391,8 @@ extension DiveFieldMetadata on DiveField {
         return 'Humidity';
       case DiveField.weatherDescription:
         return 'Weather';
+      case DiveField.surfaceConditions:
+        return 'Surface Conditions';
       case DiveField.primaryGas:
         return 'Primary Gas';
       case DiveField.diluentGas:
@@ -284,8 +403,10 @@ extension DiveFieldMetadata on DiveField {
         return 'Start Pressure';
       case DiveField.endPressure:
         return 'End Pressure';
-      case DiveField.sacRate:
-        return 'SAC Rate';
+      case DiveField.sac:
+        return 'SAC (pressure rate)';
+      case DiveField.rmv:
+        return 'RMV (volume rate)';
       case DiveField.gasConsumed:
         return 'Gas Consumed';
       case DiveField.totalWeight:
@@ -322,6 +443,12 @@ extension DiveFieldMetadata on DiveField {
         return 'Site Location';
       case DiveField.diveCenterName:
         return 'Dive Center';
+      case DiveField.diveOperator:
+        return 'Dive Operator';
+      case DiveField.boatName:
+        return 'Boat';
+      case DiveField.boatCaptain:
+        return 'Boat Captain';
       case DiveField.siteLatitude:
         return 'Latitude';
       case DiveField.siteLongitude:
@@ -332,6 +459,16 @@ extension DiveFieldMetadata on DiveField {
         return 'Rating';
       case DiveField.isFavorite:
         return 'Favorite';
+      case DiveField.excludedFromStats:
+        return 'Excluded from Stats';
+      case DiveField.excludedFromGasStats:
+        return 'Excluded from Gas Stats';
+      case DiveField.windDirection:
+        return 'Wind Direction';
+      case DiveField.scrubberType:
+        return 'Scrubber Type';
+      case DiveField.scrubberDuration:
+        return 'Scrubber Duration';
       case DiveField.notes:
         return 'Notes';
       case DiveField.tags:
@@ -354,6 +491,8 @@ extension DiveFieldMetadata on DiveField {
         return 'Date';
       case DiveField.siteName:
         return 'Site';
+      case DiveField.diveName:
+        return 'Name';
       case DiveField.maxDepth:
         return 'Max D';
       case DiveField.avgDepth:
@@ -394,6 +533,8 @@ extension DiveFieldMetadata on DiveField {
         return 'Humid';
       case DiveField.weatherDescription:
         return 'Weather';
+      case DiveField.surfaceConditions:
+        return 'Surface';
       case DiveField.primaryGas:
         return 'Gas';
       case DiveField.diluentGas:
@@ -404,8 +545,10 @@ extension DiveFieldMetadata on DiveField {
         return 'Start P';
       case DiveField.endPressure:
         return 'End P';
-      case DiveField.sacRate:
+      case DiveField.sac:
         return 'SAC';
+      case DiveField.rmv:
+        return 'RMV';
       case DiveField.gasConsumed:
         return 'Gas Used';
       case DiveField.totalWeight:
@@ -442,6 +585,12 @@ extension DiveFieldMetadata on DiveField {
         return 'Location';
       case DiveField.diveCenterName:
         return 'Dive Ctr';
+      case DiveField.diveOperator:
+        return 'Operator';
+      case DiveField.boatName:
+        return 'Boat';
+      case DiveField.boatCaptain:
+        return 'Captain';
       case DiveField.siteLatitude:
         return 'Lat';
       case DiveField.siteLongitude:
@@ -452,6 +601,16 @@ extension DiveFieldMetadata on DiveField {
         return 'Rating';
       case DiveField.isFavorite:
         return 'Fav';
+      case DiveField.excludedFromStats:
+        return 'No Stats';
+      case DiveField.excludedFromGasStats:
+        return 'No Gas Stats';
+      case DiveField.windDirection:
+        return 'Wind Dir';
+      case DiveField.scrubberType:
+        return 'Scrubber';
+      case DiveField.scrubberDuration:
+        return 'Scrubber Min';
       case DiveField.notes:
         return 'Notes';
       case DiveField.tags:
@@ -474,6 +633,8 @@ extension DiveFieldMetadata on DiveField {
         return Icons.calendar_today;
       case DiveField.siteName:
         return Icons.place;
+      case DiveField.diveName:
+        return Icons.drive_file_rename_outline;
       case DiveField.maxDepth:
         return Icons.arrow_downward;
       case DiveField.avgDepth:
@@ -498,6 +659,14 @@ extension DiveFieldMetadata on DiveField {
         return Icons.star;
       case DiveField.isFavorite:
         return Icons.favorite;
+      case DiveField.excludedFromStats:
+      case DiveField.excludedFromGasStats:
+        return Icons.block;
+      case DiveField.windDirection:
+        return Icons.explore;
+      case DiveField.scrubberType:
+      case DiveField.scrubberDuration:
+        return Icons.filter_alt;
       case DiveField.notes:
         return Icons.notes;
       case DiveField.tags:
@@ -514,7 +683,8 @@ extension DiveFieldMetadata on DiveField {
         return Icons.luggage;
       case DiveField.diveTypeName:
         return Icons.category;
-      case DiveField.sacRate:
+      case DiveField.sac:
+      case DiveField.rmv:
         return null;
       case DiveField.gasConsumed:
         return null;
@@ -578,6 +748,11 @@ extension DiveFieldMetadata on DiveField {
         return null;
       case DiveField.weatherDescription:
         return null;
+      case DiveField.surfaceConditions:
+      case DiveField.diveOperator:
+      case DiveField.boatName:
+      case DiveField.boatCaptain:
+        return null;
       case DiveField.importSource:
         return null;
       case DiveField.surfaceInterval:
@@ -593,6 +768,11 @@ extension DiveFieldMetadata on DiveField {
       case DiveField.siteLatitude:
       case DiveField.siteLongitude:
       case DiveField.weatherDescription:
+      case DiveField.surfaceConditions:
+      case DiveField.diveOperator:
+      case DiveField.boatName:
+      case DiveField.boatCaptain:
+      case DiveField.diveName:
         return false;
       default:
         return true;

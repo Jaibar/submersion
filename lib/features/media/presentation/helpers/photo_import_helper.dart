@@ -5,10 +5,17 @@ import 'package:flutter/scheduler.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/media/data/services/dive_gallery_lookup.dart';
+import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
+import 'package:submersion/features/media/domain/services/dive_photo_matcher.dart';
+import 'package:submersion/features/media/domain/value_objects/media_attach_target.dart';
 import 'package:submersion/features/media/presentation/pages/photo_picker_page.dart';
 import 'package:submersion/features/media/presentation/providers/media_providers.dart';
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/media/presentation/helpers/media_hold.dart';
 
 /// Helper for importing photos for a dive.
 ///
@@ -19,36 +26,92 @@ class PhotoImportHelper {
   /// [context] - Build context for navigation.
   /// [ref] - Riverpod ref for accessing providers.
   /// [dive] - The dive to associate photos with.
+  /// [initialFilePaths] - Files already in hand (a desktop drop), opened in
+  /// the picker's Files tab for review.
   ///
   /// Returns true if photos were imported, false if cancelled or failed.
   static Future<bool> importPhotosForDive({
     required BuildContext context,
     required WidgetRef ref,
     required Dive dive,
+    List<String>? initialFilePaths,
+    MediaHoldSink? onHold,
   }) async {
     // Calculate time window with 30-minute buffer
-    final diveStart = dive.effectiveEntryTime;
+    // The dive's window as its camera reads it, so the picker opens on the
+    // photos the dive's media time shift places inside it (issue #4539).
+    final entry = dive.effectiveEntryTime;
     final diveDuration = dive.effectiveRuntime ?? const Duration(hours: 1);
-    final diveEnd = dive.exitTime ?? diveStart.add(diveDuration);
+    final diveStart = DiveMediaClock.onCameraClock(dive, entry);
+    final diveEnd = DiveMediaClock.onCameraClock(
+      dive,
+      dive.exitTime ?? entry.add(diveDuration),
+    );
 
-    // Get already-linked asset IDs for this dive
+    // Gallery assets already linked to this dive, as this device knows them:
+    // a row linked on another device carries that device's asset id (#885).
     final mediaRepo = ref.read(mediaRepositoryProvider);
-    final alreadyLinkedIds = await mediaRepo.getLinkedAssetIdsForDive(dive.id);
+    final importService = ref.read(mediaImportServiceProvider);
+    final alreadyLinkedIds = await ref
+        .read(linkedGalleryAssetsProvider)
+        .idsOnThisDevice(await mediaRepo.getGalleryLinksForDive(dive.id));
 
     // Check context is still valid after async gap
     if (!context.mounted) return false;
 
-    // Open photo picker with already-linked IDs
+    // Open photo picker with already-linked IDs.
+    //
+    // Dive times are stored as wall-clock-as-UTC (the time on the dive
+    // computer, regardless of timezone). To produce the same window as
+    // TripMediaScanner.scanGalleryForDive (which uses DivePhotoMatcher's
+    // asymmetric pre/post buffers), apply the buffers in UTC first and only
+    // then convert to local — this avoids DST-transition divergence that
+    // would arise from applying buffers in local time after the conversion.
+    // We pass buffer: Duration.zero to disable showPhotoPicker's internal
+    // buffer-in-local logic.
+    // coverage:ignore-start
+    // showPhotoPicker drives a full-screen page tied to photo_manager + the
+    // platform photo library. Not unit-testable from flutter_test without
+    // an integration runner. The wallClockUtcToLocal helpers below are
+    // covered by trip_media_scanner_test; the search by
+    // dive_gallery_lookup_test; the buffer constants by
+    // dive_photo_matcher_test.
+    final windowStart = diveStart.subtract(DivePhotoMatcher.preBuffer);
+    final windowEnd = diveEnd.add(DivePhotoMatcher.postBuffer);
+    final photoPickerService = ref.read(photoPickerServiceProvider);
     final selectedAssets = await showPhotoPicker(
       context: context,
-      diveStartTime: diveStart,
-      diveEndTime: diveEnd,
+      diveStartTime: TripMediaScanner.wallClockUtcToLocal(windowStart),
+      diveEndTime: TripMediaScanner.wallClockUtcToLocal(windowEnd),
+      buffer: Duration.zero,
       alreadyLinkedIds: alreadyLinkedIds,
+      // Lets the Files tab link photos this dive's date window rejected.
+      target: DiveAttachTarget(dive.id),
+      initialFilePaths: initialFilePaths,
+      onHold: onHold,
+      loadAssets: (isActive) => DiveGalleryLookup.find(
+        windowStart: windowStart,
+        windowEnd: windowEnd,
+        photoPickerService: photoPickerService,
+        isActive: isActive,
+      ),
     );
+    // coverage:ignore-end
 
     // User cancelled or context no longer valid
     if (selectedAssets == null || selectedAssets.isEmpty || !context.mounted) {
       return false;
+    }
+
+    // A sitting on the dive (issue #4527) holds the picks until Save: the
+    // rows are built, and written then.
+    if (onHold != null) {
+      final prepared = await importService.prepareForDive(
+        selectedAssets: selectedAssets,
+        dive: dive,
+      );
+      onHold([for (final p in prepared) HeldMediaRow(p)]);
+      return true;
     }
 
     // Defer dialog display to avoid Navigator lock issues.

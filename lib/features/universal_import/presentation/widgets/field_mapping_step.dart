@@ -42,6 +42,9 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     'gps',
     'buddy',
     'diveMaster',
+    'instructor',
+    'buddyInstructorCenter',
+    'diveCenter',
     'suit',
     'rating',
     'notes',
@@ -99,6 +102,20 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
 
     final headers = state.detectionResult?.csvHeaders ?? [];
 
+    // With no columns there is nothing to map, and the preset and save
+    // controls act on an empty list. Rendering the normal editor here is what
+    // produced the reported "Column Mapping / 0 of 0 columns mapped" dead end,
+    // so say what happened instead.
+    if (headers.isEmpty) {
+      // ...unless nothing went wrong. A non-CSV file never has csvHeaders, and
+      // the wizard skips this step once a payload exists -- but PageView
+      // builds and mounts every page it animates over, so a successful UDDF
+      // import renders this step during the sweep to review. Stay silent for
+      // that frame rather than flashing an error at a working import.
+      if (state.payload != null) return const SizedBox.shrink();
+      return _NoColumnsNotice(error: state.error);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -107,6 +124,15 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (state.error != null) ...[
+                SelectableText(
+                  state.error!,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
               Row(
                 children: [
                   Expanded(
@@ -120,7 +146,9 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
                   TextButton.icon(
                     onPressed: () => _showSelectPresetSheet(headers),
                     icon: const Icon(Icons.playlist_add_check, size: 18),
-                    label: const Text('Presets'),
+                    label: Text(
+                      context.l10n.universalImport_preset_presetsButton,
+                    ),
                   ),
                   const SizedBox(width: 4),
                   TextButton.icon(
@@ -128,7 +156,7 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
                         ? () => _showSavePresetDialog(headers)
                         : null,
                     icon: const Icon(Icons.save_alt, size: 18),
-                    label: const Text('Save'),
+                    label: Text(context.l10n.common_action_save),
                   ),
                 ],
               ),
@@ -175,6 +203,7 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     final preset = await showModalBottomSheet<CsvPreset>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (_) => SelectPresetSheet(csvHeaders: headers),
     );
     if (preset == null || !mounted) return;
@@ -208,9 +237,13 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     ref.invalidate(userCsvPresetsProvider);
 
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Preset "${preset.name}" saved')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            context.l10n.universalImport_preset_savedSnackbar(preset.name),
+          ),
+        ),
+      );
     }
   }
 
@@ -242,6 +275,56 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     ref
         .read(universalImportNotifierProvider.notifier)
         .updateFieldMapping(newMapping);
+  }
+}
+
+/// Shown in place of the mapping editor when the file yielded no columns.
+///
+/// Reached when a parse failed upstream (so the wizard has no payload to skip
+/// this step with) or when a CSV was detected without a usable header row.
+/// [error] carries whatever the notifier recorded about the failure.
+class _NoColumnsNotice extends StatelessWidget {
+  const _NoColumnsNotice({required this.error});
+
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ExcludeSemantics(
+              child: Icon(
+                Icons.error_outline,
+                size: 40,
+                color: theme.colorScheme.error,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              context.l10n.universalImport_error_noColumnsToMap,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 12),
+              SelectableText(
+                error!,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.error,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }
 

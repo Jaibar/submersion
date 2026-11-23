@@ -1,0 +1,702 @@
+import 'package:collection/collection.dart';
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/change_log/change_log_policy.dart';
+import 'package:submersion/core/database/change_log/change_log_rewrites.dart';
+import 'package:submersion/core/database/change_log/change_log_trigger_sql.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/services/sync/parent_clock_children.dart';
+import 'package:submersion/core/services/sync/sync_fact_groups.dart';
+import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/features/change_log/data/services/change_log_dependencies.dart';
+import 'package:submersion/features/change_log/data/services/change_log_record_planner.dart';
+import 'package:submersion/features/change_log/data/services/change_log_revert_documents.dart';
+import 'package:submersion/features/change_log/domain/change_log_entities.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_event.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_revert_plan.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/dive_log/data/repositories/trip_cylinder_links.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/gps_log/data/repositories/track_geometry_cache_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media_store/data/media_deletion_coordinator.dart';
+import 'package:submersion/features/media_store/data/media_transfer_queue_repository.dart';
+import 'package:submersion/features/rules/data/services/rule_applier_support.dart';
+
+/// Puts logged changes back (issue #3922). A revert is a new edit, as an undo
+/// is since #2705: it writes the value, marks the record pending under a fresh
+/// clock and never restores a logged one, so peers accept it, and it is logged
+/// in its own right, so it can be reverted too.
+class ChangeLogRevertService {
+  ChangeLogRevertService({
+    ChangeLogRepository? repository,
+    SyncRepository? sync,
+    Map<String, int> rewrittenColumns = changeLogRewrittenColumns,
+    Map<String, ChangeLogValueRepair> rewrittenValues =
+        changeLogRewrittenValues,
+    void Function(Iterable<String> diveIds)? afterDiveWrites,
+    MediaDeletionCoordinator? mediaDeletionCoordinator,
+    Future<void> Function(String trackId)? evictTrackGeometry,
+    DocumentRepository? documents,
+    Future<void> Function(Iterable<Document> documents)? rearmDocuments,
+  }) : _repository = repository ?? ChangeLogRepository(),
+       _sync = sync ?? SyncRepository(),
+       _rewrittenColumns = rewrittenColumns,
+       _rewrittenValues = rewrittenValues,
+       _afterDiveWrites = afterDiveWrites ?? refreshAfterRuleWrites,
+       _media =
+           mediaDeletionCoordinator ??
+           MediaDeletionCoordinator(
+             mediaRepository: MediaRepository(),
+             queue: () => MediaTransferQueueRepository(),
+           ),
+       _evictTrackGeometry =
+           evictTrackGeometry ?? TrackGeometryCacheRepository().invalidate,
+       _documents = ChangeLogRevertDocuments(
+         documents: documents,
+         rearm: rearmDocuments,
+       );
+
+  static final _log = LoggerService.forClass(ChangeLogRevertService);
+
+  final ChangeLogRepository _repository;
+  final SyncRepository _sync;
+  final Map<String, int> _rewrittenColumns;
+  final Map<String, ChangeLogValueRepair> _rewrittenValues;
+  final void Function(Iterable<String> diveIds) _afterDiveWrites;
+  final MediaDeletionCoordinator _media;
+  final Future<void> Function(String trackId) _evictTrackGeometry;
+  final ChangeLogRevertDocuments _documents;
+
+  AppDatabase get _db => DatabaseService.instance.database;
+
+  /// Undoing one field of the record [eventId] changed. A row of
+  /// [changeLogRevertsWithEntryOnly] goes back only with its whole entry,
+  /// so it is refused.
+  Future<ChangeLogRevertPlan> planField(int eventId, String column) async {
+    final event = await _repository.getEvent(eventId);
+    if (event == null) {
+      throw ArgumentError.value(eventId, 'eventId', 'No such change log event');
+    }
+    if (changeLogRevertsWithEntryOnly.contains(event.table)) {
+      throw ArgumentError.value(
+        eventId,
+        'eventId',
+        '${event.table} goes back only with its whole entry',
+      );
+    }
+    // Every save to this field in the entry, not just this one: a Revert
+    // goes back to what the entry found.
+    final events = await _repository.getEvents(event.operationId);
+    final items = await _planEdits(
+      [
+        for (final other in events)
+          if (other.table == event.table && other.recordId == event.recordId)
+            other,
+      ],
+      only: column,
+      dependencies: await ChangeLogDependencyIndex.load(_db),
+    );
+    final operation = await _repository.getOperation(event.operationId);
+    return ChangeLogRevertPlan(
+      operationId: event.operationId,
+      items: items,
+      wholeOperation:
+          operation?.eventCount == events.length &&
+          events.every((other) => other.action == ChangeLogAction.update) &&
+          netFieldChanges(events).length == 1,
+    );
+  }
+
+  /// Undoing the entry [operationId], or as a diver who sees only
+  /// [onlyRoots] of it ([ChangeLogOperation.shownRoots]) the rows about
+  /// those. Only a revert of every row marks the entry reverted.
+  Future<ChangeLogRevertPlan> planOperation(
+    String operationId, {
+    Set<ChangeLogRoot>? onlyRoots,
+  }) async {
+    final events = await _repository.getEvents(
+      operationId,
+      includeMachineRows: true,
+      onlyRoots: onlyRoots,
+    );
+    return ChangeLogRevertPlan(
+      operationId: operationId,
+      items: await _plan(events),
+      wholeOperation:
+          onlyRoots == null ||
+          (await _repository.getOperation(operationId))?.eventCount ==
+              events.length,
+    );
+  }
+
+  /// Everything undoing [events] involves. An edit to a record the same
+  /// events created goes with the record, so it is not listed.
+  Future<List<ChangeLogRevertItem>> _plan(List<ChangeLogEvent> events) async {
+    final dependencies = await ChangeLogDependencyIndex.load(_db);
+    final planner = _plannerWith(dependencies);
+    final created = {
+      for (final event in events)
+        if (event.action == ChangeLogAction.insert)
+          (event.table, event.recordId),
+    };
+    final restores = await planner.planRestores(events);
+    final restoring = {
+      for (final item in restores)
+        if (!item.isBlocked)
+          changeLogRecordKey(item.event.table, item.event.recordId),
+    };
+    final edits = await _planEdits(
+      [
+        for (final event in events)
+          if (!created.contains((event.table, event.recordId))) event,
+      ],
+      dependencies: dependencies,
+      restoring: restoring,
+    );
+    final paired = await planner.pairReadings(
+      restores,
+      await planner.planRemovals(
+        events,
+        releasing: ChangeLogRecordPlanner.releasedLinks(edits),
+      ),
+    );
+    final held = await _holdWithRestores(
+      paired.restores,
+      edits,
+      dependencies: dependencies,
+      restoring: restoring,
+    );
+    return [...held.restores, ...held.edits, ...paired.removals];
+  }
+
+  /// [restores] and [edits], with what needs a record whose restore is held
+  /// back as changed since held too: a restore that needs that record, as a
+  /// series' lineage row needs its series, an edit to it, or a link to it.
+  /// A revert of only the rest could not write them without it (issue
+  /// #4848).
+  Future<
+    ({List<ChangeLogRevertItem> restores, List<ChangeLogRevertItem> edits})
+  >
+  _holdWithRestores(
+    List<ChangeLogRevertItem> restores,
+    List<ChangeLogRevertItem> edits, {
+    required ChangeLogDependencyIndex dependencies,
+    required Set<String> restoring,
+  }) async {
+    String keyOf(ChangeLogRevertItem item) =>
+        changeLogRecordKey(item.event.table, item.event.recordId);
+    bool holdable(ChangeLogRevertItem item) =>
+        !item.isBlocked && !item.changedSince;
+    final held = {
+      for (final item in restores)
+        if (!item.isBlocked && item.changedSince) keyOf(item),
+    };
+    if (held.isEmpty) return (restores: restores, edits: edits);
+    Future<bool> needsHeld(
+      ChangeLogRevertItem item,
+      Map<String, Object?> row,
+    ) async =>
+        held.contains(keyOf(item)) ||
+        (await dependencies.missingParents(
+          item.event.table,
+          row,
+          restoring.difference(held),
+        )).any(held.contains);
+
+    // Holding a restore can hold another that needs it, so this repeats.
+    var grew = true;
+    while (grew) {
+      grew = false;
+      for (final item in restores) {
+        if (!holdable(item) || held.contains(keyOf(item))) continue;
+        final row = {for (final f in item.event.fields) f.column: f.oldValue};
+        if (!await needsHeld(item, row)) continue;
+        held.add(keyOf(item));
+        grew = true;
+      }
+    }
+    return (
+      restores: [
+        for (final item in restores)
+          if (holdable(item) && held.contains(keyOf(item)))
+            item.copyWith(changedSince: true)
+          else
+            item,
+      ],
+      edits: [
+        for (final item in edits)
+          if (holdable(item) &&
+              await needsHeld(item, {item.column!: item.target}))
+            item.copyWith(changedSince: true)
+          else
+            item,
+      ],
+    );
+  }
+
+  ChangeLogRecordPlanner _plannerWith(ChangeLogDependencyIndex dependencies) =>
+      ChangeLogRecordPlanner(
+        _db,
+        _repository,
+        dependencies,
+        _rewrittenColumns,
+        rewrittenValues: _rewrittenValues,
+      );
+
+  /// The column edits among [events], oldest first. Several edits to one
+  /// column in an entry count as one: the value goes back to what the first
+  /// found, and "changed since" compares with what the last left. A record
+  /// in [restoring] returns from its delete copy first, which is the edited
+  /// row, so its edits still apply.
+  Future<List<ChangeLogRevertItem>> _planEdits(
+    List<ChangeLogEvent> events, {
+    String? only,
+    required ChangeLogDependencyIndex dependencies,
+    Set<String> restoring = const {},
+  }) async {
+    final items = <ChangeLogRevertItem>[];
+    for (final (:event, :field) in netFieldChanges(events)) {
+      final column = field.column;
+      if (only != null && column != only) continue;
+      final logged = field.newValue;
+      // A rung that reshaped the column (v358's ratings, issue #4415) means
+      // the value goes back as it reads now, not as it was logged.
+      final target = changeLogRepairedValue(
+        _rewrittenColumns,
+        event.table,
+        column,
+        field.oldValue,
+        rewrittenValues: _rewrittenValues,
+      );
+      final returning = restoring.contains(
+        changeLogRecordKey(event.table, event.recordId),
+      );
+      final block = await _editBlock(
+        event,
+        column,
+        target,
+        dependencies: dependencies,
+        restoring: restoring,
+        returning: returning,
+      );
+      if (block != null) {
+        items.add(
+          ChangeLogRevertItem(
+            event: event,
+            column: column,
+            logged: logged,
+            target: target,
+            block: block,
+          ),
+        );
+        continue;
+      }
+      // What the logged value is now, after any rung that reshaped the
+      // column: a rating logged as 8 reads 4 since v358, which is not a
+      // change made since (issue #4415).
+      final loggedNow = changeLogRepairedValue(
+        _rewrittenColumns,
+        event.table,
+        column,
+        logged,
+        rewrittenValues: _rewrittenValues,
+      );
+      final current = returning
+          ? loggedNow
+          : await _repository.liveValue(event.table, event.recordId, column);
+      if (_same(current, target)) continue;
+      items.add(
+        ChangeLogRevertItem(
+          event: event,
+          column: column,
+          // Shown beside current and target, so on the same scale they are,
+          // and as changedSince compares it.
+          logged: loggedNow,
+          target: target,
+          current: current,
+          changedSince: !_same(current, loggedNow),
+        ),
+      );
+    }
+    return items;
+  }
+
+  Future<ChangeLogBlock?> _editBlock(
+    ChangeLogEvent event,
+    String column,
+    Object? target, {
+    required ChangeLogDependencyIndex dependencies,
+    required Set<String> restoring,
+    required bool returning,
+  }) async {
+    final columns = await _repository.liveColumns(event.table);
+    if (!columns.contains(column)) return ChangeLogBlock.columnGone;
+    if (changeLogValueRewritten(
+      _rewrittenColumns,
+      event.table,
+      column,
+      event.schemaVersion,
+      rewrittenValues: _rewrittenValues,
+    )) {
+      return ChangeLogBlock.rewritten;
+    }
+    if (!returning &&
+        !await _repository.recordExists(event.table, event.recordId)) {
+      return ChangeLogBlock.recordGone;
+    }
+    final missing = await dependencies.missingParents(event.table, {
+      column: target,
+    }, restoring);
+    return missing.isEmpty ? null : ChangeLogBlock.parentGone;
+  }
+
+  bool _same(Object? a, Object? b) =>
+      const DeepCollectionEquality().equals(a, b);
+
+  /// Applies [plan] in one transaction, after any running sync, so a revert
+  /// cannot interleave with a merge: deleted records return, then edits go
+  /// back, then created records go, newest first. A failure rolls everything
+  /// back and rethrows.
+  Future<ChangeLogRevertResult> execute(
+    ChangeLogRevertPlan plan, {
+    bool includeChangedSince = true,
+  }) => SyncCoordinator.run(() async {
+    bool applies(ChangeLogRevertItem item) =>
+        !item.isBlocked && (includeChangedSince || !item.changedSince);
+
+    // Skipping a record can leave what it uses in use, and a plan can be
+    // older than the data, so removals are checked again here.
+    final dependencies = await ChangeLogDependencyIndex.load(_db);
+    final removals = await _plannerWith(dependencies).settleRemovals(
+      [
+        for (final item in plan.items)
+          if (item.removesRecord && applies(item)) item,
+      ],
+      releasing: ChangeLogRecordPlanner.releasedLinks(
+        plan.items.where((item) => item.column != null && applies(item)),
+      ),
+    );
+    final decided = [
+      for (final item in plan.items)
+        if (!item.removesRecord || !applies(item)) item,
+      ...removals,
+    ];
+    final applying = decided.where(applies).toList();
+    final kept = decided.whereNot(applies).toList();
+    if (applying.isEmpty) {
+      return ChangeLogRevertResult(
+        reverted: 0,
+        kept: kept.length,
+        keptItems: kept,
+      );
+    }
+
+    final removedDocuments = await _documents.removing(applying);
+    final operationId = await ChangeLogScope.run(
+      _db,
+      source: ChangeLogSource.revert,
+      revertOfId: plan.operationId,
+      lease: kChangeLogLongLease,
+      body: () async {
+        await _db.transaction(() async {
+          // Records can arrive in any order; a parent that cannot return was
+          // blocked when the plan was made.
+          await _db.customStatement('PRAGMA defer_foreign_keys = ON');
+          final now = DateTime.now().millisecondsSinceEpoch;
+          for (final item in applying.where((i) => i.restoresRecord)) {
+            await _restoreRecord(item.event, now);
+          }
+          await _writeEdits([
+            for (final item in applying)
+              if (item.column != null) item,
+          ]);
+          await _removeRecords([
+            for (final item in applying)
+              if (item.removesRecord) item.event,
+          ], dependencies);
+        });
+        await _evictTrackGeometryOf(applying);
+        await _documents.afterRevert(applying, removedDocuments);
+        await _repairRestoredMedia(applying);
+        return ChangeLogScope.currentOperationId;
+      },
+    );
+    await _finish(plan, applying, kept, operationId);
+    return ChangeLogRevertResult(
+      reverted: applying.length,
+      kept: kept.length,
+      keptItems: kept,
+      operationId: operationId,
+    );
+  });
+
+  /// Drops the cached lines of the tracks in [applied]. A reverted trim draws
+  /// different points, and a restored track's previews still hold the empty
+  /// line of its delete; the cache has no TTL, so neither corrects itself.
+  /// Runs straight after the commit, ahead of steps that can throw, and a
+  /// failure stays here: the revert has landed, and this is derived data.
+  Future<void> _evictTrackGeometryOf(List<ChangeLogRevertItem> applied) async {
+    final trackIds = {
+      for (final item in applied)
+        if (item.event.table == 'gps_tracks') item.event.recordId,
+    };
+    for (final trackId in trackIds) {
+      try {
+        await _evictTrackGeometry(trackId);
+      } catch (e, stackTrace) {
+        _log.warning(
+          'Could not evict cached geometry for track $trackId',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
+  /// Inserts a deleted record from its delete copy, leaving out columns the
+  /// schema has since dropped. A table with an `updated_at` gets [now] there:
+  /// a peer holding the tombstone revives a row only for a copy edited after
+  /// the delete. The clock comes from the pending mark, never from the log.
+  Future<void> _restoreRecord(ChangeLogEvent event, int now) async {
+    final table = event.table;
+    final deviceLocal = changeLogDeviceLocalTables.contains(table);
+    final columns = await _repository.liveColumns(table);
+    final values = <String, Object?>{
+      for (final column in await _repository.nullableDefaultedColumns(table))
+        if (!changeLogDeleteCopySkips(column)) column: null,
+      for (final field in event.fields)
+        if (columns.contains(field.column))
+          field.column: changeLogRepairedValue(
+            _rewrittenColumns,
+            table,
+            field.column,
+            field.oldValue,
+            rewrittenValues: _rewrittenValues,
+          ),
+      if (columns.contains('updated_at')) 'updated_at': now,
+    };
+    await _db.customInsert(
+      'INSERT INTO "$table" (${values.keys.map((c) => '"$c"').join(', ')}) '
+      'VALUES (${List.filled(values.length, '?').join(', ')})',
+      variables: [for (final value in values.values) Variable<Object>(value)],
+      updates: deviceLocal ? const {} : {_infoOf(table)},
+    );
+    if (deviceLocal) return;
+    final entity = changeLogEntityType(table);
+    await _sync.removeDeletion(entityType: entity, recordId: event.recordId);
+    await _sync.markRecordPending(
+      entityType: entity,
+      recordId: event.recordId,
+      localUpdatedAt: now,
+      alsoStamp: SyncFactGroups.of(entity),
+    );
+    await _markParentPending(table, event.recordId, now);
+  }
+
+  /// A row with no clock of its own reaches other devices through its
+  /// parent's ([syncRidesParentClockTables]): a finding's dismissal put back
+  /// is exported only once its gear item is marked too, as the dismissal
+  /// itself was.
+  Future<void> _markParentPending(
+    String table,
+    String recordId,
+    int now,
+  ) async {
+    if (!syncRidesParentClockTables.contains(table)) return;
+    final parent = changeLogParents[table];
+    final column = parent?.column;
+    if (parent == null || column == null) return;
+    final match = changeLogKeyMatch(_repository.specOf(table)!, recordId);
+    final row = await _db
+        .customSelect(
+          'SELECT "$column" AS parent FROM "$table" WHERE ${match.where}',
+          variables: match.variables,
+        )
+        .getSingleOrNull();
+    final parentId = row?.data['parent'] as String?;
+    if (parentId == null) return;
+    await _sync.markRecordPending(
+      entityType: changeLogEntityType(parent.rootTable),
+      recordId: parentId,
+      localUpdatedAt: now,
+    );
+  }
+
+  /// What the delete queued may already have taken the media's blobs, so
+  /// restored rows cannot go on claiming they are uploaded (issue #2718).
+  Future<void> _repairRestoredMedia(List<ChangeLogRevertItem> applied) async {
+    final ids = [
+      for (final item in applied)
+        if (item.restoresRecord && item.event.table == 'media')
+          item.event.recordId,
+    ];
+    if (ids.isEmpty) return;
+    final rows = [
+      for (final chunk in seriesIdChunks(ids))
+        ...await (_db.select(
+          _db.media,
+        )..where((media) => media.id.isIn(chunk))).get(),
+    ];
+    await _media.repairRestoredMedia(rows);
+  }
+
+  /// Newest first, so a child goes before its parent. Dives go through
+  /// [DiveRepository.bulkDeleteDives], which keeps media and route cascades
+  /// right, and take their children with them. Any other record's cascade
+  /// writes no tombstones, so the rows it takes are logged here, as every
+  /// repository's own delete does.
+  Future<void> _removeRecords(
+    List<ChangeLogEvent> events,
+    ChangeLogDependencyIndex dependencies,
+  ) async {
+    final dives = [
+      for (final event in events)
+        if (event.table == 'dives') event.recordId,
+    ];
+    if (dives.isNotEmpty) await DiveRepository().bulkDeleteDives(dives);
+    for (final event in events.reversed) {
+      if (event.table == 'dives') continue;
+      if (event.root.table == 'dives' && dives.contains(event.root.id)) {
+        continue;
+      }
+      final cascaded = await dependencies.cascadedRows(
+        event.table,
+        event.recordId,
+      );
+      final match = changeLogKeyMatch(
+        _repository.specOf(event.table)!,
+        event.recordId,
+      );
+      await _db.customUpdate(
+        'DELETE FROM "${event.table}" WHERE ${match.where}',
+        variables: match.variables,
+        updates: {_infoOf(event.table)},
+        updateKind: UpdateKind.delete,
+      );
+      await _sync.logDeletion(
+        entityType: changeLogEntityType(event.table),
+        recordId: event.recordId,
+      );
+      for (final row in cascaded) {
+        await _sync.logDeletion(
+          entityType: changeLogEntityType(row.table),
+          recordId: row.recordId,
+        );
+      }
+    }
+  }
+
+  TableInfo<Table, Object?> _infoOf(String table) =>
+      _db.allTables.firstWhere((t) => t.actualTableName == table);
+
+  /// One update per record, so a record's fields move together.
+  Future<void> _writeEdits(List<ChangeLogRevertItem> items) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final byRecord = groupBy(
+      items,
+      (ChangeLogRevertItem item) => (item.event.table, item.event.recordId),
+    );
+    for (final MapEntry(key: (table, recordId), value: edits)
+        in byRecord.entries) {
+      await _writeRecord(table, recordId, edits, now);
+    }
+  }
+
+  Future<void> _writeRecord(
+    String table,
+    String recordId,
+    List<ChangeLogRevertItem> edits,
+    int now,
+  ) async {
+    // A series' lineage row is raw SQL and never syncs, as in
+    // [_restoreRecord]: no Drift table to notify and nothing to stage.
+    final deviceLocal = changeLogDeviceLocalTables.contains(table);
+    final hasUpdatedAt = (await _repository.liveColumns(
+      table,
+    )).contains('updated_at');
+    final match = changeLogKeyMatch(_repository.specOf(table)!, recordId);
+    await _db.customUpdate(
+      'UPDATE "$table" SET '
+      '${[for (final edit in edits) '"${edit.column}" = ?', if (hasUpdatedAt) '"updated_at" = ?'].join(', ')} WHERE ${match.where}',
+      variables: [
+        for (final edit in edits) Variable<Object>(edit.target),
+        if (hasUpdatedAt) Variable<Object>(now),
+        ...match.variables,
+      ],
+      updates: deviceLocal ? const {} : {_infoOf(table)},
+    );
+    if (deviceLocal) return;
+
+    final entity = changeLogEntityType(table);
+    final columns = {for (final edit in edits) edit.column!};
+    final groups = [
+      for (final group in SyncFactGroups.of(entity))
+        if (group.columns.values.any(columns.contains)) group,
+    ];
+    final onlyFacts = columns.every(
+      (c) => groups.any((g) => g.columns.containsValue(c)),
+    );
+    await _sync.markRecordPending(
+      entityType: entity,
+      recordId: recordId,
+      localUpdatedAt: now,
+      alsoStamp: groups,
+      stampClock: !onlyFacts,
+    );
+    await _markParentPending(table, recordId, now);
+
+    // A dive put back on its old trip keeps no tank link into the trip it
+    // leaves, as every other trip change does.
+    if (table == 'dives' && columns.contains('trip_id')) {
+      final trip = edits.firstWhere((e) => e.column == 'trip_id').target;
+      await clearForeignTripCylinderLinks(
+        _db,
+        _sync,
+        recordId,
+        tripId: trip as String?,
+        now: now,
+      );
+    }
+  }
+
+  /// What every write of the app does after a commit, and the link from the
+  /// original entry to its revert. An entry shows as reverted only when all
+  /// of it went back, so what a partial undo kept can be tried again.
+  /// Reverting a revert puts the entry it undid back as it was.
+  Future<void> _finish(
+    ChangeLogRevertPlan plan,
+    List<ChangeLogRevertItem> applied,
+    List<ChangeLogRevertItem> kept,
+    String? operationId,
+  ) async {
+    _afterDiveWrites({
+      for (final item in applied)
+        if (item.event.root.table == 'dives') item.event.root.id,
+    });
+    SyncEventBus.notifyLocalChange();
+    if (!plan.wholeOperation || kept.isNotEmpty || operationId == null) return;
+    await _db.customUpdate(
+      'UPDATE change_log_operations SET reverted_by_id = ? WHERE id = ?',
+      variables: [
+        Variable<String>(operationId),
+        Variable<String>(plan.operationId),
+      ],
+      updates: {_db.changeLogOperations},
+    );
+    await _db.customUpdate(
+      'UPDATE change_log_operations SET reverted_by_id = NULL WHERE id = '
+      '(SELECT revert_of_id FROM change_log_operations WHERE id = ?)',
+      variables: [Variable<String>(plan.operationId)],
+      updates: {_db.changeLogOperations},
+    );
+  }
+}

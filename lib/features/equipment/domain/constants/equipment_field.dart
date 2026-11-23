@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/utils/currency.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/constants/entity_field.dart';
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
 
 /// Enumeration of every field from the [EquipmentItem] entity that can appear
 /// in table or card views.
@@ -37,7 +40,21 @@ enum EquipmentField implements EntityField {
   serviceIntervalDays,
 
   // Other
-  notes;
+  notes,
+
+  // Assemblies (issue #1487). Last so persisted column layouts keep their
+  // order.
+  components,
+
+  // Tags (issue #1942). Appended for the same reason; never reordered.
+  tags,
+
+  // Owner (issue #2046). Appended for the same reason; never reordered.
+  owner,
+
+  // Location (issue #3625): the item's current place. Appended for the same
+  // reason; never reordered.
+  location;
 
   @override
   String get name => toString().split('.').last;
@@ -60,6 +77,10 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => 'Days Until Service',
     EquipmentField.serviceIntervalDays => 'Service Interval',
     EquipmentField.notes => 'Notes',
+    EquipmentField.components => 'Components',
+    EquipmentField.tags => 'Tags',
+    EquipmentField.owner => 'Owner',
+    EquipmentField.location => 'Location',
   };
 
   @override
@@ -80,6 +101,65 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => 'Days Left',
     EquipmentField.serviceIntervalDays => 'Interval',
     EquipmentField.notes => 'Notes',
+    EquipmentField.components => 'Parts',
+    EquipmentField.tags => 'Tags',
+    EquipmentField.owner => 'Owner',
+    EquipmentField.location => 'Location',
+  };
+
+  @override
+  String localizedDisplayName(AppLocalizations l10n) => switch (this) {
+    EquipmentField.itemName => l10n.enum_equipmentField_itemName,
+    EquipmentField.fullName => l10n.enum_equipmentField_fullName,
+    EquipmentField.type => l10n.enum_equipmentField_type,
+    EquipmentField.brand => l10n.enum_equipmentField_brand,
+    EquipmentField.model => l10n.enum_equipmentField_model,
+    EquipmentField.serialNumber => l10n.enum_equipmentField_serialNumber,
+    EquipmentField.size => l10n.enum_equipmentField_size,
+    EquipmentField.status => l10n.enum_equipmentField_status,
+    EquipmentField.isActive => l10n.enum_equipmentField_isActive,
+    EquipmentField.purchaseDate => l10n.enum_equipmentField_purchaseDate,
+    EquipmentField.purchasePrice => l10n.enum_equipmentField_purchasePrice,
+    EquipmentField.lastServiceDate => l10n.enum_equipmentField_lastServiceDate,
+    EquipmentField.nextServiceDue => l10n.enum_equipmentField_nextServiceDue,
+    EquipmentField.daysUntilService =>
+      l10n.enum_equipmentField_daysUntilService,
+    EquipmentField.serviceIntervalDays =>
+      l10n.enum_equipmentField_serviceIntervalDays,
+    EquipmentField.notes => l10n.enum_equipmentField_notes,
+    EquipmentField.components => l10n.enum_equipmentField_components,
+    EquipmentField.tags => l10n.enum_equipmentField_tags,
+    EquipmentField.owner => l10n.enum_equipmentField_owner,
+    EquipmentField.location => l10n.enum_equipmentField_location,
+  };
+
+  @override
+  String localizedShortLabel(AppLocalizations l10n) => switch (this) {
+    EquipmentField.itemName => l10n.enum_equipmentField_itemName_short,
+    EquipmentField.fullName => l10n.enum_equipmentField_fullName_short,
+    EquipmentField.type => l10n.enum_equipmentField_type_short,
+    EquipmentField.brand => l10n.enum_equipmentField_brand_short,
+    EquipmentField.model => l10n.enum_equipmentField_model_short,
+    EquipmentField.serialNumber => l10n.enum_equipmentField_serialNumber_short,
+    EquipmentField.size => l10n.enum_equipmentField_size_short,
+    EquipmentField.status => l10n.enum_equipmentField_status_short,
+    EquipmentField.isActive => l10n.enum_equipmentField_isActive_short,
+    EquipmentField.purchaseDate => l10n.enum_equipmentField_purchaseDate_short,
+    EquipmentField.purchasePrice =>
+      l10n.enum_equipmentField_purchasePrice_short,
+    EquipmentField.lastServiceDate =>
+      l10n.enum_equipmentField_lastServiceDate_short,
+    EquipmentField.nextServiceDue =>
+      l10n.enum_equipmentField_nextServiceDue_short,
+    EquipmentField.daysUntilService =>
+      l10n.enum_equipmentField_daysUntilService_short,
+    EquipmentField.serviceIntervalDays =>
+      l10n.enum_equipmentField_serviceIntervalDays_short,
+    EquipmentField.notes => l10n.enum_equipmentField_notes_short,
+    EquipmentField.components => l10n.enum_equipmentField_components_short,
+    EquipmentField.tags => l10n.enum_equipmentField_tags_short,
+    EquipmentField.owner => l10n.enum_equipmentField_owner_short,
+    EquipmentField.location => l10n.enum_equipmentField_location_short,
   };
 
   @override
@@ -100,6 +180,10 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => Icons.timelapse,
     EquipmentField.serviceIntervalDays => Icons.repeat,
     EquipmentField.notes => Icons.notes,
+    EquipmentField.components => Icons.account_tree_outlined,
+    EquipmentField.tags => Icons.sell_outlined,
+    EquipmentField.owner => Icons.person_outline,
+    EquipmentField.location => Icons.place_outlined,
   };
 
   @override
@@ -120,6 +204,10 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => 80,
     EquipmentField.serviceIntervalDays => 80,
     EquipmentField.notes => 150,
+    EquipmentField.components => 90,
+    EquipmentField.tags => 160,
+    EquipmentField.owner => 140,
+    EquipmentField.location => 140,
   };
 
   @override
@@ -140,6 +228,10 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => 60,
     EquipmentField.serviceIntervalDays => 60,
     EquipmentField.notes => 80,
+    EquipmentField.components => 60,
+    EquipmentField.tags => 80,
+    EquipmentField.owner => 90,
+    EquipmentField.location => 90,
   };
 
   @override
@@ -160,6 +252,10 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => true,
     EquipmentField.serviceIntervalDays => true,
     EquipmentField.notes => false,
+    EquipmentField.components => true,
+    EquipmentField.tags => false,
+    EquipmentField.owner => true,
+    EquipmentField.location => true,
   };
 
   @override
@@ -180,12 +276,17 @@ enum EquipmentField implements EntityField {
     EquipmentField.daysUntilService => 'service',
     EquipmentField.serviceIntervalDays => 'service',
     EquipmentField.notes => 'other',
+    EquipmentField.components => 'details',
+    EquipmentField.tags => 'other',
+    EquipmentField.owner => 'details',
+    EquipmentField.location => 'details',
   };
 
   @override
   bool get isRightAligned => switch (this) {
     EquipmentField.purchasePrice => true,
     EquipmentField.daysUntilService => true,
+    EquipmentField.components => true,
     _ => false,
   };
 }
@@ -194,8 +295,36 @@ enum EquipmentField implements EntityField {
 /// generic table infrastructure.
 class EquipmentFieldAdapter
     extends EntityFieldAdapter<EquipmentItem, EquipmentField> {
-  static final instance = EquipmentFieldAdapter._();
-  EquipmentFieldAdapter._();
+  /// Most-urgent clock per equipment id (from equipmentServiceUrgencyProvider).
+  /// Empty for the shared [instance], which is used only for config
+  /// deserialization; views construct their own instance with the current map.
+  final Map<String, ServiceClockStatus> worstClocks;
+
+  /// Component count per assembly id (from equipmentComponentsIndexProvider);
+  /// absent means zero. Same lifecycle as [worstClocks].
+  final Map<String, int> componentCounts;
+
+  /// Tag names per item id, in the list's order (issue #1942); absent means
+  /// no tags. Same lifecycle as [worstClocks].
+  final Map<String, List<String>> tagNames;
+
+  /// Profile names by diver id, for the Owner column (issue #2046). Same
+  /// lifecycle as [worstClocks].
+  final Map<String, String> ownerNames;
+
+  /// Current place name per item id, for the Location column (issue #3625);
+  /// absent means no recorded place. Same lifecycle as [worstClocks].
+  final Map<String, String> locationNames;
+
+  EquipmentFieldAdapter({
+    this.worstClocks = const {},
+    this.componentCounts = const {},
+    this.tagNames = const {},
+    this.ownerNames = const {},
+    this.locationNames = const {},
+  });
+
+  static final instance = EquipmentFieldAdapter();
 
   static const List<EquipmentField> _allFields = EquipmentField.values;
 
@@ -228,10 +357,17 @@ class EquipmentFieldAdapter
       EquipmentField.purchaseDate => entity.purchaseDate,
       EquipmentField.purchasePrice => entity.purchasePrice,
       EquipmentField.lastServiceDate => entity.lastServiceDate,
-      EquipmentField.nextServiceDue => entity.nextServiceDue,
-      EquipmentField.daysUntilService => entity.daysUntilService,
+      // Forecast columns come from the clock ledger, not the legacy interval.
+      EquipmentField.nextServiceDue => worstClocks[entity.id]?.dueDate,
+      EquipmentField.daysUntilService => worstClocks[entity.id]?.daysUntilDue,
       EquipmentField.serviceIntervalDays => entity.serviceIntervalDays,
-      EquipmentField.notes => entity.notes,
+      EquipmentField.notes => markdownToPlainText(entity.notes),
+      EquipmentField.components => componentCounts[entity.id] ?? 0,
+      EquipmentField.tags => tagNames[entity.id] ?? const <String>[],
+      EquipmentField.owner => ownerNames[entity.diverId] ?? '',
+      // Null, not '', for no place: the table sorts nulls last, so unplaced
+      // gear does not head an ascending Location sort.
+      EquipmentField.location => locationNames[entity.id],
     };
   }
 
@@ -249,18 +385,29 @@ class EquipmentFieldAdapter
       EquipmentField.status => (value as EquipmentStatus).displayName,
       EquipmentField.isActive => (value as bool) ? 'Yes' : 'No',
       EquipmentField.purchaseDate => units.formatDate(value as DateTime),
-      EquipmentField.purchasePrice => _formatPrice(value as double),
+      EquipmentField.purchasePrice => _formatPrice(value as double, units),
       EquipmentField.lastServiceDate => units.formatDate(value as DateTime),
       EquipmentField.nextServiceDue => units.formatDate(value as DateTime),
       EquipmentField.daysUntilService => _formatDaysUntilService(value as int),
       EquipmentField.serviceIntervalDays => '${value as int} days',
       EquipmentField.notes => value as String,
+      EquipmentField.components => '${value as int}',
+      EquipmentField.tags => _formatTags(value as List<String>),
+      EquipmentField.owner => (value as String).isEmpty ? '--' : value,
+      EquipmentField.location => value as String,
     };
   }
 
-  String _formatPrice(double price) {
-    return NumberFormat.currency(symbol: r'$', decimalDigits: 2).format(price);
+  String _formatPrice(double price, UnitFormatter units) {
+    // No per-item currency in this configurable-column context; use the
+    // diver's default currency instead of a hardcoded '$'.
+    return formatMoney(price, units.settings.defaultCurrency);
   }
+
+  /// A comma list for the table cell; an item with no tags shows the same
+  /// placeholder as any other empty cell.
+  String _formatTags(List<String> names) =>
+      names.isEmpty ? '--' : names.join(', ');
 
   String _formatDaysUntilService(int days) {
     if (days < 0) return 'Overdue';

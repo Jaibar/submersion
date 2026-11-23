@@ -1,8 +1,16 @@
-import 'package:submersion/core/providers/provider.dart';
+import 'dart:convert';
 
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
 import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/settings/presentation/providers/hidden_built_ins_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 /// Repository provider
 final diveTypeRepositoryProvider = Provider<DiveTypeRepository>((ref) {
@@ -11,12 +19,77 @@ final diveTypeRepositoryProvider = Provider<DiveTypeRepository>((ref) {
 
 /// All dive types list provider (sorted by sort order, then name)
 /// Includes built-in types plus custom types for the current diver
+///
+/// Stays a [FutureProvider] so imperative `ref.read(diveTypesProvider.future)`
+/// reads still resolve, while self-invalidating whenever the `dive_types` table
+/// changes -- including when a sync applies remote changes -- so list UIs
+/// refresh instead of serving a cached one-shot snapshot.
 final diveTypesProvider = FutureProvider<List<DiveTypeEntity>>((ref) async {
   final repository = ref.watch(diveTypeRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveTypesChanges());
   return repository.getAllDiveTypes(diverId: validatedDiverId);
+});
+
+/// [diveTypesProvider] keyed by id, for surfaces that only hold a dive's type
+/// ids, such as the exports, which name each type as the diver did (#1834).
+///
+/// A future rather than a snapshot of the loaded value: an export started
+/// before the types finish loading must wait for them, not write every name
+/// rebuilt from its id. Read it through [diveTypesByIdOrEmpty].
+final diveTypesByIdProvider = FutureProvider<Map<String, DiveTypeEntity>>((
+  ref,
+) async {
+  final types = await ref.watch(diveTypesProvider.future);
+  return {for (final type in types) type.id: type};
+});
+
+/// Awaits [lookup] (a read of [diveTypesByIdProvider]), or yields an empty
+/// map when it fails, so an export falls back to names rebuilt from ids
+/// rather than failing: the dives CSV still carries each type's id.
+Future<Map<String, DiveTypeEntity>> diveTypesByIdOrEmpty(
+  Future<Map<String, DiveTypeEntity>> lookup,
+) async {
+  try {
+    return await lookup;
+  } catch (e, stackTrace) {
+    LoggerService.forClass(DiveTypeEntity).warning(
+      'Exporting dive types under names rebuilt from their ids',
+      error: e,
+      stackTrace: stackTrace,
+    );
+    return const {};
+  }
+}
+
+/// The active diver's starred dive type ids (issue #4413), which the dive type
+/// pickers list first.
+///
+/// Selects a sorted JSON key rather than the set itself, since every settings
+/// load decodes a fresh Set: this way a picker rebuilds only when the
+/// favourites change, not on every settings write. JSON rather than a joined
+/// string, so a blank id (what a custom type named in a non-Latin script
+/// slugs to) survives the round trip.
+final favouriteDiveTypeIdsProvider = Provider<Set<String>>((ref) {
+  final key = ref.watch(
+    settingsProvider.select(
+      (settings) => jsonEncode(settings.favouriteDiveTypeIds.toList()..sort()),
+    ),
+  );
+  final ids = (jsonDecode(key) as List).cast<String>();
+  return ids.isEmpty ? const {} : ids.toSet();
+});
+
+/// The favourites a picker that still lists hidden built-ins may lift to the
+/// top: hiding wins over a star (issue #4413), so a hidden built-in keeps its
+/// usual place there.
+final liftedFavouriteDiveTypeIdsProvider = Provider<Set<String>>((ref) {
+  final favourites = ref.watch(favouriteDiveTypeIdsProvider);
+  final hidden = ref.watch(hiddenBuiltInIdsProvider(BuiltInCatalog.diveTypes));
+  if (hidden.isEmpty) return favourites;
+  return favourites.difference(hidden);
 });
 
 /// Built-in dive types only
@@ -24,6 +97,9 @@ final builtInDiveTypesProvider = FutureProvider<List<DiveTypeEntity>>((
   ref,
 ) async {
   final repository = ref.watch(diveTypeRepositoryProvider);
+  // Built-ins are seeded rather than static: an adopt/wipe of the reference
+  // data rewrites them.
+  ref.invalidateSelfWhen(repository.watchDiveTypesChanges());
   return repository.getBuiltInDiveTypes();
 });
 
@@ -35,6 +111,7 @@ final customDiveTypesProvider = FutureProvider<List<DiveTypeEntity>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveTypesChanges());
   return repository.getCustomDiveTypes(diverId: validatedDiverId);
 });
 
@@ -44,6 +121,7 @@ final diveTypeProvider = FutureProvider.family<DiveTypeEntity?, String>((
   id,
 ) async {
   final repository = ref.watch(diveTypeRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDiveTypesChanges());
   return repository.getDiveTypeById(id);
 });
 
@@ -55,6 +133,10 @@ final diveTypeStatisticsProvider = FutureProvider<List<DiveTypeStatistic>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveTypesChanges());
+  // Counts dives per type, so a merge or bulk delete changes the figures
+  // without the dive_types table being written.
+  ref.invalidateSelfWhen(ref.read(diveRepositoryProvider).watchDivesChanges());
   return repository.getDiveTypeStatistics(diverId: validatedDiverId);
 });
 
@@ -67,7 +149,11 @@ class DiveTypeListNotifier
 
   DiveTypeListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(
+      _initializeAndLoad(),
+      DiveTypeListNotifier,
+      'initialize and load',
+    );
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -80,9 +166,20 @@ class DiveTypeListNotifier
         _ref.invalidate(diveTypesProvider);
         _ref.invalidate(customDiveTypesProvider);
         _ref.invalidate(diveTypeStatisticsProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          DiveTypeListNotifier,
+          'initialize and load',
+        );
       }
     });
+
+    // Refresh when the dive_types table changes (e.g. a sync writes rows
+    // directly). Cancelled on dispose (provider is autoDispose).
+    final tableChangeSub = _repository.watchDiveTypesChanges().listen(
+      (_) => _silentReloadDiveTypes(),
+    );
+    _ref.onDispose(tableChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -101,6 +198,25 @@ class DiveTypeListNotifier
       state = AsyncValue.data(diveTypes);
     } catch (e, st) {
       state = AsyncValue.error(e, st);
+    }
+  }
+
+  /// Reload without flipping to a loading state, so table-driven refreshes
+  /// (e.g. after a sync write) do not flash a spinner over existing data.
+  /// Resolves the validated diver id first so a tick arriving before
+  /// initialization completes still scopes the query correctly (otherwise a
+  /// null diver id would drop custom dive types).
+  Future<void> _silentReloadDiveTypes() async {
+    try {
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final diveTypes = await _repository.getAllDiveTypes(
+        diverId: _validatedDiverId,
+      );
+      if (mounted) state = AsyncValue.data(diveTypes);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
     }
   }
 
@@ -128,7 +244,10 @@ class DiveTypeListNotifier
 
   /// Add a custom dive type by name (generates ID automatically)
   /// Throws if no valid diver profile exists
-  Future<DiveTypeEntity> addDiveTypeByName(String name) async {
+  Future<DiveTypeEntity> addDiveTypeByName(
+    String name, {
+    String? shortName,
+  }) async {
     // Get fresh validated diver ID before creating
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
 
@@ -136,10 +255,12 @@ class DiveTypeListNotifier
       throw Exception('Cannot create custom dive type without a diver profile');
     }
 
+    final trimmedShortName = shortName?.trim();
     final diveType = DiveTypeEntity.create(
       id: DiveTypeEntity.generateSlug(name),
       name: name.trim(),
       diverId: validatedId,
+      shortName: trimmedShortName?.isNotEmpty == true ? trimmedShortName : null,
     );
     return addDiveType(diveType);
   }
@@ -147,6 +268,25 @@ class DiveTypeListNotifier
   /// Update an existing custom dive type
   Future<void> updateDiveType(DiveTypeEntity diveType) async {
     await _repository.updateDiveType(diveType);
+    await _loadDiveTypes();
+    _ref.invalidate(diveTypesProvider);
+    _ref.invalidate(diveTypeStatisticsProvider);
+    _ref.invalidate(customDiveTypesProvider);
+  }
+
+  /// Set which badge rows a type's badge appears in. Allowed on built-in
+  /// types too, unlike [updateDiveType] (see
+  /// [DiveTypeRepository.setDiveTypeVisibility]).
+  Future<void> setDiveTypeVisibility(
+    String id, {
+    required bool showInDetailHeader,
+    required bool showInListView,
+  }) async {
+    await _repository.setDiveTypeVisibility(
+      id,
+      showInDetailHeader: showInDetailHeader,
+      showInListView: showInListView,
+    );
     await _loadDiveTypes();
     _ref.invalidate(diveTypesProvider);
     _ref.invalidate(diveTypeStatisticsProvider);

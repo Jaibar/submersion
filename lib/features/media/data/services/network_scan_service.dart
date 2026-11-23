@@ -1,0 +1,273 @@
+// Adapted from plan `docs/design/plans/2026-04-28-media-source-extension-phase3c.md`
+// Task 3. Deviations from the plan code:
+//
+// - `NetworkCredentialsService.headersFor` takes a `Uri` and returns a
+//   nullable `Future<Map<String, String>?>`, not a `String` returning a
+//   non-null map. We pass the parsed `Uri` and coerce a `null` result to an
+//   empty map before merging with per-request overrides.
+// - `lastVerifiedAt` uses `clock.now()` from `package:clock` rather than raw
+//   `DateTime.now()`, matching Task 2's lesson: `fakeAsync` only fakes
+//   `Timer`s and `clock.now()`, not `DateTime.now()`. Tests that drive time
+//   under `fakeAsync` (future tasks may add some) will see the synthetic
+//   clock without us having to touch this file again.
+import 'dart:async';
+
+import 'package:clock/clock.dart';
+import 'package:http/http.dart' as http;
+
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/media/data/repositories/manifest_subscription_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/host_rate_limiter.dart';
+import 'package:submersion/features/media/data/services/network_credentials_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/domain/value_objects/network_scan_progress.dart';
+
+typedef HttpClientFactory = http.Client Function();
+
+/// User-triggered re-verification scan over every `networkUrl` and
+/// `manifestEntry` `MediaItem`.
+///
+/// Implements Phase 3 deliverable 8 from
+/// `2026-04-25-media-source-extension-design.md`. Purely user-initiated; no
+/// background timer, no app-launch trigger. The Settings page surfaces the
+/// progress + final report through a dialog.
+///
+/// Per-row error isolation: a throw on one row never aborts the loop; it
+/// just bumps the `unreachable` counter and the loop continues.
+class NetworkScanService {
+  final MediaRepository _repository;
+  final NetworkCredentialsService _credentials;
+  // ignore: unused_field
+  final ManifestSubscriptionRepository _subscriptions;
+  final HostRateLimiter _rateLimiter;
+  final HttpClientFactory _httpClientFactory;
+  final _log = LoggerService.forClass(NetworkScanService);
+
+  NetworkScanReport? _lastReport;
+
+  NetworkScanService({
+    required MediaRepository repository,
+    required NetworkCredentialsService credentials,
+    required ManifestSubscriptionRepository subscriptions,
+    required HostRateLimiter rateLimiter,
+    HttpClientFactory? httpClientFactory,
+  }) : _repository = repository,
+       _credentials = credentials,
+       _subscriptions = subscriptions,
+       _rateLimiter = rateLimiter,
+       _httpClientFactory = httpClientFactory ?? (() => http.Client());
+
+  /// The most recent scan's final report, or `null` if no scan has finished.
+  NetworkScanReport? get lastReport => _lastReport;
+
+  /// Walks every `networkUrl` and `manifestEntry` row and emits progress
+  /// events as each one completes. The final event has
+  /// `phase == NetworkScanPhase.finished`. The accompanying final report is
+  /// stored in [lastReport] and persists until the next scan starts.
+  ///
+  /// When the consumer cancels the stream subscription (e.g. user dismisses
+  /// the dialog), the generator terminates and any in-flight HTTP requests
+  /// are aborted. Rows that completed before cancellation keep their
+  /// updated `isOrphaned` / `lastVerifiedAt` state in the DB; rows that
+  /// were mid-fetch are left untouched. Re-running the scan picks up
+  /// where the previous one left off (since unverified rows still have
+  /// stale state).
+  Stream<NetworkScanProgress> scanAll() async* {
+    final stopwatch = Stopwatch()..start();
+    final client = _httpClientFactory();
+    try {
+      _log.info('Starting network scan');
+
+      final urlRows = await _safeFetch(MediaSourceType.networkUrl);
+      final manifestRows = await _safeFetch(MediaSourceType.manifestEntry);
+      final all = [...urlRows, ...manifestRows];
+
+      final scannable = all.where((r) => r.url != null).toList();
+      final skippedNoUrl = all.length - scannable.length;
+
+      var progress = NetworkScanProgress.starting(total: scannable.length);
+      yield progress;
+
+      // We use a list of futures so multiple in-flight requests across
+      // different hosts can advance in parallel; the rate limiter governs
+      // per-host budgets internally. The completion order drives the
+      // progress stream — first done emits first.
+      final controller = StreamController<NetworkScanProgress>();
+
+      final inflight = <Future<void>>[];
+      for (final row in scannable) {
+        inflight.add(
+          _scanOne(client, row).then((available) {
+            progress = NetworkScanProgress(
+              phase: NetworkScanPhase.scanning,
+              total: progress.total,
+              done: progress.done + 1,
+              available: progress.available + (available ? 1 : 0),
+              unreachable: progress.unreachable + (available ? 0 : 1),
+            );
+            controller.add(progress);
+          }),
+        );
+      }
+
+      // Drain inflight + close the controller when all are done.
+      // Assign `_lastReport` BEFORE emitting the `finished` event so any
+      // consumer that reads `lastReport` synchronously on the finished
+      // event sees a populated report (no race window).
+      Future<void>.microtask(() async {
+        await Future.wait<void>(inflight);
+        progress = NetworkScanProgress(
+          phase: NetworkScanPhase.finished,
+          total: progress.total,
+          done: progress.done,
+          available: progress.available,
+          unreachable: progress.unreachable,
+        );
+        stopwatch.stop();
+        _lastReport = NetworkScanReport.fromProgress(
+          progress,
+          skippedNoUrl: skippedNoUrl,
+          durationMs: stopwatch.elapsedMilliseconds,
+        );
+        controller.add(progress);
+        await controller.close();
+      });
+
+      await for (final p in controller.stream) {
+        yield p;
+      }
+
+      _log.info(
+        'Network scan complete: total=${_lastReport!.total}, '
+        'available=${_lastReport!.available}, '
+        'unreachable=${_lastReport!.unreachable}, '
+        'skippedNoUrl=${_lastReport!.skippedNoUrl}, '
+        'durationMs=${_lastReport!.durationMs}',
+      );
+    } catch (e, st) {
+      _log.error('Network scan failed', error: e, stackTrace: st);
+      rethrow;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<List<MediaItem>> _safeFetch(MediaSourceType type) async {
+    try {
+      return await _repository.getAllBySourceType(type);
+    } catch (e, st) {
+      _log.error(
+        'Failed to enumerate media for $type',
+        error: e,
+        stackTrace: st,
+      );
+      return const [];
+    }
+  }
+
+  /// Scans a single row. Returns `true` when the host confirmed the object
+  /// is there, which is what the progress counters mean by reachable.
+  ///
+  /// What gets WRITTEN is narrower than what gets counted: only a definitive
+  /// verdict reaches the row. A 401, a 429, a 5xx, a DNS failure or a
+  /// timeout all say this scan could not see the object, not that the
+  /// object is gone, and the orphan flag is sticky and syncs (media sync
+  /// program spec 5.2). Per-row exceptions are caught and logged; the scan
+  /// continues.
+  Future<bool> _scanOne(http.Client client, MediaItem row) async {
+    final urlString = row.url!;
+    final uri = Uri.parse(urlString);
+    final host = uri.host;
+
+    try {
+      final headers = await _resolveAuthHeaders(row, uri);
+      final verdict = await _rateLimiter.run<_ScanVerdict>(host, () async {
+        // First try HEAD. Some servers return 405 / 501 / 400 for HEAD on
+        // user-content endpoints; in that case fall back to a 1-byte
+        // range GET, which is still polite.
+        final headResp = await client.head(uri, headers: headers);
+        if (_isHeadUnsupported(headResp.statusCode)) {
+          final getResp = await client.get(
+            uri,
+            headers: {...headers, 'Range': 'bytes=0-0'},
+          );
+          return _verdictFor(getResp.statusCode);
+        }
+        return _verdictFor(headResp.statusCode);
+      });
+
+      await _persistResult(row, verdict);
+      return verdict == _ScanVerdict.reachable;
+    } catch (e, st) {
+      _log.warning(
+        'Scan failed for media ${row.id} (${row.url}): $e',
+        stackTrace: st,
+      );
+      try {
+        // A transport failure learned nothing, so nothing is written.
+        await _persistResult(row, _ScanVerdict.inconclusive);
+      } catch (e2, st2) {
+        _log.error(
+          'Failed to persist orphan flag for ${row.id}',
+          error: e2,
+          stackTrace: st2,
+        );
+      }
+      return false;
+    }
+  }
+
+  /// The narrow verification write, never [MediaRepository.updateMedia]:
+  /// [row] is this scan's snapshot, and an upload that finished since it was
+  /// taken has stamped the row, so a whole-row write would roll those stamps
+  /// back. It also keeps the verification facts under their own clock.
+  ///
+  /// [MediaRepository.stampVerification] rather than `markVerified`: it
+  /// records the date whether or not the flag moves, and publishes only
+  /// when it does.
+  ///
+  /// An inconclusive verdict writes nothing at all, matching
+  /// `MediaItemVerifier`: the scan did not learn whether the object is
+  /// there, and the orphan flag is sticky and syncs, so guessing from a 401
+  /// or a timeout would mark a live library missing on every device.
+  Future<void> _persistResult(MediaItem row, _ScanVerdict verdict) async {
+    if (verdict == _ScanVerdict.inconclusive) return;
+    await _repository.stampVerification(
+      row.id,
+      verifiedAt: clock.now(),
+      isOrphaned: verdict == _ScanVerdict.missing,
+    );
+  }
+
+  Future<Map<String, String>> _resolveAuthHeaders(
+    MediaItem row,
+    Uri uri,
+  ) async {
+    // The credentials service is keyed by hostname: a single host owns at
+    // most one credential set, so for both `networkUrl` and `manifestEntry`
+    // rows the URL's host is the right key. (For manifestEntry rows, the
+    // parent subscription's `credentialsHostId` is just a back-reference to
+    // the same host record.) If `headersFor` returns null, we fall back to
+    // an empty map — the request goes through without auth.
+    final headers = await _credentials.headersFor(uri);
+    return headers ?? const <String, String>{};
+  }
+
+  bool _isHeadUnsupported(int code) =>
+      code == 405 || code == 501 || code == 400;
+
+  /// 404 and 410 are the host saying the object is not there. Everything
+  /// else that is not a success is the host refusing to answer: 401 and 403
+  /// are credentials, 429 is throttling, 5xx is the server's own problem.
+  _ScanVerdict _verdictFor(int code) {
+    if (code >= 200 && code < 400) return _ScanVerdict.reachable;
+    if (code == 404 || code == 410) return _ScanVerdict.missing;
+    return _ScanVerdict.inconclusive;
+  }
+}
+
+/// What one probe learned. Only [missing] is a positive finding of absence,
+/// and only it may set the orphan flag.
+enum _ScanVerdict { reachable, missing, inconclusive }

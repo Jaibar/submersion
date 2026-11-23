@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
@@ -89,6 +90,20 @@ void main() {
       );
       expect(result, '1h 0m');
     });
+
+    test('surface interval past a day reads in days, past a year in years', () {
+      expect(
+        DiveField.surfaceInterval.formatValue(
+          const Duration(hours: 157, minutes: 42),
+          units,
+        ),
+        '6d 13h',
+      );
+      expect(
+        DiveField.surfaceInterval.formatValue(const Duration(days: 400), units),
+        '1y 35d',
+      );
+    });
   });
 
   group('DiveFieldFormatter - dateTime', () {
@@ -124,14 +139,33 @@ void main() {
   });
 
   group('DiveFieldFormatter - gas fields', () {
-    test('sacRate formats with volume symbol and per-minute', () {
-      final result = DiveField.sacRate.formatValue(12.3, units);
-      expect(result, '12.3 ${units.volumeSymbol}/min');
+    test('sac formats bar/min in metric', () {
+      expect(DiveField.sac.formatValue(1.23, units), '1.2 bar/min');
     });
 
-    test('sacRate returns "--" for non-double', () {
-      final result = DiveField.sacRate.formatValue('invalid', units);
-      expect(result, '--');
+    test('sac formats psi/min without a decimal in imperial', () {
+      const psiUnits = UnitFormatter(
+        AppSettings(pressureUnit: PressureUnit.psi),
+      );
+      // 1.23 bar/min * 14.5038 = 17.8 psi/min
+      expect(DiveField.sac.formatValue(1.23, psiUnits), '18 psi/min');
+    });
+
+    test('rmv formats L/min in metric', () {
+      expect(DiveField.rmv.formatValue(12.3, units), '12.3 L/min');
+    });
+
+    test('rmv formats cuft/min with two decimals in imperial', () {
+      const cuftUnits = UnitFormatter(
+        AppSettings(volumeUnit: VolumeUnit.cubicFeet),
+      );
+      // 12.3 L/min * 0.0353147 = 0.434 cuft/min
+      expect(DiveField.rmv.formatValue(12.3, cuftUnits), '0.43 cuft/min');
+    });
+
+    test('sac and rmv return "--" for non-double', () {
+      expect(DiveField.sac.formatValue('invalid', units), '--');
+      expect(DiveField.rmv.formatValue(null, units), '--');
     });
 
     test('gasConsumed formats with volume unit', () {
@@ -373,6 +407,7 @@ void main() {
         DiveField.diveNumber: 1,
         DiveField.dateTime: DateTime(2024, 1, 1),
         DiveField.siteName: 'Site',
+        DiveField.diveName: 'Dive',
         DiveField.maxDepth: 10.0,
         DiveField.avgDepth: 5.0,
         DiveField.bottomTime: const Duration(minutes: 30),
@@ -393,12 +428,17 @@ void main() {
         DiveField.precipitation: 'None',
         DiveField.humidity: 50.0,
         DiveField.weatherDescription: 'Sunny',
+        DiveField.surfaceConditions: 'Calm',
+        DiveField.diveOperator: 'Buddy Dive',
+        DiveField.boatName: 'Bonaire Breeze',
+        DiveField.boatCaptain: 'Rik',
         DiveField.primaryGas: 'Air',
         DiveField.diluentGas: 'Air',
         DiveField.tankCount: 1,
         DiveField.startPressure: 200.0,
         DiveField.endPressure: 50.0,
-        DiveField.sacRate: 15.0,
+        DiveField.sac: 1.5,
+        DiveField.rmv: 15.0,
         DiveField.gasConsumed: 1800.0,
         DiveField.totalWeight: 6.0,
         DiveField.diveComputerModel: 'Model',
@@ -427,6 +467,11 @@ void main() {
         DiveField.importSource: 'Source',
         DiveField.diveTypeName: 'Recreational',
         DiveField.surfaceInterval: const Duration(minutes: 60),
+        DiveField.excludedFromStats: true,
+        DiveField.excludedFromGasStats: false,
+        DiveField.windDirection: 'North',
+        DiveField.scrubberType: 'ExtendAir',
+        DiveField.scrubberDuration: 180,
       };
 
       for (final field in DiveField.values) {

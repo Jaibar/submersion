@@ -1,30 +1,42 @@
-import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/courses/data/repositories/course_repository.dart';
 import 'package:submersion/features/courses/domain/constants/course_field.dart';
 import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
 
 /// Repository provider
 final courseRepositoryProvider = Provider<CourseRepository>((ref) {
   return CourseRepository();
 });
 
-/// All courses provider
+/// All courses provider.
+///
+/// Self-invalidates whenever the `courses` table changes (e.g. after a sync)
+/// so the list refreshes automatically, while remaining a [FutureProvider] so
+/// imperative `ref.read(provider.future)` reads still resolve.
 final allCoursesProvider = FutureProvider<List<Course>>((ref) async {
   final repository = ref.watch(courseRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
   return repository.getAllCourses(diverId: validatedDiverId);
 });
 
@@ -34,6 +46,7 @@ final inProgressCoursesProvider = FutureProvider<List<Course>>((ref) async {
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
   return repository.getInProgressCourses(diverId: validatedDiverId);
 });
 
@@ -43,22 +56,36 @@ final completedCoursesProvider = FutureProvider<List<Course>>((ref) async {
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
   return repository.getCompletedCourses(diverId: validatedDiverId);
 });
 
 /// Sort state for course list
-final courseSortProvider = StateProvider<SortState<CourseSortField>>(
-  (ref) => const SortState(
-    field: CourseSortField.startDate,
-    direction: SortDirection.descending,
-  ),
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final courseSortProvider = Provider<SortState<CourseSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(
+          settingsProvider.select((s) => s.listArrangements.courseSort),
+        ),
+        CourseSortField.values,
+      ) ??
+      const SortState(
+        field: CourseSortField.startDate,
+        direction: SortDirection.descending,
+      ),
 );
 
 /// Apply sorting to a list of courses
 List<Course> applyCourseSorting(
   List<Course> courses,
-  SortState<CourseSortField> sort,
-) {
+  SortState<CourseSortField> sort, {
+  CertificationCatalog? catalog,
+}) {
+  final cat = catalog ?? CertificationCatalog.builtInOnly;
   final sorted = List<Course>.from(courses);
 
   sorted.sort((a, b) {
@@ -70,11 +97,14 @@ List<Course> applyCourseSorting(
 
     switch (sort.field) {
       case CourseSortField.name:
-        comparison = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        comparison = compareTextForSort(a.name, b.name);
       case CourseSortField.startDate:
         comparison = a.startDate.compareTo(b.startDate);
       case CourseSortField.agency:
-        comparison = a.agency.displayName.compareTo(b.agency.displayName);
+        comparison = cat
+            .agency(a.agency)
+            .interchangeName
+            .compareTo(cat.agency(b.agency).interchangeName);
       case CourseSortField.status:
         // In progress first, then completed (by completion date)
         if (a.isInProgress && !b.isInProgress) {
@@ -105,16 +135,20 @@ final courseByIdProvider = FutureProvider.family<Course?, String>((
   id,
 ) async {
   final repository = ref.watch(courseRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
   return repository.getCourseById(id);
 });
 
-/// Course for a specific dive
-final courseForDiveProvider = FutureProvider.family<Course?, String>((
+/// A dive's courses, the representative first (#2515).
+final coursesForDiveProvider = FutureProvider.family<List<Course>, String>((
   ref,
   diveId,
 ) async {
   final repository = ref.watch(courseRepositoryProvider);
-  return repository.getCourseForDive(diveId);
+  ref.invalidateSelfWhen(
+    ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+  );
+  return repository.getCoursesForDive(diveId);
 });
 
 /// Course for a specific certification
@@ -123,39 +157,78 @@ final courseForCertificationProvider = FutureProvider.family<Course?, String>((
   certificationId,
 ) async {
   final repository = ref.watch(courseRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
+  // The link lives on the certification row (#2515).
+  ref.invalidateSelfWhen(repository.watchCourseLinkChanges());
   return repository.getCourseForCertification(certificationId);
 });
 
-/// Dives for a specific course
+/// The certifications a course earned, earliest issued first (#2515).
+final certificationsForCourseProvider =
+    FutureProvider.family<List<Certification>, String>((ref, courseId) async {
+      final repository = ref.watch(certificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCertificationsChanges());
+      return repository.getCertificationsForCourse(courseId);
+    });
+
+/// Dives for a specific course.
+///
+/// Self-invalidates on any `dives` table write (a merge/consolidate, a direct
+/// edit, a sync apply, ...). The only manual invalidation paths are
+/// [CourseListNotifier.linkDiveToCourse]/[CourseListNotifier.unlinkDiveFromCourse]
+/// and the dive edit form's course reassignment; a merge or consolidate deletes
+/// the losing dive straight through `DiveRepository.bulkDeleteDives`, bypassing
+/// all of them. Without this the course detail page keeps listing a dive that
+/// was merged away -- while `courseProgressProvider`, which already watches this
+/// tick, drops it from the requirements section on the same page.
 final courseDivesProvider = FutureProvider.family<List<Dive>, String>((
   ref,
   courseId,
 ) async {
   final diveRepository = ref.watch(diveRepositoryProvider);
+
+  ref.invalidateSelfWhen(diveRepository.watchDivesChanges());
+  // A link-only change touches dive_courses alone (#2515).
+  ref.invalidateSelfWhen(
+    ref.watch(courseRepositoryProvider).watchCourseLinkChanges(),
+  );
+
   return diveRepository.getDivesForCourse(courseId);
 });
 
-/// Dive count for a course
+/// Dive count for a course.
+///
+/// See [courseDivesProvider] for why this self-invalidates on dives-table
+/// writes; `getDiveCountForCourse` counts the same rows.
+///
+/// Deliberately does NOT take the courses tick: the count is over
+/// `dive_courses` (#2515), so it changes only on link writes and a course
+/// rename would rebuild it for nothing.
 final courseDiveCountProvider = FutureProvider.family<int, String>((
   ref,
   courseId,
 ) async {
   final repository = ref.watch(courseRepositoryProvider);
+  final diveRepository = ref.watch(diveRepositoryProvider);
+
+  ref.invalidateSelfWhen(diveRepository.watchDivesChanges());
+  ref.invalidateSelfWhen(repository.watchCourseLinkChanges());
+
   return repository.getDiveCountForCourse(courseId);
 });
 
-/// Courses by agency
-final coursesByAgencyProvider =
-    FutureProvider.family<List<Course>, CertificationAgency>((
-      ref,
-      agency,
-    ) async {
-      final repository = ref.watch(courseRepositoryProvider);
-      final validatedDiverId = await ref.watch(
-        validatedCurrentDiverIdProvider.future,
-      );
-      return repository.getCoursesByAgency(agency, diverId: validatedDiverId);
-    });
+/// Courses by agency id (built-in enum name or custom id)
+final coursesByAgencyProvider = FutureProvider.family<List<Course>, String>((
+  ref,
+  agency,
+) async {
+  final repository = ref.watch(courseRepositoryProvider);
+  final validatedDiverId = await ref.watch(
+    validatedCurrentDiverIdProvider.future,
+  );
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
+  return repository.getCoursesByAgency(agency, diverId: validatedDiverId);
+});
 
 /// Course search provider
 final courseSearchProvider = FutureProvider.family<List<Course>, String>((
@@ -169,6 +242,7 @@ final courseSearchProvider = FutureProvider.family<List<Course>, String>((
     return ref.watch(allCoursesProvider).value ?? [];
   }
   final repository = ref.watch(courseRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchCoursesChanges());
   return repository.searchCourses(query, diverId: validatedDiverId);
 });
 
@@ -180,7 +254,7 @@ class CourseListNotifier extends StateNotifier<AsyncValue<List<Course>>> {
 
   CourseListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(_initializeAndLoad(), CourseListNotifier, 'initialize and load');
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -190,9 +264,20 @@ class CourseListNotifier extends StateNotifier<AsyncValue<List<Course>>> {
         _ref.invalidate(allCoursesProvider);
         _ref.invalidate(inProgressCoursesProvider);
         _ref.invalidate(completedCoursesProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          CourseListNotifier,
+          'initialize and load',
+        );
       }
     });
+
+    // Refresh when the courses table changes (e.g. a sync writes rows
+    // directly).
+    final tableChangeSub = _repository.watchCoursesChanges().listen(
+      (_) => _silentReloadCourses(),
+    );
+    _ref.onDispose(tableChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -214,6 +299,24 @@ class CourseListNotifier extends StateNotifier<AsyncValue<List<Course>>> {
     }
   }
 
+  /// Reload without flipping to a loading state, so table-driven refreshes
+  /// (e.g. after a sync write) do not flash a spinner over existing data.
+  /// Resolves the validated diver id first so a tick arriving before
+  /// initialization completes still scopes the query correctly.
+  Future<void> _silentReloadCourses() async {
+    try {
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final courses = await _repository.getAllCourses(
+        diverId: _validatedDiverId,
+      );
+      if (mounted) state = AsyncValue.data(courses);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
+    }
+  }
+
   Future<void> refresh() async {
     // Get fresh validated diver ID before loading
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
@@ -222,19 +325,6 @@ class CourseListNotifier extends StateNotifier<AsyncValue<List<Course>>> {
     _ref.invalidate(allCoursesProvider);
     _ref.invalidate(inProgressCoursesProvider);
     _ref.invalidate(completedCoursesProvider);
-  }
-
-  Future<Course> addCourse(Course course) async {
-    // Get fresh validated diver ID before creating
-    final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
-
-    // Always set diverId to the current validated diver for new items
-    final courseWithDiver = validatedId != null
-        ? course.copyWith(diverId: validatedId)
-        : course;
-    final newCourse = await _repository.createCourse(courseWithDiver);
-    await refresh();
-    return newCourse;
   }
 
   Future<void> updateCourse(Course course) async {
@@ -250,25 +340,27 @@ class CourseListNotifier extends StateNotifier<AsyncValue<List<Course>>> {
 
   Future<void> linkDiveToCourse(String diveId, String courseId) async {
     await _repository.linkDiveToCourse(diveId, courseId);
-    _ref.invalidate(courseForDiveProvider(diveId));
+    _ref.invalidate(coursesForDiveProvider(diveId));
     _ref.invalidate(courseDivesProvider(courseId));
     _ref.invalidate(courseDiveCountProvider(courseId));
   }
 
   Future<void> unlinkDiveFromCourse(String diveId, String courseId) async {
-    await _repository.unlinkDiveFromCourse(diveId);
-    _ref.invalidate(courseForDiveProvider(diveId));
+    await _repository.unlinkDiveFromCourse(diveId, courseId);
+    _ref.invalidate(coursesForDiveProvider(diveId));
     _ref.invalidate(courseDivesProvider(courseId));
     _ref.invalidate(courseDiveCountProvider(courseId));
   }
 
-  Future<void> linkCourseToCertification(
+  /// Makes the course's earned certifications exactly [certificationIds]
+  /// (#2515).
+  Future<void> setCourseCertifications(
     String courseId,
-    String certificationId,
+    List<String> certificationIds,
   ) async {
-    await _repository.linkCourseToCertification(courseId, certificationId);
+    await _repository.setCourseCertifications(courseId, certificationIds);
     _ref.invalidate(courseByIdProvider(courseId));
-    _ref.invalidate(courseForCertificationProvider(certificationId));
+    _ref.invalidate(certificationsForCourseProvider(courseId));
     await refresh();
   }
 }
@@ -289,10 +381,10 @@ final inProgressCourseCountProvider = FutureProvider<int>((ref) async {
 // Course List View Mode
 // ============================================================================
 
-/// In-memory view mode for the course list. Defaults to detailed.
-/// Not persisted in AppSettings — resets to detailed on app restart.
-final courseListViewModeProvider = StateProvider<ListViewMode>((ref) {
-  return ListViewMode.detailed;
+/// The course list's view mode, as the diver left it (issue #3748); same
+/// contract as [diveListViewModeProvider].
+final courseListViewModeProvider = Provider<ListViewMode>((ref) {
+  return ref.watch(settingsProvider.select((s) => s.courseListViewMode));
 });
 
 // ============================================================================

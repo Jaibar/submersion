@@ -7,7 +7,9 @@ class Course extends Equatable {
   final String id;
   final String diverId;
   final String name;
-  final CertificationAgency agency;
+
+  /// A built-in agency's enum name or a custom agency id (issue #690).
+  final String agency;
   final DateTime startDate;
   final DateTime? completionDate;
   final String? instructorId; // FK to buddy
@@ -45,10 +47,21 @@ class Course extends Equatable {
   /// Display name for the instructor
   String get instructorDisplay => instructorName ?? 'Unknown Instructor';
 
-  /// Duration of the course in days (null if in progress)
+  /// Duration of the course in days (null if in progress).
+  ///
+  /// Counted inclusively over calendar days: a course running May 27 → 29 is
+  /// 3 training days (27, 28, 29), not 2. Both dates are floored to midnight
+  /// before subtraction so a [startDate] that carries an hh:mm from
+  /// `DateTime.now()` does not knock the count down by one.
   int? get durationDays {
     if (completionDate == null) return null;
-    return completionDate!.difference(startDate).inDays;
+    final start = DateTime(startDate.year, startDate.month, startDate.day);
+    final end = DateTime(
+      completionDate!.year,
+      completionDate!.month,
+      completionDate!.day,
+    );
+    return end.difference(start).inDays + 1;
   }
 
   /// Days since course started
@@ -59,7 +72,7 @@ class Course extends Equatable {
     String? id,
     String? diverId,
     String? name,
-    CertificationAgency? agency,
+    String? agency,
     DateTime? startDate,
     DateTime? completionDate,
     String? instructorId,
@@ -94,7 +107,7 @@ class Course extends Equatable {
     String? id,
     String? diverId,
     String? name,
-    CertificationAgency? agency,
+    String? agency,
     DateTime? startDate,
     String? instructorId,
     String? instructorName,
@@ -130,7 +143,7 @@ class Course extends Equatable {
       id: '',
       diverId: diverId,
       name: '',
-      agency: CertificationAgency.padi,
+      agency: CertificationAgency.padi.name,
       startDate: now,
       createdAt: now,
       updatedAt: now,

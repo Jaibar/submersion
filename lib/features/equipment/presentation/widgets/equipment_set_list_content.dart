@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_set_edit_routes.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_header_bar.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_set_tile.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
 
 /// Content widget for the equipment set list, used in master-detail layout.
 ///
@@ -23,14 +26,19 @@ class EquipmentSetListContent extends ConsumerWidget {
   /// the parent Scaffold's AppBar.
   final bool showAppBar;
 
-  final Widget? headerExtension;
+  /// Builds the Equipment / Sets toggle into this list's own header bar.
+  ///
+  /// Null on phone, where the page's app bar carries it instead. Sets have no
+  /// actions of their own, so the bar disappears entirely in that case rather
+  /// than holding a row open for nothing.
+  final EquipmentHeaderToggleBuilder? toggleBuilder;
 
   const EquipmentSetListContent({
     super.key,
     this.onItemSelected,
     this.selectedId,
     this.showAppBar = true,
-    this.headerExtension,
+    this.toggleBuilder,
   });
 
   @override
@@ -48,41 +56,17 @@ class EquipmentSetListContent extends ConsumerWidget {
     if (!showAppBar) {
       return Column(
         children: [
-          _buildCompactAppBar(context),
-          ?headerExtension,
+          EquipmentHeaderBar(
+            toggleBuilder: toggleBuilder,
+            actionsBuilder: (context, {required bool dense}) =>
+                const <Widget>[],
+          ),
           Expanded(child: content),
         ],
       );
     }
 
     return content;
-  }
-
-  Widget _buildCompactAppBar(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).colorScheme.outlineVariant,
-            width: 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          const SizedBox(width: 8, height: 40),
-          Text(
-            context.l10n.equipment_appBar_title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const Spacer(),
-        ],
-      ),
-    );
   }
 
   Widget _buildEmptyState(BuildContext context) {
@@ -116,7 +100,7 @@ class EquipmentSetListContent extends ConsumerWidget {
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
-              onPressed: () => context.push('/equipment/sets/new'),
+              onPressed: () => openNewEquipmentSet(context),
               icon: const Icon(Icons.add),
               label: Text(
                 context.l10n.equipment_sets_emptyState_createFirstButton,
@@ -133,72 +117,46 @@ class EquipmentSetListContent extends ConsumerWidget {
     WidgetRef ref,
     List<EquipmentSet> sets,
   ) {
+    void open(String id) {
+      if (onItemSelected != null) {
+        onItemSelected!(id);
+      } else {
+        context.push('/equipment/sets/$id');
+      }
+    }
+
     return RefreshIndicator(
       onRefresh: () async {
         ref.read(equipmentSetListNotifierProvider.notifier).refresh();
       },
-      child: ListView.builder(
-        padding: const EdgeInsets.only(bottom: 80),
-        itemCount: sets.length,
-        itemBuilder: (context, index) {
-          final set = sets[index];
-          final isSelected = selectedId == set.id;
-          final itemCountText = set.itemCount == 1
-              ? context.l10n.equipment_sets_itemCountSingular(set.itemCount)
-              : context.l10n.equipment_sets_itemCountPlural(set.itemCount);
-          return Semantics(
-            label: listItemLabel(
-              title: set.name,
-              subtitle: set.description.isNotEmpty
-                  ? set.description
-                  : itemCountText,
-            ),
-            child: Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              color: isSelected
-                  ? Theme.of(
-                      context,
-                    ).colorScheme.primaryContainer.withValues(alpha: 0.5)
-                  : null,
-              child: ListTile(
-                onTap: () {
-                  if (onItemSelected != null) {
-                    onItemSelected!(set.id);
-                  } else {
-                    context.push('/equipment/sets/${set.id}');
-                  }
-                },
-                leading: CircleAvatar(
-                  backgroundColor: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer,
-                  child: Icon(
-                    Icons.folder,
-                    color: Theme.of(context).colorScheme.onPrimaryContainer,
-                  ),
-                ),
-                title: Text(set.name),
-                subtitle: Text(
-                  set.description.isNotEmpty ? set.description : itemCountText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: set.itemCount > 0
-                    ? Semantics(
-                        label: context.l10n
-                            .equipment_sets_itemCountSemanticLabel(
-                              '${set.itemCount}',
-                            ),
-                        child: Chip(
-                          label: Text('${set.itemCount}'),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      )
-                    : null,
+      child: KeyboardListNavigator(
+        keys: [for (final s in sets) s.id],
+        currentKey: selectedId,
+        // No highlight of its own to move: at phone width an arrow moves the
+        // cursor without marking a row, and Enter opens the cursor's row.
+        onMove: (id) => moveListCursor(
+          context,
+          canOpen: onItemSelected != null,
+          open: () => open(id),
+          highlight: () {},
+        ),
+        onActivate: open,
+        child: ListView.builder(
+          padding: const EdgeInsets.only(bottom: 80),
+          itemCount: sets.length,
+          itemBuilder: (context, index) {
+            final set = sets[index];
+            final isSelected = selectedId == set.id;
+            return KeyboardListItem(
+              navigationKey: set.id,
+              child: EquipmentSetTile(
+                set: set,
+                isSelected: isSelected,
+                onTap: () => open(set.id),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }

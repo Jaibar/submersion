@@ -1,12 +1,23 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:submersion/core/providers/ref_invalidate_on_change.dart';
+import 'package:submersion/core/services/local_cache_database_service.dart';
 import 'package:submersion/core/tide/entities/tide_extremes.dart';
 import 'package:submersion/core/tide/entities/tide_prediction.dart';
 import 'package:submersion/core/tide/tide_calculator.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/tides/data/repositories/noaa_station_cache_repository.dart';
 import 'package:submersion/features/tides/data/repositories/tide_record_repository.dart';
+import 'package:submersion/features/tides/data/services/noaa_station_index.dart';
+import 'package:submersion/features/tides/data/services/noaa_station_service.dart';
+import 'package:submersion/features/tides/data/services/tide_constituent_resolver.dart';
 import 'package:submersion/features/tides/data/services/tide_data_service.dart';
 import 'package:submersion/features/tides/domain/entities/tide_record.dart';
+import 'package:submersion/features/tides/domain/services/dive_tide_window.dart';
+import 'package:submersion/features/tides/domain/services/tide_record_heal.dart';
+import 'package:submersion/features/tides/domain/services/site_wall_clock.dart';
+import 'package:submersion/features/tides/domain/services/tide_status_for_dive.dart';
 
 /// Provider for the [TideDataService] singleton.
 final tideDataServiceProvider = Provider<TideDataService>((ref) {
@@ -24,20 +35,148 @@ final tideRecordForDiveProvider = FutureProvider.family<TideRecord?, String>((
   diveId,
 ) async {
   final repository = ref.watch(tideRecordRepositoryProvider);
+  ref.invalidateSelfWhen(
+    ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+  );
   return repository.getTideRecordForDive(diveId);
 });
 
-/// Provider for tide data metadata.
-final tideMetadataProvider = FutureProvider<TideDataMetadata?>((ref) async {
-  final service = ref.watch(tideDataServiceProvider);
-  return service.getMetadata();
+/// Provider for a dive's tide record, lazily self-healing rows written
+/// by the pre-2026 broken engine. When the stored record disagrees with
+/// a fresh computation beyond the heal thresholds it is overwritten and
+/// the new record returned. Converges: post-fix records match the fresh
+/// computation and are never rewritten.
+/// Returns null when the site has no coordinates, or has coordinates but no
+/// tide data resolves.
+final healedTideRecordProvider =
+    FutureProvider.family<
+      TideRecord?,
+      ({String diveId, GeoPoint? location, DateTime entryTime})
+    >((ref, params) async {
+      final repository = ref.watch(tideRecordRepositoryProvider);
+      ref.invalidateSelfWhen(
+        ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+      );
+      final stored = await repository.getTideRecordForDive(params.diveId);
+      if (stored == null) return null;
+
+      // Stored times are real instants; without coordinates there is no
+      // site clock to show them in, so the record is not shown.
+      final location = params.location;
+      if (location == null) return null;
+
+      final resolved = await ref.watch(
+        resolvedTideDataProvider(location).future,
+      );
+      // No tide data here: the record can be neither healed nor verified,
+      // and records from before the site-time fix would display shifted.
+      if (resolved == null) return null;
+
+      // entryTime is the dive's wall clock; the engine needs the instant.
+      final status = await tideStatusForDive(
+        calculator: resolved.calculator,
+        entryWallClock: params.entryTime,
+        location: location,
+      );
+      final fresh = TideRecord.fromStatus(
+        id: stored.id,
+        diveId: params.diveId,
+        status: status,
+      );
+      if (!tideRecordNeedsHeal(stored: stored, fresh: fresh)) return stored;
+
+      return repository.createFromStatus(diveId: params.diveId, status: status);
+    });
+
+/// A dive's tide computed from the model when nothing is stored, off the UI
+/// thread. Times are real instants, like a stored record's.
+final calculatedTideRecordProvider = FutureProvider.autoDispose
+    .family<
+      TideRecord?,
+      ({String diveId, GeoPoint location, DateTime entryTime})
+    >((ref, params) async {
+      final calculator = await ref.watch(
+        tideCalculatorProvider(params.location).future,
+      );
+      if (calculator == null) return null;
+      final status = await tideStatusForDive(
+        calculator: calculator,
+        entryWallClock: params.entryTime,
+        location: params.location,
+      );
+      return TideRecord.fromStatus(
+        id: 'calculated',
+        diveId: params.diveId,
+        status: status,
+      );
+    });
+
+/// The predicted tide across the day around a dive, for the dive page's
+/// chart: the curve and every high and low from 12 hours before the entry to
+/// 12 hours after it. Times are real instants. Null when no tide data
+/// resolves at the site. Computed off the UI thread, and released when the
+/// dive page stops watching it.
+final diveTideWindowProvider = FutureProvider.autoDispose
+    .family<
+      DiveTideWindow?,
+      ({String diveId, GeoPoint location, DateTime entryTime})
+    >((ref, params) async {
+      final calculator = await ref.watch(
+        tideCalculatorProvider(params.location).future,
+      );
+      if (calculator == null) return null;
+      return loadDiveTideWindow(
+        calculator: calculator,
+        entryWallClock: params.entryTime,
+        location: params.location,
+      );
+    });
+
+/// Provider for the NOAA station index (bundled asset).
+final noaaStationIndexProvider = FutureProvider<NoaaStationIndex?>((ref) async {
+  try {
+    return await NoaaStationIndex.load();
+  } catch (e) {
+    return null; // Missing asset: resolver degrades to FES-only.
+  }
 });
 
-/// Provider for available tide site IDs.
-final tideSiteIdsProvider = FutureProvider<List<String>>((ref) async {
-  final service = ref.watch(tideDataServiceProvider);
-  return service.getAvailableSiteIds();
+/// Provider for the [NoaaStationService] singleton.
+final noaaStationServiceProvider = Provider<NoaaStationService>((ref) {
+  return NoaaStationService();
 });
+
+/// Provider for the [NoaaStationCacheRepository].
+final noaaStationCacheRepositoryProvider = Provider<NoaaStationCacheRepository>(
+  (ref) {
+    return NoaaStationCacheRepository(
+      LocalCacheDatabaseService.instance.database,
+    );
+  },
+);
+
+/// Provider for resolved tide data (calculator plus provenance) at a
+/// location. Station tier when a cached or fetchable NOAA station is
+/// within range, FES model tier otherwise, null when no data exists.
+final resolvedTideDataProvider =
+    FutureProvider.family<ResolvedTideData?, GeoPoint>((ref, location) async {
+      final index = await ref.watch(noaaStationIndexProvider.future);
+      final resolver = TideConstituentResolver(
+        stationIndex: index,
+        stationService: ref.watch(noaaStationServiceProvider),
+        cache: ref.watch(noaaStationCacheRepositoryProvider),
+        fesService: ref.watch(tideDataServiceProvider),
+      );
+      return resolver.resolve(location.latitude, location.longitude);
+    });
+
+/// Provider for the provenance of tide data at a location (badge UI).
+final tideDataSourceProvider = FutureProvider.family<TideDataSource?, GeoPoint>(
+  (ref, location) async {
+    final resolved = await ref.watch(resolvedTideDataProvider(location).future);
+    return resolved?.source;
+  },
+);
 
 /// Provider for a [TideCalculator] at a specific location.
 ///
@@ -47,11 +186,8 @@ final tideSiteIdsProvider = FutureProvider<List<String>>((ref) async {
 /// ```
 final tideCalculatorProvider = FutureProvider.family<TideCalculator?, GeoPoint>(
   (ref, location) async {
-    final service = ref.watch(tideDataServiceProvider);
-    return service.getCalculatorForLocation(
-      location.latitude,
-      location.longitude,
-    );
+    final resolved = await ref.watch(resolvedTideDataProvider(location).future);
+    return resolved?.calculator;
   },
 );
 
@@ -60,8 +196,8 @@ final hasTideDataProvider = FutureProvider.family<bool, GeoPoint>((
   ref,
   location,
 ) async {
-  final service = ref.watch(tideDataServiceProvider);
-  return service.hasTideData(location.latitude, location.longitude);
+  final resolved = await ref.watch(resolvedTideDataProvider(location).future);
+  return resolved != null;
 });
 
 /// Provider for tide predictions at a location.
@@ -130,6 +266,14 @@ final tideExtremesProvider = FutureProvider.family<List<TideExtreme>, GeoPoint>(
     );
   },
 );
+
+/// [tideExtremesProvider] with times in the site's wall clock, for display.
+/// Released when no widget watches it; the instant provider stays cached.
+final tideExtremesAtSiteProvider = FutureProvider.autoDispose
+    .family<List<TideExtreme>, GeoPoint>((ref, location) async {
+      final extremes = await ref.watch(tideExtremesProvider(location).future);
+      return extremesAtSiteWallClock(extremes, location);
+    });
 
 /// Provider for tide extremes over a custom time range.
 ///

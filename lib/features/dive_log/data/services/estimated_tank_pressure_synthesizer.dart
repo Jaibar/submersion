@@ -1,0 +1,124 @@
+import 'package:equatable/equatable.dart';
+import 'package:submersion/features/dive_log/data/services/gas_usage_segments_service.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/tank_pressure_lookup.dart';
+
+/// Real per-tank pressures augmented with in-memory linear estimates, plus the
+/// set of tankIds that were synthesized (so the UI can label them "estimated").
+class EstimatedTankPressures extends Equatable {
+  final Map<String, List<TankPressurePoint>> pressures;
+  final Set<String> estimatedTankIds;
+  const EstimatedTankPressures(this.pressures, this.estimatedTankIds);
+
+  @override
+  List<Object?> get props => [pressures, estimatedTankIds];
+}
+
+/// Builds transmitter-style linear pressure series for tanks that have both
+/// start/end pressures but no time-series data. Never persists; pure.
+///
+/// For each qualifying tank the series is flat at startPressure until the tank
+/// is first breathed, drops linearly while breathed (windowed by gas switches),
+/// holds flat during gaps, and ends flat at endPressure. The total drop is
+/// distributed across active windows in proportion to their duration.
+///
+/// [onLoop] is as in [buildActiveTankIntervals]: false on a dive known to be
+/// off the loop, where a diluent tag does not take the start.
+EstimatedTankPressures synthesizeEstimatedTankPressures({
+  required Map<String, List<TankPressurePoint>> existing,
+  required List<DiveTank> tanks,
+  required List<GasSwitchWithTank> gasSwitches,
+  required int diveDurationSeconds,
+  int firstSampleSeconds = 0,
+  bool onLoop = true,
+}) {
+  final pressures = <String, List<TankPressurePoint>>{...existing};
+  final estimated = <String>{};
+  if (diveDurationSeconds <= 0) {
+    return EstimatedTankPressures(pressures, estimated);
+  }
+
+  final intervals = buildActiveTankIntervals(
+    tanks: tanks,
+    gasSwitches: gasSwitches,
+    diveDurationSeconds: diveDurationSeconds,
+    firstSampleSeconds: firstSampleSeconds,
+    onLoop: onLoop,
+  );
+
+  // A tank's measured series may still be keyed by an old tank id (#276);
+  // it is matched the way every reader matches it, so such a tank is not
+  // given an estimate beside its own transmitter line (#4291).
+  final measured = resolveTankPressureSeries(tanks, existing);
+  for (final tank in tanks) {
+    if (measured[tank.id]?.isNotEmpty ?? false) continue;
+    // A suit inflation bottle is not breathed (issue #4243): an estimated
+    // line would draw it as if it were. Nor is an Avelo Hydrotank's pressure
+    // the gas breathed (issue #4657), so no steady use is drawn for it
+    // either. Their logged pressures still show.
+    if (!tank.role.pressureMeasuresGasUse) continue;
+    final start = tank.startPressure;
+    final end = tank.endPressure;
+    if (start == null || end == null || start <= end) continue;
+
+    final windows = intervals[tank.id] ?? const <({int start, int end})>[];
+    final points = _buildFlatDropFlat(
+      tankId: tank.id,
+      startPressure: start,
+      endPressure: end,
+      // Fallback: a tank with start/end but no gas-switch evidence gets a
+      // single full-dive window (a plain straight line).
+      windows: windows.isEmpty
+          ? [(start: 0, end: diveDurationSeconds)]
+          : windows,
+      diveDurationSeconds: diveDurationSeconds,
+    );
+    pressures[tank.id] = points;
+    estimated.add(tank.id);
+  }
+  return EstimatedTankPressures(pressures, estimated);
+}
+
+List<TankPressurePoint> _buildFlatDropFlat({
+  required String tankId,
+  required double startPressure,
+  required double endPressure,
+  required List<({int start, int end})> windows,
+  required int diveDurationSeconds,
+}) {
+  final sorted = [...windows]..sort((a, b) => a.start.compareTo(b.start));
+  final totalActive = sorted.fold<int>(0, (s, w) => s + (w.end - w.start));
+  if (totalActive <= 0) {
+    return [
+      _pt(tankId, 0, startPressure),
+      _pt(tankId, diveDurationSeconds, endPressure),
+    ];
+  }
+  final dropRate = (startPressure - endPressure) / totalActive;
+
+  final points = <TankPressurePoint>[_pt(tankId, 0, startPressure)];
+  var pressure = startPressure;
+
+  if (sorted.first.start > 0) {
+    points.add(_pt(tankId, sorted.first.start, startPressure));
+  }
+  for (var i = 0; i < sorted.length; i++) {
+    final w = sorted[i];
+    final isLast = i == sorted.length - 1;
+    pressure -= dropRate * (w.end - w.start);
+    // Clamp the final window-end vertex to endPressure so accumulated float
+    // drift never leaves the drop (or the flat tail) slightly sloped.
+    points.add(_pt(tankId, w.end, isLast ? endPressure : pressure));
+    if (!isLast && sorted[i + 1].start > w.end) {
+      points.add(_pt(tankId, sorted[i + 1].start, pressure));
+    }
+  }
+  if (sorted.last.end < diveDurationSeconds) {
+    points.add(_pt(tankId, diveDurationSeconds, endPressure));
+  }
+  return points;
+}
+
+TankPressurePoint _pt(String tankId, int ts, double pressure) =>
+    TankPressurePoint(tankId: tankId, timestamp: ts, pressure: pressure);

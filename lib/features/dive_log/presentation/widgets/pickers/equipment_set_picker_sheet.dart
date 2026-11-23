@@ -1,0 +1,249 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_status_indicator.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/equipment/presentation/widgets/set_bundle_sections.dart';
+import 'package:submersion/features/equipment/presentation/providers/set_bundle_providers.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+
+/// Equipment set picker bottom sheet
+class EquipmentSetPickerSheet extends ConsumerWidget {
+  final ScrollController scrollController;
+  final void Function(EquipmentSet set, List<EquipmentItem> items)
+  onSetSelected;
+
+  /// The sheet's heading; "Use Equipment Set" when null. Picking a set to
+  /// take off dives says so instead (#4284).
+  final String? title;
+
+  /// Whether a set with nothing to apply (no members, or only wishlist
+  /// ones) can be picked. Off when applying a set; taking one off dives
+  /// turns it on, since the gear the set tagged there remains (#4284).
+  final bool pickEmptySets;
+
+  /// Whether a set must bring gear to be picked. A set that carries only
+  /// weights or tanks can be applied to a dive (issue #4525), but not where
+  /// only gear is wanted, such as the weight planner's rig.
+  final bool requireGear;
+
+  /// Whether the caller applies a set's weights. The dive planner takes a
+  /// set's gear and cylinders and predicts its own lead, so there a set
+  /// with only lead would do nothing: it cannot be picked, and its lead is
+  /// left out of the row.
+  final bool appliesWeights;
+
+  const EquipmentSetPickerSheet({
+    super.key,
+    required this.scrollController,
+    required this.onSetSelected,
+    this.title,
+    this.pickEmptySets = false,
+    this.requireGear = false,
+    this.appliesWeights = true,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final setsAsync = ref.watch(equipmentSetsProvider);
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                title ?? context.l10n.diveLog_equipmentSetPicker_title,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: context.l10n.common_action_close,
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: setsAsync.when(
+            data: (sets) {
+              if (sets.isEmpty) {
+                return Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.folder_special_outlined,
+                        size: 48,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        context.l10n.diveLog_equipmentSetPicker_noSets,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        context.l10n.diveLog_equipmentSetPicker_createHint,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              return ListView.builder(
+                controller: scrollController,
+                itemCount: sets.length,
+                itemBuilder: (context, index) {
+                  final set = sets[index];
+                  return _EquipmentSetTile(
+                    set: set,
+                    pickEmpty: pickEmptySets,
+                    requireGear: requireGear,
+                    appliesWeights: appliesWeights,
+                    onTap: (items) => onSetSelected(set, items),
+                  );
+                },
+              );
+            },
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (error, _) => Center(
+              child: Text(
+                context.l10n.diveLog_equipmentSetPicker_errorLoading(
+                  error.toString(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Individual equipment set tile that loads its items
+class _EquipmentSetTile extends ConsumerWidget {
+  final EquipmentSet set;
+  final bool pickEmpty;
+  final bool requireGear;
+  final bool appliesWeights;
+  final void Function(List<EquipmentItem> items) onTap;
+
+  const _EquipmentSetTile({
+    required this.set,
+    required this.pickEmpty,
+    required this.requireGear,
+    required this.appliesWeights,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final setWithItemsAsync = ref.watch(equipmentSetWithItemsProvider(set.id));
+
+    return setWithItemsAsync.when(
+      data: (setWithItems) {
+        if (setWithItems == null) {
+          return const SizedBox.shrink();
+        }
+        // A member on the wishlist (#2025) stays in the set but is never
+        // handed to a dive, plan or rig, so the tile counts, lists and
+        // enables on the members it will actually apply.
+        final items = [
+          for (final item in setWithItems.items ?? const <EquipmentItem>[])
+            if (!item.isWanted) item,
+        ];
+        // The lead and cylinders the set carries besides gear (issue
+        // #4525). A set with only those is still worth applying.
+        final summary = ref.watch(setBundleSummaryProvider(set.id)).valueOrNull;
+        final carried = summary == null
+            ? ''
+            : setBundleSummaryText(
+                context.l10n,
+                (kg) => ref.watch(unitFormatterProvider).formatWeight(kg),
+                gearCount: 0,
+                leadKg: appliesWeights ? summary.leadKg : 0,
+                cylinderCount: summary.cylinderCount,
+              );
+        final gearText = items.isEmpty
+            ? context.l10n.diveLog_equipmentSetPicker_emptySet
+            : context.l10n.diveLog_equipmentSetPicker_itemsSummary(
+                items.length,
+                items.map((e) => e.name).join(', '),
+              );
+        final canApply =
+            items.isNotEmpty || (!requireGear && carried.isNotEmpty);
+        return ListTile(
+          leading: CircleAvatar(
+            backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+            child: Icon(
+              Icons.folder_special,
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
+            ),
+          ),
+          title: Text(set.name),
+          subtitle: Text(
+            carried.isEmpty
+                ? gearText
+                : items.isEmpty
+                ? carried
+                : '$gearText · $carried',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ServiceStatusIndicatorForAny(
+                equipmentIds: [for (final i in items) i.id],
+                density: ServiceIndicatorDensity.dot,
+              ),
+              const SizedBox(width: 6),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
+          onTap: canApply || pickEmpty ? () => onTap(items) : null,
+        );
+      },
+      loading: () => ListTile(
+        leading: CircleAvatar(
+          backgroundColor: Theme.of(
+            context,
+          ).colorScheme.surfaceContainerHighest,
+          child: const SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+        title: Text(set.name),
+        subtitle: Text(context.l10n.diveLog_equipmentSetPicker_loading),
+        // Taking a set off needs none of its items (see the error tile).
+        onTap: pickEmpty ? () => onTap(const []) : null,
+      ),
+      error: (_, _) => ListTile(
+        leading: CircleAvatar(
+          backgroundColor: Theme.of(context).colorScheme.errorContainer,
+          child: Icon(
+            Icons.error_outline,
+            color: Theme.of(context).colorScheme.onErrorContainer,
+          ),
+        ),
+        title: Text(set.name),
+        subtitle: Text(context.l10n.diveLog_equipmentSetPicker_errorItems),
+        // Taking a set off dives goes by the gear it tagged there, so a set
+        // whose items failed to load can still be picked for that (#4284).
+        onTap: pickEmpty ? () => onTap(const []) : null,
+      ),
+    );
+  }
+}

@@ -1,0 +1,326 @@
+/// Generic row widgets for [ChartOptionsDialog]'s legend sections.
+///
+/// Split out of chart_options_dialog.dart, which crossed the project's
+/// 800-line file cap: these builders carry no dialog-specific state (no
+/// `config`, no anchor geometry), so they extract cleanly as top-level
+/// functions.
+library;
+
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/constants/profile_metrics.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/core/constants/o2_cell_unit.dart';
+
+Widget buildOptionsSection(
+  BuildContext context, {
+  required String key,
+  required String title,
+  required ProfileLegendState legendState,
+  required ProfileLegend legendNotifier,
+  required List<Widget> children,
+}) {
+  return Theme(
+    data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+    child: ExpansionTile(
+      key: PageStorageKey(key),
+      title: Text(
+        title,
+        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      initiallyExpanded: legendState.sectionExpanded[key] ?? false,
+      onExpansionChanged: (expanded) =>
+          legendNotifier.setSectionExpanded(key, expanded),
+      tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+      childrenPadding: EdgeInsets.zero,
+      dense: true,
+      children: children,
+    ),
+  );
+}
+
+/// Computer/Calculated segments, shared by every deco source switch.
+List<(MetricDataSource, String)> sourceSegments(BuildContext context) => [
+  (MetricDataSource.computer, context.l10n.diveLog_legend_source_dc),
+  (MetricDataSource.calculated, context.l10n.diveLog_legend_source_calc),
+];
+
+/// ppO2/mV segments for the O2 cell traces. Offered only where a dive logs
+/// both, since the two are the same measurement one calibration apart.
+List<(O2CellUnit, String)> o2CellUnitSegments(BuildContext context) => [
+  (O2CellUnit.ppO2, context.l10n.diveLog_legend_label_ppO2),
+  (O2CellUnit.millivolts, context.l10n.units_profileMetric_millivolts),
+];
+
+/// The counterdiffusion overlay's two views (#4530): ICD spans only, or all
+/// phases in which nitrogen and helium move in opposite directions.
+List<(bool, String)> counterdiffusionSegments(BuildContext context) => [
+  (false, context.l10n.diveLog_counterdiffusion_segment_icd),
+  (true, context.l10n.diveLog_counterdiffusion_segment_all),
+];
+
+/// A toggle row with a segmented mode switch on the right. Generic over the
+/// mode enum so every computer-vs-calculated data-source toggle (deco stops,
+/// NDL, TTS, CNS) shares one row implementation.
+Widget buildToggleWithSource<T>(
+  BuildContext context, {
+  required String label,
+  required Color color,
+  required bool isEnabled,
+  required VoidCallback onTap,
+  required T currentSource,
+  required ValueChanged<T> onSourceChanged,
+  required List<(T, String)> segments,
+}) {
+  return _checkboxSemantics(
+    isEnabled: isEnabled,
+    child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Row(
+          children: [
+            _checkboxIndicator(context, isEnabled: isEnabled, color: color),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: isEnabled
+                    ? null
+                    : TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+              ),
+            ),
+            GestureDetector(
+              onTap: () {}, // absorb tap to prevent parent InkWell from firing
+              child: SizedBox(
+                height: 28,
+                child: SegmentedButton<T>(
+                  segments: [
+                    for (final (value, text) in segments)
+                      ButtonSegment(
+                        value: value,
+                        label: Text(text, style: const TextStyle(fontSize: 11)),
+                      ),
+                  ],
+                  selected: {currentSource},
+                  onSelectionChanged: (selected) =>
+                      onSourceChanged(selected.first),
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: WidgetStatePropertyAll(
+                      EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Variant of [buildToggleItem] for the gas-timeline visibility toggle.
+/// Replaces the single-color decoration stripe with four stacked bars in
+/// the air → nitrox → oxygen → trimix colors so the indicator visually
+/// advertises every gas type the strip can render, not just one.
+Widget buildGasToggleItem(
+  BuildContext context, {
+  required String label,
+  required bool isEnabled,
+  required VoidCallback onTap,
+}) {
+  final colorScheme = Theme.of(context).colorScheme;
+  Widget bar(Color color) => Container(
+    width: 16,
+    height: 3,
+    decoration: BoxDecoration(
+      color: isEnabled ? color : color.withValues(alpha: 0.3),
+      borderRadius: BorderRadius.circular(2),
+    ),
+  );
+
+  return _checkboxSemantics(
+    isEnabled: isEnabled,
+    child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              isEnabled ? Icons.check_box : Icons.check_box_outline_blank,
+              size: 18,
+              color: isEnabled
+                  ? colorScheme.primary
+                  : colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                bar(GasColors.air),
+                const SizedBox(height: 1),
+                bar(GasColors.nitrox),
+                const SizedBox(height: 1),
+                bar(GasColors.oxygen),
+                const SizedBox(height: 1),
+                bar(GasColors.trimix),
+              ],
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: isEnabled
+                    ? null
+                    : TextStyle(color: colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Wraps a hand-rolled check-box row so assistive technology announces it as
+/// a checkbox with its state, not as an unlabelled button. The rows draw
+/// their own [Icons.check_box] rather than using [Checkbox], which carries no
+/// semantics of its own; [MergeSemantics] folds the state onto the same node
+/// as the [InkWell]'s tap action so the two are announced together.
+Widget _checkboxSemantics({required bool isEnabled, required Widget child}) =>
+    MergeSemantics(
+      child: Semantics(checked: isEnabled, child: child),
+    );
+
+/// Colored checkbox used as the primary on/off indicator for a toggle row.
+/// When [sourceColor] is given (combined-dive per-computer rows), it draws a
+/// ring around the checkbox in that color instead of a separate swatch.
+Widget _checkboxIndicator(
+  BuildContext context, {
+  required bool isEnabled,
+  required Color color,
+  Color? sourceColor,
+  Color? secondColor,
+}) {
+  Widget checkbox = Icon(
+    isEnabled ? Icons.check_box : Icons.check_box_outline_blank,
+    size: 18,
+    color: isEnabled ? color : Theme.of(context).colorScheme.onSurfaceVariant,
+  );
+  // A two-coloured line (the buoyancy line, #4593): left half [color], right
+  // half [secondColor], like its legend swatch.
+  if (isEnabled && secondColor != null) {
+    checkbox = ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (bounds) => LinearGradient(
+        colors: [color, color, secondColor, secondColor],
+        stops: const [0, 0.5, 0.5, 1],
+      ).createShader(bounds),
+      child: checkbox,
+    );
+  }
+  if (sourceColor == null) return checkbox;
+  return Container(
+    padding: const EdgeInsets.all(2),
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      border: Border.all(color: sourceColor, width: 1),
+    ),
+    child: checkbox,
+  );
+}
+
+Widget buildToggleItem(
+  BuildContext context, {
+  required String label,
+  required Color color,
+  required bool isEnabled,
+  required VoidCallback onTap,
+  Color? sourceColor,
+  Color? secondColor,
+}) {
+  return _checkboxSemantics(
+    isEnabled: isEnabled,
+    child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            _checkboxIndicator(
+              context,
+              isEnabled: isEnabled,
+              color: color,
+              sourceColor: sourceColor,
+              secondColor: secondColor,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: isEnabled
+                    ? null
+                    : TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// A checkbox row for a rendering-behaviour option. Unlike [buildToggleItem]
+/// it carries no series colour swatch, because it does not correspond to a
+/// line on the chart.
+Widget buildBehaviorItem(
+  BuildContext context, {
+  required String label,
+  required bool isEnabled,
+  required VoidCallback onTap,
+}) {
+  final colorScheme = Theme.of(context).colorScheme;
+  return _checkboxSemantics(
+    isEnabled: isEnabled,
+    child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              isEnabled ? Icons.check_box : Icons.check_box_outline_blank,
+              size: 18,
+              color: isEnabled
+                  ? colorScheme.primary
+                  : colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: isEnabled
+                    ? TextStyle(color: colorScheme.primary)
+                    : TextStyle(color: colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}

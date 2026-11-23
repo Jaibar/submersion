@@ -10,7 +10,8 @@
 /// ```
 ///
 /// Screenshots are saved to `screenshots/{device_name}/` directory.
-/// The output path, device name, and UDDF test data path are passed via --dart-define.
+/// The output path, device name, and demo logbook directory are passed via
+/// --dart-define.
 library;
 
 import 'dart:io';
@@ -22,33 +23,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/app.dart';
+import 'package:submersion/core/database/app_sql_functions.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/database_service.dart';
-import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
-import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
-import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
-import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
-import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
-import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
-import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
-import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
-import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
-import 'package:submersion/features/equipment/data/repositories/equipment_set_repository_impl.dart';
+import 'package:submersion/features/demo_mode/data/demo_database_preparer.dart';
+import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
-import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:path/path.dart' as p;
 
 import 'helpers/screenshot_helper.dart';
 import 'helpers/screenshot_test_data.dart';
-import 'helpers/uddf_screenshot_helper.dart';
 
-/// Path to UDDF test data file, passed via --dart-define from capture script.
-const String _kUddfTestDataPath = String.fromEnvironment(
-  'UDDF_TEST_DATA_PATH',
+/// Directory holding the demo-mode sample logbook (`submersion_demo.db` and
+/// `photos/`), as scripts/demo_data/fetch_demo_db.py extracts it (issue
+/// #3708). Passed via --dart-define from the capture script; when empty the
+/// screenshots use the small in-code seeder.
+const String _kDemoPackageDir = String.fromEnvironment(
+  'DEMO_PACKAGE_DIR',
   defaultValue: '',
 );
 
@@ -72,72 +68,81 @@ Future<void> _settle(WidgetTester tester, {int frames = 10}) async {
   }
 }
 
+/// Opens a copy of the sample logbook in [dir] and prepares it the way demo
+/// mode does: dates moved up to this week, photos linked into `dir/photos`.
+///
+/// A set but unusable directory fails the run rather than falling back, so
+/// store screenshots are never captured from the wrong data by accident.
+Future<(AppDatabase, Directory)> _openDemoLogbook(String dir) async {
+  final source = File(p.join(dir, 'submersion_demo.db'));
+  if (!source.existsSync()) {
+    throw StateError(
+      'DEMO_PACKAGE_DIR has no submersion_demo.db: ${source.absolute.path}',
+    );
+  }
+  // ignore: avoid_print
+  print('Loading the demo logbook from ${source.absolute.path}');
+  final work = Directory.systemTemp.createTempSync('screenshots_demo_');
+  final copy = source.copySync(p.join(work.path, 'submersion_demo.db'));
+  final db = AppDatabase(NativeDatabase(copy, setup: registerAppSqlFunctions));
+  DatabaseService.instance.setTestDatabase(db);
+  await DemoDatabasePreparer().prepare(
+    db,
+    now: DateTime.now(),
+    photosDir: Directory(p.join(dir, 'photos')).absolute.path,
+    deviceId: null,
+  );
+  return (db, work);
+}
+
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   late AppDatabase testDb;
   late ScreenshotHelper screenshotHelper;
   late SharedPreferences prefs;
+  late LogFileService logFileService;
+  late Directory tempLogDir;
+  Directory? demoWorkDir;
 
   setUpAll(() async {
     // Initialize SharedPreferences with empty values
     SharedPreferences.setMockInitialValues({});
     prefs = await SharedPreferences.getInstance();
 
-    // Create in-memory database for testing
-    testDb = AppDatabase(NativeDatabase.memory());
-    DatabaseService.instance.setTestDatabase(testDb);
-
-    // Seed with test data - prefer UDDF import for consistent data
-    bool uddfImported = false;
-    if (_kUddfTestDataPath.isNotEmpty &&
-        File(_kUddfTestDataPath).existsSync()) {
-      // Use UDDF test data generated by Python script for consistent screenshots
+    if (_kDemoPackageDir.isNotEmpty) {
+      (testDb, demoWorkDir) = await _openDemoLogbook(_kDemoPackageDir);
+    } else {
       // ignore: avoid_print
-      print('Loading test data from UDDF: $_kUddfTestDataPath');
-
-      // Create repositories - they use DatabaseService.instance.database which
-      // is now our test database
-      final importer = UddfScreenshotImporter(
-        diverRepository: DiverRepository(),
-        diveRepository: DiveRepository(),
-        siteRepository: SiteRepository(),
-        buddyRepository: BuddyRepository(),
-        equipmentRepository: EquipmentRepository(),
-        equipmentSetRepository: EquipmentSetRepository(),
-        tripRepository: TripRepository(),
-        diveCenterRepository: DiveCenterRepository(),
-        certificationRepository: CertificationRepository(),
-        tagRepository: TagRepository(),
-        diveTypeRepository: DiveTypeRepository(),
-        tankPressureRepository: TankPressureRepository(),
+      print('DEMO_PACKAGE_DIR not set; using the in-code test data seeder');
+      testDb = AppDatabase(
+        NativeDatabase.memory(setup: registerAppSqlFunctions),
       );
-      try {
-        await importer.importFromFile(_kUddfTestDataPath);
-        uddfImported = true;
-      } catch (e) {
-        // macOS sandbox may block file access even if existsSync() passes.
-        // Fall through to manual seeder below.
-        // ignore: avoid_print
-        print('UDDF import failed ($e), falling back to manual test data');
-      }
-    }
-    if (!uddfImported) {
-      // Fallback to manual seeder if UDDF file not available or import failed
-      // ignore: avoid_print
-      print('Using manual test data seeder');
-      final seeder = ScreenshotTestDataSeeder(testDb);
-      await seeder.seedAll();
+      DatabaseService.instance.setTestDatabase(testDb);
+      await ScreenshotTestDataSeeder(testDb).seedAll();
     }
 
     // Initialize screenshot helper
     // Device name and output dir are passed via --dart-define from capture script
     screenshotHelper = ScreenshotHelper(binding: binding);
+
+    // LogFileService is transitively watched by the Settings page via
+    // debugModeNotifierProvider; the nav customization tests need it
+    // initialized even though they never exercise logging.
+    tempLogDir = Directory.systemTemp.createTempSync('submersion_itest_');
+    logFileService = LogFileService(logDirectory: tempLogDir.path);
+    await logFileService.initialize();
   });
 
   tearDownAll(() async {
     await testDb.close();
     DatabaseService.instance.resetForTesting();
+    if (tempLogDir.existsSync()) {
+      tempLogDir.deleteSync(recursive: true);
+    }
+    if (demoWorkDir?.existsSync() ?? false) {
+      demoWorkDir!.deleteSync(recursive: true);
+    }
   });
 
   group('App Store Screenshots', () {
@@ -220,7 +225,7 @@ void main() {
             depthLabel.evaluate().isNotEmpty;
 
         if (hasDiveContent) {
-          // Enable Pressure and SAC toggles in the dive profile chart
+          // Enable the Pressure and gas-consumption profile-chart toggles
           await _enableProfileToggles(tester);
           await screenshotHelper.waitForContent(tester);
           await screenshotHelper.takeScreenshot(tester, 'dive_detail');
@@ -317,10 +322,11 @@ void main() {
           await tester.tap(fitAllSitesButton.first);
           await _settle(tester);
         } else {
-          // Try finding by icon as fallback
-          final myLocationIcon = find.byIcon(Icons.my_location);
-          if (myLocationIcon.evaluate().isNotEmpty) {
-            await tester.tap(myLocationIcon.first);
+          // Try finding by icon as fallback. The crosshair is Show my
+          // location now (#4808); Fit all wears zoom_out_map.
+          final fitAllIcon = find.byIcon(Icons.zoom_out_map);
+          if (fitAllIcon.evaluate().isNotEmpty) {
+            await tester.tap(fitAllIcon.first);
             await _settle(tester);
           }
         }
@@ -450,6 +456,7 @@ void main() {
         await _tapBottomNavItem(tester, Icons.more_horiz_outlined);
         await _settle(tester);
         final equipmentText = find.text('Equipment');
+        await _scrollMoreSheetTo(tester, equipmentText);
         if (equipmentText.evaluate().isNotEmpty) {
           await tester.tap(equipmentText.first);
           await _settle(tester);
@@ -459,9 +466,9 @@ void main() {
         }
       }
 
-      // 7. Navigate to Statistics
+      // 7. Navigate to Insights
       if (_isDesktop) {
-        await _navigateTo(tester, Icons.bar_chart_outlined);
+        await _navigateTo(tester, Icons.insights_outlined);
         await screenshotHelper.waitForContent(
           tester,
           duration: const Duration(seconds: 2),
@@ -470,9 +477,10 @@ void main() {
       } else {
         await _tapBottomNavItem(tester, Icons.more_horiz_outlined);
         await _settle(tester);
-        final statisticsText = find.text('Statistics');
-        if (statisticsText.evaluate().isNotEmpty) {
-          await tester.tap(statisticsText.first);
+        final insightsText = find.text('Insights');
+        await _scrollMoreSheetTo(tester, insightsText);
+        if (insightsText.evaluate().isNotEmpty) {
+          await tester.tap(insightsText.first);
           await _settle(tester);
           await screenshotHelper.waitForContent(
             tester,
@@ -494,12 +502,149 @@ void main() {
         await _tapBottomNavItem(tester, Icons.more_horiz_outlined);
         await _settle(tester);
         final recordsInMore = find.text('Records');
+        await _scrollMoreSheetTo(tester, recordsInMore);
         if (recordsInMore.evaluate().isNotEmpty) {
           await tester.tap(recordsInMore.first);
           await _settle(tester);
           await screenshotHelper.waitForContent(tester);
           await screenshotHelper.takeScreenshot(tester, 'records');
         }
+      }
+    });
+  });
+
+  group('Bottom Nav Customization', () {
+    Future<void> bootApp(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            logFileServiceProvider.overrideWithValue(logFileService),
+          ],
+          child: const SubmersionApp(),
+        ),
+      );
+      await _settle(tester, frames: 40);
+    }
+
+    Future<void> openNavCustomization(WidgetTester tester) async {
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await _settle(tester);
+      final settingsTile = find.widgetWithText(ListTile, 'Settings');
+      await _scrollMoreSheetTo(tester, settingsTile);
+      await tester.tap(settingsTile.first);
+      await _settle(tester);
+      await tester.tap(find.widgetWithText(ListTile, 'Appearance').first);
+      await _settle(tester);
+      final navBarTile = find.widgetWithText(ListTile, 'Navigation layout');
+      await tester.scrollUntilVisible(
+        navBarTile,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      // scrollUntilVisible stops once the tile is built, and a ListView
+      // builds tiles in its cache extent below the screen, so a tile pushed
+      // down by a new Appearance setting is found but not tappable.
+      await tester.ensureVisible(navBarTile.first);
+      await _settle(tester);
+      await tester.tap(navBarTile.first);
+      await _settle(tester);
+    }
+
+    Future<void> popToBottomNav(WidgetTester tester) async {
+      for (int i = 0; i < 6; i++) {
+        if (find.byType(NavigationBar).evaluate().isNotEmpty) return;
+        final back = find.byTooltip('Back');
+        if (back.evaluate().isEmpty) break;
+        await tester.tap(back.first);
+        await _settle(tester);
+      }
+    }
+
+    testWidgets('customizing nav order updates the bottom bar', (tester) async {
+      await bootApp(tester);
+      await openNavCustomization(tester);
+
+      expect(find.byTooltip('Move Equipment up'), findsOneWidget);
+      // Equipment has to climb into the first three (primary) slots. How far
+      // that is depends on how many destinations precede it in the canonical
+      // order, and that grows as sections are added -- the Media destination
+      // pushed it one further down, which is what made a single tap stop
+      // working. Climb until it can go no higher rather than hard-coding a
+      // tap count that any future destination would invalidate.
+      for (var i = 0; i < 20; i++) {
+        final up = find.byTooltip('Move Equipment up');
+        if (up.evaluate().isEmpty) break;
+        await tester.tap(up.first);
+        await _settle(tester);
+      }
+
+      await popToBottomNav(tester);
+
+      expect(
+        find.widgetWithText(NavigationDestination, 'Equipment'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(NavigationDestination, 'Trips'), findsNothing);
+    });
+
+    testWidgets('reset to defaults restores original order', (tester) async {
+      await bootApp(tester);
+      await openNavCustomization(tester);
+
+      // Some residual customization may exist from the prior test, or the
+      // page may already reflect defaults. In either case, the Reset button
+      // should restore defaults afterward.
+      // The actions scroll with the rows (#3370), so bring the button on
+      // screen first; scrollUntilVisible alone stops once it is built in the
+      // cache extent below the screen.
+      final resetBtn = find.widgetWithText(TextButton, 'Reset to defaults');
+      Future<void> revealReset() async {
+        await tester.scrollUntilVisible(
+          resetBtn,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.ensureVisible(resetBtn);
+        await _settle(tester);
+      }
+
+      await revealReset();
+      expect(resetBtn, findsOneWidget);
+
+      // If Reset is disabled (already defaults), tap Move Equipment up to
+      // create a customization the button can undo.
+      final resetWidget = tester.widget<TextButton>(resetBtn);
+      if (resetWidget.onPressed == null) {
+        final equipmentUp = find.byTooltip('Move Equipment up');
+        // Revealing Reset scrolled the page to the bottom; scroll back up.
+        await tester.scrollUntilVisible(
+          equipmentUp,
+          -200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.ensureVisible(equipmentUp);
+        await _settle(tester);
+        await tester.tap(equipmentUp);
+        await _settle(tester);
+        await revealReset();
+      }
+
+      await tester.tap(resetBtn);
+      await _settle(tester);
+
+      await popToBottomNav(tester);
+
+      for (final label in const ['Home', 'Dives', 'Sites', 'Trips', 'More']) {
+        expect(
+          find.widgetWithText(NavigationDestination, label),
+          findsOneWidget,
+          reason: '"$label" should be in default bottom nav',
+        );
       }
     });
   });
@@ -528,7 +673,7 @@ Future<void> _selectEquipmentCard(
   }
 }
 
-/// Enables Pressure and SAC toggles in the dive profile chart.
+/// Enables the Pressure and gas-consumption toggles in the profile chart.
 /// These toggles show additional data curves on the profile graph.
 Future<void> _enableProfileToggles(WidgetTester tester) async {
   // The toggles are text labels that can be tapped
@@ -539,12 +684,34 @@ Future<void> _enableProfileToggles(WidgetTester tester) async {
     await _settle(tester);
   }
 
-  // Look for SAC toggle and tap it if found
-  final sacToggle = find.text('SAC');
-  if (sacToggle.evaluate().isNotEmpty) {
-    await tester.tap(sacToggle.first);
+  // Look for the gas-consumption toggle and tap it if found. Match the
+  // legend's own label, not 'SAC': the detail summary now carries rows
+  // labelled SAC and RMV, so a bare find.text('SAC') selected a row that is
+  // not hit-testable here and the tap missed.
+  final consumptionToggle = find.text('Consumption');
+  if (consumptionToggle.evaluate().isNotEmpty) {
+    await tester.tap(consumptionToggle.first);
     await _settle(tester);
   }
+}
+
+/// Scrolls the open "More" overflow sheet until [target] is on screen.
+///
+/// The sheet is capped at a fraction of the screen height (issue #1480), so
+/// destinations past the fold are not built until the list scrolls. Gives up
+/// quietly: every caller already guards on whether the target turned up.
+Future<void> _scrollMoreSheetTo(WidgetTester tester, Finder target) async {
+  final sheetList = find.descendant(
+    of: find.byType(BottomSheet),
+    matching: find.byType(Scrollable),
+  );
+  if (sheetList.evaluate().isEmpty) return;
+  try {
+    await tester.scrollUntilVisible(target, 120, scrollable: sheetList.first);
+  } on StateError {
+    // Not in this sheet at all; the caller's isNotEmpty check handles it.
+  }
+  await _settle(tester);
 }
 
 /// Taps a bottom navigation item by its icon.
@@ -606,7 +773,7 @@ IconData? _getSelectedIcon(IconData outlinedIcon) {
   if (outlinedIcon == Icons.backpack_outlined) return Icons.backpack;
   if (outlinedIcon == Icons.people_outlined) return Icons.people;
   if (outlinedIcon == Icons.store_outlined) return Icons.store;
-  if (outlinedIcon == Icons.bar_chart_outlined) return Icons.bar_chart;
+  if (outlinedIcon == Icons.insights_outlined) return Icons.insights;
   if (outlinedIcon == Icons.settings_outlined) return Icons.settings;
   return null;
 }

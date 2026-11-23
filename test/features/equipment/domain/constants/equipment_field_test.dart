@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:intl/intl.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/utils/currency.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_field.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 void main() {
   // A UnitFormatter backed by metric default settings.
@@ -19,8 +24,14 @@ void main() {
     brand: 'Apeks',
     model: 'XTX 200',
     serialNumber: 'SN-12345',
-    size: 'DIN',
     status: EquipmentStatus.active,
+    attributes: [
+      EquipmentAttribute.curated(
+        equipmentId: 'equip-1',
+        key: 'size',
+        valueText: 'DIN',
+      ),
+    ],
     isActive: true,
     purchaseDate: DateTime(2023, 1, 15),
     purchasePrice: 599.99,
@@ -29,6 +40,83 @@ void main() {
     serviceIntervalDays: 365,
     notes: 'Annual service due',
   );
+
+  group('EquipmentField.components', () {
+    test('extracts the count from the adapter map and defaults to zero', () {
+      final adapter = EquipmentFieldAdapter(componentCounts: {'equip-1': 3});
+      expect(adapter.extractValue(EquipmentField.components, testItem), 3);
+      expect(
+        EquipmentFieldAdapter.instance.extractValue(
+          EquipmentField.components,
+          testItem,
+        ),
+        0,
+      );
+      expect(adapter.formatValue(EquipmentField.components, 3, units), '3');
+    });
+
+    test('keeps its place before the later appended tags', () {
+      const values = EquipmentField.values;
+      expect(
+        values[values.indexOf(EquipmentField.tags) - 1],
+        EquipmentField.components,
+      );
+      expect(EquipmentField.components.categoryName, 'details');
+    });
+  });
+
+  group('EquipmentField.tags', () {
+    test('extracts the names from the adapter map and defaults to none', () {
+      final adapter = EquipmentFieldAdapter(
+        tagNames: {
+          'equip-1': ['Rental', 'Travel kit'],
+        },
+      );
+      expect(adapter.extractValue(EquipmentField.tags, testItem), [
+        'Rental',
+        'Travel kit',
+      ]);
+      expect(
+        EquipmentFieldAdapter.instance.extractValue(
+          EquipmentField.tags,
+          testItem,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('a table cell is a comma list; no tags is the placeholder', () {
+      final adapter = EquipmentFieldAdapter.instance;
+      expect(
+        adapter.formatValue(EquipmentField.tags, [
+          'Rental',
+          'Travel kit',
+        ], units),
+        'Rental, Travel kit',
+      );
+      expect(adapter.formatValue(EquipmentField.tags, <String>[], units), '--');
+    });
+
+    test('is appended last, so saved layouts keep their order', () {
+      // Owner (issue #2046) and location (issue #3625) were appended after
+      // it; see their own tests.
+      const values = EquipmentField.values;
+      expect(values[values.length - 3], EquipmentField.tags);
+      expect(EquipmentField.tags.categoryName, 'other');
+      expect(EquipmentField.tags.sortable, isFalse);
+      expect(EquipmentField.tags.isRightAligned, isFalse);
+      expect(
+        EquipmentFieldAdapter.instance.fieldFromName('tags'),
+        EquipmentField.tags,
+      );
+    });
+
+    test('labels are localized', () {
+      final l10n = lookupAppLocalizations(const Locale('en'));
+      expect(EquipmentField.tags.localizedDisplayName(l10n), 'Tags');
+      expect(EquipmentField.tags.localizedShortLabel(l10n), 'Tags');
+    });
+  });
 
   group('EquipmentFieldAdapter.allFields', () {
     test('has expected count matching EquipmentField.values', () {
@@ -228,21 +316,50 @@ void main() {
       );
     });
 
-    test('returns nextServiceDue (computed)', () {
-      // lastServiceDate (2024-06-01) + 365 days = 2025-06-01
-      expect(
-        adapter.extractValue(EquipmentField.nextServiceDue, testItem),
-        equals(DateTime(2025, 6, 1)),
-      );
-    });
+    // Under the unified model the forecast columns come from the clock ledger
+    // supplied to the adapter, not the legacy interval on the item.
+    final clockDue = DateTime(2026, 6, 1);
+    ServiceClockStatus clockFor(String id) => ServiceClockStatus(
+      schedule: ServiceSchedule(
+        id: 's-$id',
+        equipmentId: id,
+        serviceKindId: 'hydro',
+        createdAt: DateTime(2025, 1, 1),
+        updatedAt: DateTime(2025, 1, 1),
+      ),
+      kind: ServiceKind(
+        id: 'hydro',
+        name: 'Hydro',
+        defaultIntervalDays: 1825,
+        createdAt: DateTime(2025, 1, 1),
+        updatedAt: DateTime(2025, 1, 1),
+      ),
+      anchor: DateTime(2025, 1, 1),
+      dueDate: clockDue,
+      severity: ServiceClockSeverity.dueSoon,
+      now: DateTime(2025, 1, 1),
+    );
 
-    test('returns daysUntilService (computed)', () {
-      // nextServiceDue is 2025-06-01, difference from now
-      final dueDate = DateTime(2025, 6, 1);
-      final expectedDays = dueDate.difference(DateTime.now()).inDays;
+    test(
+      'nextServiceDue reads the clock due date, not the legacy interval',
+      () {
+        final clockAdapter = EquipmentFieldAdapter(
+          worstClocks: {'equip-1': clockFor('equip-1')},
+        );
+        expect(
+          clockAdapter.extractValue(EquipmentField.nextServiceDue, testItem),
+          equals(clockDue),
+        );
+      },
+    );
+
+    test('daysUntilService reads the clock, not the legacy interval', () {
+      final clockAdapter = EquipmentFieldAdapter(
+        worstClocks: {'equip-1': clockFor('equip-1')},
+      );
       expect(
-        adapter.extractValue(EquipmentField.daysUntilService, testItem),
-        equals(expectedDays),
+        clockAdapter.extractValue(EquipmentField.daysUntilService, testItem),
+        equals(clockFor('equip-1').daysUntilDue),
       );
     });
 
@@ -250,6 +367,16 @@ void main() {
       expect(
         adapter.extractValue(EquipmentField.serviceIntervalDays, testItem),
         equals(365),
+      );
+    });
+
+    test('returns Markdown notes as plain words', () {
+      expect(
+        adapter.extractValue(
+          EquipmentField.notes,
+          testItem.copyWith(notes: '# Plan\n**Bring torch**'),
+        ),
+        'Plan\nBring torch',
       );
     });
 
@@ -269,7 +396,7 @@ void main() {
       expect(adapter.extractValue(EquipmentField.brand, noBrand), isNull);
     });
 
-    test('returns null for nextServiceDue when no lastServiceDate', () {
+    test('returns null for nextServiceDue when the adapter has no clock', () {
       const noService = EquipmentItem(
         id: 'equip-3',
         name: 'Test',
@@ -281,7 +408,7 @@ void main() {
       );
     });
 
-    test('returns null for daysUntilService when no service info', () {
+    test('returns null for daysUntilService when the adapter has no clock', () {
       const noService = EquipmentItem(
         id: 'equip-4',
         name: 'Test',
@@ -401,15 +528,24 @@ void main() {
       );
     });
 
-    test('formats purchasePrice as currency', () {
-      final expected = NumberFormat.currency(
-        symbol: r'$',
-        decimalDigits: 2,
-      ).format(599.99);
+    test('formats purchasePrice in the diver default currency', () {
+      // This column has no per-item context, so it follows the diver's
+      // default currency rather than a hardcoded dollar sign.
       expect(
         adapter.formatValue(EquipmentField.purchasePrice, 599.99, units),
-        equals(expected),
+        equals(formatMoney(599.99, 'USD')),
       );
+    });
+
+    test('purchasePrice follows a non-USD default currency', () {
+      const euroUnits = UnitFormatter(AppSettings(defaultCurrency: 'EUR'));
+      final formatted = adapter.formatValue(
+        EquipmentField.purchasePrice,
+        599.99,
+        euroUnits,
+      );
+      expect(formatted, equals(formatMoney(599.99, 'EUR')));
+      expect(formatted, contains('€'));
     });
 
     test('formats lastServiceDate with units.formatDate', () {
@@ -626,9 +762,11 @@ void main() {
       expect(EquipmentField.notes.sortable, isFalse);
     });
 
-    test('all fields except notes are sortable', () {
+    test('all fields except notes and tags are sortable', () {
       for (final field in EquipmentField.values) {
-        if (field == EquipmentField.notes) continue;
+        if (field == EquipmentField.notes || field == EquipmentField.tags) {
+          continue;
+        }
         expect(field.sortable, isTrue, reason: field.name);
       }
     });

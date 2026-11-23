@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_finding.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/providers/condition_badge_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/features/equipment/presentation/widgets/dense_equipment_list_tile.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 import '../../../../helpers/test_app.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
 
 EquipmentItem _makeItem({
   String id = 'test-id',
@@ -24,8 +34,133 @@ EquipmentItem _makeItem({
   );
 }
 
+RollupClock _clock(EquipmentItem item, ServiceClockSeverity severity) {
+  final t0 = DateTime(2026, 1, 1);
+  return (
+    ownerId: item.id,
+    ownerName: item.name,
+    status: ServiceClockStatus(
+      schedule: ServiceSchedule(
+        id: 's-${item.id}',
+        equipmentId: item.id,
+        serviceKindId: 'annual',
+        createdAt: t0,
+        updatedAt: t0,
+      ),
+      kind: ServiceKind(
+        id: 'annual',
+        name: 'Annual service',
+        createdAt: t0,
+        updatedAt: t0,
+      ),
+      anchor: t0,
+      dueDate: DateTime.now().add(const Duration(days: 5)),
+      severity: severity,
+      now: DateTime.now(),
+    ),
+  );
+}
+
 void main() {
+  group('DenseEquipmentListTile service label', () {
+    for (final (severity, expected) in [
+      (ServiceClockSeverity.overdue, StatusColors.light.alert.accent),
+      (ServiceClockSeverity.dueSoon, StatusColors.light.warn.accent),
+    ]) {
+      testWidgets('a ${severity.name} clock uses the status accent', (
+        tester,
+      ) async {
+        final item = _makeItem();
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              equipmentRollupClockProvider.overrideWith(
+                (ref) async => {item.id: _clock(item, severity)},
+              ),
+            ],
+            child: DenseEquipmentListTile(item: item, onTap: () {}),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The label now carries its severity wording too ("Annual service
+        // overdue"), so match on the kind rather than the whole string; this
+        // test is about the colour, which the wording tests do not cover.
+        final label = tester.widget<Text>(
+          find.textContaining('Annual service'),
+        );
+        expect(label.style?.color, expected);
+      });
+    }
+  });
+
+  testWidgets('the service label stays right-aligned in its column', (
+    tester,
+  ) async {
+    // The 80px status column right-aligns every other state (finding,
+    // retired) and the type column beside it. The label wraps in that
+    // width, so each LINE must align right, not just the text box (#2260).
+    final item = _makeItem();
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          equipmentRollupClockProvider.overrideWith(
+            (ref) async => {
+              item.id: _clock(item, ServiceClockSeverity.overdue),
+            },
+          ),
+        ],
+        child: DenseEquipmentListTile(item: item, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final label = tester.widget<Text>(find.textContaining('Annual service'));
+    expect(label.textAlign, TextAlign.right);
+  });
+
   group('DenseEquipmentListTile', () {
+    testWidgets('a screen reader hears the condition badge', (tester) async {
+      // The badge is text and colour on screen. The row's Semantics label
+      // folds its children's text in, so a screen reader hears the badge
+      // after the name; this pins that, since hiding the status from
+      // semantics would leave the reader with the name alone.
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            conditionBadgeProvider.overrideWith(
+              (ref) async => {
+                'test-id': (
+                  severity: ConditionSeverity.significant,
+                  rule: ConditionRuleId.cellCurrentLimited,
+                ),
+              },
+            ),
+          ],
+          child: DenseEquipmentListTile(item: _makeItem(), onTap: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = tester.getSemantics(find.byType(DenseEquipmentListTile));
+      final heard = <String>[];
+      void collect(SemanticsNode n) {
+        final d = n.getSemanticsData();
+        heard
+          ..add(d.label)
+          ..add(d.value);
+        n.visitChildren((c) {
+          collect(c);
+          return true;
+        });
+      }
+
+      collect(row);
+      final said = heard.where((s) => s.isNotEmpty).join(' | ');
+      expect(said, contains('Test Regulator'));
+      expect(said, contains('Cell current-limited at high ppO2'));
+      semantics.dispose();
+    });
+
     testWidgets('renders name and type label', (tester) async {
       await tester.pumpWidget(
         testApp(
@@ -40,12 +175,15 @@ void main() {
       expect(find.byIcon(Icons.chevron_right), findsOneWidget);
     });
 
-    testWidgets('shows Service Due in error color when service is overdue', (
+    testWidgets('ignores the legacy interval: no badge without a clock', (
       tester,
     ) async {
+      // Under the unified model the service badge comes only from the ledger.
+      // A legacy-overdue item with no ledger clock shows no badge at all.
       final pastDate = DateTime.now().subtract(const Duration(days: 400));
       await tester.pumpWidget(
         testApp(
+          locale: const Locale('en'),
           child: DenseEquipmentListTile(
             item: _makeItem(
               name: 'Old Regulator',
@@ -56,28 +194,8 @@ void main() {
         ),
       );
 
-      expect(find.text('Service Due'), findsOneWidget);
-    });
-
-    testWidgets('shows days until service when service is upcoming', (
-      tester,
-    ) async {
-      final recentDate = DateTime.now().subtract(const Duration(days: 10));
-      await tester.pumpWidget(
-        testApp(
-          child: DenseEquipmentListTile(
-            item: _makeItem(
-              name: 'Recent Service',
-              lastServiceDate: recentDate,
-              serviceIntervalDays: 365,
-            ),
-          ),
-        ),
-      );
-
-      // Should show "In X days" text
-      final serviceFinder = find.textContaining('In ');
-      expect(serviceFinder, findsOneWidget);
+      expect(find.text('Service Due'), findsNothing);
+      expect(find.textContaining('Service in'), findsNothing);
     });
 
     testWidgets('shows non-active status when no service info', (tester) async {
@@ -155,5 +273,26 @@ void main() {
       await tester.tap(find.byType(InkWell));
       expect(tapped, isTrue);
     });
+  });
+
+  testWidgets('chevron ends one row padding from the edge (#4639)', (
+    tester,
+  ) async {
+    final item = _makeItem();
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          equipmentRollupClockProvider.overrideWith((ref) async => {}),
+        ],
+        child: DenseEquipmentListTile(item: item, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: tester.getRect(find.byType(DenseEquipmentListTile)),
+      padding: kRecordRowDenseHorizontalPadding,
+    );
   });
 }

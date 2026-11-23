@@ -1,0 +1,1107 @@
+import 'package:flutter/services.dart';
+import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+
+import 'package:submersion/core/constants/surface_pressure_limits.dart';
+import 'package:submersion/core/constants/enums.dart'
+    show EquipmentStatus, ServiceCategory;
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show GasMix;
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/universal_import/data/models/import_enums.dart';
+import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/data/models/import_warning.dart';
+import 'package:submersion/features/universal_import/data/models/source_diver.dart';
+import 'package:submersion/features/universal_import/data/services/dive_computer_descriptor_index.dart';
+import 'package:submersion/features/universal_import/data/services/import_site_location.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_media_entries.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_raw_types.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_samples_decoder.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_sqlite_sample.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_time_zone.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_unit_converter.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_unit_inference.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_value_mapper.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_xml_models.dart'
+    show MacDiveUnitSystem;
+import 'package:submersion/features/universal_import/data/services/parsed_dive_profile_mapper.dart';
+import 'package:submersion/features/universal_import/data/services/raw_profile_sanity_check.dart';
+import 'package:submersion/features/universal_import/data/services/shearwater_raw_decompressor.dart';
+
+/// Signature of the native raw-parse call, injectable so tests can exercise
+/// the decode path without a platform channel.
+typedef MacDiveRawParseFn =
+    Future<pigeon.ParsedDive> Function(
+      String vendor,
+      String product,
+      int model,
+      Uint8List data,
+    );
+
+/// Signature of the native descriptor-list call, injectable for the same
+/// reason as [MacDiveRawParseFn].
+typedef MacDiveDescriptorFetchFn =
+    Future<List<pigeon.DeviceDescriptor>> Function();
+
+/// A transform applied to `ZRAWDATA` before libdivecomputer sees it, returning
+/// null when the bytes are not in the form this vendor's transform expects.
+typedef MacDiveRawPrePass = Uint8List? Function(Uint8List raw);
+
+/// What reading a dive's `ZSAMPLES` column produced.
+///
+/// The distinction the caller needs is between MacDive having no profile for
+/// a dive and MacDive having one this decoder could not read: only the second
+/// is worth telling the user about, and only when the dive has no other
+/// source left.
+enum _SamplesOutcome {
+  /// Profile points were decoded and attached.
+  attached,
+
+  /// The column is absent, or decoded cleanly to zero samples. Either way
+  /// MacDive itself draws no profile for this dive.
+  none,
+
+  /// The column holds bytes this decoder rejected.
+  unreadable,
+}
+
+/// Maps a [MacDiveRawLogbook] (raw SQLite rows read by [MacDiveDbReader])
+/// into a unified [ImportPayload] the rest of the import pipeline consumes
+/// without knowing the source was SQLite. Key conventions mirror the M2
+/// `MacDiveXmlParser` so the downstream `UddfEntityImporter` processes
+/// both sources through the same code path.
+///
+/// Profile samples come from `ZRAWDATA`, the raw download MacDive kept from
+/// whatever device layer it used. Decoding it takes two steps.
+///
+/// First, resolve `ZDIVE.ZCOMPUTER` - a display string such as
+/// "Shearwater Teric" - to a libdivecomputer descriptor. That resolution runs
+/// against libdivecomputer's own descriptor list via
+/// [DiveComputerDescriptorIndex], not a table maintained here: every model the
+/// vendored submodule supports is a candidate, and the set grows on its own as
+/// the submodule advances. Two earlier rounds of this feature each added a
+/// hardcoded entry for one more family (#961 for Shearwater, #1400 for three
+/// Suunto models) and each left every other model on the warning path with its
+/// bytes sitting unread in the database; #1436 replaced the tables outright.
+///
+/// Second, hand the bytes to `parseRawDiveData`. Almost every vendor's
+/// `ZRAWDATA` is already in the exact layout libdivecomputer's parsers expect,
+/// because MacDive downloaded it through libdivecomputer too. Shearwater is
+/// the one known exception ([_rawPrePasses]): its stream is still transport
+/// compressed, so [ShearwaterRawDecompressor] has to reverse two passes first.
+///
+/// Nothing about that resolution proves the bytes belong to the parser it
+/// selected, so [RawProfileSanityCheck] gates the result. A dive whose parse
+/// is rejected, or whose computer resolves to nothing, counts toward one
+/// aggregated [ImportWarning] pointing at MacDive's XML export - exactly the
+/// behaviour every unrecognised computer already had. See
+/// `docs/developer/reference/formats/macdive-zsamples.md`.
+///
+/// Not every dive has `ZRAWDATA` at all: presence tracks how the dive entered
+/// MacDive (a native download versus manual entry or a file import) rather
+/// than the vendor. Every dive MacDive ever drew a profile for does have
+/// `ZSAMPLES`, its own copy of that profile, which [MacDiveSamplesDecoder]
+/// reads without the platform channel. It carries fewer channels than the raw
+/// download (no per-cell ppO2, no deco settings, no events), so it is the
+/// fallback rather than the first choice: a dive lands on it when it has no
+/// `ZRAWDATA`, when the raw parse is rejected, or when this platform cannot
+/// reach libdivecomputer at all. Only a dive with profile bytes in neither
+/// readable form counts toward the aggregated warning.
+class MacDiveDiveMapper {
+  const MacDiveDiveMapper._();
+
+  /// Builds an [ImportPayload] from [logbook]. Numeric values are converted
+  /// into Submersion's canonical SI units via [MacDiveUnitConverter], whose
+  /// Core Data mode knows which MacDive columns are already SI and which
+  /// follow the diver's display unit.
+  /// String enum-ish values (waterType, entryType) go through
+  /// [MacDiveValueMapper] so unrecognised inputs are dropped rather than
+  /// mis-stored.
+  static Future<ImportPayload> toPayload(
+    MacDiveRawLogbook logbook, {
+    MacDiveRawParseFn? parseRaw,
+    MacDiveDescriptorFetchFn? fetchDescriptors,
+  }) async {
+    // MacDive routinely omits its own SystemOfUnits row, so fall back to
+    // inferring the display unit from the stored magnitudes rather than
+    // passing psi through as bar (#912).
+    final units = MacDiveUnitInference.resolve(logbook);
+    final converter = MacDiveUnitConverter.coreData(units);
+    final warnings = <ImportWarning>[];
+
+    final siteMaps = _buildSiteMaps(logbook, converter);
+    final buddyMaps = _buildBuddyMaps(logbook);
+    final tagMaps = _buildTagMaps(logbook);
+    final gearMaps = _buildGearMaps(logbook, converter);
+    final diveTypeMaps = _buildDiveTypeMaps(logbook);
+    final diveCenterMaps = _buildDiveCenterMaps(logbook);
+    final certificationMaps = _buildCertificationMaps(logbook);
+    final serviceRecordMaps = _buildServiceRecordMaps(logbook);
+    // A MacDive library can hold several divers. The payload names each one
+    // and keys every dive and card to its diver, so the wizard's Divers step
+    // can send them to separate profiles (#1893).
+    final sourceDivers = _buildSourceDivers(logbook);
+
+    final parse = parseRaw ?? _defaultParseRaw;
+    final diveMaps = <Map<String, dynamic>>[];
+    // Once the platform channel reports it is unavailable there is no point
+    // retrying it for the remaining 500 dives.
+    var ffiAvailable = true;
+    // Dives that end up without a profile, split by what the user can do
+    // about it: bytes that were read and rejected (the XML export can still
+    // rescue those) versus a raw download this platform could not attempt on
+    // a dive with nothing else to read.
+    var unreadable = 0;
+    var platformBlocked = 0;
+
+    // The descriptor list is a static table inside libdivecomputer, identical
+    // for every dive, so it is read once per import rather than once per dive.
+    // Skipped entirely when no dive has raw bytes, so a logbook of manual
+    // entries never touches the platform channel.
+    var descriptors = const DiveComputerDescriptorIndex.empty();
+    if (logbook.dives.any(_hasRawProfile)) {
+      try {
+        descriptors = DiveComputerDescriptorIndex.fromDescriptors(
+          await (fetchDescriptors ?? _defaultDescriptors)(),
+        );
+        // libdivecomputer always knows some computers, so an empty list means
+        // the native side could not answer, not that nothing is supported.
+        // Reporting that as "this platform cannot decode profiles" is more
+        // honest than reporting every dive as undecodable.
+        ffiAvailable = !descriptors.isEmpty;
+      } on MissingPluginException {
+        ffiAvailable = false;
+      } on PlatformException {
+        ffiAvailable = false;
+      } catch (_) {
+        ffiAvailable = false;
+      }
+    }
+
+    // Dives whose `ZRELATIONSHIPDIVESITE` names a row the file does not
+    // carry, or carries with neither a name nor coordinates. They import
+    // without a site, and used to do so in silence (#2213, #2232).
+    var divesMissingSite = 0;
+    final zones = MacDiveZoneResolver();
+
+    for (final d in logbook.dives) {
+      final map = _buildDiveMap(d, logbook, converter, zones);
+      if (d.diveSiteFk != null && map['site'] == null) divesMissingSite++;
+      var attached = false;
+      if (ffiAvailable && _hasRawProfile(d)) {
+        try {
+          attached = await _attachProfile(d, map, parse, descriptors);
+        } on MissingPluginException {
+          ffiAvailable = false;
+        } on PlatformException catch (e) {
+          if (e.code == 'UNSUPPORTED' || e.code == 'channel-error') {
+            ffiAvailable = false;
+          }
+        } catch (_) {
+          // A single corrupt blob must not abort a 500-dive import.
+        }
+      }
+      // Whatever kept the raw download from producing a profile, MacDive's
+      // own copy of the samples is still there to read.
+      var samples = _SamplesOutcome.none;
+      if (!attached) {
+        samples = _attachSamples(d, map, converter);
+        attached = samples == _SamplesOutcome.attached;
+      }
+      if (!attached && _hasProfileBytes(d)) {
+        if (samples == _SamplesOutcome.none && !_hasRawProfile(d)) {
+          // MacDive drew no profile for this dive and there was no other
+          // column to try. Nothing was lost, so there is nothing to report.
+        } else if (!ffiAvailable &&
+            _hasRawProfile(d) &&
+            samples == _SamplesOutcome.none) {
+          // The raw download was the only source that could have produced a
+          // profile, and this platform could not attempt it. An XML export
+          // would not help: MacDive has no samples of its own to export.
+          platformBlocked++;
+        } else {
+          unreadable++;
+        }
+      }
+      diveMaps.add(map);
+    }
+
+    // Aggregated warnings, one per cause, so a 500-dive import does not
+    // produce 500 identical summary lines.
+    if (divesMissingSite > 0) {
+      warnings.add(ImportSiteLocation.sitesUnresolved(divesMissingSite));
+    }
+    // The device zone is a guess that holds only if the diver imports from
+    // the zone they dove in, so say which dives it was used for.
+    final deviceZoneDives = zones.deviceZoneDives;
+    if (deviceZoneDives > 0) {
+      warnings.add(
+        ImportWarning(
+          severity: ImportWarningSeverity.info,
+          code: ImportWarningCode.macdiveDeviceTimeZone,
+          count: deviceZoneDives,
+          message:
+              '$deviceZoneDives dive(s) had no readable time zone in MacDive '
+              "and no site GPS position, so their times were read in this "
+              "device's time zone.",
+          entityType: ImportEntityType.dives,
+        ),
+      );
+    }
+    if (unreadable > 0) {
+      warnings.add(
+        ImportWarning(
+          severity: ImportWarningSeverity.info,
+          code: ImportWarningCode.macdiveProfileUndecodable,
+          count: unreadable,
+          message:
+              '$unreadable dive(s) had profile data Submersion could not '
+              'decode. To import those profiles, export from MacDive as XML '
+              '(File > Export > MacDive XML) and import that file instead.',
+          entityType: ImportEntityType.dives,
+        ),
+      );
+    }
+    if (platformBlocked > 0) {
+      warnings.add(
+        ImportWarning(
+          severity: ImportWarningSeverity.info,
+          code: ImportWarningCode.profileUndecodableOnPlatform,
+          count: platformBlocked,
+          message:
+              '$platformBlocked dive(s) had dive computer data that could '
+              'not be decoded on this platform. Their details were imported '
+              'without depth profiles.',
+          entityType: ImportEntityType.dives,
+        ),
+      );
+    }
+
+    // MacDive's sidebar logbooks are saved searches: membership is computed
+    // from an NSPredicate rather than stored, and no dive-to-logbook table
+    // exists, so there is nothing to import. Name them so the diver knows
+    // what did not come across.
+    final logNames = logbook.diveLogsByPk.values
+        .map((l) => l.name?.trim() ?? '')
+        .where((n) => n.isNotEmpty)
+        .toList();
+    if (logNames.isNotEmpty) {
+      warnings.add(
+        ImportWarning(
+          severity: ImportWarningSeverity.info,
+          code: ImportWarningCode.macdiveLogbooksNotImported,
+          names: logNames,
+          message:
+              'MacDive logbooks (${logNames.join(', ')}) were not imported. '
+              'MacDive stores them as saved searches rather than as fixed '
+              'lists of dives, so they can be recreated as filters in '
+              'Submersion.',
+          entityType: ImportEntityType.dives,
+        ),
+      );
+    }
+
+    // Photo references ride along as media entries; the wizard's Photos
+    // step resolves them against a user-picked folder after parsing.
+    final mediaMaps = macDiveMediaEntriesFromImages(
+      dives: logbook.dives,
+      images: logbook.diveImages,
+    );
+
+    final entities = <ImportEntityType, List<Map<String, dynamic>>>{};
+    if (diveMaps.isNotEmpty) entities[ImportEntityType.dives] = diveMaps;
+    if (mediaMaps.isNotEmpty) entities[ImportEntityType.media] = mediaMaps;
+    if (siteMaps.isNotEmpty) entities[ImportEntityType.sites] = siteMaps;
+    if (buddyMaps.isNotEmpty) entities[ImportEntityType.buddies] = buddyMaps;
+    if (tagMaps.isNotEmpty) entities[ImportEntityType.tags] = tagMaps;
+    if (gearMaps.isNotEmpty) entities[ImportEntityType.equipment] = gearMaps;
+    if (diveTypeMaps.isNotEmpty) {
+      entities[ImportEntityType.diveTypes] = diveTypeMaps;
+    }
+    if (diveCenterMaps.isNotEmpty) {
+      entities[ImportEntityType.diveCenters] = diveCenterMaps;
+    }
+    if (certificationMaps.isNotEmpty) {
+      entities[ImportEntityType.certifications] = certificationMaps;
+    }
+    if (serviceRecordMaps.isNotEmpty) {
+      entities[ImportEntityType.serviceRecords] = serviceRecordMaps;
+    }
+
+    return ImportPayload(
+      entities: entities,
+      warnings: warnings,
+      sourceDivers: sourceDivers,
+      metadata: {
+        'source': 'macdive_sqlite',
+        'diveCount': logbook.dives.length,
+        'units': units.name,
+      },
+    );
+  }
+
+  // ---- profile decoding ----
+
+  static Future<pigeon.ParsedDive> _defaultParseRaw(
+    String vendor,
+    String product,
+    int model,
+    Uint8List data,
+  ) => pigeon.DiveComputerHostApi().parseRawDiveData(
+    vendor,
+    product,
+    model,
+    data,
+  );
+
+  static Future<List<pigeon.DeviceDescriptor>> _defaultDescriptors() =>
+      pigeon.DiveComputerHostApi().getDeviceDescriptors();
+
+  static bool _hasRawProfile(MacDiveRawDive d) =>
+      d.rawDataBlob != null && d.rawDataBlob!.isNotEmpty;
+
+  static bool _hasSamples(MacDiveRawDive d) =>
+      d.samplesBlob != null && d.samplesBlob!.isNotEmpty;
+
+  /// Whether the dive stores a profile in either column, i.e. whether ending
+  /// up without one is worth telling the user about.
+  static bool _hasProfileBytes(MacDiveRawDive d) =>
+      _hasRawProfile(d) || _hasSamples(d);
+
+  /// Decodes [d]'s `ZSAMPLES` into profile samples on [map].
+  ///
+  /// An empty sample array is a successful decode of a dive MacDive itself
+  /// shows no profile for, which is why it is [_SamplesOutcome.none] rather
+  /// than a failure - but it is not the same as having a profile, and the
+  /// caller has to know the difference for a dive whose raw download also
+  /// failed.
+  static _SamplesOutcome _attachSamples(
+    MacDiveRawDive d,
+    Map<String, dynamic> map,
+    MacDiveUnitConverter converter,
+  ) {
+    if (!_hasSamples(d)) return _SamplesOutcome.none;
+    final samples = MacDiveSamplesDecoder.decode(d.samplesBlob!);
+    if (samples == null) return _SamplesOutcome.unreadable;
+    if (samples.isEmpty) return _SamplesOutcome.none;
+
+    map['profile'] = [for (final s in samples) _samplePoint(s, converter)];
+
+    // Scalars in one pass. Records stay in stored order: the one backwards
+    // step in the reference library is a second descent whose clock restarts
+    // after a surfacing, and sorting it would interleave the two segments
+    // into a zigzag where MacDive draws them one after the other. So the
+    // runtime is the latest stamp rather than the last record's.
+    var maxDepth = 0.0;
+    double? minTemp;
+    var end = Duration.zero;
+    for (final s in samples) {
+      if (s.depthMeters > maxDepth) maxDepth = s.depthMeters;
+      final t = s.temperatureCelsius;
+      if (t != null && (minTemp == null || t < minTemp)) minTemp = t;
+      if (s.time > end) end = s.time;
+    }
+    // As with the raw path, MacDive's scalar fields win where it has them.
+    if (maxDepth > 0) map['maxDepth'] ??= maxDepth;
+    if (minTemp != null) map['waterTemp'] ??= minTemp;
+    if (end > Duration.zero) {
+      map['runtime'] ??= Duration(seconds: _wholeSeconds(end));
+    }
+    return _SamplesOutcome.attached;
+  }
+
+  /// Sample times to the nearest whole second, the resolution profile points
+  /// carry app-wide.
+  static int _wholeSeconds(Duration d) => (d.inMilliseconds / 1000).round();
+
+  /// One profile point in the shape `UddfEntityImporter` reads, matching the
+  /// keys `MacDiveXmlParser` emits for the same fields. Pressures come out of
+  /// the column in the diver's display unit, like the tank columns, so they
+  /// go through [converter] and are dropped outright when it has no unit
+  /// system to convert from; depth and temperature are already SI. A zero
+  /// pressure, ppO2 or heart rate is MacDive's "no reading" and is left out
+  /// rather than charted as a real value. Profile points carry whole seconds
+  /// app-wide, so a fractional sample time (none exist in the reference
+  /// library) lands on its nearest second rather than the one before it.
+  static Map<String, dynamic> _samplePoint(
+    MacDiveSqliteSample s,
+    MacDiveUnitConverter converter,
+  ) {
+    final point = <String, dynamic>{
+      'timestamp': _wholeSeconds(s.time),
+      'depth': s.depthMeters,
+    };
+    if (s.temperatureCelsius != null) {
+      point['temperature'] = s.temperatureCelsius;
+    }
+    // A pressure with no unit system to place it in is worse than no
+    // pressure: passing psi through as bar is #912 on a new column, and a
+    // charted number carries no hint that it might be wrong. MacDive's
+    // sample pressures are themselves a witness the inference reads
+    // ([MacDiveUnitInference]), so unknown here means a library whose only
+    // pressures sit past the end of that bounded scan.
+    final placeable = converter.units != MacDiveUnitSystem.unknown;
+    final pressures = <Map<String, dynamic>>[
+      if (placeable)
+        for (final (index, raw) in [s.pressure, s.pressure2].indexed)
+          if (raw != null && raw > 0)
+            {'pressure': converter.pressureToBar(raw), 'tankIndex': index},
+    ];
+    if (pressures.isNotEmpty) point['allTankPressures'] = pressures;
+    if (s.ppO2 != null && s.ppO2! > 0) point['ppO2'] = s.ppO2;
+    if (s.heartRate != null && s.heartRate! > 0) {
+      point['heartRate'] = s.heartRate;
+    }
+    if (s.ndtMinutes != null) point['ndl'] = s.ndtMinutes! * 60;
+    if (s.ttsMinutes != null) point['tts'] = s.ttsMinutes! * 60;
+    final stop = s.nextStopDepthMeters;
+    if (stop != null && stop > 0) point['ceiling'] = stop;
+    return point;
+  }
+
+  /// Vendors whose `ZRAWDATA` is not yet in the layout libdivecomputer's
+  /// parsers read, keyed by the descriptor vendor name.
+  ///
+  /// Shearwater is the only known member and is the exception rather than the
+  /// rule: libdivecomputer decompresses inside its own device layer
+  /// (`shearwater_common.c`), so any host that downloads through
+  /// libdivecomputer ends up holding native bytes. MacDive storing the
+  /// compressed stream tells us its Shearwater download path is its own.
+  /// A second such vendor is one entry here, not a rework.
+  static const _rawPrePasses = <String, MacDiveRawPrePass>{
+    'Shearwater': ShearwaterRawDecompressor.decompress,
+  };
+
+  /// Decodes [d]'s `ZRAWDATA` into profile samples on [map]. Returns false
+  /// when the dive carries raw bytes we could not turn into a profile, so the
+  /// caller can count it toward the aggregated warning.
+  static Future<bool> _attachProfile(
+    MacDiveRawDive d,
+    Map<String, dynamic> map,
+    MacDiveRawParseFn parse,
+    DiveComputerDescriptorIndex descriptors,
+  ) async {
+    final candidates = descriptors.resolve(d.computer);
+    if (candidates.isEmpty) return false;
+
+    // Every candidate shares a vendor and product and differs only by model
+    // number, so the pre-pass runs once rather than per candidate.
+    final prePass = _rawPrePasses[candidates.first.vendor];
+    final payload = prePass == null ? d.rawDataBlob! : prePass(d.rawDataBlob!);
+    if (payload == null || payload.isEmpty) return false;
+
+    for (final candidate in candidates) {
+      final parsed = await _tryParse(parse, candidate, payload);
+      if (parsed == null) continue;
+
+      // A failed native parse does not always surface as an error: the macOS
+      // wrapper has been observed returning success with a zeroed dive, and
+      // now that any libdivecomputer-supported model is attempted rather than
+      // an allowlist, a structurally plausible parse of the wrong format is a
+      // live possibility too.
+      if (!RawProfileSanityCheck.accepts(
+        parsed,
+        recordedMaxDepthMeters: (map['maxDepth'] as num?)?.toDouble(),
+        recordedDuration: map['runtime'] as Duration?,
+      )) {
+        continue;
+      }
+      final samples = ParsedDiveProfileMapper.samples(parsed);
+      if (samples.isEmpty) continue;
+
+      map['profile'] = samples;
+      // MacDive's own scalar fields win where it has them - the user may have
+      // corrected them - so parsed values only fill gaps, and only with values
+      // that mean something.
+      if (parsed.maxDepthMeters > 0) map['maxDepth'] ??= parsed.maxDepthMeters;
+      if (parsed.avgDepthMeters > 0) map['avgDepth'] ??= parsed.avgDepthMeters;
+      map['decoAlgorithm'] ??= parsed.decoAlgorithm;
+      map['gradientFactorLow'] ??= parsed.gfLow;
+      map['gradientFactorHigh'] ??= parsed.gfHigh;
+      map['waterTemp'] ??= ParsedDiveProfileMapper.minSampleTemperature(parsed);
+      map['surfacePressure'] ??= plausibleSurfacePressureBar(
+        parsed.surfacePressureBar,
+      );
+      if (map['runtime'] == null && parsed.durationSeconds > 0) {
+        map['runtime'] = Duration(seconds: parsed.durationSeconds);
+      }
+      // The raw download is the only column that records when the diver
+      // switched gas: `ZSAMPLES` carries no gas channel, and a `ZEVENT` row
+      // has no column naming a gas (#2608).
+      final gas = ParsedDiveProfileMapper.gasSwitches(
+        parsed,
+        (map['tanks'] as List<Map<String, dynamic>>?) ?? const [],
+        profile: map['profile'] as List<Map<String, dynamic>>,
+      );
+      if (gas.gasSwitches.isNotEmpty) {
+        map['tanks'] = gas.tanks;
+        map['gasSwitches'] = gas.gasSwitches;
+        map['profile'] = gas.profile;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Runs one candidate model through the parser, returning null when that
+  /// model did not work out. Errors that mean the channel itself is gone are
+  /// rethrown, because retrying the next candidate cannot help.
+  static Future<pigeon.ParsedDive?> _tryParse(
+    MacDiveRawParseFn parse,
+    DiveComputerModel candidate,
+    Uint8List payload,
+  ) async {
+    try {
+      return await parse(
+        candidate.vendor,
+        candidate.product,
+        candidate.model,
+        payload,
+      );
+    } on MissingPluginException {
+      rethrow;
+    } on PlatformException catch (e) {
+      if (e.code == 'UNSUPPORTED' || e.code == 'channel-error') rethrow;
+      return null;
+    }
+  }
+
+  // ---- dive types / centers / certifications / service records / divers ----
+
+  /// MacDive's dive-type vocabulary is user-extensible, and so is
+  /// Submersion's. Slugging the name lands the common ones ("Shore", "Boat",
+  /// "Night") straight onto the matching built-in id; anything else is
+  /// carried across as a custom type.
+  static List<Map<String, dynamic>> _buildDiveTypeMaps(
+    MacDiveRawLogbook logbook,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final t in logbook.diveTypesByPk.values) {
+      final name = t.name?.trim();
+      if (name == null || name.isEmpty) continue;
+      final slug = DiveTypeEntity.generateSlug(name);
+      if (slug.isEmpty || !seen.add(slug)) continue;
+      out.add({'id': slug, 'name': name, 'uddfId': slug});
+    }
+    return out;
+  }
+
+  static List<String> _diveTypeIdsFor(
+    MacDiveRawDive d,
+    MacDiveRawLogbook logbook,
+  ) {
+    final pks = logbook.diveToDiveTypePks[d.pk] ?? const <int>[];
+    final ids = <String>[];
+    for (final pk in pks) {
+      final name = logbook.diveTypesByPk[pk]?.name?.trim();
+      if (name == null || name.isEmpty) continue;
+      final slug = DiveTypeEntity.generateSlug(name);
+      if (slug.isNotEmpty && !ids.contains(slug)) ids.add(slug);
+    }
+    return ids;
+  }
+
+  /// MacDive records the operator as free text on each dive. Deduplicate the
+  /// names into real dive-center entities so they can be browsed and filtered
+  /// (#912), while `diveOperator` keeps carrying the original string.
+  static List<Map<String, dynamic>> _buildDiveCenterMaps(
+    MacDiveRawLogbook logbook,
+  ) {
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    for (final d in logbook.dives) {
+      final name = d.diveOperator?.trim();
+      if (name == null || name.isEmpty || !seen.add(name)) continue;
+      // Country comes from the site the operator was used at, which is the
+      // only geography MacDive associates with an operator.
+      final country = logbook.sitesByPk[d.diveSiteFk]?.country;
+      out.add({
+        'name': name,
+        'uddfId': name,
+        if (country != null && country.isNotEmpty) 'country': country,
+      });
+    }
+    return out;
+  }
+
+  static List<Map<String, dynamic>> _buildCertificationMaps(
+    MacDiveRawLogbook logbook,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    for (final c in logbook.certifications) {
+      final name = c.name?.trim();
+      if (name == null || name.isEmpty) continue;
+      final shop = c.instructorShop?.trim() ?? '';
+      out.add({
+        'name': name,
+        'uddfId': c.uuid.isNotEmpty ? c.uuid : name,
+        if (c.agency != null) 'agency': c.agency,
+        // MacDive has no level field; the card name is the closest thing, and
+        // _parseCertificationLevel drops it when it matches nothing.
+        'level': name,
+        SourceDiver.mapKey: _sourceDiverKey(logbook, c.diverFk),
+        if (c.diverNumber != null) 'cardNumber': c.diverNumber,
+        if (c.attained != null) 'issueDate': c.attained,
+        if (c.expiry != null) 'expiryDate': c.expiry,
+        if (c.instructorName != null) 'instructorName': c.instructorName,
+        if (c.instructorNumber != null) 'instructorNumber': c.instructorNumber,
+        if (shop.isNotEmpty) 'notes': 'Shop: $shop',
+      });
+    }
+    return out;
+  }
+
+  /// MacDive keys service records to gear by row id; the equipment payload is
+  /// keyed by the gear's uddfId, so translate here rather than teaching the
+  /// importer about Core Data primary keys.
+  static List<Map<String, dynamic>> _buildServiceRecordMaps(
+    MacDiveRawLogbook logbook,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    for (final r in logbook.serviceRecords) {
+      final gear = logbook.gearByPk[r.gearFk];
+      if (gear == null) continue;
+      final equipmentRef = _gearUddfId(gear);
+      if (equipmentRef == null) continue;
+      // A record with no date cannot be persisted - the importer requires
+      // one - so drop it here rather than letting it inflate the counts the
+      // review step shows the diver.
+      final serviceDate = r.serviceDate;
+      if (serviceDate == null) continue;
+      out.add({
+        'equipmentRef': equipmentRef,
+        'uddfId': r.uuid.isNotEmpty ? r.uuid : '${equipmentRef}_${r.pk}',
+        'serviceDate': serviceDate,
+        if (r.servicedBy != null) 'provider': r.servicedBy,
+        if (r.notes != null) 'notes': r.notes,
+        // MacDive does not categorise service events.
+        'serviceCategory': ServiceCategory.annual.name,
+      });
+    }
+    return out;
+  }
+
+  /// Distinct diver names that actually have dives attached, in first-seen
+  /// order. Dives with no diver link contribute nothing.
+  /// The `sourceDiverKey` of a record whose `ZRELATIONSHIPDIVER` is
+  /// [diverFk]. A missing or dangling link is the unowned row (#1893). A
+  /// diver with no uuid falls back to its primary key, which only this file
+  /// guarantees, so that key is marked file-local for the batch merger.
+  static String _sourceDiverKey(MacDiveRawLogbook logbook, int? diverFk) {
+    final diver = logbook.diversByPk[diverFk];
+    if (diver == null) return SourceDiver.unownedKey;
+    if (diver.uuid.isNotEmpty) return 'macdive:${diver.uuid}';
+    return '${SourceDiver.fileLocalPrefix}macdive-pk${diver.pk}';
+  }
+
+  /// One [SourceDiver] per MacDive diver with dives or certifications, then
+  /// the unowned row when some records name no diver (#1893).
+  static List<SourceDiver> _buildSourceDivers(MacDiveRawLogbook logbook) {
+    final dives = <String, int>{};
+    for (final d in logbook.dives) {
+      final key = _sourceDiverKey(logbook, d.diverFk);
+      dives[key] = (dives[key] ?? 0) + 1;
+    }
+    final certs = <String, int>{};
+    for (final c in logbook.certifications) {
+      // Mirrors _buildCertificationMaps, which drops nameless cards.
+      if ((c.name?.trim() ?? '').isEmpty) continue;
+      final key = _sourceDiverKey(logbook, c.diverFk);
+      certs[key] = (certs[key] ?? 0) + 1;
+    }
+
+    final out = <SourceDiver>[];
+    final seen = <String>{};
+    final pks = logbook.diversByPk.keys.toList()..sort();
+    for (final pk in pks) {
+      final diver = logbook.diversByPk[pk]!;
+      final key = _sourceDiverKey(logbook, pk);
+      if (!seen.add(key)) continue;
+      final diveCount = dives[key] ?? 0;
+      final certificationCount = certs[key] ?? 0;
+      if (diveCount == 0 && certificationCount == 0) continue;
+      final email = diver.email?.trim();
+      out.add(
+        SourceDiver(
+          key: key,
+          name:
+              diver.fullName ??
+              ((email?.isNotEmpty ?? false) ? email! : 'MacDive diver $pk'),
+          diveCount: diveCount,
+          certificationCount: certificationCount,
+          email: diver.email,
+          phone: diver.phone ?? diver.mobile,
+          emergencyContact: diver.emergencyContact,
+          bloodType: diver.bloodType,
+          danNumber: diver.danNumber,
+        ),
+      );
+    }
+
+    final unownedDives = dives[SourceDiver.unownedKey] ?? 0;
+    final unownedCerts = certs[SourceDiver.unownedKey] ?? 0;
+    if (unownedDives > 0 || unownedCerts > 0) {
+      out.add(
+        SourceDiver(
+          key: SourceDiver.unownedKey,
+          name: '',
+          diveCount: unownedDives,
+          certificationCount: unownedCerts,
+        ),
+      );
+    }
+    return out;
+  }
+
+  // ---- site / buddy / tag / gear ----
+
+  /// The identity a `ZDIVESITE` row is filed under, or null when the row
+  /// says nothing about where the dive happened.
+  ///
+  /// MacDive keys a site on its name, so a row the diver never named used to
+  /// be skipped before `ZGPSLAT`/`ZGPSLON` were read and its coordinates went
+  /// with it (#2213). They now supply the identity, through the shared
+  /// coordinate name every importer uses. MacDive's `0.0/0.0` stand-in for
+  /// "no GPS set" is not coordinates, so such a row is still dropped.
+  static String? siteKeyFor(MacDiveRawSite site) =>
+      ImportSiteLocation.named(<String, dynamic>{
+            if (site.name != null) 'name': site.name,
+            if (site.latitude != null) 'latitude': site.latitude,
+            if (site.longitude != null) 'longitude': site.longitude,
+          })?['name']
+          as String?;
+
+  static List<Map<String, dynamic>> _buildSiteMaps(
+    MacDiveRawLogbook logbook,
+    MacDiveUnitConverter c,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    for (final s in logbook.sitesByPk.values) {
+      final name = siteKeyFor(s);
+      if (name == null) continue;
+      final map = <String, dynamic>{
+        'name': name,
+        // Match M2: the site's uddf-style id is its name, so the importer
+        // can resolve `dive['site']['uddfId']` back to this record.
+        'uddfId': name,
+      };
+      if (s.uuid.isNotEmpty) map['sourceUuid'] = s.uuid;
+      if (s.country != null) map['country'] = s.country;
+      if (s.location != null) map['region'] = s.location;
+      if (s.bodyOfWater != null) map['bodyOfWater'] = s.bodyOfWater;
+      final waterType = MacDiveValueMapper.waterType(s.waterType);
+      if (waterType != null) map['waterType'] = waterType.name;
+      if (s.difficulty != null) map['difficulty'] = s.difficulty;
+      final altitude = c.depthToMeters(s.altitude);
+      if (altitude != null) map['altitude'] = altitude;
+      final lat = s.latitude;
+      final lon = s.longitude;
+      // MacDive uses 0.0/0.0 as "no GPS set" - filter out.
+      if (lat != null && lon != null && !(lat == 0.0 && lon == 0.0)) {
+        map['latitude'] = lat;
+        map['longitude'] = lon;
+      }
+      if (s.notes != null) map['description'] = s.notes;
+      out.add(map);
+    }
+    return out;
+  }
+
+  static List<Map<String, dynamic>> _buildBuddyMaps(MacDiveRawLogbook logbook) {
+    final out = <Map<String, dynamic>>[];
+    // A dive references a buddy by name, so rows sharing a name are one
+    // person: a second entity could never be linked to a dive.
+    final seen = <String>{};
+    for (final b in logbook.buddiesByPk.values) {
+      final name = _buddyName(b);
+      if (name == null || !seen.add(name)) continue;
+      out.add({
+        'name': name,
+        'uddfId': name,
+        if (b.uuid.isNotEmpty) 'sourceUuid': b.uuid,
+      });
+    }
+    return out;
+  }
+
+  /// The name [buddy] is imported and referenced under, or null for none.
+  static String? _buddyName(MacDiveRawBuddy? buddy) {
+    final name = buddy?.name?.trim() ?? '';
+    return name.isEmpty ? null : name;
+  }
+
+  static List<Map<String, dynamic>> _buildTagMaps(MacDiveRawLogbook logbook) {
+    final out = <Map<String, dynamic>>[];
+    for (final t in logbook.tagsByPk.values) {
+      final name = t.name;
+      if (name == null || name.isEmpty) continue;
+      out.add({
+        'name': name,
+        'uddfId': name,
+        if (t.uuid.isNotEmpty) 'sourceUuid': t.uuid,
+      });
+    }
+    return out;
+  }
+
+  /// Returns the stable uddf-style id for a gear row. Prefers the MacDive
+  /// UUID (guaranteed unique per gear item in Core Data); falls back to
+  /// the name so older exports without UUIDs still link. Returns null
+  /// when neither is present — callers should skip the gear entirely in
+  /// that case.
+  static String? _gearUddfId(MacDiveRawGear g) {
+    if (g.uuid.isNotEmpty) return g.uuid;
+    final name = g.name;
+    if (name != null && name.isNotEmpty) return name;
+    return null;
+  }
+
+  static List<Map<String, dynamic>> _buildGearMaps(
+    MacDiveRawLogbook logbook,
+    MacDiveUnitConverter c,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    for (final g in logbook.gearByPk.values) {
+      final name = g.name;
+      // UddfEntityImporter._importEquipment skips items without a name.
+      // Dropping them here avoids phantom entries in the review UI and
+      // keeps equipmentIdMapping in sync with the emitted entities.
+      if (name == null || name.isEmpty) continue;
+      final uddfId = _gearUddfId(g);
+      if (uddfId == null) continue;
+      final map = <String, dynamic>{'name': name, 'uddfId': uddfId};
+      if (g.manufacturer != null) map['brand'] = g.manufacturer;
+      if (g.model != null) map['model'] = g.model;
+      if (g.serial != null) map['serialNumber'] = g.serial;
+      final type = MacDiveValueMapper.equipmentType(g.type);
+      if (type != null) map['type'] = type.name;
+      final weightKg = c.weightToKg(g.weight);
+      if (weightKg != null) map['weight'] = weightKg;
+      // Key must be `purchasePrice`; `_importEquipment` reads that name, so
+      // emitting `price` silently dropped every MacDive purchase price.
+      if (g.price != null) map['purchasePrice'] = g.price;
+      if (g.currency != null) map['purchaseCurrency'] = g.currency;
+      if (g.datePurchase != null) map['purchaseDate'] = g.datePurchase;
+      if (g.dateNextService != null) {
+        map['nextServiceDate'] = g.dateNextService;
+      }
+      if (g.notes != null) map['notes'] = g.notes;
+      if (g.uuid.isNotEmpty) map['sourceUuid'] = g.uuid;
+      // MacDive's "inactive" gear is retired gear (#912). Both markers are
+      // written because getActiveEquipment filters on each of them.
+      if (g.disabled) {
+        map['status'] = EquipmentStatus.retired.name;
+        map['isActive'] = false;
+      }
+      out.add(map);
+    }
+    return out;
+  }
+
+  // ---- dive ----
+
+  static Map<String, dynamic> _buildDiveMap(
+    MacDiveRawDive d,
+    MacDiveRawLogbook logbook,
+    MacDiveUnitConverter c,
+    MacDiveZoneResolver zones,
+  ) {
+    final map = <String, dynamic>{};
+
+    if (d.uuid.isNotEmpty) map['sourceUuid'] = d.uuid;
+    if (d.identifier != null) map['sourceIdentifier'] = d.identifier;
+    map[SourceDiver.mapKey] = _sourceDiverKey(logbook, d.diverFk);
+    // `rawDate` is the absolute instant from ZRAWDATE; the zone the dive
+    // was logged in lives in `ZTIMEZONE`. Emit the wall clock of that zone
+    // as UTC components, the convention the MacDive XML reader and every
+    // other importer use. [MacDiveZoneResolver] documents which zone wins.
+    final rawDate = d.rawDate;
+    if (rawDate != null) {
+      map['dateTime'] = zones.wallClockUtc(
+        rawDate,
+        archive: d.timezoneBplist,
+        site: logbook.sitesByPk[d.diveSiteFk],
+      );
+    }
+    if (d.diveNumber != null) map['diveNumber'] = d.diveNumber;
+    if (d.repetitiveDiveNumber != null) {
+      map['diveNumberOfDay'] = d.repetitiveDiveNumber;
+    }
+
+    final maxDepth = c.depthToMeters(d.maxDepth);
+    if (maxDepth != null) map['maxDepth'] = maxDepth;
+    final avgDepth = c.depthToMeters(d.averageDepth);
+    if (avgDepth != null) map['avgDepth'] = avgDepth;
+
+    if (d.totalDuration != null) {
+      // M2 sets both `runtime` (UDDF convention) and `duration` (CSV
+      // convention) so the entity importer can populate runtime +
+      // bottomTime from the same source. Mirror that here.
+      final runtime = Duration(seconds: d.totalDuration!.round());
+      map['runtime'] = runtime;
+      map['duration'] = runtime;
+    }
+    // `ZSURFACEINTERVAL` is minutes, not seconds (#1606). Joining a real
+    // MacDive.sqlite against the XML export of the same logbook shows the
+    // column and `<surfaceInterval>` carrying the identical number, and
+    // MacDive's UDDF export of that number is `value * 60` seconds. A 0
+    // means "no prior dive", so it stays unset.
+    // The column is a float, so round before the guard: testing the raw
+    // value would let a fraction of a minute through as Duration.zero.
+    final surfaceIntervalMinutes = d.surfaceInterval?.round();
+    if (surfaceIntervalMinutes != null && surfaceIntervalMinutes > 0) {
+      map['surfaceInterval'] = Duration(minutes: surfaceIntervalMinutes);
+    }
+
+    final waterTemp = c.tempToCelsius(d.tempLow);
+    if (waterTemp != null) map['waterTemp'] = waterTemp;
+    final airTemp = c.tempToCelsius(d.airTemp);
+    if (airTemp != null) map['airTemp'] = airTemp;
+
+    if (d.cns != null) map['cnsEnd'] = d.cns;
+    // `decoAlgorithm` is the key UddfEntityImporter reads; emitting only
+    // `decoModel` silently dropped MacDive's deco model on every import.
+    if (d.decoModel != null) map['decoAlgorithm'] = d.decoModel;
+    if (d.gasModel != null) map['gasModel'] = d.gasModel;
+    if (d.computer != null) map['diveComputerModel'] = d.computer;
+    if (d.computerSerial != null) {
+      map['diveComputerSerial'] = d.computerSerial;
+    }
+    if (d.notes != null) map['notes'] = d.notes;
+    if (d.weather != null) map['weather'] = d.weather;
+    if (d.surfaceConditions != null) {
+      map['surfaceConditions'] = d.surfaceConditions;
+    }
+    if (d.current != null) map['currentDirection'] = d.current;
+    if (d.diveMaster != null) map['diveMaster'] = d.diveMaster;
+    // Keep the free-text column populated for round-tripping, and also link
+    // the dive to the deduplicated DiveCenter entity (#912).
+    if (d.diveOperator != null) {
+      map['diveOperator'] = d.diveOperator;
+      final operator = d.diveOperator!.trim();
+      if (operator.isNotEmpty) map['diveCenterRef'] = operator;
+    }
+    if (d.boatName != null) map['boatName'] = d.boatName;
+    if (d.boatCaptain != null) map['boatCaptain'] = d.boatCaptain;
+    if (d.visibility != null) map['visibility'] = d.visibility;
+
+    // MacDive SQLite stores ZWEIGHT as a raw string - try to parse and
+    // convert. Unparseable strings are dropped (no key emitted) so the
+    // importer falls back to its default.
+    final weightRaw = d.weight == null
+        ? null
+        : double.tryParse(d.weight!.trim());
+    final weightKg = c.weightToKg(weightRaw);
+    if (weightKg != null) map['weightUsed'] = weightKg;
+
+    // Rating: MacDive stores 0.0 - 5.0 float; Submersion stores 0-5 int.
+    final rating = MacDiveValueMapper.rating(d.rating);
+    if (rating != null) map['rating'] = rating;
+
+    // Entry type -> EntryMethod.name; unknown values omit the key.
+    final entryMethod = MacDiveValueMapper.entryType(d.entryType);
+    if (entryMethod != null) map['entryMethod'] = entryMethod.name;
+
+    // Site reference: M2 emits both `siteName` and `site: {uddfId: name}`
+    // so the UddfEntityImporter can resolve the linked site.
+    if (d.diveSiteFk != null) {
+      final site = logbook.sitesByPk[d.diveSiteFk];
+      final siteName = site == null ? null : siteKeyFor(site);
+      if (siteName != null) {
+        map['siteName'] = siteName;
+        map['site'] = <String, dynamic>{'uddfId': siteName};
+      }
+    }
+
+    // Buddies - emit `buddyRefs` matching the `uddfId` values produced by
+    // `_buildBuddyMaps`, so the importer links only the buddies the user
+    // selected. `unmatchedBuddyNames` would create them regardless and
+    // count them a second time (issue #3871).
+    final buddyPks = logbook.diveToBuddyPks[d.pk] ?? const <int>[];
+    final buddyRefs = <String>{
+      for (final bpk in buddyPks) ?_buddyName(logbook.buddiesByPk[bpk]),
+    };
+    if (buddyRefs.isNotEmpty) map['buddyRefs'] = buddyRefs.toList();
+
+    // Per-dive gear linkage via `equipmentRefs`. UddfEntityImporter
+    // resolves each ref through `equipmentIdMapping[uddfId]` to find
+    // the newly-created equipment row, so we emit the same uddfId
+    // values produced by `_buildGearMaps` above (MacDive gear UUID,
+    // with name fallback for older exports). Gear items skipped in
+    // the equipment map are also omitted here.
+    final gearPks = logbook.diveToGearPks[d.pk] ?? const <int>[];
+    final equipmentRefs = <String>[
+      for (final gpk in gearPks)
+        if (logbook.gearByPk[gpk] case final g?) ?_gearUddfId(g),
+    ];
+    if (equipmentRefs.isNotEmpty) map['equipmentRefs'] = equipmentRefs;
+
+    // Dive types - MacDive's own vocabulary, slugged onto Submersion ids.
+    final diveTypeIds = _diveTypeIdsFor(d, logbook);
+    if (diveTypeIds.isNotEmpty) map['diveTypeIds'] = diveTypeIds;
+
+    // Tags - emit names under `tagRefs`.
+    final tagPks = logbook.diveToTagPks[d.pk] ?? const <int>[];
+    final tagNames = <String>[
+      for (final tpk in tagPks)
+        if ((logbook.tagsByPk[tpk]?.name ?? '').isNotEmpty)
+          logbook.tagsByPk[tpk]!.name!,
+    ];
+    if (tagNames.isNotEmpty) map['tagRefs'] = tagNames;
+
+    // Tanks: join ZTANKANDGAS rows with the referenced tank + gas. Sort
+    // by ZORDER so the index is deterministic across runs.
+    final tankRows =
+        logbook.tankAndGases.where((t) => t.diveFk == d.pk).toList()
+          ..sort((a, b) => a.order.compareTo(b.order));
+    if (tankRows.isNotEmpty) {
+      final tanks = <Map<String, dynamic>>[];
+      for (var i = 0; i < tankRows.length; i++) {
+        final t = tankRows[i];
+        final tank = logbook.tanksByPk[t.tankFk];
+        final gas = logbook.gasesByPk[t.gasFk];
+        final entry = <String, dynamic>{'index': i, 'order': i};
+        if (tank?.name != null) entry['name'] = tank!.name;
+        if (tank?.size != null) {
+          final volumeL = c.tankSizeLiters(tank!.size, tank.workingPressure);
+          // Key must be `volume` (not `volumeL`) — the shared UDDF importer's
+          // _buildTanks reads `t['volume']`. A mismatched key silently drops
+          // tank volume, which zeroes out volume-based SAC statistics (#517).
+          if (volumeL != null) entry['volume'] = volumeL;
+        }
+        if (tank?.workingPressure != null) {
+          final wp = c.pressureToBar(tank!.workingPressure);
+          // Key must be `workingPressure` (not `workingPressureBar`) for the
+          // same reason as `volume` above.
+          if (wp != null) entry['workingPressure'] = wp;
+        }
+        final startPressure = c.pressureToBar(t.airStart);
+        if (startPressure != null) entry['startPressure'] = startPressure;
+        final endPressure = c.pressureToBar(t.airEnd);
+        if (endPressure != null) entry['endPressure'] = endPressure;
+        // ZDURATION is how long the tank was breathed, under the key
+        // _buildTanks reads (issue #1496). `runtime` is the dive's key.
+        if (t.duration != null) {
+          entry['usageDuration'] = Duration(seconds: t.duration!.round());
+        }
+        if (t.supplyType != null) entry['supplyType'] = t.supplyType;
+        // MacDive's ZGAS.ZOXYGEN/ZHELIUM store whole percent (32.0 for
+        // EAN32), not a 0-1 fraction - confirmed against a real MacDive
+        // database, where every gas row (including "Trimix 21/35" at
+        // ZOXYGEN=21.0/ZHELIUM=35.0) matches its percent-based name exactly.
+        entry['gasMix'] = GasMix(
+          o2: gas?.oxygen ?? 21.0,
+          he: gas?.helium ?? 0.0,
+        );
+        tanks.add(entry);
+      }
+      map['tanks'] = tanks;
+    }
+
+    // The `profile` key is attached later by _attachProfile, once ZRAWDATA
+    // has been decompressed and parsed. Dives without decodable samples keep
+    // the key absent, matching the XML parser's convention.
+
+    return map;
+  }
+}

@@ -2,12 +2,83 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:drift/drift.dart' show TableUpdate, Variable;
+
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
-import 'package:submersion/core/database/database.dart' show SyncRecord;
+import 'package:submersion/core/database/cylinder_volume_repair.dart';
+import 'package:submersion/core/database/duplicate_primary_series_repair.dart';
+import 'package:submersion/core/database/lone_download_source_repair.dart';
+import 'package:submersion/core/database/computer_tissue_scalar_move.dart';
+import 'package:submersion/core/database/last_service_date_repair.dart';
+import 'package:submersion/core/database/weather_fetched_at_repair.dart';
+import 'package:submersion/core/database/combine_source_slot_stamp.dart';
+import 'package:submersion/core/database/combined_dive_summary_repair.dart';
+import 'package:submersion/core/database/dive_water_temp_fill.dart';
+import 'package:submersion/core/database/device_gear_heal.dart';
+import 'package:submersion/core/database/database.dart'
+    show AppDatabase, SyncRecord, DeletionLogData;
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/cloud_storage/deferred_write_provider.dart';
+import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/child_column_clears.dart';
+import 'package:submersion/core/services/sync/device_local_fields.dart';
+import 'package:submersion/core/services/sync/peer_device_name_store.dart';
+import 'package:submersion/core/services/sync/peer_sync_snapshot.dart';
+import 'package:submersion/core/services/sync/sync_fact_groups.dart';
+import 'package:submersion/core/services/sync/sync_dive_rating.dart';
+import 'package:submersion/core/services/sync/media_resolution_hints.dart';
+import 'package:submersion/core/services/sync/conflict_reference.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_apply_progress.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_json_stream_reader.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_parse_client.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_part_file_sink.dart';
+import 'package:submersion/core/services/sync/changeset_log/byte_progress_stream.dart';
+import 'package:submersion/core/services/sync/changeset_log/gzip_size_check.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_codec.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_sweep.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_log_layout.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_reader.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_writer.dart';
+import 'package:submersion/core/services/sync/changeset_log/device_retirement.dart';
+import 'package:submersion/core/services/sync/changeset_log/peer_cursor_store.dart';
+import 'package:submersion/core/services/sync/changeset_log/publish_state_store.dart';
+import 'package:submersion/core/services/sync/changeset_log/stale_restore_detector.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_liveness.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_manifest.dart';
+import 'package:submersion/core/services/sync/changeset_log/tombstone_horizon.dart';
+import 'package:submersion/core/services/sync/event_scope_tombstone.dart';
+import 'package:submersion/core/services/sync/event_scope_tombstone_applier.dart';
+import 'package:submersion/core/services/sync/hlc.dart';
+import 'package:submersion/core/services/sync/library_epoch.dart';
+import 'package:submersion/core/services/sync/sync_cleanup_outcome.dart';
+import 'package:submersion/core/services/sync/sync_device_metadata.dart';
+import 'package:submersion/core/services/sync/library_epoch_store.dart';
+import 'package:submersion/core/services/sync/crypto/crypto_errors.dart';
+import 'package:submersion/core/services/sync/crypto/sync_encryption_service.dart';
+import 'package:submersion/core/services/sync/crypto/sync_envelope.dart';
+import 'package:submersion/core/services/sync/library_moved.dart';
+import 'package:submersion/core/services/sync/sync_clock.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/core/services/nearby/nearby_peer_store.dart';
+import 'package:submersion/core/services/shared_library/library_site_notes.dart';
+import 'package:submersion/core/services/shared_library/shared_library_store.dart';
 import 'package:submersion/core/services/sync/sync_data_serializer.dart';
+import 'package:submersion/core/services/sync/legacy_wire_keys.dart';
+import 'package:submersion/core/services/sync/sync_record_overlay.dart';
+import 'package:submersion/core/services/sync/tag_fill_copy_merge.dart';
+import 'package:submersion/core/services/sync/sync_initializer.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 import 'package:uuid/uuid.dart';
+
+part 'sync_service_replace_join.dart';
 
 /// Sync operation result
 enum SyncResultStatus {
@@ -16,6 +87,8 @@ enum SyncResultStatus {
   hasConflicts,
   networkError,
   authError,
+  awaitingAdoption,
+  awaitingPassphrase,
   error,
 }
 
@@ -26,6 +99,53 @@ class SyncResult {
   final int recordsSynced;
   final int conflictsFound;
   final DateTime? lastSyncTime;
+  final bool adoptedFreshIdentity;
+
+  /// Peers skipped because their manifests are from an older or unknown
+  /// library epoch. They must adopt the current library before their changes
+  /// can be safely merged.
+  final Set<String> skippedPeerDeviceIds;
+
+  /// Display names for the entries in [skippedPeerDeviceIds] that published
+  /// one. An absent entry means the peer is on an older manifest, or nothing
+  /// identifies it by name; render a short id instead.
+  final Map<String, String> skippedPeerNames;
+
+  /// Peers held because their declared compatibility floor exceeds this
+  /// build's schema. Their data applies after this device updates.
+  final Set<String> newerSchemaPeerDeviceIds;
+
+  /// Display names for [newerSchemaPeerDeviceIds], same contract as
+  /// [skippedPeerNames].
+  final Map<String, String> newerSchemaPeerNames;
+
+  /// Peers whose own schema is below this build's compatibility floor, so
+  /// they hold this device's changes until they update. Their own changes
+  /// still merge here.
+  final Set<String> olderSchemaPeerDeviceIds;
+
+  /// Display names for [olderSchemaPeerDeviceIds], same contract as
+  /// [skippedPeerNames].
+  final Map<String, String> olderSchemaPeerNames;
+
+  /// Peers whose changeset read threw during the pull. Their cursors stayed
+  /// put, so the next sync retries them; the UI names them so the user can
+  /// see whose data did not merge this run.
+  final Set<String> readFailedPeerDeviceIds;
+
+  /// Display names for [readFailedPeerDeviceIds], same contract as
+  /// [skippedPeerNames].
+  final Map<String, String> readFailedPeerNames;
+
+  /// Set with [SyncResultStatus.awaitingAdoption]: the cloud library was
+  /// replaced under this marker's epoch and the user must adopt (or defer)
+  /// before any sync can proceed.
+  final LibraryEpochMarker? replaceMarker;
+
+  /// Set with [SyncResultStatus.authError] when a server refused the account.
+  /// Unset, the status only means there is no session here, which an offline
+  /// cold launch reads as too (issue #3811).
+  final bool accessRefused;
 
   const SyncResult({
     required this.status,
@@ -33,6 +153,17 @@ class SyncResult {
     this.recordsSynced = 0,
     this.conflictsFound = 0,
     this.lastSyncTime,
+    this.adoptedFreshIdentity = false,
+    this.skippedPeerDeviceIds = const {},
+    this.skippedPeerNames = const {},
+    this.newerSchemaPeerDeviceIds = const {},
+    this.newerSchemaPeerNames = const {},
+    this.olderSchemaPeerDeviceIds = const {},
+    this.olderSchemaPeerNames = const {},
+    this.readFailedPeerDeviceIds = const {},
+    this.readFailedPeerNames = const {},
+    this.replaceMarker,
+    this.accessRefused = false,
   });
 
   bool get isSuccess =>
@@ -45,18 +176,19 @@ class SyncResult {
       'SyncResult(status: $status, records: $recordsSynced, conflicts: $conflictsFound)';
 }
 
-class SyncStepException implements Exception {
-  final String step;
-  final Object error;
-
-  SyncStepException(this.step, this.error);
-
-  @override
-  String toString() => 'Sync failed during $step: $error';
-}
-
 /// Progress callback for sync operations
 typedef SyncProgressCallback = void Function(SyncProgress progress);
+
+/// What a nearby apply merged (issue #3731).
+typedef NearbyApplyResult = ({
+  int recordsApplied,
+  int conflictsFound,
+  int recordsFailed,
+});
+
+/// A marine life identification a peer's tombstone deleted here, with the
+/// media it was on: its crop file is kept under that media (issue #4890).
+typedef DeletedIdentification = ({String mediaId, String id});
 
 /// Sync progress information
 class SyncProgress {
@@ -91,6 +223,16 @@ class SyncConflict {
   final DateTime localModified;
   final DateTime remoteModified;
 
+  /// Foreign keys of [localData], resolved to the referenced rows' names and
+  /// dates. Junction entities carry nothing but ids, so this is the only thing
+  /// that lets the resolution dialog describe them (#1031). Empty when the
+  /// entity has no foreign keys, or when resolution could not run.
+  final List<ConflictReference> localReferences;
+
+  /// The same for [remoteData]. Resolved separately because a junction row's
+  /// foreign keys are usually exactly what the two sides disagree about.
+  final List<ConflictReference> remoteReferences;
+
   const SyncConflict({
     required this.entityType,
     required this.recordId,
@@ -98,6 +240,8 @@ class SyncConflict {
     required this.remoteData,
     required this.localModified,
     required this.remoteModified,
+    this.localReferences = const [],
+    this.remoteReferences = const [],
   });
 
   String get displayName {
@@ -111,27 +255,233 @@ class SyncConflict {
 /// Resolution choice for a conflict
 enum ConflictResolution { keepLocal, keepRemote, keepBoth }
 
+/// A foreign-key reference from a synced child record to a parent whose
+/// deletion is tracked in the deletion log. [nullable] distinguishes a cascade
+/// child (NOT NULL -> the row cannot exist without the parent) from a set-null
+/// reference (nullable -> the row survives with the reference cleared).
+typedef ParentRef = ({String field, String parent, bool nullable});
+
+/// Outcome of the library-epoch gate: either a [terminal] result the caller
+/// must return immediately (a pending replace was executed, the marker was
+/// unreadable, or the cloud library was replaced and awaits adoption), or the
+/// resolved [currentEpochId] to stamp and filter by for the rest of the sync
+/// (null in the pre-epoch world).
+class _EpochGate {
+  const _EpochGate.proceed(this.currentEpochId) : terminal = null;
+  const _EpochGate.halt(this.terminal) : currentEpochId = null;
+  final String? currentEpochId;
+  final SyncResult? terminal;
+}
+
 /// Core sync service that orchestrates cloud sync operations
 class SyncService {
   final SyncRepository _syncRepository;
+  final EventScopeTombstoneApplier _eventScopeApplier;
   final SyncDataSerializer _serializer;
   final CloudStorageProvider? _cloudProvider;
+  final SyncInitializer? _syncInitializer;
+
+  /// Library epoch persistence (restore Replace mode). Nullable so existing
+  /// constructions keep working; epoch gating activates only when provided.
+  final LibraryEpochStore? _epochStore;
+
+  /// Keyslot self-heal after publish (encrypted libraries). Nullable so
+  /// existing constructions keep working; heal runs only when provided.
+  final SyncEncryptionService? _encryptionService;
+
+  /// Where the names peers publish on their manifests are remembered, so
+  /// labels such as "From Eric's MacBook" need no cloud read. Optional:
+  /// the legacy tests build the service without one.
+  final PeerDeviceNameStore? _peerNames;
+  final PeerSyncSnapshotStore? _peerSnapshots;
+
+  /// Told which media rows a merge gave something new to be found by, so
+  /// their cached "not found here" searches retry at once (spec 6.2).
+  /// Optional: most tests build the service without one.
+  final Future<void> Function(MediaResolutionHints hints)?
+  _onMediaResolutionHints;
+
+  /// Told which identifications a peer's tombstones deleted, once the
+  /// apply that deleted them has ended, so the files and cache rows this
+  /// device keeps for them go too (issue #4890). Told after a rollback as
+  /// well, and whether or not the tombstone was logged: it must act only on
+  /// ids whose row is gone. Optional: most tests build the service without
+  /// one.
+  final Future<void> Function(List<DeletedIdentification> deleted)?
+  _onIdentificationsDeleted;
+
+  /// What the running apply has deleted for [_onIdentificationsDeleted].
+  final List<DeletedIdentification> _deletedIdentifications = [];
   final _log = LoggerService.forClass(SyncService);
   final _uuid = const Uuid();
 
+  /// How long a library-epoch marker with no readable (ssv1) library may exist
+  /// before it is treated as orphaned (a replace that never landed) rather than
+  /// in flight. A backend carrying only old-format files is recovered
+  /// immediately, regardless of this.
+  static const _unreadableEpochGraceMs = 60 * 60 * 1000; // 1 hour
+
+  static const ChangesetCodec _changesetCodec = ChangesetCodec();
+
+  // Changeset-log transport (Phases 1-6), lazily bound to the active database.
+
+  /// Assembles a peer's base parts into a temp file (per-part + whole-file
+  /// checksum verified) for the bounded-memory replace-adopt (#358).
+  final BasePartFileSink _baseSink = BasePartFileSink();
+  late final PublishStateStore _publishStateStore = PublishStateStore(
+    DatabaseService.instance.database,
+  );
+  late final ChangesetWriter _changesetWriter = ChangesetWriter(
+    _serializer,
+    _changesetCodec,
+    _publishStateStore,
+  );
+  late final ChangesetReader _changesetReader = ChangesetReader(
+    _changesetCodec,
+    PeerCursorStore(DatabaseService.instance.database),
+  );
+  late final StaleRestoreDetector _staleRestoreDetector = StaleRestoreDetector(
+    _syncRepository,
+  );
+
   SyncProgressCallback? _progressCallback;
+
+  /// Test seam: how the base apply spawns its parse worker. Overridable so a
+  /// forced-failure test can verify the inline fallback; production uses the
+  /// real isolate spawn. [gzipped] says the file is a compressed base.
+  @visibleForTesting
+  Future<BaseParseClient> Function(String filePath, {bool gzipped})
+  baseParseClientSpawn = BaseParseClient.spawn;
+
+  /// Resolves localizations for the user-facing strings this service puts on
+  /// [SyncResult] and [SyncProgress] (the Cloud Sync page renders them
+  /// verbatim through SyncState.message).
+  ///
+  /// A service has no BuildContext and its notifier is a StateNotifier, so the
+  /// locale arrives as a resolver injected by `syncServiceProvider`:
+  /// `() => l10nForLocaleTag(ref.read(localeProvider))`. It defaults to
+  /// English rather than the platform locale so an un-wired caller -- a unit
+  /// test, or a background isolate with no settings -- stays deterministic.
+  final AppLocalizations Function() _localizations;
+
+  static AppLocalizations _englishLocalizations() => l10nForLocaleTag('en');
+
+  AppLocalizations get _l10n => _localizations();
 
   SyncService({
     required SyncRepository syncRepository,
     required SyncDataSerializer serializer,
     CloudStorageProvider? cloudProvider,
+    SyncInitializer? syncInitializer,
+    LibraryEpochStore? epochStore,
+    SyncEncryptionService? encryptionService,
+    AppLocalizations Function()? localizations,
+    PeerDeviceNameStore? peerNames,
+    PeerSyncSnapshotStore? peerSnapshots,
+    Future<void> Function(MediaResolutionHints hints)? onMediaResolutionHints,
+    Future<void> Function(List<DeletedIdentification> deleted)?
+    onIdentificationsDeleted,
   }) : _syncRepository = syncRepository,
+       _eventScopeApplier = EventScopeTombstoneApplier(
+         syncRepository: syncRepository,
+       ),
        _serializer = serializer,
-       _cloudProvider = cloudProvider;
+       _cloudProvider = cloudProvider,
+       _syncInitializer = syncInitializer,
+       _epochStore = epochStore,
+       _encryptionService = encryptionService,
+       _peerNames = peerNames,
+       _peerSnapshots = peerSnapshots,
+       _onMediaResolutionHints = onMediaResolutionHints,
+       _onIdentificationsDeleted = onIdentificationsDeleted,
+       _localizations = localizations ?? _englishLocalizations;
 
   /// Set a callback to receive progress updates during sync
   void setProgressCallback(SyncProgressCallback? callback) {
     _progressCallback = callback;
+  }
+
+  /// Test seam: apply an in-memory payload through the standard merge. Exposed
+  /// so the streaming-vs-in-memory parity test can compare apply paths.
+  @visibleForTesting
+  Future<({int recordsApplied, int conflictsFound, int recordsFailed})>
+  debugApplyPayload(SyncPayload payload, {DateTime? lastSync}) async {
+    final r = await _applyRemotePayload(payload, lastSync);
+    return (
+      recordsApplied: r.recordsApplied,
+      conflictsFound: r.conflictsFound,
+      recordsFailed: r.recordsFailed,
+    );
+  }
+
+  /// Test seam: apply a base from a local file through the streaming merge.
+  @visibleForTesting
+  Future<({int recordsApplied, int conflictsFound, int recordsFailed})>
+  debugApplyBaseFile(
+    String filePath, {
+    DateTime? lastSync,
+    String? peerDeviceId,
+    void Function(double fraction)? onProgress,
+    bool gzipped = false,
+  }) async {
+    final r = await _applyRemoteBaseFile(
+      filePath,
+      lastSync,
+      peerDeviceId: peerDeviceId,
+      onProgress: onProgress,
+      gzipped: gzipped,
+    );
+    return (
+      recordsApplied: r.recordsApplied,
+      conflictsFound: r.conflictsFound,
+      recordsFailed: r.recordsFailed,
+    );
+  }
+
+  /// Applies a payload a nearby peer sent (issue #3731) through the same
+  /// merge a cloud pull uses, queued behind any running sync. [lastSync] is
+  /// when this device last synced with that peer: it scopes the two-sided
+  /// edit conflict and the tombstone age guard to the peer, as the cloud
+  /// path scopes them to its backend.
+  Future<NearbyApplyResult> applyNearbyPayload(
+    SyncPayload payload, {
+    required DateTime? lastSync,
+  }) {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+    return SyncCoordinator.run(() async {
+      final r = await _applyRemotePayload(payload, lastSync);
+      return (
+        recordsApplied: r.recordsApplied,
+        conflictsFound: r.conflictsFound,
+        recordsFailed: r.recordsFailed,
+      );
+    });
+  }
+
+  /// [applyNearbyPayload] for a full copy streamed to [filePath], which is
+  /// gzipped. Each pass reads it through the decoder, so the copy is never
+  /// expanded on disk beside the compressed one (issue #4256).
+  Future<NearbyApplyResult> applyNearbyBaseFile(
+    String filePath, {
+    required DateTime? lastSync,
+    String? peerDeviceId,
+    void Function(double fraction)? onProgress,
+  }) {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+    return SyncCoordinator.run(() async {
+      final r = await _applyRemoteBaseFile(
+        filePath,
+        lastSync,
+        peerDeviceId: peerDeviceId,
+        onProgress: onProgress,
+        gzipped: true,
+      );
+      return (
+        recordsApplied: r.recordsApplied,
+        conflictsFound: r.conflictsFound,
+        recordsFailed: r.recordsFailed,
+      );
+    });
   }
 
   void _reportProgress(SyncPhase phase, double progress, [String? message]) {
@@ -167,11 +517,25 @@ class SyncService {
   Future<List<SyncConflict>> getConflicts() async {
     final conflictRecords = await _syncRepository.getConflictRecords();
     final conflicts = <SyncConflict>[];
+    // One resolver for the whole batch: a restore raises many conflicts
+    // pointing at the same diver, dive or site, and the resolver caches the
+    // rows it has already read.
+    final resolver = ConflictReferenceResolver(_serializer);
 
     for (final record in conflictRecords) {
       if (record.conflictData != null) {
         try {
-          final remoteData = _parseConflictData(record.conflictData!);
+          // A conflict stored before a column became device-local may still
+          // carry it; fetchRecord strips the local side the same way. A
+          // dive's rating is put on the star scale as an apply would put it,
+          // so a peer below v358 shows no false rating difference (#4415).
+          final remoteData = withDiveRatingInScale(
+            record.entityType,
+            withoutDeviceLocalColumns(
+              record.entityType,
+              _parseConflictData(record.conflictData!),
+            ),
+          );
           final localData = await _serializer.fetchRecord(
             record.entityType,
             record.recordId,
@@ -189,6 +553,16 @@ class SyncService {
                   localModified ??
                   DateTime.fromMillisecondsSinceEpoch(record.localUpdatedAt),
               remoteModified: remoteModified ?? DateTime.now(),
+              localReferences: await _resolveReferences(
+                resolver,
+                record.entityType,
+                localData ?? {},
+              ),
+              remoteReferences: await _resolveReferences(
+                resolver,
+                record.entityType,
+                remoteData,
+              ),
             ),
           );
         } catch (e) {
@@ -201,6 +575,26 @@ class SyncService {
     }
 
     return conflicts;
+  }
+
+  /// Resolves a conflicting record's foreign keys for display. A lookup
+  /// failure degrades to an unresolved preview rather than dropping the whole
+  /// conflict, which would leave the user unable to resolve it at all.
+  Future<List<ConflictReference>> _resolveReferences(
+    ConflictReferenceResolver resolver,
+    String entityType,
+    Map<String, dynamic> data,
+  ) async {
+    if (data.isEmpty) return const [];
+    try {
+      return await resolver.resolve(entityType, data);
+    } catch (e) {
+      _log.warning(
+        'Could not resolve display references for $entityType',
+        error: e,
+      );
+      return const [];
+    }
   }
 
   Map<String, dynamic> _parseConflictData(String json) {
@@ -223,261 +617,486 @@ class SyncService {
     return null;
   }
 
-  /// Perform a full sync operation
+  /// Incremental changeset-log sync: the live sync path. Pulls peers' deltas
+  /// through the existing HLC/LWW merge, then publishes this device's own
+  /// delta, with the library-epoch gate and twin-identity split folded in.
   ///
-  /// This will:
-  /// 1. Export local changes to JSON
-  /// 2. Download remote sync file (if exists)
-  /// 3. Merge changes, detecting conflicts
-  /// 4. Upload merged result
-  /// 5. Update local sync state
+  /// Pipeline: auth -> epoch gate -> twin split -> stale-restore reset ->
+  /// pull peers (epoch-filtered) -> publish our delta (epoch-stamped) ->
+  /// advance state. Re-pulls are idempotent (upsert + HLC), so a partial apply
+  /// leaves state unadvanced and retries next sync rather than losing records.
+  /// Builds the user-facing result messages for a completed pull. Extracted
+  /// so the phrasing and precedence (failures suppress everything else) are
+  /// unit-testable without a full sync.
+  ///
+  /// Peer notices are deliberately NOT here. Stale-epoch and newer-schema
+  /// peers are carried as structured fields on [SyncResult] and rendered as
+  /// localized banners by the Cloud Sync page; building them here produced
+  /// untranslated English, and in the newer-schema case the notice appeared
+  /// twice. The peer parameters are kept so callers need not change and the
+  /// precedence rule stays expressible.
+  @visibleForTesting
+  static List<String> pullResultMessages({
+    required AppLocalizations l10n,
+    required int recordsFailed,
+    required Set<String> skippedPeerDeviceIds,
+    required Set<String> newerSchemaPeerDeviceIds,
+    required bool adoptedFreshIdentity,
+  }) {
+    final resultMessages = <String>[];
+    if (recordsFailed > 0) {
+      resultMessages.add(
+        l10n.settings_cloudSync_result_recordsFailed(recordsFailed),
+      );
+      return resultMessages;
+    }
+    if (adoptedFreshIdentity) {
+      resultMessages.add(l10n.settings_cloudSync_result_adoptedFreshIdentity);
+    }
+    return resultMessages;
+  }
+
+  /// One sync run. Whatever happens inside, deferred writes are pushed
+  /// before it returns (see [_flushAfterRun]).
   Future<SyncResult> performSync() async {
-    _log.debug('performSync() called');
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+    try {
+      return await _performSyncRun();
+    } finally {
+      await _flushAfterRun('sync');
+    }
+  }
+
+  Future<SyncResult> _performSyncRun() async {
     final provider = _cloudProvider;
     if (provider == null) {
-      _log.error('No cloud provider configured');
-      return const SyncResult(
+      return SyncResult(
         status: SyncResultStatus.error,
-        message: 'No cloud provider configured',
+        message: _l10n.settings_cloudSync_result_noProvider,
       );
     }
-
-    _log.debug('Using provider: ${provider.providerName}');
-
     try {
-      _reportProgress(SyncPhase.preparing, 0.0, 'Preparing sync...');
-
-      // Check authentication
-      final isAuth = await _withStep(
-        'auth check',
-        () => provider.isAuthenticated(),
+      _reportProgress(
+        SyncPhase.preparing,
+        0.0,
+        _l10n.settings_cloudSync_progress_preparing,
       );
-      _log.debug('isAuthenticated = $isAuth');
-      if (!isAuth) {
-        return const SyncResult(
+      // Until this sync reaches its clean end, the storage cleanup must not
+      // trust the previous snapshot: an authentication failure, an adoption
+      // halt or a failure below leaves this device behind its peers (storage
+      // GC design, safety). A reset that cannot be written fails this sync
+      // rather than leave a stale caught-up snapshot behind it.
+      await _peerSnapshots?.markNotCaughtUp();
+      if (!await provider.isAuthenticated()) {
+        return SyncResult(
           status: SyncResultStatus.authError,
-          message: 'Not authenticated with cloud provider',
+          message: _l10n.settings_cloudSync_result_notAuthenticated,
         );
       }
-
-      // Get device ID and last sync time
-      final deviceId = await _withStep(
-        'load device id',
-        () => _syncRepository.getDeviceId(),
+      var deviceId = await _syncRepository.getDeviceId();
+      // Scoped to this provider: a cursor minted against a backend we switched
+      // away from reads as null here, forcing a full cold-start reconcile on
+      // the new backend rather than replaying a foreign baseline.
+      final lastSyncTime = await _syncRepository.getLastSyncTime(
+        forProvider: provider.providerId,
       );
-      final lastSyncTime = await _withStep(
-        'load last sync time',
-        () => _syncRepository.getLastSyncTime(),
-      );
+      await _syncRepository.ensureSyncClockConfigured();
 
-      // Try to download existing remote file
+      // Self-heal: stamp an HLC on rows written while their table was not
+      // HLC-capable (pre-v130 enrichment rows, and the tables whose entity
+      // types were missing from hlcTargets until #1144), so they replicate
+      // instead of waiting for a full base republish.
+      await _syncRepository.backfillMissingHlc();
+
+      // ---- Library epoch gate (restore Replace mode) ----
+      // A pending replace runs INSTEAD of a merge, and a marker from an
+      // unaccepted epoch halts everything until the user adopts.
+      final gate = await _runEpochGate(provider);
+      if (gate.terminal != null) return gate.terminal!;
+      final currentEpochId = gate.currentEpochId;
+
+      final folderId = await provider.getOrCreateSyncFolder();
+
+      // ---- Twin-identity split ----
+      // Our own cloud manifest carrying a nonce we never minted means another
+      // install is syncing as this device (a whole-container OS clone). Adopt a
+      // fresh identity now; the old id's files then read as a peer below and
+      // the twins converge in this same sync.
+      final twin = await _detectTwin(provider, deviceId, folderId);
+      deviceId = twin.deviceId;
+      final adoptedFreshIdentity = twin.adopted;
+
+      // ---- Retirement fence ----
+      // The fleet retired this device while it was offline (the tombstone
+      // horizon has moved past what we know): rebuild from the cloud library
+      // before merging anything, or stale local rows would resurrect
+      // fleet-wide. Detected ONLY by the durable marker -- a missing manifest
+      // alone is routine listing lag and cold-starts harmlessly.
+      final fence = await _checkRetirementFence(
+        provider,
+        folderId,
+        deviceId,
+        currentEpochId,
+      );
+      if (fence.terminal != null) return fence.terminal!;
+
+      // ---- Stale-restore: cold-start to re-pull the authoritative library ----
+      var staleRestoreDetected = false;
+      if (await _staleRestoreDetector.isStaleRestore(
+        provider: provider,
+        deviceId: deviceId,
+        folderId: folderId,
+      )) {
+        staleRestoreDetected = true;
+        _log.warning('Stale restore detected; resetting changeset cursors');
+        final db = DatabaseService.instance.database;
+        await PeerCursorStore(db).resetForProvider(provider.providerId);
+        await PublishStateStore(db).resetForProvider(provider.providerId);
+        // NOTE: deliberately do NOT clear the deletion log here. This detector
+        // is a coarse backstop that also fires when the user legitimately
+        // deletes their last HLC-bearing row (local max HLC drops below the
+        // published watermark with no actual restore). Wiping tombstones then
+        // would let a peer's stale live copy resurrect a just-deleted record.
+        // Stale-tombstone safety is already handled by the merge's deletedAt-vs-
+        // updatedAt LWW, so no clear is needed (or safe) here.
+      }
+
+      // ---- Download: pull peers, applying through the existing merge ----
       _reportProgress(
         SyncPhase.downloading,
         0.4,
-        'Checking for remote data...',
+        _l10n.settings_cloudSync_progress_pulling,
       );
-
-      SyncPayload? remotePayload;
-      String? remoteFileId;
-      try {
-        remoteFileId = await _resolveRemoteFileId(
-          provider,
-        ).timeout(const Duration(seconds: 8));
-      } on TimeoutException {
-        _log.warning('Timed out checking for remote sync file');
-        remoteFileId = null;
-      } catch (e, stackTrace) {
-        _log.warning(
-          'Failed to check remote sync file: $e',
-          stackTrace: stackTrace,
-        );
-        remoteFileId = null;
-      }
-
-      if (remoteFileId != null) {
-        try {
-          if (lastSyncTime != null) {
-            final info = await provider.getFileInfo(remoteFileId);
-            if (info != null && !info.modifiedTime.isAfter(lastSyncTime)) {
-              _log.debug(
-                'Remote sync file not newer than last sync; skipping.',
-              );
-              remoteFileId = null;
-            }
-          }
-        } catch (e, stackTrace) {
-          _log.warning(
-            'Failed to check remote file info: $e',
-            stackTrace: stackTrace,
-          );
-        }
-      }
-
-      if (remoteFileId != null) {
-        try {
-          final remoteData = await provider
-              .downloadFile(remoteFileId)
-              .timeout(const Duration(seconds: 15));
-          final remoteJson = _decodePayloadBytes(remoteData);
-          try {
-            remotePayload = _serializer.deserializePayload(remoteJson);
-          } catch (e, stackTrace) {
-            _log.warning(
-              'Failed to parse remote sync payload: $e',
-              stackTrace: stackTrace,
-            );
-            remotePayload = null;
-          }
-
-          // Validate checksum
-          if (remotePayload != null &&
-              !_serializer.validateChecksum(remotePayload)) {
-            _log.warning('Remote sync file has invalid checksum');
-            remotePayload = null;
-          }
-          if (remotePayload != null &&
-              remotePayload.deviceId == deviceId &&
-              lastSyncTime != null) {
-            final lastSyncMs = lastSyncTime.millisecondsSinceEpoch;
-            if (remotePayload.exportedAt <= lastSyncMs) {
-              _log.debug(
-                'Remote payload from this device is not newer; skipping apply.',
-              );
-              remotePayload = null;
-            }
-          }
-        } on TimeoutException {
-          _log.warning('Timed out downloading remote sync file');
-        } catch (e) {
-          _log.warning('Failed to download remote sync file: $e');
-          // Continue with upload-only sync
-        }
-      }
-
-      _reportProgress(SyncPhase.importing, 0.6, 'Processing changes...');
-
       var recordsSynced = 0;
       var conflictsFound = 0;
-
-      if (remotePayload != null && remotePayload.deviceId != deviceId) {
-        _log.info(
-          'Remote data from different device: ${remotePayload.deviceId}',
-        );
-      }
-
-      if (remotePayload != null) {
-        final payload = remotePayload;
-        final mergeResult = await _withStep(
-          'apply remote data',
-          () => _applyRemotePayload(payload, lastSyncTime),
-        );
-        recordsSynced += mergeResult.recordsApplied;
-        conflictsFound += mergeResult.conflictsFound;
-      }
-
-      _reportProgress(SyncPhase.exporting, 0.7, 'Exporting local data...');
-
-      final deletions = await _withStep(
-        'load deletions',
-        () => _syncRepository.getAllDeletions(),
+      var recordsFailed = 0;
+      // The snapshot's time: before the pull, not after the publish (see
+      // PeerSyncSnapshot.takenAt).
+      final pullStartedAt = DateTime.now();
+      final pullResult = await _changesetReader.pull(
+        provider: provider,
+        selfDeviceId: deviceId,
+        folderId: folderId,
+        currentEpochId: currentEpochId,
+        // Reuse the fence check's listing (null after a rejoin, which mutates
+        // the folder and needs a fresh view).
+        preListedFiles: fence.files,
+        peerNames: _peerNames,
+        apply: (payload) async {
+          final r = await _applyRemotePayload(payload, lastSyncTime);
+          recordsSynced += r.recordsApplied;
+          conflictsFound += r.conflictsFound;
+          recordsFailed += r.recordsFailed;
+        },
+        // A peer's base can run to hundreds of megabytes and take minutes
+        // to download and import. Spread it across the pull's share of the
+        // bar (0.4 to 0.8) so the user sees it advancing instead of reading a
+        // motionless bar as a hang and killing the app, which restarts the
+        // whole adoption from part 0 (issue #1421).
+        onBaseDownloadProgress: (manifest, downloaded, total) =>
+            _reportProgress(
+              SyncPhase.downloading,
+              0.4 + 0.15 * (downloaded / total),
+              _l10n.settings_cloudSync_progress_downloadingLibrary(
+                downloaded,
+                total,
+              ),
+            ),
+        applyBaseFile: (path, manifest) async {
+          final r = await _applyRemoteBaseFile(
+            path,
+            lastSyncTime,
+            peerDeviceId: manifest.deviceId,
+            onProgress: (fraction) => _reportProgress(
+              SyncPhase.downloading,
+              0.55 + 0.25 * fraction,
+              _l10n.settings_cloudSync_progress_importingLibrary(
+                (fraction * 100).round(),
+              ),
+            ),
+          );
+          recordsSynced += r.recordsApplied;
+          conflictsFound += r.conflictsFound;
+          recordsFailed += r.recordsFailed;
+        },
       );
-      final localPayload = await _withStep(
-        'export local data',
-        () => _serializer.exportData(
+
+      // Acks to publish: the highest HLC applied from each peer, as recorded
+      // by the reader (including this very pull).
+      final cursorRows = await PeerCursorStore(
+        DatabaseService.instance.database,
+      ).allForProvider(provider.providerId);
+      final appliedPeerHlc = <String, String>{
+        for (final c in cursorRows)
+          if (c.appliedHlcHigh != null) c.peerDeviceId: c.appliedHlcHigh!,
+      };
+
+      // Retire peers idle past the retirement period (best-effort; never
+      // fatal to the sync). Marker-first ordering guarantees the fence. The
+      // sweep reports which peers have DURABLE markers -- tombstone GC below
+      // treats exactly that set as fenced, so a peer whose marker upload
+      // failed keeps blocking GC (it is stale but unfenced). On a sweep
+      // failure fall back to the markers observed in the pull listing.
+      var fencedPeerIds = pullResult.retiredPeerIds;
+      try {
+        fencedPeerIds = await DeviceRetirement().sweep(
+          provider: provider,
+          folderId: folderId,
+          selfDeviceId: deviceId,
+          peerManifests: pullResult.peerManifests,
+          alreadyRetired: pullResult.retiredPeerIds,
+          retiredPeerHasFiles: pullResult.retiredPeerHasFiles,
+          nowMillis: DateTime.now().millisecondsSinceEpoch,
+        );
+      } catch (e) {
+        _log.warning('Device retirement sweep failed (non-fatal): $e');
+      }
+
+      // What the storage cleanup needs from this pull once the manifests are
+      // gone: whether every live peer applied cleanly to its head, and when
+      // each last published. It describes the pull, so it is written once the
+      // pull and the retirement sweep are done: a publish or cleanup failure
+      // later in this sync does not change which peer rows this device holds,
+      // and tying the two together deadlocked a full cloud (every publish
+      // fails, so the cleanup that frees space never ran). Best-effort: a
+      // failed write leaves the not-caught-up mark this sync set at its
+      // start, the cautious state.
+      try {
+        await _peerSnapshots?.write(
+          buildPeerSyncSnapshot(
+            now: pullStartedAt,
+            providerId: provider.providerId,
+            selfDeviceId: deviceId,
+            peerManifests: pullResult.peerManifests,
+            fencedPeerIds: fencedPeerIds,
+            readFailedPeerIds: pullResult.readFailedPeerDeviceIds,
+            newerSchemaPeerIds: pullResult.newerSchemaPeerDeviceIds,
+            incompletePeerIds: pullResult.incompletePeerDeviceIds,
+            unpublishedPeerIds: pullResult.unpublishedPeerDeviceIds,
+            skippedPeerIds: pullResult.skippedPeerDeviceIds,
+            recordsFailed: recordsFailed,
+            manifestListedAt: pullResult.peerManifestListedAt,
+          ),
+        );
+      } catch (e) {
+        _log.warning('Peer sync snapshot write failed (non-fatal): $e');
+      }
+
+      // ---- Upload: publish our delta ----
+      _reportProgress(
+        SyncPhase.uploading,
+        0.8,
+        _l10n.settings_cloudSync_progress_publishing,
+      );
+      final deletions = await _syncRepository.getAllDeletions();
+      var publishAttempted = false;
+      // When the publish read its export snapshot (see
+      // ChangesetWriteResult.snapshotAt); bounds the bookkeeping clear below.
+      int? publishSnapshotAt;
+      if (await _shouldSkipPublishAfterAdopt(provider.providerId, deletions)) {
+        // Just adopted a restored library and have nothing of our own yet: our
+        // library == the adopted epoch the peers already published, so there
+        // is nothing to say. Skip the publish entirely. Once a local change
+        // exists, the writer publishes it as a small changeset against the
+        // adopted watermark, never a redundant full base (#358).
+        _log.info('Skipping publish after adopt (no local changes yet)');
+      } else {
+        publishAttempted = true;
+        final write = await _changesetWriter.publish(
+          provider: provider,
           deviceId: deviceId,
-          since: null, // Full export for now
-          lastSyncTimestamp: lastSyncTime?.millisecondsSinceEpoch,
+          folderId: folderId,
           deletions: deletions,
-        ),
-      );
-
-      _reportProgress(SyncPhase.exporting, 0.8, 'Serializing data...');
-
-      final localJson = _withStepSync(
-        'serialize local payload',
-        () => _serializer.serializePayload(localPayload),
-      );
-      final localData = Uint8List.fromList(utf8.encode(localJson));
-
-      _reportProgress(SyncPhase.uploading, 0.85, 'Uploading sync data...');
-
-      final syncFolder = await _withStep(
-        'resolve sync folder',
-        () => provider.getOrCreateSyncFolder().timeout(
-          const Duration(seconds: 10),
-        ),
-      );
-      const filename = CloudStorageProviderMixin.canonicalSyncFileName;
-
-      _log.debug(
-        'Uploading ${localData.length} bytes to $syncFolder/$filename...',
-      );
-      final result = await _withStep(
-        'upload sync file',
-        () => provider
-            .uploadFile(localData, filename, folderId: syncFolder)
-            .timeout(const Duration(seconds: 180)),
-      );
-      _log.debug('Upload complete! fileId = ${result.fileId}');
-
-      // Update sync state
-      await _withStep(
-        'store remote file id',
-        () => _syncRepository.setRemoteFileId(result.fileId),
-      );
-      await _withStep(
-        'store last sync time',
-        () => _syncRepository.updateLastSyncTime(result.uploadTime),
-      );
-
-      // Keep deletions for propagation, but prune old entries
-      await _withStep(
-        'clear old deletions',
-        () => _syncRepository.clearOldDeletions(),
-      );
-      await _withStep(
-        'clear pending records',
-        () => _syncRepository.clearPendingRecords(),
-      );
-      if (conflictsFound == 0) {
-        await _withStep(
-          'clear sync records',
-          () => _syncRepository.clearAllSyncRecords(),
+          epochId: currentEpochId,
+          uploadNonce: _uuid.v4(),
+          // Recorded by the writer at the manifest, not here: this publish may
+          // write none (nothing to say), or one carrying a different nonce (a
+          // resumed base), and may fail after one landed (a compaction). A
+          // ring that guesses gets one of those wrong, and a wrong guess reads
+          // as a twin on the next sync: a new identity for this device, and
+          // another full base to upload (#733, #3822).
+          onManifestNonce: (nonce) =>
+              _recordUploadNonce(nonce, provider.providerId),
+          deviceName: await _deviceNameForManifest(),
+          appliedPeerHlc: appliedPeerHlc,
+          // Republish our log from what we actually hold now. Without this
+          // the cold-start above never converges: our manifest keeps
+          // claiming an HLC we no longer have, so the next sync detects the
+          // same "stale restore" and wipes every peer cursor again -- a full
+          // re-download of the whole fleet's data, every sync (#997).
+          forceBase: staleRestoreDetected,
+          // A full base republish -- what a wiped or replaced backend forces
+          // -- can run to hundreds of megabytes. Spread it across the back
+          // fifth of the bar so the user sees it advancing, instead of
+          // reading a motionless 80% as a hang and killing the app, which
+          // restarts the whole upload from part 0 (issue #1032).
+          onBasePartUploaded: (uploaded, total) => _reportProgress(
+            SyncPhase.uploading,
+            0.8 + 0.2 * (uploaded / total),
+            _l10n.settings_cloudSync_progress_uploadingLibrary(uploaded, total),
+          ),
         );
+        publishSnapshotAt = write.snapshotAt;
       }
 
-      _reportProgress(SyncPhase.complete, 1.0, 'Sync complete');
+      // ---- Keyslot self-heal (encrypted libraries) ----
+      // Keyslot list/upload use an exempt name, so the decorated provider is
+      // equivalent to the raw one for this call. Never fatal to the sync.
+      final enc = _encryptionService;
+      if (enc != null) {
+        try {
+          await enc.selfHealKeyslots(provider);
+        } catch (e) {
+          _log.warning('Keyslot self-heal failed (non-fatal): $e');
+        }
+      }
 
-      _log.info('Sync completed successfully');
+      // A peer's computer or transmitter may have arrived without its
+      // Equipment item, or an older peer may have deleted one as "unlink
+      // only" (issue #3676). Give each its item back BEFORE the tombstone GC
+      // below, while the deleted id's tombstone still steers the re-mint.
+      // Ids are deterministic; what it writes keeps a NULL hlc, so the next
+      // sync publishes it.
+      try {
+        final db = DatabaseService.instance.database;
+        final healed = await ensureDeviceGearLinks(db);
+        // The heal writes raw SQL, which Drift's streams do not see; tell
+        // open screens, so a computer that just got its item appears.
+        if (healed.computersLinked + healed.transmittersLinked > 0) {
+          db.notifyUpdates({
+            TableUpdate.onTable(db.equipment),
+            TableUpdate.onTable(db.diveComputers),
+            TableUpdate.onTable(db.transmitters),
+            TableUpdate.onTable(db.diveEquipment),
+          });
+        }
+      } catch (e) {
+        _log.warning('Device gear heal failed (non-fatal): $e');
+      }
 
+      // Advance state only on a clean apply (idempotent re-pull otherwise).
+      final now = DateTime.now();
+      if (recordsFailed == 0) {
+        await _syncRepository.updateLastSyncTime(
+          now,
+          providerId: provider.providerId,
+        );
+      }
+      await _syncRepository.persistSyncClock();
+      // Fleet-acked tombstone GC (replaces the unconditional 90-day purge).
+      // Only durably fenced peers (retirement marker confirmed present) are
+      // exempt from the ack constraint -- see the sweep above.
+      final gc = TombstoneHorizon.compute(
+        selfDeviceId: deviceId,
+        peerManifests: pullResult.peerManifests,
+        retiredPeerIds: fencedPeerIds,
+        // Paired nearby devices hold tombstones back too (issue #3731).
+        nearbyPeers: [
+          for (final peer in await NearbyPeerStore(
+            DatabaseService.instance.database,
+          ).all())
+            NearbyTombstoneAck(
+              deviceId: peer.peerDeviceId,
+              ackedHlc: peer.peerAppliedHlcHigh,
+              lastSeenAt: peer.lastSeenAt ?? peer.pairedAt,
+            ),
+        ],
+        nowMillis: now.millisecondsSinceEpoch,
+      );
+      if (gc.allowed) {
+        await _syncRepository.clearAcknowledgedDeletions(
+          upToHlc: gc.upToHlc,
+          floorCutoffMillis:
+              now.millisecondsSinceEpoch - SyncLiveness.gcFloorMillis,
+        );
+      }
+      // Clear upload-side bookkeeping only when a publish actually ran. On a
+      // skipped (post-adopt, nothing-to-say) sync, an edit can land between
+      // the skip decision and this cleanup; wiping its pending row here would
+      // make every following sync skip again and the edit would never publish
+      // until some unrelated later edit re-tripped the gate.
+      //
+      // And clear only what the published snapshot covered. Pending marks are
+      // an export source for clockless children (a cleared tank link travels
+      // on its own, not by re-stamping its dive), so a mark made after the
+      // snapshot was read, during the upload or the steps since, is not in
+      // what was sent; wiping it would drop that edit. A resumed base has no
+      // snapshot from this run, so nothing is cleared and the next publish
+      // carries every mark.
+      final snapshotAt = publishSnapshotAt;
+      if (publishAttempted && snapshotAt != null) {
+        await _syncRepository.clearPendingRecords(markedBefore: snapshotAt);
+        if (conflictsFound == 0) {
+          await _syncRepository.clearAllSyncRecords(markedBefore: snapshotAt);
+        }
+      }
+
+      _reportProgress(
+        SyncPhase.complete,
+        1.0,
+        _l10n.settings_cloudSync_status_syncComplete,
+      );
+      final resultMessages = pullResultMessages(
+        l10n: _l10n,
+        recordsFailed: recordsFailed,
+        skippedPeerDeviceIds: pullResult.skippedPeerDeviceIds,
+        newerSchemaPeerDeviceIds: pullResult.newerSchemaPeerDeviceIds,
+        adoptedFreshIdentity: adoptedFreshIdentity,
+      );
+      final resultMessage = resultMessages.isEmpty
+          ? null
+          : resultMessages.join(' ');
       return SyncResult(
-        status: conflictsFound > 0
-            ? SyncResultStatus.hasConflicts
-            : SyncResultStatus.success,
+        status: recordsFailed > 0
+            ? SyncResultStatus.error
+            : (conflictsFound > 0
+                  ? SyncResultStatus.hasConflicts
+                  : SyncResultStatus.success),
+        message: resultMessage,
         recordsSynced: recordsSynced,
         conflictsFound: conflictsFound,
-        lastSyncTime: result.uploadTime,
+        lastSyncTime: recordsFailed == 0 ? now : null,
+        adoptedFreshIdentity: adoptedFreshIdentity,
+        skippedPeerDeviceIds: pullResult.skippedPeerDeviceIds,
+        skippedPeerNames: pullResult.skippedPeerNames,
+        newerSchemaPeerDeviceIds: pullResult.newerSchemaPeerDeviceIds,
+        newerSchemaPeerNames: pullResult.newerSchemaPeerNames,
+        olderSchemaPeerDeviceIds: pullResult.olderSchemaPeerDeviceIds,
+        olderSchemaPeerNames: pullResult.olderSchemaPeerNames,
+        readFailedPeerDeviceIds: pullResult.readFailedPeerDeviceIds,
+        readFailedPeerNames: pullResult.readFailedPeerNames,
       );
     } on TimeoutException {
-      _log.warning('Sync timed out while uploading');
-      return const SyncResult(
-        status: SyncResultStatus.networkError,
-        message: 'Sync timed out while uploading',
-      );
-    } on SyncStepException catch (e) {
-      return SyncResult(status: SyncResultStatus.error, message: e.toString());
-    } on CloudStorageException catch (e) {
-      _log.error(
-        'Cloud storage error during sync',
-        error: e,
-        stackTrace: e.stackTrace,
-      );
+      _log.warning('Sync timed out');
       return SyncResult(
         status: SyncResultStatus.networkError,
+        message: _l10n.settings_cloudSync_result_timedOut,
+      );
+    } on SyncEncryptionRequired catch (e) {
+      _log.info('Sync halted: encrypted library requires a passphrase');
+      return SyncResult(
+        status: SyncResultStatus.awaitingPassphrase,
         message: e.message,
       );
+    } on CloudStorageException catch (e) {
+      // toString carries the underlying cause the message omits, which is
+      // what a user's diagnostics need to tell an outage from a sign-in.
+      _log.warning('Sync failed: $e');
+      if (e.accessRefused) {
+        return SyncResult(
+          status: SyncResultStatus.authError,
+          message: e.message,
+          accessRefused: true,
+        );
+      }
+      return SyncResult(
+        status: SyncResultStatus.networkError,
+        message: _causedByTimeout(e)
+            ? _l10n.settings_cloudSync_result_timedOut
+            : e.message,
+      );
     } catch (e, stackTrace) {
-      _log.error('Sync failed', error: e, stackTrace: stackTrace);
+      _log.error('Changeset sync failed', error: e, stackTrace: stackTrace);
       return SyncResult(
         status: SyncResultStatus.error,
         message: _formatSyncError(e, stackTrace),
@@ -485,22 +1104,352 @@ class SyncService {
     }
   }
 
-  Future<T> _withStep<T>(String step, Future<T> Function() action) async {
+  /// Run the library-epoch gate. Returns a terminal result the caller must
+  /// return immediately, or the resolved currentEpochId to proceed with.
+  /// Mirrors the inline gate the legacy full-file performSync used.
+  String? _cachedDeviceName;
+  bool _deviceNameResolved = false;
+
+  /// The name published on this device's manifest so peers can name it in the
+  /// "still needs to adopt" banner. Resolved once per service lifetime: a
+  /// device is not renamed while the app runs, and publish is on the sync hot
+  /// path. Null when nothing on this platform identifies the device.
+  Future<String?> _deviceNameForManifest() async {
+    if (_deviceNameResolved) return _cachedDeviceName;
+    _cachedDeviceName = (await SyncDeviceMetadata(
+      _syncRepository,
+    ).resolve()).name;
+    _deviceNameResolved = true;
+    return _cachedDeviceName;
+  }
+
+  Future<_EpochGate> _runEpochGate(CloudStorageProvider provider) async {
+    final epochStore = _epochStore;
+    if (epochStore == null) return const _EpochGate.proceed(null);
+
+    final pending = epochStore.pendingReplace;
+    if (pending != null) {
+      return _EpochGate.halt(await executeLibraryReplace(pending));
+    }
+    final accepted =
+        await _syncRepository.getLastAcceptedEpochId() ??
+        epochStore.lastAcceptedEpochId;
+    LibraryEpochMarker? marker;
     try {
-      return await action();
-    } catch (e, stackTrace) {
-      _log.error('Sync step failed: $step', error: e, stackTrace: stackTrace);
-      throw SyncStepException(step, e);
+      marker = await readLibraryEpochMarker(provider);
+    } on SyncEncryptionRequired {
+      // Not unreadable-corrupt: encrypted. Reaches performSync's handler,
+      // which halts with awaitingPassphrase instead of a generic error.
+      rethrow;
+    } on TimeoutException {
+      // Not unreadable either: the backend could not be reached. This is the
+      // sync's first cloud request, so a dead connection or an expired
+      // sign-in surfaces here first. performSync's handlers still halt the
+      // sync, but say what went wrong instead of blaming the marker (#2332).
+      rethrow;
+    } on CloudStorageException {
+      rethrow;
+    } catch (e) {
+      _log.warning('Library epoch marker unreadable; failing closed: $e');
+      return _EpochGate.halt(
+        SyncResult(
+          status: SyncResultStatus.error,
+          message: _l10n.settings_cloudSync_result_epochMarkerUnreadable,
+        ),
+      );
+    }
+    if (marker == null) {
+      if (accepted != null) {
+        // On an epoch but the marker vanished: self-heal it from the mirror
+        // and continue as current.
+        final stored = epochStore.lastAcceptedMarker;
+        if (stored == null) {
+          // No marker in the cloud AND no mirror to rebuild one from: this
+          // epoch can never be proven to a peer or republished, yet the reader
+          // fences off every peer stamped differently -- which, with the marker
+          // gone, is all of them. Peers meanwhile see no marker, stay in the
+          // pre-epoch world, and merge us happily: sync silently goes one-way
+          // behind a green "Sync complete". A missing marker means the fence
+          // is already gone fleet-wide, so holding an unprovable epoch buys no
+          // safety and only isolates this device. Rejoin the pre-epoch world.
+          _log.warning(
+            'Accepted epoch $accepted has neither a cloud marker nor a local '
+            'mirror; dropping to the pre-epoch world so peers merge again',
+          );
+          await _syncRepository.setLastAcceptedEpochId(null);
+          return const _EpochGate.proceed(null);
+        }
+        try {
+          await writeLibraryEpochMarker(provider, stored);
+        } catch (e) {
+          _log.warning('Could not self-heal epoch marker: $e');
+        }
+        return _EpochGate.proceed(accepted);
+      }
+      return const _EpochGate.proceed(null); // pre-epoch world
+    }
+    if (marker.epochId == accepted) {
+      return _EpochGate.proceed(accepted);
+    }
+    // Before halting for adoption, make sure the marked library is actually
+    // readable. A marker with no current-format (ssv1) library is either a
+    // replace still in flight (wait) or orphaned / old-format (unrecoverable);
+    // for the latter, re-establish this backend from our own library instead
+    // of bricking sync in an un-adoptable awaiting-adoption loop.
+    if (await _recoverUnreadableEpoch(provider, marker)) {
+      return _EpochGate.proceed(marker.epochId);
+    }
+    _log.info(
+      'Cloud library was replaced (epoch ${marker.epochId}); '
+      'halting sync until the user adopts',
+    );
+    return _EpochGate.halt(
+      SyncResult(
+        status: SyncResultStatus.awaitingAdoption,
+        message: _l10n.settings_cloudSync_result_libraryReplacedRemotely,
+        replaceMarker: marker,
+      ),
+    );
+  }
+
+  /// When [marker]'s epoch has no readable (current-format) library, decide
+  /// whether to recover or to wait. Recovery -- re-establish this backend from
+  /// the local library (wipe stale files, cold-start the publish state, adopt
+  /// the epoch) -- happens when the backend holds only old-format files (a
+  /// pre-changeset app version) or the marker is older than the grace window (a
+  /// replace whose base never landed). Returns true when it recovered; false to
+  /// wait (a replace in flight) or when the library is adoptable. The caller
+  /// then publishes (in performSync, or the notifier's follow-up sync after
+  /// adopt), writing our library as the new base stamped with this epoch.
+  Future<bool> _recoverUnreadableEpoch(
+    CloudStorageProvider provider,
+    LibraryEpochMarker marker,
+  ) async {
+    final epochStore = _epochStore;
+    if (epochStore == null) return false;
+    final folderId = await provider.getOrCreateSyncFolder();
+    if (await _epochHasReadableLibrary(provider, folderId, marker.epochId)) {
+      return false; // adoptable -> caller halts for adoption
+    }
+    final legacy = await provider.listFiles(
+      namePattern: CloudStorageProviderMixin.syncFileStem,
+    );
+    final ageMs = DateTime.now().millisecondsSinceEpoch - marker.replacedAt;
+    if (legacy.isEmpty && ageMs <= _unreadableEpochGraceMs) {
+      return false; // possibly a replace in flight -> wait
+    }
+    _log.warning(
+      'Epoch ${marker.epochId} has no readable library; re-establishing this '
+      'backend from the local library',
+    );
+    await _reestablishEpochFromLocalLibrary(provider, marker);
+    return true;
+  }
+
+  /// Make THIS device's library the authoritative base for [marker]'s epoch:
+  /// wipe the (unreadable/incomplete) sync files, drop this backend's publish
+  /// and peer state so the next sync republishes a full base, and accept the
+  /// epoch locally. Shared by the automatic unreadable-epoch recovery and the
+  /// user-driven [rebuildBackendFromThisDevice].
+  Future<void> _reestablishEpochFromLocalLibrary(
+    CloudStorageProvider provider,
+    LibraryEpochMarker marker, {
+    SyncCleanupProgress? onProgress,
+  }) async {
+    await deleteAllSyncFiles(provider, onProgress: onProgress);
+    final db = DatabaseService.instance.database;
+    await PublishStateStore(db).resetForProvider(provider.providerId);
+    await PeerCursorStore(db).resetForProvider(provider.providerId);
+    await _syncRepository.setLastAcceptedEpochId(marker.epochId);
+    await _epochStore?.setLastAccepted(marker);
+  }
+
+  /// User-driven escape from a stuck library replacement (issue #509): the
+  /// device that ran "Replace everywhere" went offline before uploading the new
+  /// base, so every other device waits forever on "still uploading". This
+  /// forces the re-establish that [_recoverUnreadableEpoch] defers during its
+  /// grace window: THIS device's library becomes the epoch's authoritative
+  /// base, and the caller's follow-up sync publishes it. Peers then adopt from
+  /// us instead of the offline device.
+  Future<SyncResult> rebuildBackendFromThisDevice({
+    SyncCleanupProgress? onProgress,
+  }) async {
+    try {
+      return await _rebuildBackendFromThisDeviceRun(onProgress: onProgress);
+    } finally {
+      await _flushAfterRun('backend rebuild');
     }
   }
 
-  T _withStepSync<T>(String step, T Function() action) {
-    try {
-      return action();
-    } catch (e, stackTrace) {
-      _log.error('Sync step failed: $step', error: e, stackTrace: stackTrace);
-      throw SyncStepException(step, e);
+  Future<SyncResult> _rebuildBackendFromThisDeviceRun({
+    SyncCleanupProgress? onProgress,
+  }) async {
+    final provider = _cloudProvider;
+    if (provider == null) {
+      return SyncResult(
+        status: SyncResultStatus.error,
+        message: _l10n.settings_cloudSync_result_noProvider,
+      );
     }
+    try {
+      final marker = await readLibraryEpochMarker(provider);
+      if (marker == null) {
+        return SyncResult(
+          status: SyncResultStatus.error,
+          message: _l10n.settings_cloudSync_result_noReplacementToRebuild,
+        );
+      }
+      await _reestablishEpochFromLocalLibrary(
+        provider,
+        marker,
+        onProgress: onProgress,
+      );
+      _log.info('Rebuilt backend from this device for epoch ${marker.epochId}');
+      return SyncResult(
+        status: SyncResultStatus.success,
+        message: _l10n.settings_cloudSync_result_rebuiltFromThisDevice,
+      );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to rebuild backend from this device',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return _libraryFailure(
+        e,
+        _l10n.settings_cloudSync_result_rebuildFailed('$e'),
+      );
+    }
+  }
+
+  /// True if any device has published a current-format (ssv1) base for
+  /// [epochId] -- i.e. the marked library is actually adoptable.
+  Future<bool> _epochHasReadableLibrary(
+    CloudStorageProvider provider,
+    String folderId,
+    String epochId,
+  ) async {
+    final files = await provider.listFiles(
+      folderId: folderId,
+      namePattern: ChangesetLogLayout.prefix,
+    );
+    for (final f in files) {
+      if (!ChangesetLogLayout.isManifest(f.name)) continue;
+      final m = await _usableManifest(provider, f.id);
+      if (m != null && m.epochId == epochId && m.baseSeq != null) return true;
+    }
+    return false;
+  }
+
+  /// The manifest in [fileId], or null when the cloud holds one this device
+  /// cannot use.
+  ///
+  /// A manifest that could not be fetched says nothing about the cloud, so that
+  /// failure propagates. Both callers count what is readable to decide whether
+  /// a library exists, and a "no" ends in a delete-all refill or in
+  /// [_reestablishEpochFromLocalLibrary] wiping every sync file: a dropped
+  /// connection must not be able to answer that.
+  Future<SyncManifest?> _usableManifest(
+    CloudStorageProvider provider,
+    String fileId,
+  ) async {
+    final Uint8List bytes;
+    try {
+      bytes = await provider.downloadFile(fileId);
+    } on EnvelopeCorruptException {
+      return null;
+    } on SyncEncryptionRequired {
+      return null;
+    }
+    try {
+      return SyncManifest.fromBytes(bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Twin-identity split: if this device's own cloud manifest carries an
+  /// upload nonce we never minted, another install is syncing as us. Adopt a
+  /// fresh identity and re-seed the clock; the returned id is used for the rest
+  /// of the sync so the old id's files merge as a peer and the twins converge.
+  Future<({String deviceId, bool adopted})> _detectTwin(
+    CloudStorageProvider provider,
+    String deviceId,
+    String folderId,
+  ) async {
+    final initializer = _syncInitializer;
+    if (initializer == null) return (deviceId: deviceId, adopted: false);
+    final manifest = await _readManifest(provider, folderId, deviceId);
+    final nonce = manifest?.uploadNonce;
+    // Require the manifest to actually claim our id: a manifest at our filename
+    // whose body names a different device is mislabeled, not evidence that
+    // another install is syncing as us.
+    if (manifest == null || manifest.deviceId != deviceId || nonce == null) {
+      return (deviceId: deviceId, adopted: false);
+    }
+    if (!await initializer.isForeignUploadNonce(nonce, provider.providerId)) {
+      // Ours, and the one the next sync will read. Refresh it, so a run of
+      // publishes that fail at the manifest cannot push it out of the ring.
+      await initializer.recordUploadNonce(nonce, provider.providerId);
+      return (deviceId: deviceId, adopted: false);
+    }
+    _log.warning(
+      'Another install is uploading as this device id; adopting a fresh '
+      'sync identity to split the twins',
+    );
+    final newId = await initializer.adoptFreshIdentity();
+    // Re-seed the HLC clock under the new node id so remote HLCs received while
+    // merging the converging files advance it instead of no-opping.
+    await _syncRepository.ensureSyncClockConfigured();
+    return (deviceId: newId, adopted: true);
+  }
+
+  Future<void> _recordUploadNonce(String nonce, String providerId) async {
+    await _syncInitializer?.recordUploadNonce(nonce, providerId);
+  }
+
+  /// Read a device's own changeset manifest from the cloud, or null if absent
+  /// or unparseable.
+  Future<SyncManifest?> _readManifest(
+    CloudStorageProvider provider,
+    String folderId,
+    String deviceId,
+  ) async {
+    final name = ChangesetLogLayout.manifestName(deviceId);
+    final files = await provider.listFiles(
+      folderId: folderId,
+      namePattern: ChangesetLogLayout.prefix,
+    );
+    final match = files.where((f) => f.name == name).firstOrNull;
+    if (match == null) return null;
+    try {
+      return SyncManifest.fromBytes(await provider.downloadFile(match.id));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What a library operation that failed on [e] reports: a refusal as one, so
+  /// its error offers a sign-in (issue #3811), anything else as [message].
+  SyncResult _libraryFailure(Object e, String message) =>
+      e is CloudStorageException && e.accessRefused
+      ? SyncResult(
+          status: SyncResultStatus.authError,
+          message: e.message,
+          accessRefused: true,
+        )
+      : SyncResult(status: SyncResultStatus.error, message: message);
+
+  /// True when [e] is a provider's report of a missed deadline. Providers put
+  /// HTTP timeouts on every request and wrap a miss like any other failure,
+  /// sometimes more than once as calls nest, so the chain of causes is walked
+  /// rather than only the first link.
+  static bool _causedByTimeout(CloudStorageException e) {
+    Object? cause = e.cause;
+    while (cause is CloudStorageException) {
+      cause = cause.cause;
+    }
+    return cause is TimeoutException;
   }
 
   String _formatSyncError(Object error, StackTrace stackTrace) {
@@ -516,67 +1465,192 @@ class SyncService {
     return '${error.toString()} ($cleaned)';
   }
 
-  String _decodePayloadBytes(Uint8List data) {
-    try {
-      return utf8.decode(data);
-    } catch (_) {
-      return String.fromCharCodes(data);
-    }
-  }
-
-  Future<String?> _resolveRemoteFileId(CloudStorageProvider provider) async {
-    var remoteFileId = await _syncRepository.getRemoteFileId();
-    if (remoteFileId != null) {
-      final exists = await provider.fileExists(remoteFileId);
-      if (exists) {
-        return remoteFileId;
-      }
-      await _syncRepository.setRemoteFileId(null);
-      remoteFileId = null;
-    }
-
-    try {
-      final files = await provider.listFiles(
-        namePattern: CloudStorageProviderMixin.syncFileStem,
-      );
-      if (files.isEmpty) return null;
-
-      CloudFileInfo? selected = files.firstWhere(
-        (f) => f.name == CloudStorageProviderMixin.canonicalSyncFileName,
-        orElse: () => files.first,
-      );
-
-      final candidates = files.where((f) => !_isConflictCopy(f.name)).toList();
-      if (candidates.isNotEmpty) {
-        candidates.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
-        selected = candidates.first;
-      }
-
-      await _syncRepository.setRemoteFileId(selected.id);
-      return selected.id;
-    } catch (e) {
-      _log.warning('Failed to resolve remote sync file: $e');
-      return null;
-    }
-  }
-
   Future<_MergeResult> _applyRemotePayload(
+    SyncPayload remotePayload,
+    DateTime? localLastSync,
+  ) async {
+    // Wrap deletions + merge in a single transaction with deferred FK checks.
+    // Without this, intra-payload references (e.g. a dive whose siteId points
+    // at a dive site appearing later in the apply order, or a dive whose
+    // courseId points at a course in the same payload) fail immediately and
+    // the affected rows never reach the receiving DB. See
+    // docs/design/findings/2026-06-02-icloud-sync-diagnosis.md.
+    try {
+      return await ChangeLogScope.run(
+        DatabaseService.instance.databaseOrNull,
+        source: ChangeLogSource.sync,
+        deviceId: remotePayload.deviceId,
+        lease: kChangeLogLongLease,
+        body: () => _serializer.applyInDeferredFkTransaction(() async {
+          final result = await _applyRemotePayloadInner(
+            remotePayload,
+            localLastSync,
+          );
+          await _repairLegacyPeerRows(
+            touchedDiveIds: {
+              for (final dive in remotePayload.data.dives)
+                ?dive['id'] as String?,
+              for (final source in remotePayload.data.diveDataSources)
+                ?source['diveId'] as String?,
+              // A series row can arrive alone, and the duplicate-series
+              // repair reads only the dives named here (issue #4847).
+              for (final series in remotePayload.data.diveProfileSeries)
+                ?series['diveId'] as String?,
+            },
+          );
+          return result;
+        }),
+      );
+    } finally {
+      await _handOnDeletedIdentifications();
+    }
+  }
+
+  /// Runs the data rungs over what was just applied, because this database
+  /// ran them before those rows arrived, or never ran them if it is new. Each
+  /// reads only rows still in the old shape, so it is a cheap no-op once every
+  /// peer is current, and each leaves the sync stamp alone, as its rung does:
+  /// the sending peer makes the same change when it upgrades. A combined dive
+  /// keeps its shape once repaired, and a dive with no temperature on any
+  /// source stays empty once filled, so those two read only
+  /// [touchedDiveIds], the dives a payload touched; null, for a base file or
+  /// an adopted library, sweeps them all.
+  ///
+  /// A peer below v318 still publishes the CNS, OTU and deco model inside a
+  /// dive's computer tissue snapshot, with the dive's own columns empty
+  /// (issue #2555). One below v337 publishes `weather_fetched_at` in
+  /// milliseconds, as does a sync store written before it (issue #4119). One
+  /// below v340 publishes a combined dive with its first segment's water
+  /// temperature, CNS and OTU (issue #4136). One below v346 publishes an
+  /// item's last service date older than its newest service record when an
+  /// older record was logged there (issue #4201). One below v349 publishes a
+  /// downloaded dive with no water temperature, kept on its source row only
+  /// (issue #4333); that fill reads the same touched dives. One below v356
+  /// publishes a dive combined before v184 with no merge slot on its source
+  /// rows, which a consolidation then left open to a re-parse (issue
+  /// #4367); that stamp reads the same touched dives too. One below v358
+  /// publishes a UDDF import's 1 to 10 rating or a 0 (issue #4415); that
+  /// one is not repaired here but as the serializer writes each dive row
+  /// (`withDiveRatingInScale`), which conflict resolution also goes through.
+  /// One below v368 publishes a cylinder volume typed in cubic feet and
+  /// stored as water volume (issue #4534). One below v380 publishes a lone
+  /// download with no primary row, which the v356 stamp then took for a
+  /// combined dive, and a live series duplicating its source's own under
+  /// another computer's label (issue #4847); both read the touched dives.
+  Future<void> _repairLegacyPeerRows({Iterable<String>? touchedDiveIds}) async {
+    try {
+      final db = DatabaseService.instance.database;
+      await repairWeatherFetchedAtSeconds(db);
+      await repairCombinedDiveSummaries(db, diveIds: touchedDiveIds);
+      await moveComputerTissueScalars(db);
+      // Raw SQL, which Drift's streams do not see; tell open screens, as the
+      // base-file path runs this after its apply has committed.
+      if (await fillDiveWaterTempsFromSources(db, diveIds: touchedDiveIds) >
+          0) {
+        db.notifyUpdates({TableUpdate.onTable(db.dives)});
+      }
+      if (await stampCombinedDiveSourceSlots(db, diveIds: touchedDiveIds) > 0) {
+        db.notifyUpdates({TableUpdate.onTable(db.diveDataSources)});
+      }
+      if (await repairLoneDownloadSources(db, diveIds: touchedDiveIds) > 0) {
+        db.notifyUpdates({TableUpdate.onTable(db.diveDataSources)});
+      }
+      if (await demoteDuplicatePrimarySeries(db, diveIds: touchedDiveIds) > 0) {
+        db.notifyUpdates({TableUpdate.onTable(db.diveProfileSeries)});
+      }
+      if (await repairLastServiceDates(db) > 0) {
+        db.notifyUpdates({TableUpdate.onTable(db.equipment)});
+      }
+      if (await repairCylinderVolumeCubicFeet(db) > 0) {
+        db.notifyUpdates({TableUpdate.onTable(db.equipmentAttributes)});
+      }
+    } catch (e, st) {
+      // The applied rows are already in place; losing this repair costs only
+      // the old values, never the sync.
+      _log.warning(
+        'Repairing rows from an older peer failed (non-fatal)',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  Future<_MergeResult> _applyRemotePayloadInner(
     SyncPayload remotePayload,
     DateTime? localLastSync,
   ) async {
     final lastSyncMs = localLastSync?.millisecondsSinceEpoch;
     var recordsApplied = 0;
     var conflictsFound = 0;
+    var recordsFailed = 0;
     final pendingByEntity = await _pendingRecordMap();
+
+    // A payload can present a record as LIVE and ALSO carry a tombstone for the
+    // same key -- the on-the-wire signature of a composite-natural-key junction
+    // (equipment_set_items, dive_equipment) rebuilt by its repository via
+    // delete-all-then-reinsert. A row cannot be both present and deleted in one
+    // source snapshot, so the live table is authoritative and the tombstone is
+    // a stale artifact. Collect these self-contradicted keys: the deletion is
+    // skipped below and the live row wins (clearing any local tombstone in the
+    // merge heals a peer that already dropped the row on the buggy build).
+    final contradictedByEntity = <String, Set<String>>{};
+    // toJson omits the inbound-only legacy sample entities, so they are
+    // folded back in from the typed fields fromJson already parsed them
+    // into, the way the adopt path does. Without them a peer below v183
+    // that publishes a row both live and tombstoned (consolidation undo
+    // re-inserts the snapshot's rows while the old tombstones are still in
+    // its deletion_log) has the tombstone win: these entities carry no
+    // updatedAt, so _mergeEntity's local-deletion guard has no "newer than
+    // the deletion" escape and skips the live row entirely.
+    final liveByType = {
+      ...remotePayload.data.toJson(),
+      'diveProfiles': remotePayload.data.diveProfiles,
+      'tankPressureProfiles': remotePayload.data.tankPressureProfiles,
+    };
+    for (final delEntry in remotePayload.deletions.entries) {
+      final deletedIds = {for (final d in delEntry.value) d.id};
+      if (deletedIds.isEmpty) continue;
+      final live = liveByType[delEntry.key];
+      if (live is! List) continue;
+      final contradicted = <String>{};
+      for (final rec in live) {
+        if (rec is! Map<String, dynamic>) continue;
+        final id = recordIdForEntity(delEntry.key, rec);
+        if (id != null && deletedIds.contains(id)) contradicted.add(id);
+      }
+      if (contradicted.isNotEmpty) {
+        contradictedByEntity[delEntry.key] = contradicted;
+      }
+    }
+    final payloadScopes = _payloadEventScopes(
+      remotePayload.deletions,
+      remotePayload.exportedAt,
+    );
+    if (payloadScopes != null) {
+      for (final rec in remotePayload.data.diveProfileEvents) {
+        _addScopeContradiction(contradictedByEntity, payloadScopes, rec);
+      }
+    }
 
     final deletionResult = await _applyRemoteDeletions(
       remotePayload.deletions,
       lastSyncMs,
       remotePayload.exportedAt,
       pendingByEntity,
+      contradictedByEntity,
     );
     recordsApplied += deletionResult.recordsApplied;
     conflictsFound += deletionResult.conflictsFound;
+    recordsFailed += deletionResult.recordsFailed;
+
+    // Local tombstones (including any just applied from this payload's
+    // deletions) guard the merge below: a remote LIVE record must not
+    // resurrect a record we have deleted unless the remote edit is newer than
+    // our deletion. Loaded after _applyRemoteDeletions so a tombstone arriving
+    // in the same payload also protects against a self-contradictory payload
+    // that carries both a delete and a stale live copy of the same record.
+    final (deletedAt: tombstonesByEntity, clocks: tombstoneClocks) =
+        await _deletionMaps();
 
     final data = remotePayload.data;
 
@@ -603,7 +1677,120 @@ class SyncService {
             records: data.itineraryDays,
             hasUpdatedAt: true,
           ),
+          (
+            type: 'tripDayWeather',
+            records: data.tripDayWeather,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'checklistTemplates',
+            records: data.checklistTemplates,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'checklistTemplateSections',
+            records: data.checklistTemplateSections,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'checklistTemplateItems',
+            records: data.checklistTemplateItems,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tripChecklists',
+            records: data.tripChecklists,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tripChecklistSections',
+            records: data.tripChecklistSections,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tripChecklistItems',
+            records: data.tripChecklistItems,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveChecklistTemplates',
+            records: data.preDiveChecklistTemplates,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveChecklistTemplateSections',
+            records: data.preDiveChecklistTemplateSections,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveChecklistTemplateItems',
+            records: data.preDiveChecklistTemplateItems,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveSessions',
+            records: data.preDiveSessions,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveSessionSections',
+            records: data.preDiveSessionSections,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveSessionItems',
+            records: data.preDiveSessionItems,
+            hasUpdatedAt: true,
+          ),
+          (type: 'gpsTracks', records: data.gpsTracks, hasUpdatedAt: true),
+          (type: 'navTracks', records: data.navTracks, hasUpdatedAt: true),
+          // Before divePlans, whose series_id references it.
+          (
+            type: 'divePlanSeries',
+            records: data.divePlanSeries,
+            hasUpdatedAt: true,
+          ),
+          (type: 'divePlans', records: data.divePlans, hasUpdatedAt: true),
+          (
+            type: 'divePlanTanks',
+            records: data.divePlanTanks,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'divePlanSegments',
+            records: data.divePlanSegments,
+            hasUpdatedAt: true,
+          ),
+          // Mission rows reference only their plan, applied above.
+          (
+            type: 'divePlanMissions',
+            records: data.divePlanMissions,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'divePlanMissionLegs',
+            records: data.divePlanMissionLegs,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'divePlanMissionMembers',
+            records: data.divePlanMissionMembers,
+            hasUpdatedAt: true,
+          ),
           (type: 'equipment', records: data.equipment, hasUpdatedAt: true),
+          // Trip cylinder slots reference trips and equipment; their ledger
+          // references the slots and dive centers. Both before dives, whose
+          // tanks link the slots.
+          (
+            type: 'tripCylinders',
+            records: data.tripCylinders,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tripCylinderEvents',
+            records: data.tripCylinderEvents,
+            hasUpdatedAt: true,
+          ),
           (
             type: 'equipmentSets',
             records: data.equipmentSets,
@@ -614,16 +1801,199 @@ class SyncService {
             records: data.equipmentSetItems,
             hasUpdatedAt: false,
           ),
+          // Child of equipmentSets; must apply after its parent so the
+          // deferred-FK commit sees the set row.
+          (
+            type: 'equipmentSetGeofences',
+            records: data.equipmentSetGeofences,
+            hasUpdatedAt: true,
+          ),
+          // References equipment (nullably); must apply after it.
+          (
+            type: 'cylinderConfigs',
+            records: data.cylinderConfigs,
+            hasUpdatedAt: true,
+          ),
+          // Child of cylinderConfigs; must apply after its parent so the
+          // deferred-FK commit sees the config row.
+          (
+            type: 'cylinderConfigItems',
+            records: data.cylinderConfigItems,
+            hasUpdatedAt: true,
+          ),
+          // Child of equipment; must apply after its parent so the
+          // deferred-FK commit sees the equipment row.
+          (
+            type: 'equipmentAttributes',
+            records: data.equipmentAttributes,
+            hasUpdatedAt: true,
+          ),
+          // Child of equipment (issue #1487); after its parent for the same
+          // deferred-FK reason as equipmentAttributes. Both ends of the edge
+          // are equipment rows, so one ordering covers both.
+          (
+            type: 'equipmentComponents',
+            records: data.equipmentComponents,
+            hasUpdatedAt: true,
+          ),
+          // Twin set pairings (issue #4242): both cylinders are equipment
+          // rows, so after equipment like equipmentComponents.
+          (
+            type: 'cylinderPairings',
+            records: data.cylinderPairings,
+            hasUpdatedAt: true,
+          ),
+          // After both parents (divePlans and equipment).
+          (
+            type: 'divePlanEquipment',
+            records: data.divePlanEquipment,
+            hasUpdatedAt: false,
+          ),
+          // After dives (the scenario's parent).
+          (
+            type: 'diveScenarios',
+            records: data.diveScenarios,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'diverWeightEntries',
+            records: data.diverWeightEntries,
+            hasUpdatedAt: true,
+          ),
           (type: 'diveTypes', records: data.diveTypes, hasUpdatedAt: true),
+          (type: 'siteTypes', records: data.siteTypes, hasUpdatedAt: true),
+          (type: 'diveRoles', records: data.diveRoles, hasUpdatedAt: true),
+          (
+            type: 'customCertificationAgencies',
+            records: data.customCertificationAgencies,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'customCertificationLevels',
+            records: data.customCertificationLevels,
+            hasUpdatedAt: true,
+          ),
           (type: 'tankPresets', records: data.tankPresets, hasUpdatedAt: true),
+          (
+            type: 'weightPresets',
+            records: data.weightPresets,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'weightPresetEntries',
+            records: data.weightPresetEntries,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'equipmentSetIncludes',
+            records: data.equipmentSetIncludes,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'equipmentSetWeightPresets',
+            records: data.equipmentSetWeightPresets,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'equipmentSetCylinderConfigs',
+            records: data.equipmentSetCylinderConfigs,
+            hasUpdatedAt: false,
+          ),
           (
             type: 'diveComputers',
             records: data.diveComputers,
             hasUpdatedAt: true,
           ),
+          // v279: a computer's connections, after their parent (#3106).
+          (
+            type: 'diveComputerConnections',
+            records: data.diveComputerConnections,
+            hasUpdatedAt: true,
+          ),
+          // v289: a profile's shared site library memberships (issue #2567).
+          (
+            type: 'sharedLibraryMemberships',
+            records: data.sharedLibraryMemberships,
+            hasUpdatedAt: true,
+          ),
+          // v289: a profile's private notes on library sites (issue #2567).
+          (
+            type: 'librarySiteNotes',
+            records: data.librarySiteNotes,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'transmitters',
+            records: data.transmitters,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'cylinderFills',
+            records: data.cylinderFills,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'connectionMaps',
+            records: data.connectionMaps,
+            hasUpdatedAt: true,
+          ),
+          // Saved queries reference sites and buddies only inside their
+          // JSON (by id, resolved at load), so they carry no FK but the
+          // diver and can apply anywhere in the order.
+          (
+            type: 'savedQueries',
+            records: data.savedQueries,
+            hasUpdatedAt: true,
+          ),
+          // Logbook rules (#3513) reference tags, types and gear only
+          // inside their JSON, by id, so they carry no FK but the diver.
+          // A run comes before its changes, whose run_id must resolve.
+          (type: 'rules', records: data.rules, hasUpdatedAt: true),
+          (type: 'ruleRuns', records: data.ruleRuns, hasUpdatedAt: true),
+          (
+            type: 'ruleRunChanges',
+            records: data.ruleRunChanges,
+            hasUpdatedAt: true,
+          ),
+          // Observation dismissals (#2381) carry a diver FK only, and their
+          // deterministic ids make a plain last-writer-wins upsert safe.
+          (
+            type: 'insightObservationDismissals',
+            records: data.insightObservationDismissals,
+            hasUpdatedAt: true,
+          ),
           (type: 'species', records: data.species, hasUpdatedAt: false),
           (type: 'tags', records: data.tags, hasUpdatedAt: true),
+          // Courses must apply before dives/certifications that reference them.
+          // (Deferred FK already covers ordering, but keep the logical sequence
+          // so a future read of this list still tells the dependency story.)
+          (type: 'courses', records: data.courses, hasUpdatedAt: true),
           (type: 'dives', records: data.dives, hasUpdatedAt: true),
+          // Child of diveCenters, and of dives when noted on one; applied
+          // after both so the deferred-FK commit sees the parent rows.
+          (
+            type: 'diveCenterGearNotes',
+            records: data.diveCenterGearNotes,
+            hasUpdatedAt: false,
+          ),
+          // Quality findings FK dives + diveComputers (both applied above);
+          // deferred FKs cover ordering, but keep the logical sequence.
+          (
+            type: 'qualityFindings',
+            records: data.qualityFindings,
+            hasUpdatedAt: true,
+          ),
+          // Requirements before their junction rows (parent-first apply).
+          (
+            type: 'courseRequirements',
+            records: data.courseRequirements,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'courseRequirementDives',
+            records: data.courseRequirementDives,
+            hasUpdatedAt: false,
+          ),
           (type: 'diveSites', records: data.diveSites, hasUpdatedAt: true),
           (type: 'diveTanks', records: data.diveTanks, hasUpdatedAt: false),
           (type: 'diveWeights', records: data.diveWeights, hasUpdatedAt: false),
@@ -633,6 +2003,22 @@ class SyncService {
             hasUpdatedAt: false,
           ),
           (type: 'diveTags', records: data.diveTags, hasUpdatedAt: false),
+          (
+            type: 'diveDiveTypes',
+            records: data.diveDiveTypes,
+            hasUpdatedAt: false,
+          ),
+          (type: 'diveCourses', records: data.diveCourses, hasUpdatedAt: false),
+          (
+            type: 'diveDiverRoles',
+            records: data.diveDiverRoles,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'diveBuddyRoles',
+            records: data.diveBuddyRoles,
+            hasUpdatedAt: false,
+          ),
           (type: 'diveBuddies', records: data.diveBuddies, hasUpdatedAt: false),
           (
             type: 'diveProfiles',
@@ -644,27 +2030,267 @@ class SyncService {
             records: data.diveProfileEvents,
             hasUpdatedAt: false,
           ),
+          (
+            type: 'diveSafetyReviews',
+            records: data.diveSafetyReviews,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'diveSafetyFindings',
+            records: data.diveSafetyFindings,
+            hasUpdatedAt: false,
+          ),
           (type: 'gasSwitches', records: data.gasSwitches, hasUpdatedAt: false),
+          // Extra entities added in the SyncData expansion. Five are
+          // append-only and use the blind-upsert merge path (no updatedAt
+          // column: diveCustomFields, diveDataSources, siteSpecies,
+          // mediaSpecies, fieldPresets). Two carry updatedAt and use the standard
+          // conflict-detection path (csvPresets, viewConfigs). importedFiles
+          // carries updatedAt and still blind-upserts: its id is the sha256
+          // of its bytes, so two devices holding the same id hold the same
+          // row and there is nothing to overlay or conflict over. FK ordering
+          // is handled by the deferred-FK transaction wrapping this loop.
+          (
+            type: 'diveCustomFields',
+            records: data.diveCustomFields,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'importedFiles',
+            records: data.importedFiles,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'diveDataSources',
+            records: data.diveDataSources,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'diveProfileSeries',
+            records: data.diveProfileSeries,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tankPressureSeries',
+            records: data.tankPressureSeries,
+            hasUpdatedAt: true,
+          ),
+          (type: 'siteSpecies', records: data.siteSpecies, hasUpdatedAt: false),
+          (
+            type: 'siteSiteTypes',
+            records: data.siteSiteTypes,
+            hasUpdatedAt: false,
+          ),
+          (type: 'siteTags', records: data.siteTags, hasUpdatedAt: false),
+          // After both parents (equipment and tags), issue #1942.
+          (
+            type: 'equipmentTags',
+            records: data.equipmentTags,
+            hasUpdatedAt: false,
+          ),
+          // After both parents (equipment and divers), issue #2046.
+          (
+            type: 'equipmentShares',
+            records: data.equipmentShares,
+            hasUpdatedAt: false,
+          ),
+          // After both parents (trips and equipment), issue #2338.
+          (
+            type: 'tripEquipment',
+            records: data.tripEquipment,
+            hasUpdatedAt: false,
+          ),
+          // After their parents (trips, sites and divers), issue #2594.
+          (type: 'tripHides', records: data.tripHides, hasUpdatedAt: false),
+          (type: 'siteHides', records: data.siteHides, hasUpdatedAt: false),
+          // After their parents (trips, sites and divers), issue #2151.
+          (type: 'tripShares', records: data.tripShares, hasUpdatedAt: false),
+          (type: 'siteShares', records: data.siteShares, hasUpdatedAt: false),
+          (
+            type: 'equipmentOwnershipEvents',
+            records: data.equipmentOwnershipEvents,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'equipmentLocations',
+            records: data.equipmentLocations,
+            hasUpdatedAt: true,
+          ),
+          // After equipment and the places they point at.
+          (
+            type: 'equipmentLocationMoves',
+            records: data.equipmentLocationMoves,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'mediaSpecies',
+            records: data.mediaSpecies,
+            hasUpdatedAt: false,
+          ),
+          // After media, buddies and divers (v326, issue #1745). Edited rows,
+          // but clock-guarded like media: a moved box never raises a card.
+          (type: 'mediaPeople', records: data.mediaPeople, hasUpdatedAt: false),
+          // Marine life results, after media (v381, issue #4876): a run
+          // before its identifications, those before their crops.
+          (
+            type: 'mediaIdentificationRuns',
+            records: data.mediaIdentificationRuns,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'mediaIdentifications',
+            records: data.mediaIdentifications,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'mediaIdentificationCrops',
+            records: data.mediaIdentificationCrops,
+            hasUpdatedAt: false,
+          ),
+          (
+            type: 'siteFeatures',
+            records: data.siteFeatures,
+            hasUpdatedAt: true,
+          ),
+          (type: 'csvPresets', records: data.csvPresets, hasUpdatedAt: true),
+          (type: 'viewConfigs', records: data.viewConfigs, hasUpdatedAt: true),
+          (
+            type: 'fieldPresets',
+            records: data.fieldPresets,
+            hasUpdatedAt: false,
+          ),
           (
             type: 'tankPressureProfiles',
             records: data.tankPressureProfiles,
             hasUpdatedAt: false,
           ),
           (type: 'tideRecords', records: data.tideRecords, hasUpdatedAt: false),
+          (
+            type: 'diveHealthRecords',
+            records: data.diveHealthRecords,
+            hasUpdatedAt: false,
+          ),
           (type: 'sightings', records: data.sightings, hasUpdatedAt: false),
           (
             type: 'certifications',
             records: data.certifications,
             hasUpdatedAt: true,
           ),
+          // Documents after every owner they can link to, pages after
+          // their document (issue #2613).
+          (type: 'documents', records: data.documents, hasUpdatedAt: true),
+          (
+            type: 'documentPages',
+            records: data.documentPages,
+            hasUpdatedAt: true,
+          ),
+          // After both parents (documents and tags), issue #1970.
+          (
+            type: 'documentTags',
+            records: data.documentTags,
+            hasUpdatedAt: false,
+          ),
           (
             type: 'serviceRecords',
             records: data.serviceRecords,
             hasUpdatedAt: true,
           ),
+          (
+            type: 'serviceKinds',
+            records: data.serviceKinds,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'serviceSchedules',
+            records: data.serviceSchedules,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'certificationCurrencyRules',
+            records: data.certificationCurrencyRules,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'certificationCurrencyPrefs',
+            records: data.certificationCurrencyPrefs,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'certificationCurrencyEvents',
+            records: data.certificationCurrencyEvents,
+            hasUpdatedAt: true,
+          ),
           (type: 'settings', records: data.settings, hasUpdatedAt: true),
+          // Smart albums reference sites/trips/dives only inside their
+          // serialized filter, so they carry no FK and can apply
+          // anywhere in the order.
+          (
+            type: 'mediaSmartAlbums',
+            records: data.mediaSmartAlbums,
+            hasUpdatedAt: true,
+          ),
           (type: 'media', records: data.media, hasUpdatedAt: false),
+          // After both parents (media and tags), issue #1970.
+          (type: 'mediaTags', records: data.mediaTags, hasUpdatedAt: false),
+          (
+            type: 'mediaEnrichment',
+            records: data.mediaEnrichment,
+            hasUpdatedAt: false,
+          ),
+          (type: 'mediaStores', records: data.mediaStores, hasUpdatedAt: false),
+          (
+            type: 'connectedAccounts',
+            records: data.connectedAccounts,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'mediaSubscriptions',
+            records: data.mediaSubscriptions,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'emergencyChambers',
+            records: data.emergencyChambers,
+            hasUpdatedAt: true,
+          ),
+          (type: 'incidents', records: data.incidents, hasUpdatedAt: true),
+          (
+            type: 'equipmentObservations',
+            records: data.equipmentObservations,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'equipmentFindings',
+            records: data.equipmentFindings,
+            hasUpdatedAt: false,
+          ),
         ];
+
+    // Precompute the locally-tombstoned parents this payload will REVIVE
+    // (_revivedParents). A child must not be
+    // dropped/cleared for a parent that is coming back. The merge order does
+    // not guarantee a parent is processed before its children, and a revival
+    // only clears the tombstone in the DB (not the in-memory snapshot used by
+    // the guard below), so this is computed up front to stay order-independent.
+    final parentTypes = <String>{
+      for (final refs in parentRefs.values)
+        for (final ref in refs) ref.parent,
+    };
+    final revivedParents = _revivedParents(
+      parentTypes: parentTypes,
+      stamps: {
+        for (final e in mergeOrder)
+          if (parentTypes.contains(e.type) &&
+              tombstonesByEntity[e.type]?.isNotEmpty == true)
+            e.type: {
+              for (final rec in e.records)
+                ?recordIdForEntity(e.type, rec): _parentStamp(e.type, rec),
+            },
+      },
+      tombstones: tombstonesByEntity,
+      tombstoneClocks: tombstoneClocks,
+      contradicted: contradictedByEntity,
+    );
 
     for (final entry in mergeOrder) {
       final result = await _mergeEntity(
@@ -673,15 +2299,645 @@ class SyncService {
         hasUpdatedAt: entry.hasUpdatedAt,
         lastSyncMs: lastSyncMs,
         pendingRecordIds: pendingByEntity[entry.type] ?? const <String>{},
+        allTombstones: tombstonesByEntity,
+        tombstoneClocks: tombstoneClocks,
+        revivedParents: revivedParents,
+        contradicted: contradictedByEntity[entry.type] ?? const <String>{},
       );
       recordsApplied += result.recordsApplied;
       conflictsFound += result.conflictsFound;
+      recordsFailed += result.recordsFailed;
     }
+
+    await _packLegacySamplesIfPresent(
+      data.diveProfiles.isNotEmpty || data.tankPressureProfiles.isNotEmpty,
+      parentsArrived: data.dives.isNotEmpty || data.diveTanks.isNotEmpty,
+    );
+
+    // Integrity backstop: applying a remote deletion of a parent can leave a
+    // local row pointing at it via a non-cascading FK, which would fail the
+    // deferred-FK COMMIT and abort the whole sync. Clear or delete any such
+    // dangling reference before the transaction commits. (The merge guard
+    // above stops a peer's orphan from being re-added, so this does not loop.)
+    await _serializer.repairDanglingForeignKeys();
 
     return _MergeResult(
       recordsApplied: recordsApplied,
       conflictsFound: conflictsFound,
+      recordsFailed: recordsFailed,
     );
+  }
+
+  /// v182 receive-side tolerance: after a merge (changeset OR base file) has
+  /// applied any inbound-only legacy row-per-sample rows, pack them into
+  /// series for whichever dives don't already have one. A no-op (and no log)
+  /// when this payload carried none AND nothing is still staged, which is
+  /// the common case once every peer has upgraded.
+  ///
+  /// The staging check is what makes the retry this method's own doc
+  /// promises real. A staged row whose dive had not arrived is kept for the
+  /// next apply, and the payload that finally brings that dive need not
+  /// carry legacy rows of its own: gating on the payload alone let the rows
+  /// sit until the next payload happened to carry legacy rows of its own.
+  ///
+  /// Runs inside the caller's deferred-FK merge transaction, so a throw here
+  /// must never escape: it would roll back the whole payload while leaving
+  /// the changeset reader's cursor advanced, and the next sync would neither
+  /// replay nor retry the payload, wedging the peer permanently. The legacy
+  /// rows this call packs are already applied and durable in
+  /// `legacy_sample_staging.dart`'s staging tables by the time it runs, and
+  /// [SyncDataSerializer.packLegacySamples] leaves them staged on a throw
+  /// (it only empties the staging tables after a successful pack), so
+  /// nothing is lost by deferring: the next apply in this session (another
+  /// changeset, base file, or adopt) packs the same staged rows. The
+  /// staging tables are ordinary tables, not TEMP, so that retry survives
+  /// an app restart: the changeset cursor that would offer these rows again
+  /// is committed durably, and a staging that evaporated with the
+  /// connection made the promise false exactly when it mattered.
+  Future<void> _packLegacySamplesIfPresent(
+    bool anyLegacyRowsApplied, {
+    bool parentsArrived = false,
+  }) async {
+    if (!anyLegacyRowsApplied) {
+      // A staged row the last pass could not place is blocked on a parent
+      // (its dive, or a pressure row's tank). Only a payload that brought
+      // one can unblock it, so a payload that brought neither cannot, and
+      // re-running the whole pack on every apply to find that out is the
+      // difference between a bounded retry and a permanent per-apply cost
+      // for one row that may never be placeable.
+      if (!parentsArrived) return;
+      if (!await _serializer.hasStagedLegacySamples()) return;
+    }
+    try {
+      final packed = await _serializer.packLegacySamples();
+      _log.info(
+        'Packed legacy sample rows from a peer: '
+        '${packed.profileSeries} profile series, '
+        '${packed.tankSeries} tank series, '
+        '${packed.skippedAlreadyPacked} dives already packed here',
+      );
+    } catch (e, st) {
+      _log.warning(
+        'Packing legacy sample rows from a peer failed; the rows stay '
+        'staged and the next sync apply in this session retries them',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  /// Apply a base that was streamed to a local temp [filePath], in bounded
+  /// memory. Three forward passes over the file:
+  ///   1. header `exportedAt` + the full `deletions` map (both small),
+  ///   2. parent-row id->updatedAt and contradiction keys (skips giant tables),
+  ///   3. batched apply of every row through the existing [_mergeEntity].
+  /// Applies a peer's base file. Tries the worker-isolate path (file read +
+  /// JSON parse off the UI isolate) and falls back to the inline path on any
+  /// worker failure, so a broken isolate degrades to old behaviour and never
+  /// fails or corrupts sync. The base's checksums were already verified, off
+  /// the UI isolate, by BasePartFileSink.assemble.
+  ///
+  /// [onProgress] receives a 0.0 to 1.0 fraction spanning the three passes
+  /// (each pass is one third), with a final 1.0 once the transaction commits.
+  ///
+  /// A device with no library of its own taking its first base would log the
+  /// whole library, so that records one summary. An established device can
+  /// also meet a base when a peer's compaction has lapped it: those are real
+  /// changes, update triggers skip the rows that did not change, and they log
+  /// as a normal sync.
+  Future<_MergeResult> _applyRemoteBaseFile(
+    String filePath,
+    DateTime? localLastSync, {
+    String? peerDeviceId,
+    void Function(double fraction)? onProgress,
+    bool gzipped = false,
+  }) async {
+    Future<_MergeResult> apply() => _applyRemoteBaseFileInner(
+      filePath,
+      localLastSync,
+      onProgress: onProgress,
+      gzipped: gzipped,
+    );
+
+    final db = DatabaseService.instance.databaseOrNull;
+    try {
+      if (localLastSync == null && !await _hasOwnLibrary(db)) {
+        return await ChangeLogScope.suppressed(
+          db,
+          label: ChangeLogLabels.libraryAdopted,
+          source: ChangeLogSource.sync,
+          summaryCount: (result) => result.recordsApplied,
+          lease: kChangeLogLongLease,
+          body: apply,
+        );
+      }
+      return await ChangeLogScope.run(
+        db,
+        source: ChangeLogSource.sync,
+        deviceId: peerDeviceId,
+        lease: kChangeLogLongLease,
+        body: apply,
+      );
+    } finally {
+      await _handOnDeletedIdentifications();
+    }
+  }
+
+  /// Whether this device holds any dives yet. A new device's profile row is
+  /// not a library, and connecting a new backend to an old device is not a
+  /// first adoption, though both start with no last sync time.
+  Future<bool> _hasOwnLibrary(AppDatabase? db) async {
+    if (db == null) return false;
+    final row = await db
+        .customSelect('SELECT EXISTS (SELECT 1 FROM dives) AS has_dives')
+        .getSingle();
+    return row.read<int>('has_dives') == 1;
+  }
+
+  /// A [gzipped] file is read through the decoder on every pass; progress
+  /// then follows the compressed bytes consumed.
+  Future<_MergeResult> _applyRemoteBaseFileInner(
+    String filePath,
+    DateTime? localLastSync, {
+    void Function(double fraction)? onProgress,
+    bool gzipped = false,
+  }) async {
+    final totalBytes = await SyncTempFiles.length(filePath);
+    final stopwatch = Stopwatch()..start();
+    _log.info('Applying peer base: $totalBytes bytes');
+    final progress = BaseApplyProgress(totalBytes, onProgress);
+    BaseParseClient? client;
+    _MergeResult result;
+    try {
+      client = await baseParseClientSpawn(filePath, gzipped: gzipped);
+      client.onProgress = progress.bytes;
+      result = await _applyRemoteBaseFileViaWorker(
+        client,
+        localLastSync,
+        progress,
+      );
+    } catch (e, st) {
+      // No inline parse in a browser: a base the worker cannot handle is
+      // too large for the page, so the failure is reported as it is.
+      if (HostPlatform.isWeb) {
+        await client?.dispose();
+        rethrow;
+      }
+      _log.warning(
+        'Base-apply worker failed; falling back to inline',
+        error: e,
+        stackTrace: st,
+      );
+      // Kill the (possibly wedged, memory-hungry) worker BEFORE the inline
+      // passes start competing with it for memory and file I/O.
+      await client?.dispose();
+      client = null;
+      progress.restart();
+      result = await _applyRemoteBaseFileInline(
+        filePath,
+        localLastSync,
+        progress,
+        gzipped: gzipped,
+      );
+    } finally {
+      await client?.dispose();
+    }
+    await _repairLegacyPeerRows();
+    progress.done();
+    _log.info(
+      'Peer base applied in ${stopwatch.elapsed.inSeconds}s: '
+      '${result.recordsApplied} applied, ${result.conflictsFound} conflicts, '
+      '${result.recordsFailed} failed',
+    );
+    return result;
+  }
+
+  /// Worker-backed base apply: the file read + JSON parse run in [client]'s
+  /// isolate; the merge/writes run here. Mirrors [_applyRemoteBaseFileInline]
+  /// exactly, fed by streamed rows in file order instead of an inline parse (so
+  /// per-table batching and mergeOrder match).
+  Future<_MergeResult> _applyRemoteBaseFileViaWorker(
+    BaseParseClient client,
+    DateTime? localLastSync,
+    BaseApplyProgress progress,
+  ) async {
+    final lastSyncMs = localLastSync?.millisecondsSinceEpoch;
+
+    // ---- Pass 1: exportedAt + deletions ----
+    final p1 = await client.readScalarsAndDeletions();
+    final baseExportedAt = p1.exportedAt;
+    final deletions = <String, List<SyncDeletion>>{};
+    for (final e in p1.deletions) {
+      (deletions[e.table] ??= []).add(SyncDeletion.fromJson(e.row));
+    }
+
+    final pendingByEntity = await _pendingRecordMap();
+
+    // ---- Pass 2: parent updatedAt + contradiction keys ----
+    final parentTypes = <String>{
+      for (final refs in parentRefs.values)
+        for (final ref in refs) ref.parent,
+    };
+    final deletionIds = <String, Set<String>>{
+      for (final e in deletions.entries) e.key: {for (final d in e.value) d.id},
+    };
+    // Each parent row's stamps, for the revived-parent check.
+    final parentStamps = <String, Map<String, _ParentStamp>>{};
+    final contradictedByEntity = <String, Set<String>>{};
+    final payloadScopes = _payloadEventScopes(deletions, baseExportedAt);
+    final pass2Tables = <String>{
+      for (final table in _baseApplyEntityFlags.keys)
+        if (parentTypes.contains(table) ||
+            deletionIds.containsKey(table) ||
+            (payloadScopes != null && table == 'diveProfileEvents'))
+          table,
+    };
+    progress.beginPass(1);
+    client.startDataRows(pass2Tables);
+    List<({String table, Map<String, dynamic> row})>? p2batch;
+    while ((p2batch = await client.nextDataBatch()) != null) {
+      for (final r in p2batch!) {
+        final table = r.table;
+        final rec = r.row;
+        final id = recordIdForEntity(table, rec);
+        if (id == null) continue;
+        // Every parent, whatever its merge flag, as in the payload apply.
+        if (parentTypes.contains(table)) {
+          (parentStamps[table] ??= {})[id] = _parentStamp(table, rec);
+        }
+        if (deletionIds[table]?.contains(id) == true) {
+          (contradictedByEntity[table] ??= {}).add(id);
+        }
+        if (payloadScopes != null && table == 'diveProfileEvents') {
+          _addScopeContradiction(contradictedByEntity, payloadScopes, rec);
+        }
+      }
+    }
+
+    // ---- Apply, all inside one deferred-FK transaction ----
+    return _serializer.applyInDeferredFkTransaction(() async {
+      var recordsApplied = 0;
+      var conflictsFound = 0;
+      var recordsFailed = 0;
+
+      final delResult = await _applyRemoteDeletions(
+        deletions,
+        lastSyncMs,
+        baseExportedAt,
+        pendingByEntity,
+        contradictedByEntity,
+      );
+      recordsApplied += delResult.recordsApplied;
+      conflictsFound += delResult.conflictsFound;
+      recordsFailed += delResult.recordsFailed;
+
+      final (deletedAt: tombstonesByEntity, clocks: tombstoneClocks) =
+          await _deletionMaps();
+
+      final revivedParents = _revivedParents(
+        parentTypes: parentTypes,
+        stamps: parentStamps,
+        tombstones: tombstonesByEntity,
+        tombstoneClocks: tombstoneClocks,
+        contradicted: contradictedByEntity,
+      );
+
+      // ---- Pass 3: batched apply ----
+      const batchSize = 500;
+      String? currentTable;
+      var batch = <Map<String, dynamic>>[];
+      // v182 receive-side tolerance: true once a legacy diveProfiles /
+      // tankPressureProfiles row has streamed through, so the packer only
+      // runs when this base actually carried some.
+      var sawLegacySamples = false;
+      var sawParents = false;
+
+      Future<void> flush() async {
+        final table = currentTable;
+        if (table == null || batch.isEmpty) return;
+        final r = await _mergeEntity(
+          entityType: table,
+          records: batch,
+          hasUpdatedAt: _baseApplyEntityFlags[table] ?? false,
+          lastSyncMs: lastSyncMs,
+          pendingRecordIds: pendingByEntity[table] ?? const <String>{},
+          allTombstones: tombstonesByEntity,
+          tombstoneClocks: tombstoneClocks,
+          revivedParents: revivedParents,
+          contradicted: contradictedByEntity[table] ?? const <String>{},
+        );
+        recordsApplied += r.recordsApplied;
+        conflictsFound += r.conflictsFound;
+        recordsFailed += r.recordsFailed;
+        batch = <Map<String, dynamic>>[];
+      }
+
+      progress.beginPass(2);
+      client.startDataRows(_baseApplyEntityFlags.keys.toSet());
+      List<({String table, Map<String, dynamic> row})>? p3batch;
+      while ((p3batch = await client.nextDataBatch()) != null) {
+        for (final r in p3batch!) {
+          if (r.table != currentTable) {
+            await flush();
+            currentTable = r.table;
+          }
+          if (inboundOnlyLegacyEntities.containsKey(r.table)) {
+            sawLegacySamples = true;
+          }
+          if (r.table == 'dives' || r.table == 'diveTanks') {
+            sawParents = true;
+          }
+          batch.add(r.row);
+          if (batch.length >= batchSize) await flush();
+        }
+      }
+      await flush();
+
+      await _packLegacySamplesIfPresent(
+        sawLegacySamples,
+        parentsArrived: sawParents,
+      );
+
+      await _serializer.repairDanglingForeignKeys();
+      return _MergeResult(
+        recordsApplied: recordsApplied,
+        conflictsFound: conflictsFound,
+        recordsFailed: recordsFailed,
+      );
+    });
+  }
+
+  /// Reuses the same merge primitives as [_applyRemotePayloadInner], so the
+  /// result is identical to applying the equivalent in-memory payload, but peak
+  /// memory stays at one ~8 MB part download + one batch of rows regardless of
+  /// library size (issue #358).
+  Future<_MergeResult> _applyRemoteBaseFileInline(
+    String filePath,
+    DateTime? localLastSync,
+    BaseApplyProgress progress, {
+    bool gzipped = false,
+  }) async {
+    final lastSyncMs = localLastSync?.millisecondsSinceEpoch;
+    // A gzipped file is checked against its trailer on every pass.
+    GzipTrailer? trailer;
+    if (gzipped) {
+      final length = await SyncTempFiles.length(filePath);
+      trailer = gzipTrailer(
+        await SyncTempFiles.read(filePath, length < 8 ? 0 : length - 8, 8),
+      );
+    }
+    // The inline parse blocks the UI isolate, so its heartbeats are what
+    // keep the bar moving; the fallback runs the whole file three times.
+    Stream<List<int>> openWithProgress() {
+      final read = withByteProgress(
+        SyncTempFiles.openRead(filePath),
+        onProgress: progress.consumed,
+      );
+      return trailer != null
+          ? checkedGzipTrailer(SyncTempFiles.gunzip(read), trailer)
+          : read;
+    }
+
+    // ---- Pass 1: exportedAt + deletions ----
+    var baseExportedAt = 0;
+    final deletions = <String, List<SyncDeletion>>{};
+    await BaseJsonStreamReader().parse(
+      openWithProgress(),
+      onScalar: (key, raw) async {
+        if (key == 'exportedAt') {
+          baseExportedAt = (jsonDecode(utf8.decode(raw)) as num?)?.toInt() ?? 0;
+        }
+      },
+      wantRows: (section, _) => section == 'deletions',
+      onRow: (section, table, rowBytes) async {
+        final decoded = jsonDecode(utf8.decode(rowBytes));
+        if (decoded is Map<String, dynamic>) {
+          (deletions[table] ??= []).add(SyncDeletion.fromJson(decoded));
+        } else if (decoded is Map) {
+          (deletions[table] ??= []).add(
+            SyncDeletion.fromJson(decoded.cast<String, dynamic>()),
+          );
+        } else if (decoded is String) {
+          (deletions[table] ??= []).add(
+            SyncDeletion(id: decoded, deletedAt: 0),
+          );
+        }
+      },
+    );
+
+    final pendingByEntity = await _pendingRecordMap();
+
+    // ---- Pass 2: parent updatedAt + contradiction keys ----
+    final parentTypes = <String>{
+      for (final refs in parentRefs.values)
+        for (final ref in refs) ref.parent,
+    };
+    final deletionIds = <String, Set<String>>{
+      for (final e in deletions.entries) e.key: {for (final d in e.value) d.id},
+    };
+    // Each parent row's stamps, for the revived-parent check.
+    final parentStamps = <String, Map<String, _ParentStamp>>{};
+    final contradictedByEntity = <String, Set<String>>{};
+    final payloadScopes = _payloadEventScopes(deletions, baseExportedAt);
+    progress.beginPass(1);
+    await BaseJsonStreamReader().parse(
+      openWithProgress(),
+      wantRows: (section, table) =>
+          section == 'data' &&
+          _baseApplyEntityFlags.containsKey(table) &&
+          (parentTypes.contains(table) ||
+              deletionIds.containsKey(table) ||
+              (payloadScopes != null && table == 'diveProfileEvents')),
+      onRow: (section, table, rowBytes) async {
+        final rec = jsonDecode(utf8.decode(rowBytes)) as Map<String, dynamic>;
+        final id = recordIdForEntity(table, rec);
+        if (id == null) return;
+        // Every parent, whatever its merge flag, as in the payload apply.
+        if (parentTypes.contains(table)) {
+          (parentStamps[table] ??= {})[id] = _parentStamp(table, rec);
+        }
+        if (deletionIds[table]?.contains(id) == true) {
+          (contradictedByEntity[table] ??= {}).add(id);
+        }
+        if (payloadScopes != null && table == 'diveProfileEvents') {
+          _addScopeContradiction(contradictedByEntity, payloadScopes, rec);
+        }
+      },
+    );
+
+    // ---- Apply, all inside one deferred-FK transaction ----
+    return _serializer.applyInDeferredFkTransaction(() async {
+      var recordsApplied = 0;
+      var conflictsFound = 0;
+      var recordsFailed = 0;
+
+      final delResult = await _applyRemoteDeletions(
+        deletions,
+        lastSyncMs,
+        baseExportedAt,
+        pendingByEntity,
+        contradictedByEntity,
+      );
+      recordsApplied += delResult.recordsApplied;
+      conflictsFound += delResult.conflictsFound;
+      recordsFailed += delResult.recordsFailed;
+
+      // Load tombstones AFTER deletions so a tombstone arriving in this base
+      // also guards the merge below (mirrors _applyRemotePayloadInner).
+      final (deletedAt: tombstonesByEntity, clocks: tombstoneClocks) =
+          await _deletionMaps();
+
+      // Revived parents (_revivedParents). Combines pass-2 file data with
+      // post-deletion tombstones, so it is complete before any row is merged
+      // (a child may precede its parent in file order).
+      final revivedParents = _revivedParents(
+        parentTypes: parentTypes,
+        stamps: parentStamps,
+        tombstones: tombstonesByEntity,
+        tombstoneClocks: tombstoneClocks,
+        contradicted: contradictedByEntity,
+      );
+
+      // ---- Pass 3: batched apply ----
+      const batchSize = 500;
+      String? currentTable;
+      var batch = <Map<String, dynamic>>[];
+      // v182 receive-side tolerance: true once a legacy diveProfiles /
+      // tankPressureProfiles row has streamed through, so the packer only
+      // runs when this base actually carried some.
+      var sawLegacySamples = false;
+      var sawParents = false;
+
+      Future<void> flush() async {
+        final table = currentTable;
+        if (table == null || batch.isEmpty) return;
+        final r = await _mergeEntity(
+          entityType: table,
+          records: batch,
+          hasUpdatedAt: _baseApplyEntityFlags[table] ?? false,
+          lastSyncMs: lastSyncMs,
+          pendingRecordIds: pendingByEntity[table] ?? const <String>{},
+          allTombstones: tombstonesByEntity,
+          tombstoneClocks: tombstoneClocks,
+          revivedParents: revivedParents,
+          contradicted: contradictedByEntity[table] ?? const <String>{},
+        );
+        recordsApplied += r.recordsApplied;
+        conflictsFound += r.conflictsFound;
+        recordsFailed += r.recordsFailed;
+        batch = <Map<String, dynamic>>[];
+      }
+
+      progress.beginPass(2);
+      await BaseJsonStreamReader().parse(
+        openWithProgress(),
+        wantRows: (section, table) =>
+            section == 'data' && _baseApplyEntityFlags.containsKey(table),
+        onRow: (section, table, rowBytes) async {
+          if (table != currentTable) {
+            await flush();
+            currentTable = table;
+          }
+          if (inboundOnlyLegacyEntities.containsKey(table)) {
+            sawLegacySamples = true;
+          }
+          if (table == 'dives' || table == 'diveTanks') {
+            sawParents = true;
+          }
+          batch.add(jsonDecode(utf8.decode(rowBytes)) as Map<String, dynamic>);
+          if (batch.length >= batchSize) await flush();
+        },
+      );
+      await flush();
+
+      await _packLegacySamplesIfPresent(
+        sawLegacySamples,
+        parentsArrived: sawParents,
+      );
+
+      await _serializer.repairDanglingForeignKeys();
+      return _MergeResult(
+        recordsApplied: recordsApplied,
+        conflictsFound: conflictsFound,
+        recordsFailed: recordsFailed,
+      );
+    });
+  }
+
+  /// The payload's own event scope tombstones (#1926), or null when it has
+  /// none. A delete time missing from an older peer falls back to the
+  /// payload's export time, as [_applyRemoteDeletions] does.
+  static EventScopeCoverage? _payloadEventScopes(
+    Map<String, List<SyncDeletion>> deletions,
+    int exportedAt,
+  ) {
+    final scopes = deletions[EventScopeTombstone.entityType];
+    if (scopes == null || scopes.isEmpty) return null;
+    // Only the clocks that parse: a scope without one falls back to its
+    // delete time, as it does in the applier.
+    final clocks = <String, Hlc>{};
+    for (final d in scopes) {
+      final clock = tryParseHlc(d.hlc);
+      if (clock != null) clocks[d.id] = clock;
+    }
+    return EventScopeCoverage.from(
+      deletedAt: {
+        for (final d in scopes)
+          d.id: d.deletedAt > 0 ? d.deletedAt : exportedAt,
+      },
+      clocks: clocks,
+    );
+  }
+
+  /// Records [event] as contradicted when a scope in the same payload covers
+  /// it. The publisher sends it live beside that scope, so it still holds
+  /// it, and the same-payload rule the per-row path follows applies: the
+  /// live row is the publisher's current truth and survives both the scope
+  /// and the merge guard.
+  static void _addScopeContradiction(
+    Map<String, Set<String>> contradictedByEntity,
+    EventScopeCoverage payloadScopes,
+    Map<String, dynamic> event,
+  ) {
+    final id = recordIdForEntity('diveProfileEvents', event);
+    if (id != null && payloadScopes.covers(event)) {
+      (contradictedByEntity['diveProfileEvents'] ??= {}).add(id);
+    }
+  }
+
+  /// Remembers an identification a tombstone just deleted, for
+  /// [_handOnDeletedIdentifications]. Only a row that was here: its crop
+  /// file is found by its media.
+  void _noteDeletedIdentification(
+    String entityType,
+    Map<String, dynamic>? local,
+  ) {
+    if (entityType != 'mediaIdentifications') return;
+    final mediaId = local?['mediaId'];
+    final id = local?['id'];
+    if (mediaId is String && id is String) {
+      _deletedIdentifications.add((mediaId: mediaId, id: id));
+    }
+  }
+
+  /// Hands what an apply deleted to [_onIdentificationsDeleted], once the
+  /// apply has ended: inside it, the rows are not yet committed, and a
+  /// read from outside its transaction would wait on it. Never throws: the
+  /// launch sweep picks up anything left behind.
+  Future<void> _handOnDeletedIdentifications() async {
+    if (_deletedIdentifications.isEmpty) return;
+    final deleted = List<DeletedIdentification>.of(_deletedIdentifications);
+    _deletedIdentifications.clear();
+    final onDeleted = _onIdentificationsDeleted;
+    if (onDeleted == null) return;
+    try {
+      await onDeleted(deleted);
+    } on Object catch (e) {
+      _log.warning(
+        'Could not remove what ${deleted.length} deleted identifications '
+        'left on this device: $e',
+      );
+    }
   }
 
   Future<_MergeResult> _applyRemoteDeletions(
@@ -689,55 +2945,1041 @@ class SyncService {
     int? lastSyncMs,
     int remoteExportedAt,
     Map<String, Set<String>> pendingByEntity,
+    Map<String, Set<String>> contradictedByEntity,
   ) async {
     var applied = 0;
     var conflicts = 0;
+    var failed = 0;
+    // A library site ignores a personal tombstone (issue #2567).
+    final librarySites = await _serializer.librarySiteIds();
 
     for (final entry in deletions.entries) {
       final entityType = entry.key;
       for (final deletion in entry.value) {
         final recordId = deletion.id;
-        if (pendingByEntity[entityType]?.contains(recordId) == true) {
-          continue;
-        }
-        final local = await _serializer.fetchRecord(entityType, recordId);
-        final localUpdatedAt = _extractUpdatedAtMillis(local);
-        final deletionTimestamp = deletion.deletedAt > 0
-            ? deletion.deletedAt
-            : remoteExportedAt;
+        try {
+          // One tombstone for a set of events (#1926): expanded here into
+          // the rows it covers, never looked up as a record of its own.
+          if (entityType == EventScopeTombstone.entityType) {
+            final deletionHlc = _parseHlc(deletion.hlc);
+            if (deletionHlc != null) SyncClock.instance.receive(deletionHlc);
+            // The rows it removed, not the scope: a relayed copy that finds
+            // nothing left to delete applied nothing.
+            applied += await _eventScopeApplier.apply(
+              deletion: deletion,
+              deletedAt: deletion.deletedAt > 0
+                  ? deletion.deletedAt
+                  : remoteExportedAt,
+              pendingEventIds:
+                  pendingByEntity['diveProfileEvents'] ?? const <String>{},
+              contradictedEventIds:
+                  contradictedByEntity['diveProfileEvents'] ?? const <String>{},
+            );
+            continue;
+          }
+          // A device-local settings key never syncs (issue #2947), so a
+          // peer's tombstone for one neither deletes this device's value nor
+          // raises a conflict, as the merge treats a live copy.
+          if (isDeviceLocalRecord(entityType, recordId)) continue;
+          if (entityType == 'diveSites' && librarySites.contains(recordId)) {
+            continue;
+          }
+          // A child row of a library site (its types, tags, species, hides
+          // or features) is just as much outside the personal sync.
+          if (librarySites.isNotEmpty &&
+              SyncDataSerializer.librarySiteChildEntities.contains(
+                entityType,
+              )) {
+            final local = await _serializer.fetchRecord(entityType, recordId);
+            if (local != null && librarySites.contains(local['siteId'])) {
+              continue;
+            }
+          }
+          if (pendingByEntity[entityType]?.contains(recordId) == true) {
+            continue;
+          }
+          if (contradictedByEntity[entityType]?.contains(recordId) == true) {
+            // The same payload re-inserts this row as live; the tombstone is a
+            // stale delete-all+reinsert artifact. Skip it so the live row
+            // survives (the merge upserts it and clears any local tombstone).
+            continue;
+          }
+          final local = await _serializer.fetchRecord(entityType, recordId);
+          final deletionTimestamp = deletion.deletedAt > 0
+              ? deletion.deletedAt
+              : remoteExportedAt;
+          // A local row against a tombstone carrying the clock of the
+          // delete: the clocks order them, for every entity, as they order
+          // two live copies in _mergeEntity. A row not later than the delete
+          // is deleted with no conflict, whatever the wall clocks say: its
+          // updatedAt is the stamp of whichever device wrote it, so reading
+          // it against this device's own lastSync made a row nobody touched
+          // here look edited whenever that writer's clock ran ahead (#2943).
+          // A later row was edited after the delete: a child with its own
+          // clock keeps it with no card (children resolve per row, as their
+          // upserts do), anything else raises the deletion conflict below.
+          // Either clock missing: the wall-clock rules below.
+          final localHlc = _ownClock(entityType, local);
+          final deletionHlc = _parseHlc(deletion.hlc);
+          if (deletionHlc != null) SyncClock.instance.receive(deletionHlc);
+          final clockOrdered = localHlc != null && deletionHlc != null;
+          if (clockOrdered) {
+            if (localHlc.compareTo(deletionHlc) <= 0) {
+              await _serializer.deleteRecord(entityType, recordId);
+              // Before the log: a log that fails is caught below, and the
+              // delete still commits.
+              _noteDeletedIdentification(entityType, local);
+              await _syncRepository.logDeletionIfMissing(
+                entityType: entityType,
+                recordId: recordId,
+                deletedAt: deletionTimestamp,
+                originHlc: deletion.hlc,
+              );
+              applied += 1;
+              continue;
+            }
+            if (SyncDataSerializer.ownClockEntities.contains(entityType)) {
+              continue;
+            }
+          }
+          // _extractUpdatedAtMillis falls back to createdAt, so a row created
+          // locally after our last sync (or after the tombstone itself) is
+          // protected from a stale remote tombstone even on append-only child
+          // tables that have a createdAt.
+          // Clockless child tables with neither updatedAt nor createdAt
+          // (dive_tanks and sightings, and the retired dive_profiles /
+          // tank_pressure_profiles before them) have no age signal: the uuid-keyed ones regenerate with fresh ids on
+          // re-import, so a stale tombstone won't match a current row. The
+          // composite-natural-key junctions (dive_equipment, equipment_set_items)
+          // WOULD match a re-inserted row, but the contradicted-key skip above
+          // already drops a tombstone whose key the same payload re-inserts.
+          final localUpdatedAt = _extractUpdatedAtMillis(local);
 
-        final hasConflict =
-            localUpdatedAt != null &&
-            lastSyncMs != null &&
-            localUpdatedAt > lastSyncMs;
+          // Reached with clockOrdered only for a row later than the delete,
+          // which is a conflict on its own. Otherwise, for a row or
+          // tombstone with no clock (a pre-HLC peer), two independent
+          // guards; either one routes to a conflict:
+          //  * edited since our last sync (three-way; needs a horizon), and
+          //  * the tombstone's own age: a local row edited AFTER the peer
+          //    deleted it is newer than the deletion. This mirrors the
+          //    remote-live-vs-local-tombstone rule in _mergeEntity.
+          // The age guard is the ONLY protection when there is no horizon,
+          // which is exactly the state every recovery action leaves behind
+          // (restore, Reset Sync State, adopt, rejoin, backend switch):
+          // lastSyncMs is null there, and without this guard a peer tombstone
+          // deleted every matching row unconditionally, so a freshly restored
+          // library silently undid itself on the next sync (#1340).
+          final editedSinceLastSync =
+              localUpdatedAt != null &&
+              lastSyncMs != null &&
+              localUpdatedAt > lastSyncMs;
+          final newerThanTombstone =
+              localUpdatedAt != null && localUpdatedAt > deletionTimestamp;
+          // A fill copied from a tag is not an edit of the fill the peer
+          // deleted: the delete wins, with no conflict to resolve, so every
+          // device agrees it stays deleted (tag_fill_copy_merge.dart).
+          final tagCopy =
+              entityType == 'cylinderFills' &&
+              local != null &&
+              isTagFillCopy(local);
+          final hasConflict =
+              !tagCopy &&
+              (clockOrdered || editedSinceLastSync || newerThanTombstone);
 
-        if (hasConflict) {
-          conflicts += 1;
-          await _syncRepository.markRecordConflict(
+          if (hasConflict) {
+            conflicts += 1;
+            await _syncRepository.markRecordConflict(
+              entityType: entityType,
+              recordId: recordId,
+              conflictDataJson: jsonEncode({
+                '_deleted': true,
+                'deletedAt': deletionTimestamp,
+                'hlc': ?deletion.hlc,
+                'recordId': recordId,
+              }),
+              // Only a row ordered by its clock can conflict with no
+              // timestamp, and its clock says when it was last written.
+              localUpdatedAt: localUpdatedAt ?? localHlc!.physicalTime,
+            );
+            continue;
+          }
+
+          await _serializer.deleteRecord(entityType, recordId);
+          _noteDeletedIdentification(entityType, local);
+          await _syncRepository.logDeletionIfMissing(
             entityType: entityType,
             recordId: recordId,
-            conflictDataJson: jsonEncode({
-              '_deleted': true,
-              'deletedAt': deletionTimestamp,
-              'recordId': recordId,
-            }),
-            localUpdatedAt: localUpdatedAt,
+            deletedAt: deletionTimestamp,
+            originHlc: deletion.hlc,
           );
-          continue;
+          applied += 1;
+        } catch (e, stackTrace) {
+          // A failed deletion is a real failure (surfaced via recordsFailed),
+          // not a conflict, and must not abort the rest of the batch.
+          _log.error(
+            'Failed to apply deletion $entityType/$recordId',
+            error: e,
+            stackTrace: stackTrace,
+          );
+          failed += 1;
         }
-
-        await _serializer.deleteRecord(entityType, recordId);
-        await _syncRepository.logDeletionIfMissing(
-          entityType: entityType,
-          recordId: recordId,
-          deletedAt: deletionTimestamp,
-        );
-        applied += 1;
       }
     }
 
-    return _MergeResult(recordsApplied: applied, conflictsFound: conflicts);
+    return _MergeResult(
+      recordsApplied: applied,
+      conflictsFound: conflicts,
+      recordsFailed: failed,
+    );
   }
+
+  /// Per-entity merge-strategy flag, mirroring the `mergeOrder`
+  /// records in [_applyRemotePayloadInner].
+  ///
+  /// True means "resolve this entity as LWW": fetch the local row, compare
+  /// clocks, overlay, and raise a two-sided edit as a conflict. False means
+  /// "apply as a blind upsert". It is NOT a claim that the table has no
+  /// `updated_at`: the three composite-natural-key gear junctions carry one
+  /// as of v207 (issue #1728) and stay false here on purpose. Their payload
+  /// is the key itself, so there is nothing to overlay, and routing them
+  /// through the LWW path would surface a conflict card for a gear link.
+  /// Code that wants a row's age must call [_extractUpdatedAtMillis]
+  /// directly rather than gate on this flag.
+  ///
+  /// The streaming base apply ([_applyRemoteBaseFile]) uses it (via [_baseApplyEntityFlags], which
+  /// also folds in [inboundOnlyLegacyEntities]) for (a) conflict-detection
+  /// behavior in [_mergeEntity] and (b) the set of entity tables it applies
+  /// (a table absent from that union is silently skipped on base import).
+  ///
+  /// MUST list every [SyncData] entity: a structural test
+  /// (`entityHasUpdatedAt covers exactly the SyncData entities`) asserts the
+  /// keys match [SyncData], so adding an entity without a flag here fails that
+  /// test. Each flag VALUE must match the `hasUpdatedAt` of the corresponding
+  /// `mergeOrder` record above; the parity test verifies apply behavior for a
+  /// representative subset (parent, clockless-child, junction, BLOB, and
+  /// updatedAt tables plus a tombstone), not for every entity.
+  @visibleForTesting
+  static const Map<String, bool> entityHasUpdatedAt = {
+    'divers': true,
+    'diverSettings': true,
+    'buddies': true,
+    'diveCenters': true,
+    'diveCenterGearNotes': false,
+    'trips': true,
+    'liveaboardDetails': true,
+    'itineraryDays': true,
+    'tripDayWeather': true,
+    'tripCylinders': true,
+    'tripCylinderEvents': true,
+    'checklistTemplates': true,
+    'checklistTemplateSections': true,
+    'checklistTemplateItems': true,
+    'tripChecklists': true,
+    'tripChecklistSections': true,
+    'tripChecklistItems': true,
+    'preDiveChecklistTemplates': true,
+    'preDiveChecklistTemplateSections': true,
+    'preDiveChecklistTemplateItems': true,
+    'preDiveSessions': true,
+    'preDiveSessionSections': true,
+    'preDiveSessionItems': true,
+    'gpsTracks': true,
+    'navTracks': true,
+    'divePlanSeries': true,
+    'divePlans': true,
+    'diveScenarios': true,
+    'divePlanTanks': true,
+    'divePlanSegments': true,
+    'divePlanMissions': true,
+    'divePlanMissionLegs': true,
+    'divePlanMissionMembers': true,
+    'equipment': true,
+    'equipmentSets': true,
+    'equipmentSetItems': false,
+    'equipmentSetGeofences': true,
+    'cylinderConfigs': true,
+    'cylinderConfigItems': true,
+    'qualityFindings': true,
+    'equipmentAttributes': true,
+    'equipmentComponents': true,
+    'cylinderPairings': true,
+    'mediaSmartAlbums': true,
+    'divePlanEquipment': false,
+    'diverWeightEntries': true,
+    'diveTypes': true,
+    'siteTypes': true,
+    'diveRoles': true,
+    'customCertificationAgencies': true,
+    'customCertificationLevels': true,
+    'tankPresets': true,
+    'weightPresets': true,
+    'weightPresetEntries': false,
+    'equipmentSetIncludes': false,
+    'equipmentSetWeightPresets': false,
+    'equipmentSetCylinderConfigs': false,
+    'diveComputers': true,
+    'diveComputerConnections': true,
+    'sharedLibraryMemberships': true,
+    'librarySiteNotes': true,
+    'transmitters': true,
+    'cylinderFills': true,
+    'connectionMaps': true,
+    'savedQueries': true,
+    'rules': true,
+    'ruleRuns': true,
+    'ruleRunChanges': true,
+    'insightObservationDismissals': true,
+    'species': false,
+    'tags': true,
+    'courses': true,
+    'courseRequirements': true,
+    'courseRequirementDives': false,
+    'dives': true,
+    'diveSites': true,
+    'diveTanks': false,
+    'diveWeights': false,
+    'diveEquipment': false,
+    'diveTags': false,
+    'diveDiveTypes': false,
+    'diveCourses': false,
+    'diveBuddies': false,
+    'diveProfileEvents': false,
+    'diveSafetyReviews': false,
+    'diveSafetyFindings': false,
+    'emergencyChambers': true,
+    'incidents': true,
+    'equipmentObservations': true,
+    'equipmentFindings': false,
+    'gasSwitches': false,
+    'diveCustomFields': false,
+    // The id is the sha256 of the bytes, so the row is immutable and two
+    // devices that hold the same id hold the same row: nothing to overlay,
+    // nothing to raise a conflict card for (issue #478).
+    'importedFiles': false,
+    'diveDataSources': false,
+    'siteSpecies': false,
+    'siteSiteTypes': false,
+    'diveDiverRoles': false,
+    'diveBuddyRoles': false,
+    'siteTags': false,
+    'equipmentTags': false,
+    'mediaTags': false,
+    'documentTags': false,
+    'equipmentShares': false,
+    'tripEquipment': false,
+    'tripHides': false,
+    'siteHides': false,
+    'tripShares': false,
+    'siteShares': false,
+    'equipmentOwnershipEvents': false,
+    'equipmentLocations': true,
+    'equipmentLocationMoves': false,
+    'mediaSpecies': false,
+    'mediaPeople': false,
+    'mediaIdentificationRuns': false,
+    'mediaIdentifications': false,
+    'mediaIdentificationCrops': false,
+    'siteFeatures': true,
+    'csvPresets': true,
+    'viewConfigs': true,
+    'fieldPresets': false,
+    'tideRecords': false,
+    'diveHealthRecords': false,
+    'sightings': false,
+    'certifications': true,
+    'documents': true,
+    'documentPages': true,
+    'serviceRecords': true,
+    'serviceKinds': true,
+    'serviceSchedules': true,
+    'certificationCurrencyRules': true,
+    'certificationCurrencyPrefs': true,
+    'certificationCurrencyEvents': true,
+    'settings': true,
+    'media': false,
+    'mediaEnrichment': false,
+    'mediaStores': false,
+    'connectedAccounts': true,
+    'mediaSubscriptions': true,
+    'diveProfileSeries': true,
+    'tankPressureSeries': true,
+  };
+
+  /// v182 receive-side tolerance: legacy row-per-sample entities an older
+  /// peer still sends. Parsed and applied when such a peer's data arrives,
+  /// whether as a changeset (via `mergeOrder` in [_applyRemotePayloadInner])
+  /// or as a base file (unioned into the table set the base-file apply path
+  /// reads off the wire, see [_baseApplyEntityFlags]), then packed into
+  /// series by [SyncDataSerializer.packLegacySamples]. Deliberately absent
+  /// from [entityHasUpdatedAt] and from [SyncData.toJson]: never exported,
+  /// and kept out of the structural test that pins `entityHasUpdatedAt` to
+  /// the `SyncData` entity set. Removed together with the legacy tables in
+  /// plan 2e.
+  @visibleForTesting
+  static const Map<String, bool> inboundOnlyLegacyEntities = {
+    'diveProfiles': false,
+    'tankPressureProfiles': false,
+  };
+
+  /// Table set the base-file apply path (`_applyRemoteBaseFile*`) and the
+  /// replace-adopt streaming path (`_adoptApplyStreaming`) read off the wire
+  /// (and, for adopt, clear before re-inserting): every merge-applied entity
+  /// ([entityHasUpdatedAt]) plus the inbound-only legacy entities
+  /// ([inboundOnlyLegacyEntities]). A table absent from this union is
+  /// silently skipped on base import (mirrors [entityHasUpdatedAt]'s own doc
+  /// comment); kept separate from [entityHasUpdatedAt] itself so that map's
+  /// structural test is unaffected.
+  static final Map<String, bool> _baseApplyEntityFlags = Map.unmodifiable({
+    ...entityHasUpdatedAt,
+    ...inboundOnlyLegacyEntities,
+  });
+
+  /// Every synced child -> parent FK whose parent can be deleted (and thus
+  /// tombstoned in the deletion log). Used by [_mergeEntity] to keep a peer's
+  /// live child from dangling its FK against a parent we have deleted -- which
+  /// would otherwise fail the deferred-FK COMMIT and abort the whole sync.
+  /// NOT NULL (nullable: false) children are skipped; nullable references are
+  /// cleared so the row survives detached.
+  ///
+  /// Generated from every `references(<deletable parent>, ...)` in the schema;
+  /// completeness (and column nullability) is asserted against the live schema
+  /// by sync_parent_refs_completeness_test.dart, so a new FK to a deletable
+  /// parent fails that test until it is added here. (diverId is intentionally
+  /// absent, because each of the diver's rows carries its own fate to a peer.
+  /// DiverRepository.deleteDiverWithReassignment tombstones every row it
+  /// deletes and stamps the ones it keeps (shared trips and sites handed to a
+  /// surviving diver, a service kind still in use); DiverMergeRepository
+  /// repoints them. A diverId still left dangling, such as a row a peer wrote
+  /// before the diver's tombstone reached it, is cleared by
+  /// SyncDataSerializer.repairDanglingForeignKeys, which drops the row
+  /// instead where the column is NOT NULL.)
+  /// Fields cleared together with a set-null [parentRefs] reference when
+  /// its parent is tombstoned, keyed by entity type and then by the
+  /// reference's field: values that only mean something while the
+  /// reference is set.
+  ///
+  /// navTracks.linkMode records HOW diveId got linked ('auto'/'manual') and
+  /// is null exactly when diveId is (nav_tracks schema comment,
+  /// database.dart). Clearing it here keeps that invariant when a peer's
+  /// still-linked route arrives after this device already tombstoned its
+  /// dive, mirroring what NavTrackRepository does for the same unlink on
+  /// the local delete path. isPrimary is left alone: it is NOT NULL with a
+  /// default, and nothing reads it without also filtering on diveId.
+  @visibleForTesting
+  static const Map<String, Map<String, List<String>>> alsoClearedWithParent = {
+    'navTracks': {
+      'diveId': ['linkMode'],
+    },
+  };
+
+  /// A device that has not connected a shared site library holds no copy of its
+  /// sites, so the FK repair clears its rows' links to one, and its next
+  /// edit of such a row sends that null back (issue #2567). Where the library
+  /// site exists, the null is the peer's blindness, not an unlink: keep the
+  /// local link. The rest of the row merges as usual.
+  Future<List<Map<String, dynamic>>> _keepLibrarySiteLinks(
+    String entityType,
+    List<Map<String, dynamic>> records,
+  ) async {
+    final fields = [
+      for (final ref in parentRefs[entityType] ?? const <ParentRef>[])
+        if (ref.parent == 'diveSites' && ref.nullable) ref.field,
+    ];
+    if (fields.isEmpty) return records;
+    final cleared = [
+      for (final r in records)
+        if (r['id'] is String && fields.any((f) => r[f] == null))
+          r['id'] as String,
+    ];
+    if (cleared.isEmpty) return records;
+    final guarded = await _serializer.librarySiteIds();
+    if (guarded.isEmpty) return records;
+    final local = await _serializer.fetchRecords(entityType, cleared);
+    return [
+      for (final r in records)
+        if (local[r['id']] case final mine?)
+          {
+            ...r,
+            for (final f in fields)
+              if (r[f] == null && guarded.contains(mine[f])) f: mine[f],
+          }
+        else
+          r,
+    ];
+  }
+
+  static const _signingKeyFields = ['signingPublicKey', 'signingPrivateKey'];
+  static const _libraryKeyFields = ['libraryKeyId', 'libraryKey'];
+
+  /// The key id the library's manifest names on this device, lowercased,
+  /// or null when this device has not connected the library.
+  Future<String?> _currentLibraryKeyId(Object? libraryId) async {
+    if (libraryId is! String) return null;
+    final row = await DatabaseService.instance.database
+        .customSelect(
+          'SELECT key_id FROM shared_libraries WHERE id = ?',
+          variables: [Variable.withString(libraryId)],
+        )
+        .getSingleOrNull();
+    return row?.read<String?>('key_id')?.toLowerCase();
+  }
+
+  /// A profile's keys on its shared site library memberships (issue #2567)
+  /// are never lost to a row written before they reached that device: an
+  /// incoming row without them keeps the local ones, and a local row
+  /// without them adopts the incoming ones whichever row wins.
+  Future<List<Map<String, dynamic>>> _keepLibraryMembershipKeys(
+    String entityType,
+    List<Map<String, dynamic>> records,
+  ) async {
+    if (entityType != 'sharedLibraryMemberships' || records.isEmpty) {
+      return records;
+    }
+    final ids = [
+      for (final r in records)
+        if (r['id'] is String) r['id'] as String,
+    ];
+    final local = await _serializer.fetchRecords(entityType, ids);
+    final db = DatabaseService.instance.database;
+    final kept = <Map<String, dynamic>>[];
+    for (final r in records) {
+      final mine = local[r['id']];
+      if (mine == null) {
+        kept.add(r);
+        continue;
+      }
+      final merged = {...r};
+      for (final fields in [_signingKeyFields, _libraryKeyFields]) {
+        final incomingHas = fields.every((f) => r[f] != null);
+        final localHas = fields.every((f) => mine[f] != null);
+        if (incomingHas &&
+            localHas &&
+            identical(fields, _libraryKeyFields) &&
+            r['libraryKeyId'] != mine['libraryKeyId']) {
+          // Two keys: the library's current one stays, whichever row wins.
+          final current = await _currentLibraryKeyId(r['libraryId']);
+          if (current == null) continue;
+          if (current == (mine['libraryKeyId'] as String).toLowerCase()) {
+            for (final f in fields) {
+              merged[f] = mine[f];
+            }
+            // The other device may hold the library's next key, from a
+            // change this device has not synced yet: kept aside for the
+            // library sync to take up once the manifest names it.
+            await db.customUpdate(
+              'UPDATE shared_libraries SET spare_key_id = ?, spare_key = ? '
+              'WHERE id = ?',
+              variables: [
+                Variable.withString(r['libraryKeyId'] as String),
+                Variable.withString(r['libraryKey'] as String),
+                Variable.withString(r['libraryId'] as String),
+              ],
+              updates: {db.sharedLibraries},
+            );
+          } else if (current == (r['libraryKeyId'] as String).toLowerCase()) {
+            await db.customUpdate(
+              'UPDATE shared_library_memberships SET library_key_id = ?, '
+              'library_key = ? WHERE id = ?',
+              variables: [
+                Variable.withString(r['libraryKeyId'] as String),
+                Variable.withString(r['libraryKey'] as String),
+                Variable.withString(r['id'] as String),
+              ],
+              updates: {db.sharedLibraryMemberships},
+            );
+          }
+        } else if (!incomingHas && localHas) {
+          for (final f in fields) {
+            merged[f] = mine[f];
+          }
+        } else if (incomingHas && !localHas) {
+          // Adopted in place, without a pending stamp: the key came from
+          // the peer, so there is nothing new to send back.
+          final signing = identical(fields, _signingKeyFields);
+          await db.customUpdate(
+            signing
+                ? 'UPDATE shared_library_memberships SET signing_public_key = ?, '
+                      'signing_private_key = ? WHERE diver_id = ? AND '
+                      'signing_private_key IS NULL'
+                : 'UPDATE shared_library_memberships SET library_key_id = ?, '
+                      'library_key = ? WHERE id = ? AND library_key IS NULL',
+            variables: [
+              Variable.withString(r[fields[0]] as String),
+              Variable.withString(r[fields[1]] as String),
+              Variable.withString(
+                signing ? mine['diverId'] as String : r['id'] as String,
+              ),
+            ],
+            updates: {db.sharedLibraryMemberships},
+          );
+        }
+      }
+      kept.add(merged);
+    }
+    return kept;
+  }
+
+  @visibleForTesting
+  static const Map<String, List<ParentRef>> parentRefs = {
+    'dives': [
+      (field: 'siteId', parent: 'diveSites', nullable: true),
+      (field: 'tripId', parent: 'trips', nullable: true),
+      (field: 'courseId', parent: 'courses', nullable: true),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+      (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
+    ],
+    'diveCenterGearNotes': [
+      (field: 'diveCenterId', parent: 'diveCenters', nullable: false),
+      (field: 'diveId', parent: 'dives', nullable: true),
+    ],
+    'qualityFindings': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'relatedDiveId', parent: 'dives', nullable: true),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+    ],
+    // v175 gear twins: a peer's live computer whose gear item we deleted
+    // locally would otherwise dangle this FK and abort the whole sync at
+    // COMMIT. Nullable, so the computer survives with the reference cleared.
+    'diveComputers': [
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    // v279: a connection belongs to its computer (issue #3106).
+    'diveComputerConnections': [
+      (field: 'computerId', parent: 'diveComputers', nullable: false),
+    ],
+    // v289: a membership belongs to its profile (issue #2567).
+    'sharedLibraryMemberships': [
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    // v289: private notes belong to their profile (issue #2567). The site
+    // is no parent: library sites never cross the personal sync.
+    'librarySiteNotes': [(field: 'diverId', parent: 'divers', nullable: false)],
+    // Both gear FKs are nullable: the registry entry outlives a deleted
+    // cylinder or computer (set null), so a missing parent must not drop it.
+    'transmitters': [
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+      // v206: the transmitter gear item the entry is (condition phase 3b).
+      (field: 'transmitterEquipmentId', parent: 'equipment', nullable: true),
+      (field: 'diveComputerId', parent: 'diveComputers', nullable: true),
+    ],
+    // The gear link is nullable: a fill outlives a deleted cylinder (set
+    // null) and a fill of a rental cylinder never had one.
+    'cylinderFills': [
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    // v301: a rule run's change belongs to its run (issue #3513).
+    'ruleRunChanges': [(field: 'runId', parent: 'ruleRuns', nullable: false)],
+    // v202: a child item (O2 cell, battery) points at the item it is installed
+    // in. Nullable: deleting the parent orphans the child, never drops it.
+    'equipment': [
+      (field: 'parentEquipmentId', parent: 'equipment', nullable: true),
+    ],
+    'diveTanks': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+      // v202: the regulator breathed from the cylinder; user-authored and
+      // nullable, so a deleted regulator only clears the link.
+      (field: 'regulatorEquipmentId', parent: 'equipment', nullable: true),
+      // v232: the trip cylinder slot; nullable, so a slot the peer never
+      // sent, or has deleted, only clears the link.
+      (field: 'tripCylinderId', parent: 'tripCylinders', nullable: true),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+      // v251: the data source the tank row came from (#2716); nullable, as
+      // on tank pressure series, so a source the peer deleted only clears
+      // the link.
+      (field: 'sourceId', parent: 'diveDataSources', nullable: true),
+    ],
+    'diveWeights': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveEquipment': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      // Provenance (issue #1487). Nullable by design: the schema is ON DELETE
+      // SET NULL, so a peer that deleted the assembly or the set clears the
+      // pointer instead of dropping the row.
+      (field: 'viaEquipmentId', parent: 'equipment', nullable: true),
+      (field: 'viaSetId', parent: 'equipmentSets', nullable: true),
+    ],
+    'diveBuddies': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'buddyId', parent: 'buddies', nullable: false),
+    ],
+    'mediaEnrichment': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+      (field: 'diveId', parent: 'dives', nullable: false),
+    ],
+    'diveTags': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    'diveDiveTypes': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveCourses': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'courseId', parent: 'courses', nullable: false),
+    ],
+    'diveDiverRoles': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveBuddyRoles': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'buddyId', parent: 'buddies', nullable: false),
+    ],
+    'diveProfileEvents': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+    ],
+    'emergencyChambers': [(field: 'diverId', parent: 'divers', nullable: true)],
+    'incidents': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+      (field: 'diveId', parent: 'dives', nullable: true),
+      // v202: the item an equipment incident attributes to; nullable.
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+      // v338: the check-in behind a near-miss; nullable, so a deleted
+      // check-in only clears the link.
+      (field: 'observationId', parent: 'equipmentObservations', nullable: true),
+    ],
+    // v202: a gear check-in; the item is required, the dive optional.
+    'equipmentObservations': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      (field: 'diveId', parent: 'dives', nullable: true),
+    ],
+    // v202: condition findings, write-once children of equipment.
+    'equipmentFindings': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    'diveSafetyReviews': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveSafetyFindings': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'gasSwitches': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+    ],
+    'diveCustomFields': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'tideRecords': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveHealthRecords': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'diveDataSources': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+    ],
+    'diveProfileSeries': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+      (field: 'sourceId', parent: 'diveDataSources', nullable: true),
+    ],
+    'tankPressureSeries': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'tankId', parent: 'diveTanks', nullable: false),
+      (field: 'computerId', parent: 'diveComputers', nullable: true),
+      // v241 (issue #2440): the owning source, like diveProfileSeries.
+      (field: 'sourceId', parent: 'diveDataSources', nullable: true),
+    ],
+    'sightings': [
+      (field: 'diveId', parent: 'dives', nullable: false),
+      (field: 'speciesId', parent: 'species', nullable: false),
+    ],
+    'media': [
+      (field: 'diveId', parent: 'dives', nullable: true),
+      (field: 'siteId', parent: 'diveSites', nullable: true),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+      (field: 'signerId', parent: 'buddies', nullable: true),
+    ],
+    // All three nullable (onDelete: KeyAction.setNull): the recording
+    // outlives a deleted dive, site or equipment item and just loses the
+    // link (spec 2026-09-10-underwater-nav-track-design.md).
+    'navTracks': [
+      // diveId also clears linkMode: see [alsoClearedWithParent].
+      (field: 'diveId', parent: 'dives', nullable: true),
+      (field: 'siteId', parent: 'diveSites', nullable: true),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    'siteSpecies': [
+      (field: 'siteId', parent: 'diveSites', nullable: false),
+      (field: 'speciesId', parent: 'species', nullable: false),
+    ],
+    // siteTypeId has no FK (a custom type may arrive after its links), so
+    // only the site is a parent, as with diveDiveTypes.
+    'siteSiteTypes': [(field: 'siteId', parent: 'diveSites', nullable: false)],
+    'siteTags': [
+      (field: 'siteId', parent: 'diveSites', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    // v219: an equipment item's tags (issue #1942), the siteTags twin.
+    'equipmentTags': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    // v309: a photo's or video's tags and a document's tags (issue #1970).
+    'mediaTags': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    'documentTags': [
+      (field: 'documentId', parent: 'documents', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    // v234: equipment sharing (issue #2046). The diver keys are left to
+    // repairDanglingForeignKeys like every diverId (see the note above).
+    'equipmentShares': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    // v248: gear packed for a trip (issue #2338).
+    'tripEquipment': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    // v250: a profile's hidden shared trips and sites (issue #2594).
+    'tripHides': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    'siteHides': [
+      (field: 'siteId', parent: 'diveSites', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    // v311: the profiles a trip or site is shared with (issue #2151).
+    'tripShares': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    'siteShares': [
+      (field: 'siteId', parent: 'diveSites', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    'equipmentOwnershipEvents': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    // v331: the saved center behind a Dive center place (issue #3623).
+    // Cleared, not skipped: the place outlives its center. So too its buddy
+    // (v334, issue #3790).
+    'equipmentLocations': [
+      (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
+      (field: 'buddyId', parent: 'buddies', nullable: true),
+    ],
+    // v268: an item's location log. The place reference is cleared, not
+    // skipped, when the place is gone: the move then reads "No location".
+    'equipmentLocationMoves': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      (field: 'locationId', parent: 'equipmentLocations', nullable: true),
+    ],
+    'mediaSpecies': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+      (field: 'speciesId', parent: 'species', nullable: false),
+    ],
+    // v326: people tagged on photos and videos (issue #1745). buddyId is
+    // nullable (a Me tag has none), so a tag whose buddy is gone arrives
+    // with the reference cleared; diverId is left to repairDanglingForeignKeys
+    // like every diver key. A row left naming nobody is never shown
+    // (MediaPeopleRepository reads only rows that name someone).
+    'mediaPeople': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+      (field: 'buddyId', parent: 'buddies', nullable: true),
+    ],
+    // Marine life results (v381, issue #4876). No foreign key (an undo puts
+    // media back), so only a media tombstone here drops them.
+    'mediaIdentificationRuns': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+    ],
+    'mediaIdentifications': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+    ],
+    'mediaIdentificationCrops': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+    ],
+    'siteFeatures': [(field: 'siteId', parent: 'diveSites', nullable: false)],
+    'liveaboardDetails': [(field: 'tripId', parent: 'trips', nullable: false)],
+    'itineraryDays': [(field: 'tripId', parent: 'trips', nullable: false)],
+    'tripDayWeather': [(field: 'tripId', parent: 'trips', nullable: false)],
+    'tripCylinders': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    'tripCylinderEvents': [
+      (field: 'tripCylinderId', parent: 'tripCylinders', nullable: false),
+      (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
+    ],
+    // Checklist sections (issue #3360). A section table's own parent ref is
+    // its trip/template/session; an item table's existing entry gains a
+    // sectionId ref to its section table, nullable (deleting a section sets
+    // the item's link to null, never the item). preDiveSessionItems.sectionId
+    // is deliberately absent here: unlike the other three, it is not a SQL
+    // FK (same reasoning as its existing sourceItemId), so there is no FK
+    // for sync_parent_refs_completeness_test's pragma_foreign_key_list scan
+    // to find.
+    'checklistTemplateSections': [
+      (field: 'templateId', parent: 'checklistTemplates', nullable: false),
+    ],
+    'checklistTemplateItems': [
+      (field: 'templateId', parent: 'checklistTemplates', nullable: false),
+      (field: 'sectionId', parent: 'checklistTemplateSections', nullable: true),
+    ],
+    'tripChecklists': [(field: 'tripId', parent: 'trips', nullable: false)],
+    'tripChecklistSections': [
+      (field: 'checklistId', parent: 'tripChecklists', nullable: false),
+    ],
+    'tripChecklistItems': [
+      (field: 'checklistId', parent: 'tripChecklists', nullable: false),
+      (field: 'sectionId', parent: 'tripChecklistSections', nullable: true),
+    ],
+    'preDiveChecklistTemplateSections': [
+      (
+        field: 'templateId',
+        parent: 'preDiveChecklistTemplates',
+        nullable: false,
+      ),
+    ],
+    'preDiveChecklistTemplateItems': [
+      (
+        field: 'templateId',
+        parent: 'preDiveChecklistTemplates',
+        nullable: false,
+      ),
+      (
+        field: 'sectionId',
+        parent: 'preDiveChecklistTemplateSections',
+        nullable: true,
+      ),
+    ],
+    'preDiveSessions': [
+      (
+        field: 'templateId',
+        parent: 'preDiveChecklistTemplates',
+        nullable: true,
+      ),
+      (field: 'diveId', parent: 'dives', nullable: true),
+      (field: 'tripId', parent: 'trips', nullable: true),
+      (field: 'equipmentSetId', parent: 'equipmentSets', nullable: true),
+    ],
+    'preDiveSessionSections': [
+      (field: 'sessionId', parent: 'preDiveSessions', nullable: false),
+    ],
+    'preDiveSessionItems': [
+      (field: 'sessionId', parent: 'preDiveSessions', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    'divePlanSeries': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+      (field: 'followedDiveId', parent: 'dives', nullable: true),
+    ],
+    'divePlans': [
+      (field: 'siteId', parent: 'diveSites', nullable: true),
+      (field: 'sourceDiveId', parent: 'dives', nullable: true),
+      (field: 'linkedDiveId', parent: 'dives', nullable: true),
+      (field: 'seriesId', parent: 'divePlanSeries', nullable: true),
+    ],
+    'divePlanTanks': [(field: 'planId', parent: 'divePlans', nullable: false)],
+    'divePlanSegments': [
+      (field: 'planId', parent: 'divePlans', nullable: false),
+      (field: 'tankId', parent: 'divePlanTanks', nullable: false),
+    ],
+    'divePlanMissions': [
+      (field: 'planId', parent: 'divePlans', nullable: false),
+    ],
+    // A mission row's id is its plan's id, so planId also names the
+    // mission: a leg or member whose mission this device removed is dropped
+    // rather than landing as an orphan the mission read never shows.
+    'divePlanMissionLegs': [
+      (field: 'planId', parent: 'divePlans', nullable: false),
+      (field: 'planId', parent: 'divePlanMissions', nullable: false),
+    ],
+    'divePlanMissionMembers': [
+      (field: 'planId', parent: 'divePlans', nullable: false),
+      (field: 'planId', parent: 'divePlanMissions', nullable: false),
+    ],
+    'certifications': [
+      (field: 'courseId', parent: 'courses', nullable: true),
+      (field: 'instructorId', parent: 'buddies', nullable: true),
+      (field: 'buddyId', parent: 'buddies', nullable: true),
+    ],
+    'courses': [(field: 'instructorId', parent: 'buddies', nullable: true)],
+    'documents': [
+      (field: 'diverId', parent: 'divers', nullable: false),
+      (field: 'diveId', parent: 'dives', nullable: true),
+      (field: 'siteId', parent: 'diveSites', nullable: true),
+      (field: 'tripId', parent: 'trips', nullable: true),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+      (field: 'courseId', parent: 'courses', nullable: true),
+      (field: 'certificationId', parent: 'certifications', nullable: true),
+      (field: 'buddyId', parent: 'buddies', nullable: true),
+      (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
+    ],
+    'documentPages': [
+      (field: 'documentId', parent: 'documents', nullable: false),
+    ],
+    'courseRequirements': [
+      (field: 'courseId', parent: 'courses', nullable: false),
+    ],
+    'courseRequirementDives': [
+      (field: 'requirementId', parent: 'courseRequirements', nullable: false),
+      (field: 'diveId', parent: 'dives', nullable: false),
+    ],
+    'equipmentSetItems': [
+      (field: 'setId', parent: 'equipmentSets', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    'weightPresetEntries': [
+      (field: 'presetId', parent: 'weightPresets', nullable: false),
+    ],
+    'equipmentSetIncludes': [
+      (field: 'setId', parent: 'equipmentSets', nullable: false),
+      (field: 'includedSetId', parent: 'equipmentSets', nullable: false),
+    ],
+    'equipmentSetWeightPresets': [
+      (field: 'setId', parent: 'equipmentSets', nullable: false),
+      (field: 'presetId', parent: 'weightPresets', nullable: false),
+    ],
+    'equipmentSetCylinderConfigs': [
+      (field: 'setId', parent: 'equipmentSets', nullable: false),
+      (field: 'configId', parent: 'cylinderConfigs', nullable: false),
+    ],
+    'equipmentSetGeofences': [
+      (field: 'setId', parent: 'equipmentSets', nullable: false),
+    ],
+    // equipmentId is nullable by design: deleting a rebreather demotes its
+    // configurations to generic gas plans (ON DELETE SET NULL) rather than
+    // destroying them, so a peer's config referencing a locally-deleted unit
+    // must have the reference cleared, not be skipped.
+    'cylinderConfigs': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+      (field: 'equipmentId', parent: 'equipment', nullable: true),
+    ],
+    'cylinderConfigItems': [
+      (field: 'configId', parent: 'cylinderConfigs', nullable: false),
+    ],
+    'divePlanEquipment': [
+      (field: 'planId', parent: 'divePlans', nullable: false),
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      // Provenance (issue #1487); see diveEquipment.
+      (field: 'viaEquipmentId', parent: 'equipment', nullable: true),
+      (field: 'viaSetId', parent: 'equipmentSets', nullable: true),
+    ],
+    'diveScenarios': [(field: 'diveId', parent: 'dives', nullable: false)],
+    'serviceRecords': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    'equipmentAttributes': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+    ],
+    'equipmentComponents': [
+      (field: 'parentEquipmentId', parent: 'equipment', nullable: false),
+      (field: 'componentEquipmentId', parent: 'equipment', nullable: false),
+    ],
+    'cylinderPairings': [
+      (field: 'cylinderAId', parent: 'equipment', nullable: false),
+      (field: 'cylinderBId', parent: 'equipment', nullable: false),
+    ],
+    'serviceSchedules': [
+      (field: 'equipmentId', parent: 'equipment', nullable: false),
+      (field: 'serviceKindId', parent: 'serviceKinds', nullable: false),
+    ],
+    // Currency rule and event ids on a pref or event are plain text with no
+    // FK, so only the certification and the owning diver gate them.
+    'certificationCurrencyRules': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+    ],
+    'certificationCurrencyPrefs': [
+      (field: 'certificationId', parent: 'certifications', nullable: false),
+    ],
+    'certificationCurrencyEvents': [
+      (field: 'certificationId', parent: 'certifications', nullable: false),
+    ],
+  };
 
   Future<_MergeResult> _mergeEntity({
     required String entityType,
@@ -745,38 +3987,428 @@ class SyncService {
     required bool hasUpdatedAt,
     required int? lastSyncMs,
     required Set<String> pendingRecordIds,
+    required Map<String, Map<String, int>> allTombstones,
+    required Map<String, Map<String, Hlc>> tombstoneClocks,
+    required Map<String, Set<String>> revivedParents,
+    required Set<String> contradicted,
   }) async {
     if (records.isEmpty) {
       return const _MergeResult(recordsApplied: 0, conflictsFound: 0);
     }
+    // A row of a shared site library site never arrives through the personal sync
+    // (issue #2567): a peer's stale personal copy must not overwrite it.
+    if (entityType == 'diveSites' ||
+        SyncDataSerializer.librarySiteChildEntities.contains(entityType)) {
+      final guarded = await _serializer.librarySiteIds();
+      if (guarded.isNotEmpty) {
+        final key = entityType == 'diveSites' ? 'id' : 'siteId';
+        records = [
+          for (final r in records)
+            if (!guarded.contains(r[key])) r,
+        ];
+        if (records.isEmpty) {
+          return const _MergeResult(recordsApplied: 0, conflictsFound: 0);
+        }
+      }
+    }
+    // Before anything fills a key the peer left out (issue #4954).
+    await _serializer.noteIncomingRows(entityType, records);
+    records = await _keepLibrarySiteLinks(entityType, records);
+    records = await _keepLibraryMembershipKeys(entityType, records);
 
     var applied = 0;
     var conflicts = 0;
+    var failed = 0;
+
+    final selfTombstones = allTombstones[entityType] ?? const <String, int>{};
+    final selfTombstoneClocks =
+        tombstoneClocks[entityType] ?? const <String, Hlc>{};
+    final entityParentRefs = parentRefs[entityType] ?? const <ParentRef>[];
+
+    // Read-decide-write: batch-fetch every local row the LWW compare needs in
+    // one query (the clockless path needs no read). Each decision below reads
+    // only this pre-fetched map plus the pre-fetched tombstone/pending maps --
+    // never a row written earlier in this loop -- so deferring all writes to a
+    // single batch at the end cannot change any decision.
+    // A child exported through its parent is applied as a blind upsert, but
+    // carries its own clock (v210), so its local copy is read too: one batch
+    // for the stale-copy guard below.
+    // One predicate for every row that carries its own clock, whether it
+    // reaches a peer through a parent or on its own (media sync program
+    // spec 5.1). The stale-copy guard, the tombstone comparison and the
+    // revival check below all read it, so a row cannot be guarded in the
+    // merge and compared by timestamp when a delete arrives.
+    final ownClocked = SyncDataSerializer.ownClockEntities.contains(entityType);
+    final clockGuarded = ownClocked;
+    // Deletions apply before the merge, but the local-deletion guard below
+    // matches by exact id. A lagging peer can still hold events a scope
+    // delete removed (#1926), so those are checked against the scopes too.
+    final eventScopes = entityType == 'diveProfileEvents'
+        ? EventScopeCoverage.from(
+            deletedAt:
+                allTombstones[EventScopeTombstone.entityType] ??
+                const <String, int>{},
+            clocks:
+                tombstoneClocks[EventScopeTombstone.entityType] ??
+                const <String, Hlc>{},
+          )
+        : null;
+    // Events the payload sends live beside a scope that covers them: kept,
+    // then given a fresh clock (see below).
+    final scopeSurvivors = <String>{};
+    final factGroups = SyncFactGroups.of(entityType);
+    final localById = hasUpdatedAt || clockGuarded || factGroups.isNotEmpty
+        ? await _serializer.fetchRecords(entityType, [
+            for (final record in records)
+              ?recordIdForEntity(entityType, record),
+          ])
+        : const <String, Map<String, dynamic>>{};
+    final toUpsert = <Map<String, dynamic>>[];
+    // A parent-gated child's deliberate clears, by record id: written after
+    // the batched upsert, which drops nulls (#2644).
+    final childClears = <String, Set<String>>{};
+    // Fact groups written after the batched upsert with explicit values, so
+    // a peer's cleared stamp lands (the upsert drops nulls; spec 5.1).
+    // [inBatch] records whether this row also went into the batched upsert,
+    // so a batch that fails can take its own fact writes down with it. A
+    // fact write whose row never joined the batch is independent of it.
+    // Media rows this merge gave something new to be found by (spec 6.2),
+    // and whether each rode the batch, so a failed batch drops its own.
+    final hinted = <({String id, MediaResolutionHint hint, bool inBatch})>[];
+    final factWrites =
+        <
+          ({
+            String id,
+            Map<String, dynamic> row,
+            List<SyncFactGroup> groups,
+            bool inBatch,
+          })
+        >[];
 
     for (final record in records) {
       String? recordId;
       int? localUpdatedAt;
       try {
-        recordId = _recordIdForEntity(entityType, record);
+        recordId = recordIdForEntity(entityType, record);
         if (recordId == null) {
-          conflicts += 1;
+          // A record with no resolvable id is malformed data, not a two-sided
+          // conflict -- count it as a failure so performSync surfaces an error.
+          _log.error('Skipping $entityType record with no resolvable id');
+          failed += 1;
           continue;
         }
 
-        if (pendingRecordIds.contains(recordId)) {
+        // A device-local settings key never syncs (issue #2947). A peer on
+        // an older build may still send one; it neither applies nor raises
+        // a conflict for a value that stays on each device.
+        if (isDeviceLocalRecord(entityType, recordId)) continue;
+
+        // A locally pending row used to skip the peer's copy outright, and
+        // the changeset cursor still advanced past it, so the peer's update
+        // was lost for good: a newer edit made elsewhere never landed here,
+        // and the peer then refused this device's older copy, leaving the
+        // two devices diverged. Where both sides carry a clock the ordinary
+        // resolution below orders them, and the pending mark is kept, so
+        // this device still publishes whatever wins. Where either clock is
+        // missing nothing can order an unpublished local edit against the
+        // peer's, so the skip stays. Entities whose local rows are not
+        // fetched (the clockless blind upserts) have no local clock here and
+        // keep the skip too.
+        //
+        // A fact-carrying row is the exception. A media row's first local
+        // write can be a fact write, which stamps the group clock and
+        // deliberately leaves the row clock null, so a legacy row can be
+        // pending and unorderable while its FACTS are perfectly ordered by
+        // their own clocks. Skipping it outright threw away the peer's
+        // facts for good. Such a row keeps its local user fields, exactly
+        // as the skip intends, and falls through to the per-group merge
+        // below, which takes only the groups the peer's clocks win.
+        final pendingUnorderable =
+            pendingRecordIds.contains(recordId) &&
+            !_orderable(localById[recordId], record);
+        if (pendingUnorderable &&
+            (localById[recordId] == null ||
+                SyncFactGroups.of(entityType).isEmpty)) {
           continue;
+        }
+
+        // Parent-deletion guard: a record pointing at a locally-tombstoned
+        // parent would otherwise dangle its FK (failing the deferred-FK commit)
+        // or resurrect an orphan. A NOT NULL (cascade) child is skipped; a
+        // nullable (set-null) reference is cleared so the row survives detached
+        // (e.g. a photo whose dive was deleted keeps the photo, sans dive link).
+        var recordToApply = withoutDeviceLocalColumns(entityType, record);
+        var droppedByParent = false;
+        // Under the current names: a checklist row from below v336 names its
+        // default checklist only once the legacy key is mapped.
+        final currentKeys = withCurrentWireKeys(entityType, record);
+        for (final ref in entityParentRefs) {
+          final parentId = currentKeys[ref.field];
+          if (parentId is String &&
+              (allTombstones[ref.parent]?.containsKey(parentId) ?? false) &&
+              // A parent being revived in this same payload is NOT gone; keep
+              // the child's reference intact regardless of merge order.
+              (revivedParents[ref.parent]?.contains(parentId) != true)) {
+            if (ref.nullable) {
+              recordToApply = {
+                ...recordToApply,
+                ref.field: null,
+                for (final also
+                    in alsoClearedWithParent[entityType]?[ref.field] ??
+                        const <String>[])
+                  also: null,
+              };
+            } else {
+              droppedByParent = true;
+              break;
+            }
+          }
+        }
+        if (droppedByParent) continue;
+
+        // Local-deletion guard: if we deleted this record, a remote LIVE copy
+        // must not resurrect it unless the remote edit is newer than our
+        // deletion (a genuine revival). Without this, a peer that has not yet
+        // seen our delete re-introduces the record on every sync.
+        final deletedAt = selfTombstones[recordId];
+        if (deletedAt != null) {
+          if (contradicted.contains(recordId)) {
+            // This same payload presents the record as live AND tombstones it
+            // (a delete-all+reinsert artifact). The live row is the source's
+            // current truth, so drop the stale tombstone -- including a local
+            // one a prior buggy sync left behind -- and apply the record. This
+            // is what self-heals a peer that already dropped the membership.
+            await _syncRepository.removeDeletion(
+              entityType: entityType,
+              recordId: recordId,
+            );
+          } else if (entityType == 'cylinderFills' && isTagFillCopy(record)) {
+            // A fill copied from a tag is not an edit of the fill we deleted,
+            // so it never revives it, whatever its clock
+            // (tag_fill_copy_merge.dart).
+            continue;
+          } else {
+            // Read the remote clock whether or not this entity resolves as
+            // LWW. [hasUpdatedAt] selects the merge STRATEGY (an entity that
+            // is false here is applied as a blind upsert, never overlaid or
+            // conflicted); it is not a claim that the row carries no
+            // timestamp. Gating on it made this branch unreachable for the
+            // gear junctions, so a link lost anywhere could never be revived
+            // by a live copy from a peer (issue #1728). A genuinely clockless
+            // entity still yields null here and is unaffected.
+            // Against the clock of our delete, when both carry one: only an
+            // edit made after the delete revives it. Either clock missing:
+            // the timestamps.
+            if (!_outlivesDelete(
+              copyClock: _ownClock(entityType, record),
+              copyUpdatedAt: _extractUpdatedAtMillis(record),
+              deleteClock: selfTombstoneClocks[recordId],
+              deletedAt: deletedAt,
+            )) {
+              // No newer remote edit -- the deletion wins; stay deleted.
+              continue;
+            }
+            // Remote edit is newer than the deletion: revive the record and
+            // drop the now-obsolete tombstone so it stops re-deleting it.
+            await _syncRepository.removeDeletion(
+              entityType: entityType,
+              recordId: recordId,
+            );
+          }
+        }
+
+        // A scope delete covers this event: the same rule as the per-row
+        // guard above, where only a copy newer than the delete comes back.
+        // The exception is a row the same payload sends live beside it,
+        // which the publisher still holds and so wins.
+        if (eventScopes != null &&
+            !eventScopes.isEmpty &&
+            eventScopes.covers(record)) {
+          if (!contradicted.contains(recordId)) continue;
+          scopeSurvivors.add(recordId);
         }
 
         if (!hasUpdatedAt) {
-          await _serializer.upsertRecord(entityType, record);
-          applied += 1;
+          final local = localById[recordId];
+          var rowFromRemote = true;
+          // Parsed once: the stale-copy guard and the child clears read both.
+          final remoteHlc = clockGuarded ? _extractHlc(record) : null;
+          final localHlc = clockGuarded ? _extractHlc(local) : null;
+          if (clockGuarded) {
+            if (remoteHlc != null) SyncClock.instance.receive(remoteHlc);
+            for (final g in factGroups) {
+              final factClock = _parseHlc(record[g.clockKey]);
+              if (factClock != null) SyncClock.instance.receive(factClock);
+            }
+            // A copy strictly older than the local row is stale: a peer's
+            // snapshot taken before this device's newer edit to the same
+            // child, which the blind upsert used to write over it. An exact
+            // tie or a missing clock on either side still applies, as the
+            // blind upsert always did, so a writer that changed the row
+            // without restamping it still propagates; and no conflict card is
+            // ever raised for a child (the v207 rule for the gear junctions).
+            if (localHlc != null &&
+                remoteHlc != null &&
+                remoteHlc.compareTo(localHlc) < 0) {
+              rowFromRemote = false;
+            }
+          }
+          // An unorderable pending row keeps its own user fields; only its
+          // fact groups are open to the peer (see the gate above).
+          if (pendingUnorderable) rowFromRemote = false;
+          if (factGroups.isEmpty) {
+            if (!rowFromRemote) continue;
+            toUpsert.add(recordToApply);
+            applied += 1;
+            final cleared = _childClears(
+              entityType,
+              recordToApply,
+              local,
+              remoteHlc: remoteHlc,
+              localHlc: localHlc,
+            );
+            if (cleared.isNotEmpty) childClears[recordId] = cleared;
+            continue;
+          }
+          // Facts resolve per group by their own clocks (spec 5.1): a stale
+          // row still hands over newer facts, and a newer row does not take
+          // older ones.
+          //
+          // No overlayOntoLocal here, unlike the LWW path below, and it is
+          // not needed: these arms build their insert with nullToAbsent, so
+          // a column an older peer omits is simply not written and the local
+          // value stands. That is the same property writeFactGroup exists to
+          // work around, since it is what stops a peer's explicit clear from
+          // landing through the upsert. media_clock_guard_test pins it.
+          final resolved = mergeFactGroups(
+            entityType: entityType,
+            base: rowFromRemote ? recordToApply : local!,
+            local: local,
+            remote: recordToApply,
+          );
+          final hint = entityType == 'media'
+              ? mediaResolutionHintFor(
+                  local: local,
+                  applied: resolved.row,
+                  rowFromRemote: rowFromRemote,
+                )
+              : null;
+          if (hint != null) {
+            hinted.add((id: recordId, hint: hint, inBatch: rowFromRemote));
+          }
+          if (rowFromRemote) {
+            toUpsert.add(resolved.row);
+            factWrites.add((
+              id: recordId,
+              row: resolved.row,
+              groups: factGroups,
+              inBatch: true,
+            ));
+            applied += 1;
+          } else if (resolved.fromRemote.isNotEmpty) {
+            factWrites.add((
+              id: recordId,
+              row: resolved.row,
+              groups: resolved.fromRemote,
+              inBatch: false,
+            ));
+            applied += 1;
+          }
           continue;
         }
 
-        final local = await _serializer.fetchRecord(entityType, recordId);
+        final local = localById[recordId];
         localUpdatedAt = _extractUpdatedAtMillis(local);
         final remoteUpdatedAt = _extractUpdatedAtMillis(record);
 
+        final localHlc = _extractHlc(local);
+        final remoteHlc = _extractHlc(record);
+        // Advance our clock past every remote HLC we observe, so this device's
+        // next local write is ordered after what it has seen (the skew fix).
+        if (remoteHlc != null) {
+          SyncClock.instance.receive(remoteHlc);
+        }
+
+        // A fill copied from an NFC tag never beats the fill it was copied
+        // from, whatever the clocks say (tag_fill_copy_merge.dart).
+        if (entityType == 'cylinderFills') {
+          switch (tagFillCopyMerge(local, record)) {
+            case TagFillCopyMerge.keepLocal:
+              continue;
+            case TagFillCopyMerge.takeRemote:
+              toUpsert.add(overlayOntoLocal(entityType, recordToApply, local));
+              applied += 1;
+              continue;
+            case null:
+              break;
+          }
+        }
+
+        // A row carrying fact groups (a diver's list arrangements, issue
+        // #3748) resolves its user fields by the row clock and each group by
+        // its own clock, exactly as the clock-guarded path above does for
+        // media: a stale row still hands over a newer sort, and a newer
+        // settings change does not take a stale one. An unorderable pending
+        // row keeps its own user fields, as the gate above intends, and
+        // opens only its groups to the peer. A row new here takes every
+        // group from the peer, and a peer too old to send a group clock
+        // hands over its row clock as that clock (mergeFactGroups), so a
+        // later local save cannot give its untouched groups a fresh clock.
+        if (factGroups.isNotEmpty &&
+            (local == null ||
+                pendingUnorderable ||
+                (localHlc != null && remoteHlc != null))) {
+          for (final g in factGroups) {
+            final factClock = _parseHlc(record[g.clockKey]);
+            if (factClock != null) SyncClock.instance.receive(factClock);
+          }
+          final rowFromRemote =
+              local == null ||
+              (!pendingUnorderable && remoteHlc!.compareTo(localHlc!) > 0);
+          final resolved = mergeFactGroups(
+            entityType: entityType,
+            base: rowFromRemote
+                ? overlayOntoLocal(entityType, recordToApply, local)
+                : local,
+            local: local,
+            remote: recordToApply,
+          );
+          if (rowFromRemote) {
+            toUpsert.add(resolved.row);
+            factWrites.add((
+              id: recordId,
+              row: resolved.row,
+              groups: factGroups,
+              inBatch: true,
+            ));
+            applied += 1;
+          } else if (resolved.fromRemote.isNotEmpty) {
+            factWrites.add((
+              id: recordId,
+              row: resolved.row,
+              groups: resolved.fromRemote,
+              inBatch: false,
+            ));
+            applied += 1;
+          }
+          continue;
+        }
+
+        // When BOTH sides carry an HLC it is the authoritative, deterministic
+        // resolution -- it already encodes causal order across devices, so we
+        // do NOT raise a manual conflict (that would defeat the purpose of the
+        // clock for the common concurrent-edit case). A strictly-greater
+        // remote HLC wins; an exact tie or a local-newer HLC keeps local.
+        if (localHlc != null && remoteHlc != null) {
+          if (remoteHlc.compareTo(localHlc) > 0) {
+            toUpsert.add(overlayOntoLocal(entityType, recordToApply, local));
+            applied += 1;
+          }
+          continue;
+        }
+
+        // Pre-HLC fallback (one or both sides lack an HLC): use updatedAt, and
+        // surface a true two-sided edit since the last sync as a conflict.
         if (localUpdatedAt != null &&
             remoteUpdatedAt != null &&
             lastSyncMs != null &&
@@ -787,7 +4419,7 @@ class SyncService {
           await _syncRepository.markRecordConflict(
             entityType: entityType,
             recordId: recordId,
-            conflictDataJson: jsonEncode(record),
+            conflictDataJson: jsonEncode(recordToApply),
             localUpdatedAt: localUpdatedAt,
           );
           continue;
@@ -796,7 +4428,7 @@ class SyncService {
         if (remoteUpdatedAt == null ||
             localUpdatedAt == null ||
             remoteUpdatedAt >= localUpdatedAt) {
-          await _serializer.upsertRecord(entityType, record);
+          toUpsert.add(overlayOntoLocal(entityType, recordToApply, local));
           applied += 1;
         }
       } catch (e, stackTrace) {
@@ -805,20 +4437,138 @@ class SyncService {
           error: e,
           stackTrace: stackTrace,
         );
-        conflicts += 1;
-        if (recordId != null) {
-          await _syncRepository.markRecordConflict(
-            entityType: entityType,
-            recordId: recordId,
-            conflictDataJson: jsonEncode(record),
-            localUpdatedAt:
-                localUpdatedAt ?? DateTime.now().millisecondsSinceEpoch,
-          );
-        }
+        // An apply error is a real failure, not a "conflict" (which means both
+        // sides edited the same record). Masking apply errors as conflicts is
+        // what hid the cross-device no-op; count it so performSync surfaces it.
+        failed += 1;
       }
     }
 
-    return _MergeResult(recordsApplied: applied, conflictsFound: conflicts);
+    // Read-decide-write flush: one batched write for the whole merge-batch.
+    // Drift's batch is all-or-nothing, so a failure fails every row it would
+    // have applied -- move those from applied to failed, mirroring the per-row
+    // catch above.
+    //
+    // The two inbound-only legacy sample entities are the exception to the
+    // all-or-nothing part: their upsert goes to the staging tables of
+    // legacy_sample_staging.dart, which insert in chunks, so a throw can
+    // leave earlier chunks staged. Counting the whole batch failed is still
+    // right, and the partial stage is harmless: the staged rows are
+    // pack that reads it is idempotent, and a retry restages the same ids
+    // over the same rows.
+    var batchFailed = false;
+    if (toUpsert.isNotEmpty) {
+      try {
+        await _serializer.upsertRecords(entityType, toUpsert);
+      } catch (e, stackTrace) {
+        _log.error(
+          'Failed to batch-upsert $entityType (${toUpsert.length} rows)',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        batchFailed = true;
+        failed += toUpsert.length;
+        applied -= toUpsert.length;
+      }
+    }
+
+    // A live event that beat a scope keeps an old clock, but the scope is
+    // stored and relayed: a later copy of it (from another peer, or relayed
+    // on from here) would delete the event again. The per-row path drops a
+    // contradicted tombstone; a scope also covers other rows, so instead the
+    // event takes a clock newer than the scope and is published with it, and
+    // no copy of the scope covers it anywhere any more.
+    if (!batchFailed) {
+      for (final id in scopeSurvivors) {
+        await _syncRepository.markRecordPending(
+          entityType: entityType,
+          recordId: id,
+          localUpdatedAt: DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+    }
+
+    // Rethrown, not counted, unlike the row upsert above. The upsert has
+    // already written this row including its new fact clock, while the
+    // group's own columns are still the old values (the upsert builds with
+    // nullToAbsent, which is why the targeted write exists at all). Swallow
+    // the failure and the row looks applied, the reader advances its cursor
+    // past this changeset, and the peer's clear is lost for good: its clock
+    // is now ours. Throwing rolls back the deferred-FK transaction around
+    // the whole payload, and the reader leaves its cursor where it was, so
+    // the next sync re-pulls this changeset (media sync program spec 5.1).
+    for (final w in factWrites) {
+      // The batch is all-or-nothing, so a failure means this row was never
+      // written. Writing its facts anyway would apply half a changeset that
+      // failed: the row keeps its old values while its fact columns and
+      // clock move, which can consume a peer's clear outright. A fact write
+      // whose row was not in the batch is untouched by that failure.
+      if (batchFailed && w.inBatch) continue;
+      try {
+        for (final g in w.groups) {
+          await _serializer.writeFactGroup(entityType, w.id, g, w.row);
+        }
+      } catch (e, stackTrace) {
+        _log.error(
+          'Failed to write facts for $entityType ${w.id}; rolling back the '
+          'payload so the changeset is re-applied next sync',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        rethrow;
+      }
+    }
+
+    // Rethrown for the same reason as the fact writes: the batch has already
+    // written each row with the peer's clock, so a swallowed failure would
+    // leave the row looking applied, the next copy would tie, and the clear
+    // would be lost for good. Throwing rolls the payload back so the
+    // changeset is re-applied next sync.
+    if (!batchFailed && childClears.isNotEmpty) {
+      try {
+        await _serializer.clearChildColumns(entityType, childClears);
+      } catch (e, stackTrace) {
+        _log.error(
+          'Failed to write cleared columns for $entityType; rolling back the '
+          'payload so the changeset is re-applied next sync',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        rethrow;
+      }
+    }
+
+    // After the writes, so a row the batch failed to write is not treated
+    // as if it had landed. The cache is another database and outside this
+    // payload's transaction: if the payload later rolls back, the only
+    // cost is a search that runs sooner than it would have.
+    final hints = MediaResolutionHints.of([
+      for (final h in hinted)
+        if (!(batchFailed && h.inBatch)) (h.id, h.hint),
+    ]);
+    final onHints = _onMediaResolutionHints;
+    if (!hints.isEmpty && onHints != null) {
+      try {
+        await onHints(hints);
+      } on Object catch (e) {
+        _log.warning(
+          'Could not apply resolution hints for '
+          '${hints.retry.length + hints.remap.length} media rows: $e',
+        );
+      }
+    }
+
+    // A profile's private notes on shared site library sites (issue #2567)
+    // reach the library site rows, which personal sync never carries.
+    if (entityType == SharedLibraryStore.siteNotesEntity && applied > 0) {
+      await applyLibrarySiteNotes(DatabaseService.instance.database);
+    }
+
+    return _MergeResult(
+      recordsApplied: applied,
+      conflictsFound: conflicts,
+      recordsFailed: failed,
+    );
   }
 
   Future<Map<String, Set<String>>> _pendingRecordMap() async {
@@ -830,6 +4580,41 @@ class SyncService {
     return map;
   }
 
+  /// Local deletion tombstones as entityType -> (recordId -> latest
+  /// deletedAt), and the clock of each delete that has one
+  /// (DeletionLog.originHlc) keyed the same way. Used by [_mergeEntity] to
+  /// keep a remote live copy from resurrecting a record we have deleted.
+  Future<
+    ({
+      Map<String, Map<String, int>> deletedAt,
+      Map<String, Map<String, Hlc>> clocks,
+    })
+  >
+  _deletionMaps() async {
+    final deletions = await _syncRepository.getAllDeletions();
+    final map = <String, Map<String, int>>{};
+    final clocks = <String, Map<String, Hlc>>{};
+    for (final d in deletions) {
+      final byId = map.putIfAbsent(d.entityType, () => <String, int>{});
+      final existing = byId[d.recordId];
+      // Keep the most recent deletion if duplicate tombstones exist.
+      if (existing == null || d.deletedAt > existing) {
+        byId[d.recordId] = d.deletedAt;
+        final clock = _parseHlc(d.originHlc);
+        final clocksById = clocks.putIfAbsent(
+          d.entityType,
+          () => <String, Hlc>{},
+        );
+        if (clock == null) {
+          clocksById.remove(d.recordId);
+        } else {
+          clocksById[d.recordId] = clock;
+        }
+      }
+    }
+    return (deletedAt: map, clocks: clocks);
+  }
+
   int? _extractUpdatedAtMillis(Map<String, dynamic>? data) {
     if (data == null) return null;
     final updatedAt = data['updatedAt'];
@@ -839,25 +4624,141 @@ class SyncService {
     return null;
   }
 
-  String? _recordIdForEntity(String entityType, Map<String, dynamic> record) {
-    switch (entityType) {
-      case 'settings':
-        return record['key'] as String?;
-      case 'diveEquipment':
-        return record['id'] as String? ??
-            _compositeId(record['diveId'], record['equipmentId']);
-      case 'equipmentSetItems':
-        return record['id'] as String? ??
-            _compositeId(record['setId'], record['equipmentId']);
-      default:
-        return record['id'] as String?;
+  /// The keys a parent-gated child's [remote] copy clears on [local], or a
+  /// clock-guarded type's in [SyncDataSerializer.clockGuardedClearTables]:
+  /// its explicit nulls, when the copy's clock ([remoteHlc], against the
+  /// local row's [localHlc]) is strictly newer (#2644). Empty for anything
+  /// else, including a row this device does not have yet.
+  Set<String> _childClears(
+    String entityType,
+    Map<String, dynamic> remote,
+    Map<String, dynamic>? local, {
+    required Hlc? remoteHlc,
+    required Hlc? localHlc,
+  }) {
+    if (local == null || SyncDataSerializer.clearTableFor(entityType) == null) {
+      return const {};
+    }
+    if (!isNewerChildCopy(remote: remoteHlc, local: localHlc)) {
+      return const {};
+    }
+    return explicitlyClearedKeys(remote: remote, local: local);
+  }
+
+  /// Parse a record's Hybrid Logical Clock, or null if absent/blank (rows
+  /// written before the HLC rollout). Malformed values are treated as absent
+  /// so a bad value can never crash the merge.
+  Hlc? _extractHlc(Map<String, dynamic>? data) => _parseHlc(data?['hlc']);
+
+  /// [raw] as an HLC, or null when absent, blank or malformed.
+  Hlc? _parseHlc(Object? raw) {
+    if (raw is! String || raw.isEmpty) return null;
+    try {
+      return Hlc.parse(raw);
+    } catch (_) {
+      return null;
     }
   }
 
-  String? _compositeId(Object? left, Object? right) {
-    if (left == null || right == null) return null;
-    return '$left|$right';
+  /// The newest clock a row carries: its own, or any of its fact groups'.
+  ///
+  /// A media fact write advances ONLY its group clock and deliberately
+  /// leaves the row clock alone, so reading the row clock by itself makes a
+  /// freshly written fact look older than it is. A tombstone decision that
+  /// did that fell through to the `updatedAt` comparison and could apply a
+  /// stale delete over a newer fact write (media sync program spec 5.1).
+  /// The row clock alone is still the answer for an entity with no fact
+  /// groups, and for a peer old enough to send none.
+  Hlc? _ownClock(String entityType, Map<String, dynamic>? row) {
+    var newest = _extractHlc(row);
+    for (final g in SyncFactGroups.of(entityType)) {
+      final factClock = _parseHlc(row?[g.clockKey]);
+      if (factClock != null &&
+          (newest == null || factClock.compareTo(newest) > 0)) {
+        newest = factClock;
+      }
+    }
+    return newest;
   }
+
+  /// Whether a peer's live copy of a row this device deleted is newer than
+  /// the delete, and so revives the row. The two clocks decide when both
+  /// exist ([copyClock] is the copy's [_ownClock], [deleteClock] the
+  /// tombstone's origin clock), for every entity: the copy's updatedAt was
+  /// stamped by another device's wall clock and [deletedAt] by this one's,
+  /// so comparing them let a stale copy from a fast clock revive the row,
+  /// or a later edit from a slow one stay deleted (#2943). Either clock
+  /// missing: the wall-clock comparison.
+  static bool _outlivesDelete({
+    required Hlc? copyClock,
+    required int? copyUpdatedAt,
+    required Hlc? deleteClock,
+    required int deletedAt,
+  }) {
+    if (copyClock != null && deleteClock != null) {
+      return copyClock.compareTo(deleteClock) > 0;
+    }
+    return copyUpdatedAt != null && copyUpdatedAt > deletedAt;
+  }
+
+  /// What [_revivedParents] reads of a peer's copy of a parent row.
+  _ParentStamp _parentStamp(String entityType, Map<String, dynamic> row) => (
+    updatedAt: _extractUpdatedAtMillis(row),
+    clock: _ownClock(entityType, row),
+  );
+
+  /// The locally tombstoned parents a payload brings back, by type, decided
+  /// as [_mergeEntity]'s local-deletion guard decides them: a copy newer
+  /// than our delete ([_outlivesDelete]), or one the same payload both
+  /// deletes and sends live ([contradicted]), which the merge applies over
+  /// our tombstone. Every parent counts, whatever its merge flag (species,
+  /// media and diveTanks resolve by their clock alone). Computed before any
+  /// row merges, so a child keeps its link to a parent that is coming back
+  /// whichever of the two merges first.
+  static Map<String, Set<String>> _revivedParents({
+    required Set<String> parentTypes,
+    required Map<String, Map<String, _ParentStamp>> stamps,
+    required Map<String, Map<String, int>> tombstones,
+    required Map<String, Map<String, Hlc>> tombstoneClocks,
+    required Map<String, Set<String>> contradicted,
+  }) {
+    final revived = <String, Set<String>>{};
+    for (final parentType in parentTypes) {
+      final tombs = tombstones[parentType];
+      if (tombs == null || tombs.isEmpty) continue;
+      final ids = <String>{
+        for (final id in contradicted[parentType] ?? const <String>{})
+          if (tombs.containsKey(id)) id,
+      };
+      stamps[parentType]?.forEach((id, stamp) {
+        final deletedAt = tombs[id];
+        if (deletedAt != null &&
+            _outlivesDelete(
+              copyClock: stamp.clock,
+              copyUpdatedAt: stamp.updatedAt,
+              deleteClock: tombstoneClocks[parentType]?[id],
+              deletedAt: deletedAt,
+            )) {
+          ids.add(id);
+        }
+      });
+      if (ids.isNotEmpty) revived[parentType] = ids;
+    }
+    return revived;
+  }
+
+  /// Whether a local row and a peer's copy can be ordered: both carry a
+  /// clock. A pending local row is protected from the peer's copy only when
+  /// they cannot be.
+  bool _orderable(Map<String, dynamic>? local, Map<String, dynamic> remote) =>
+      _extractHlc(local) != null && _extractHlc(remote) != null;
+
+  /// The id the merge keys a record by; see [syncRecordId].
+  @visibleForTesting
+  static String? recordIdForEntity(
+    String entityType,
+    Map<String, dynamic> record,
+  ) => syncRecordId(entityType, record);
 
   bool _isConflictCopy(String filename) {
     final lower = filename.toLowerCase();
@@ -889,7 +4790,10 @@ class SyncService {
       return;
     }
 
-    final remoteData = _parseConflictData(match.conflictData!);
+    final remoteData = withoutDeviceLocalColumns(
+      entityType,
+      _parseConflictData(match.conflictData!),
+    );
     final isDeletion = remoteData['_deleted'] == true;
     final deletedAt = remoteData['deletedAt'] is int
         ? remoteData['deletedAt'] as int
@@ -906,14 +4810,53 @@ class SyncService {
 
       case ConflictResolution.keepRemote:
         if (isDeletion) {
-          await _serializer.deleteRecord(entityType, recordId);
-          await _syncRepository.logDeletionIfMissing(
-            entityType: entityType,
-            recordId: recordId,
-            deletedAt: deletedAt ?? DateTime.now().millisecondsSinceEpoch,
-          );
+          // A local row can still reference this record through a
+          // non-cascading FK (a dive plan's source dive, a dive's site), and
+          // a bare delete then fails with SqliteException(787), leaving the
+          // conflict unresolved. Defer the FK checks and repair the dangling
+          // references before COMMIT, as _applyRemoteDeletions does. The
+          // repaired rows are not marked pending: every peer applying this
+          // tombstone runs the same repair.
+          try {
+            await _serializer.applyInDeferredFkTransaction(() async {
+              // Only an identification's row is needed, for its media; other
+              // rows can carry large blobs.
+              final local = entityType == 'mediaIdentifications'
+                  ? await _serializer.fetchRecord(entityType, recordId)
+                  : null;
+              await _serializer.deleteRecord(entityType, recordId);
+              await _serializer.repairDanglingForeignKeys();
+              await _syncRepository.logDeletionIfMissing(
+                entityType: entityType,
+                recordId: recordId,
+                deletedAt: deletedAt ?? DateTime.now().millisecondsSinceEpoch,
+                originHlc: remoteData['hlc'] is String
+                    ? remoteData['hlc'] as String
+                    : null,
+              );
+              _noteDeletedIdentification(entityType, local);
+            });
+          } finally {
+            // An identification's crop file and embedding go too, as when
+            // the tombstone applied with no conflict (issue #4890).
+            await _handOnDeletedIdentifications();
+          }
         } else {
-          await _serializer.upsertRecord(entityType, remoteData);
+          // keepRemote overwrites the local row. For HLC-bearing entities the
+          // upsert uses `.toCompanion(false)`, so a cross-version remote map
+          // that OMITS a nullable key would write SQL NULL and clobber the
+          // local value. Overlay onto the current local row first (mirrors
+          // `_mergeEntity`): an omitted key keeps its local value, an explicit
+          // null still clears. Clockless entities upsert with nullToAbsent, so
+          // an omitted key is already preserved -- apply their map directly.
+          final toApply = entityHasUpdatedAt[entityType] == true
+              ? overlayOntoLocal(
+                  entityType,
+                  remoteData,
+                  await _serializer.fetchRecord(entityType, recordId),
+                )
+              : remoteData;
+          await _applyConflictRow(entityType, toApply);
         }
         await _syncRepository.clearConflict(
           entityType: entityType,
@@ -922,18 +4865,9 @@ class SyncService {
         break;
 
       case ConflictResolution.keepBoth:
-        if (isDeletion) {
-          await _syncRepository.clearConflict(
-            entityType: entityType,
-            recordId: recordId,
-          );
-          await _markPendingForConflict(entityType, recordId);
-          break;
-        }
-        final newId = _duplicateId(entityType, remoteData);
-        if (newId != null) {
-          remoteData['id'] = newId;
-          await _serializer.upsertRecord(entityType, remoteData);
+        if (keepBothMakesCopy(entityType, remoteData)) {
+          remoteData['id'] = _uuid.v4();
+          await _applyConflictRow(entityType, remoteData);
         }
         await _syncRepository.clearConflict(
           entityType: entityType,
@@ -943,6 +4877,19 @@ class SyncService {
         break;
     }
   }
+
+  /// Writes a peer's row the user chose to keep, as the batch paths would.
+  /// That row can name a parent this device has since deleted, or a check-in
+  /// it turns OK, so the write defers the FK checks and repairs before COMMIT
+  /// rather than failing with SqliteException(787) and leaving the conflict
+  /// unresolvable. The repaired rows are not marked pending: every device
+  /// derives the same result from the same rows.
+  Future<void> _applyConflictRow(String entityType, Map<String, dynamic> row) =>
+      _serializer.applyInDeferredFkTransaction(() async {
+        await _serializer.noteIncomingRows(entityType, [row]);
+        await _serializer.upsertRecord(entityType, row);
+        await _serializer.repairAfterRowWrite(entityType);
+      });
 
   Future<void> _markPendingForConflict(
     String entityType,
@@ -958,16 +4905,1479 @@ class SyncService {
     );
   }
 
-  String? _duplicateId(String entityType, Map<String, dynamic> record) {
-    if (entityType == 'settings') return null;
-    if (record['id'] == null) return null;
-    return _uuid.v4();
+  /// Whether resolving with [ConflictResolution.keepBoth] copies the remote
+  /// row under a new id. It cannot for a deletion, for a row with no `id` of
+  /// its own (a composite-key junction) or for `settings`; there Keep both
+  /// keeps the local row only. The conflict dialog reads this to decide
+  /// whether to offer Keep both, so the offer and the outcome cannot drift.
+  static bool keepBothMakesCopy(
+    String entityType,
+    Map<String, dynamic> remoteData,
+  ) =>
+      entityType != 'settings' &&
+      remoteData['_deleted'] != true &&
+      remoteData['id'] != null;
+
+  /// Reset sync state (for debugging or account changes).
+  ///
+  /// Keeps the deletion log: this reset is the user-facing recovery path,
+  /// and the next sync after it runs with a null baseline, where a wiped
+  /// log would let stale peer files resurrect every deleted record.
+  Future<void> resetSyncState() async {
+    await _syncRepository.resetSyncState(clearDeletionLog: false);
+    _log.info('Sync state reset');
   }
 
-  /// Reset sync state (for debugging or account changes)
-  Future<void> resetSyncState() async {
-    await _syncRepository.resetSyncState();
-    _log.info('Sync state reset');
+  /// Comprehensive local sync reset: everything [resetSyncState] clears, PLUS
+  /// both library-epoch anchors (the SharedPreferences markers -- see
+  /// [LibraryEpochStore.clear] -- and the DB's accepted epoch, which
+  /// [resetSyncState] leaves alone) and any leftover base temp files.
+  /// A true reinstall-equivalent for sync state that never touches dive data.
+  /// The notifier-level caller still runs the identity/cloud-file cleanup.
+  ///
+  /// Both anchors must go together. Clearing only the mirror strands this
+  /// device on a DB epoch it can no longer republish a marker for, and the
+  /// reader then skips every peer stamped differently -- turning the repair
+  /// into a worse wedge than the one it was invoked to escape.
+  Future<void> repairLocalSyncState() async {
+    await resetSyncState();
+    await _syncRepository.setLastAcceptedEpochId(null);
+    await _epochStore?.clear();
+    await sweepLeftoverSyncTempFiles();
+    _log.info('Local sync state repaired');
+  }
+
+  /// Best-effort removal of [deviceId]'s entire changeset log from the cloud
+  /// (manifest, base parts, changesets). Used when this install retires an
+  /// identity (Reset Sync State): once the device id changes, its old log would
+  /// otherwise be merged back as a stale "peer" forever. Never throws; if the
+  /// provider is offline the log lingers indefinitely as a stale peer.
+  Future<SyncCleanupOutcome> deleteDeviceSyncFile(
+    String deviceId, {
+    SyncCleanupProgress? onProgress,
+  }) async {
+    final provider = _cloudProvider;
+    if (provider == null) return const SyncCleanupOutcome();
+    return _deleteListedFiles(
+      provider,
+      const [ChangesetLogLayout.prefix],
+      where: (f) => ChangesetLogLayout.deviceIdOf(f.name) == deviceId,
+      reason: 'retirement of $deviceId',
+      onProgress: onProgress,
+    );
+  }
+
+  /// List every file matching [patterns] (de-duplicated by id, patterns applied
+  /// in order so the caller's deletion order is predictable), then delete each
+  /// one, reporting progress against a total fixed before the first delete.
+  ///
+  /// Deliberately two-pass. Deleting as it lists would leave the UI unable to
+  /// show anything but a spinner, and a wipe of a 400-file backend runs for
+  /// minutes (issue #1032). Taking the whole listing up front costs one extra
+  /// round trip and buys a real denominator.
+  ///
+  /// Best-effort, as every caller here is: individual failures are counted into
+  /// the returned [SyncCleanupOutcome] rather than thrown, so a partial wipe
+  /// finishes what it can. Callers must not claim success without checking
+  /// [SyncCleanupOutcome.isComplete].
+  Future<SyncCleanupOutcome> _deleteListedFiles(
+    CloudStorageProvider provider,
+    List<String> patterns, {
+    required String reason,
+    bool Function(CloudFileInfo file)? where,
+    SyncCleanupProgress? onProgress,
+  }) async {
+    final byId = <String, CloudFileInfo>{};
+    var listIncomplete = false;
+    for (final pattern in patterns) {
+      try {
+        final files = await provider
+            .listFiles(namePattern: pattern)
+            .timeout(const Duration(seconds: 8));
+        for (final f in files) {
+          if (where == null || where(f)) byId[f.id] = f;
+        }
+      } catch (e) {
+        // The listing we could not read may name files we will never attempt.
+        // Record that so the caller cannot report a clean sweep (issue #1032).
+        listIncomplete = true;
+        _log.warning('Could not list "$pattern" files for $reason: $e');
+      }
+    }
+
+    final targets = byId.values.toList();
+    var deleted = 0;
+    var failed = 0;
+    onProgress?.call(0, targets.length);
+    for (final f in targets) {
+      try {
+        await provider.deleteFile(f.id).timeout(const Duration(seconds: 8));
+        deleted++;
+        _log.info('Deleted sync file ${f.name} for $reason');
+      } catch (e) {
+        failed++;
+        _log.warning('Could not delete sync file ${f.name}: $e');
+      }
+      onProgress?.call(deleted + failed, targets.length);
+    }
+    // A provider that batches deletes (Git) has only recorded them so far.
+    // Push them now, before anyone is told they are gone; if that fails,
+    // none of them happened.
+    if (deleted > 0) {
+      try {
+        await flushDeferredWrites(provider, timeout: _flushTimeout);
+      } catch (e) {
+        _log.warning('Could not push $deleted deletes for $reason: $e');
+        failed += deleted;
+        deleted = 0;
+      }
+    }
+    return SyncCleanupOutcome(
+      deleted: deleted,
+      failed: failed,
+      listIncomplete: listIncomplete,
+    );
+  }
+
+  /// How long a flush's own push may run. Its wait behind earlier writes
+  /// (a backup upload, say) does not count, so deletes that will land are
+  /// not reported as failed for waiting their turn.
+  static const Duration _flushTimeout = Duration(seconds: 20);
+
+  /// Pushes deferred writes at the end of a run. Best-effort: a failure is
+  /// logged, and a later sweep redoes the deletes it covered.
+  Future<void> _flushAfterRun(String run) async {
+    final provider = _cloudProvider;
+    if (provider == null) return;
+    try {
+      await flushDeferredWrites(provider, timeout: _flushTimeout);
+    } catch (e) {
+      _log.warning('Deferred writes not pushed after $run: $e');
+    }
+  }
+
+  /// On a backend that keeps deleted data in its history (Git), drops it
+  /// now: called after deletes made for privacy (an old backend, a full
+  /// wipe, a library replace). Best-effort, never throws.
+  Future<void> _resetHistoryQuietly(
+    CloudStorageProvider provider,
+    String reason,
+  ) async {
+    try {
+      await resetHistoryNowIfSupported(provider).timeout(_flushTimeout);
+    } catch (e) {
+      _log.warning('History not reset after $reason: $e');
+    }
+  }
+
+  /// Best-effort deletion of EVERY sync file in the cloud folder: all peers'
+  /// per-device files, our own, the legacy shared file, and conflict copies.
+  /// Failures are logged and skipped -- files that survive carry a stale (or
+  /// missing) epoch stamp and are inert to every current-epoch device.
+  Future<SyncCleanupOutcome> deleteAllSyncFiles(
+    CloudStorageProvider provider, {
+    SyncCleanupProgress? onProgress,
+  }) async {
+    // Wipe both the changeset logs (ssv1.*) and any legacy full-file uploads.
+    // The epoch/moved markers (submersion_library_*) match neither pattern, so
+    // they survive -- a peer mid-replace still learns the new epoch.
+    final outcome = await _deleteListedFiles(
+      provider,
+      const [ChangesetLogLayout.prefix, CloudStorageProviderMixin.syncFileStem],
+      reason: 'library replace',
+      onProgress: onProgress,
+    );
+    await _resetHistoryQuietly(provider, 'library replace');
+    return outcome;
+  }
+
+  /// Delete EVERY sync artifact on [provider], INCLUDING the library epoch and
+  /// moved markers that [deleteAllSyncFiles] intentionally preserves. A genuine
+  /// fresh start (issue #509, cloud clear 3b): every device re-establishes from
+  /// scratch. Best-effort; failures are logged and skipped.
+  Future<SyncCleanupOutcome> wipeAllSyncData(
+    CloudStorageProvider provider, {
+    SyncCleanupProgress? onProgress,
+  }) async {
+    // One pass over all four patterns rather than logs-then-markers, so the
+    // user sees a single bar with a single honest total (issue #1032). Pattern
+    // order still puts the logs first: a peer listing mid-wipe must never find
+    // orphaned logs whose epoch marker is already gone.
+    final outcome = await _deleteListedFiles(
+      provider,
+      const [
+        ChangesetLogLayout.prefix,
+        CloudStorageProviderMixin.syncFileStem,
+        libraryEpochFileName,
+        libraryMovedFileName,
+      ],
+      reason: 'full sync wipe',
+      onProgress: onProgress,
+    );
+    await _resetHistoryQuietly(provider, 'full sync wipe');
+    return outcome;
+  }
+
+  /// Wipe all sync data on the active provider (issue #509, cloud clear 3b).
+  /// No-op when no provider is configured.
+  Future<SyncCleanupOutcome> wipeAllSyncDataOnActiveProvider({
+    SyncCleanupProgress? onProgress,
+  }) async {
+    final provider = _cloudProvider;
+    if (provider == null) return const SyncCleanupOutcome();
+    return wipeAllSyncData(provider, onProgress: onProgress);
+  }
+
+  /// Execute the cloud side of a Replace restore: write the new epoch marker
+  /// FIRST (a peer syncing mid-replace must learn the new epoch before it can
+  /// misread a half-empty folder), wipe every sync file, upload our library
+  /// stamped with the new epoch, then commit the epoch locally and clear the
+  /// pending intent. On any failure the intent is kept so the next sync
+  /// retries instead of merging.
+  Future<SyncResult> executeLibraryReplace(LibraryEpochMarker marker) async {
+    try {
+      return await _executeLibraryReplaceRun(marker);
+    } finally {
+      await _flushAfterRun('library replace');
+    }
+  }
+
+  Future<SyncResult> _executeLibraryReplaceRun(
+    LibraryEpochMarker marker,
+  ) async {
+    final provider = _cloudProvider;
+    final store = _epochStore;
+    if (provider == null || store == null) {
+      return SyncResult(
+        status: SyncResultStatus.error,
+        message: _l10n.settings_cloudSync_result_noProvider,
+      );
+    }
+    try {
+      if (!await provider.isAuthenticated()) {
+        return SyncResult(
+          status: SyncResultStatus.authError,
+          message: _l10n.settings_cloudSync_result_notAuthenticated,
+        );
+      }
+      final deviceId = await _syncRepository.getDeviceId();
+      await _syncRepository.ensureSyncClockConfigured();
+
+      await writeLibraryEpochMarker(provider, marker);
+      await deleteAllSyncFiles(provider);
+
+      final syncFolder = await provider.getOrCreateSyncFolder();
+      // Cold-start the changeset log under the new epoch: the wipe removed our
+      // cloud manifest, so the local publish position must be cleared too, or
+      // the writer would append a changeset against a base that no longer
+      // exists.
+      final db = DatabaseService.instance.database;
+      await PublishStateStore(db).resetForProvider(provider.providerId);
+      await PeerCursorStore(db).resetForProvider(provider.providerId);
+
+      final deletions = await _syncRepository.getAllDeletions();
+      // Publish the new library as a fresh epoch-stamped base. Peers on the old
+      // epoch halt for adoption; adopters rebuild from this base.
+      await _changesetWriter.publish(
+        provider: provider,
+        deviceId: deviceId,
+        folderId: syncFolder,
+        deletions: deletions,
+        epochId: marker.epochId,
+        uploadNonce: _uuid.v4(),
+        onManifestNonce: (nonce) =>
+            _recordUploadNonce(nonce, provider.providerId),
+        deviceName: await _deviceNameForManifest(),
+      );
+
+      final now = DateTime.now();
+      await _syncRepository.setLastAcceptedEpochId(marker.epochId);
+      await store.setLastAccepted(marker);
+      await _syncRepository.updateLastSyncTime(
+        now,
+        providerId: provider.providerId,
+      );
+      await _syncRepository.persistSyncClock();
+      await store.clearPendingReplace();
+      _log.info('Library replace executed under epoch ${marker.epochId}');
+      return SyncResult(
+        status: SyncResultStatus.success,
+        message: _l10n.settings_cloudSync_result_libraryReplaced,
+        lastSyncTime: now,
+      );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Library replace failed; pending intent kept for retry',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return _libraryFailure(
+        e,
+        _l10n.settings_cloudSync_result_libraryReplaceFailed('$e'),
+      );
+    }
+  }
+
+  /// Adopt the replaced library: apply the current-epoch cloud files as
+  /// authoritative -- upsert every record they contain and delete every
+  /// local record (of synced entity types) they do not. Device identity is
+  /// deliberately untouched: adoption changes data, not identity. The caller
+  /// is responsible for the pre-adoption safety backup and any post-adoption
+  /// fix-ups (active diver, follow-up sync).
+  /// Retirement fence: if the fleet retired this device while it was offline
+  /// (its retirement marker is present), rebuild from the current cloud
+  /// library before doing anything else. `terminal` is non-null only on
+  /// failure; a null `terminal` means "not fenced" or "fence completed --
+  /// continue this sync normally" (the follow-through pull/publish then
+  /// republishes us). `files` carries this check's folder listing back to the
+  /// caller for reuse by the pull when the fence did NOT fire (after a rejoin
+  /// the listing is stale -- the rejoin mutated the folder -- so it is null).
+  Future<({SyncResult? terminal, List<CloudFileInfo>? files})>
+  _checkRetirementFence(
+    CloudStorageProvider provider,
+    String folderId,
+    String deviceId,
+    String? currentEpochId,
+  ) async {
+    final markerName = ChangesetLogLayout.retiredMarkerName(deviceId);
+    final files = await provider.listFiles(
+      folderId: folderId,
+      namePattern: ChangesetLogLayout.prefix,
+    );
+    final marker = files.where((f) => f.name == markerName).toList();
+    if (marker.isEmpty) return (terminal: null, files: files);
+    final retiredPeers = <String>{
+      for (final f in files)
+        if (ChangesetLogLayout.isRetiredMarker(f.name) &&
+            ChangesetLogLayout.deviceIdOf(f.name) != null)
+          ChangesetLogLayout.deviceIdOf(f.name)!,
+    };
+    final terminal = await _rejoinAfterRetirement(
+      provider: provider,
+      folderId: folderId,
+      deviceId: deviceId,
+      currentEpochId: currentEpochId,
+      markerId: marker.first.id,
+      retiredPeers: retiredPeers,
+    );
+    return (terminal: terminal, files: null);
+  }
+
+  Future<SyncResult?> _rejoinAfterRetirement({
+    required CloudStorageProvider provider,
+    required String folderId,
+    required String deviceId,
+    required String? currentEpochId,
+    required String markerId,
+    required Set<String> retiredPeers,
+  }) async {
+    _log.warning(
+      'This device was retired while offline; rejoining from the cloud '
+      'library (cloud-wins)',
+    );
+    final db = DatabaseService.instance.database;
+
+    // 1. Snapshot unpublished local changes: everything above our last
+    //    published watermark (rows AND deletions). This is exactly what the
+    //    pending bookkeeping tracks, expressed as an HLC delta.
+    final state = await _publishStateStore.get(provider.providerId);
+    final watermark = state?.publishedHlcHigh;
+    SyncPayload? pending;
+    if (watermark != null) {
+      pending = await _serializer.exportChangeset(
+        deviceId: deviceId,
+        hlcWatermark: watermark,
+        deletions: await _syncRepository.getAllDeletions(),
+        seq: 0,
+      );
+    }
+
+    // 2. Rebuild from the current cloud library (authoritative). Excludes
+    //    other retired devices' lingering logs -- their stale data must not
+    //    ride back in through the fence.
+    final sources = await _collectEpochBaseSources(
+      provider,
+      folderId,
+      currentEpochId,
+      excludeDeviceIds: retiredPeers,
+    );
+    if (sources.newerSchemaPeerDeviceIds.isNotEmpty) {
+      // Held (#1341): stay fenced. The cloud library exists but was published
+      // from a newer schema, so rebuilding from it would apply what pull
+      // holds, and the re-establish below would push the stale rows the fence
+      // exists to keep out. Marker and local state are left as they are; the
+      // rejoin runs once this device updates.
+      _log.warning(
+        'Retirement fence held: the cloud library was published from a newer '
+        'schema by ${sources.newerSchemaPeerDeviceIds}',
+      );
+      return SyncResult(
+        status: SyncResultStatus.error,
+        message: _l10n.settings_cloudSync_result_cloudLibraryNewerSchema,
+        newerSchemaPeerDeviceIds: sources.newerSchemaPeerDeviceIds,
+        newerSchemaPeerNames: sources.newerSchemaPeerNames,
+      );
+    }
+    if (sources.baseFilePaths.isEmpty) {
+      // No readable library to rebuild from. Re-establish from the local
+      // library instead of bricking (mirrors _recoverUnreadableEpoch): drop
+      // the marker and let this same sync republish our base. Resurrection is
+      // moot -- there is no fleet state to diverge from.
+      _log.warning(
+        'Retirement fence found no readable cloud library; re-establishing '
+        'from the local library',
+      );
+      await provider.deleteFile(markerId);
+      await _publishStateStore.resetForProvider(provider.providerId);
+      await PeerCursorStore(db).resetForProvider(provider.providerId);
+      return null;
+    }
+    try {
+      await _serializer.applyInDeferredFkTransaction(
+        () => _adoptApplyStreaming(
+          baseFilePaths: sources.baseFilePaths,
+          baseExportedAt: sources.baseExportedAt,
+          changesets: sources.changesets,
+        ),
+      );
+    } finally {
+      for (final path in sources.baseFilePaths) {
+        await _baseSink.deleteQuietly(path);
+      }
+    }
+
+    // 3. Re-baseline exactly as adopt does: cloud is the authority. The
+    //    adopted watermark is captured BEFORE the pending replay so the
+    //    replayed (re-stamped) rows sort above it and publish.
+    await _syncRepository.resetSyncState(clearDeletionLog: true);
+    final cursorStore = PeerCursorStore(db);
+    for (final c in sources.cursors) {
+      await cursorStore.upsert(
+        peerDeviceId: c.deviceId,
+        provider: provider.providerId,
+        baseSeqApplied: c.baseSeq,
+        lastSeqApplied: c.appliedThrough,
+      );
+    }
+    await _publishStateStore.markAdoptedPendingBase(
+      provider.providerId,
+      await _syncRepository.maxRowHlc(),
+    );
+
+    // 4. Replay the pending snapshot: offline-created records survive.
+    if (pending != null) {
+      await _replayPendingSnapshot(pending, publishedThrough: watermark);
+    }
+
+    // 5. Live again: drop our marker. The rest of this sync pulls (cursors
+    //    already positioned) and publishes the replayed pending records.
+    await provider.deleteFile(markerId);
+    _log.info('Rejoined after retirement');
+    return null;
+  }
+
+  /// One snapshot row with fresh clocks for the replay.
+  ///
+  /// Fact groups (media sync program spec 5.1) carry their own clocks, and a
+  /// row can be pending because of a fact write alone. [publishedThrough] is
+  /// the watermark the snapshot was exported above: a clock at or below it
+  /// was already published, a clock above it never was. Only the unpublished
+  /// clocks are refreshed, because only they are this device's unsent writes
+  /// and so the only ones with something to say.
+  ///
+  /// Refreshing a published clock would fabricate freshness. The export
+  /// selects a row on ANY of its clocks, so a row pending on one group
+  /// carries its other groups along in the same payload, holding facts the
+  /// cloud has already resolved; a brand-new clock on those would let this
+  /// device's untouched observation beat a peer that really did write one.
+  /// How a group's clock sorts against the ROW clock says nothing about
+  /// this, which is why the watermark decides and the row clock is chosen
+  /// the same way. Everything else travels with its original clock, which is
+  /// exactly what the per-group merge needs to leave a peer's newer facts
+  /// alone; the row still exports either way.
+  ///
+  /// A row with nothing above the watermark cannot come out of the export,
+  /// but would sort below the adopted watermark and be lost if it did, so
+  /// its row clock is refreshed as a floor.
+  @visibleForTesting
+  static Map<String, dynamic> restampRowForReplay(
+    String entityType,
+    Map<String, dynamic> row, {
+    required String? publishedThrough,
+  }) {
+    // No watermark means this device has published nothing at all.
+    bool unpublished(Object? clock) =>
+        clock is String &&
+        (publishedThrough == null || clock.compareTo(publishedThrough) > 0);
+
+    final groups = SyncFactGroups.of(entityType);
+    if (groups.isEmpty) {
+      return {...row, 'hlc': SyncClock.instance.issue()};
+    }
+    final restampRow =
+        unpublished(row['hlc']) ||
+        !groups.any((g) => unpublished(row[g.clockKey]));
+    return {
+      ...row,
+      if (restampRow) 'hlc': SyncClock.instance.issue(),
+      for (final g in groups)
+        if (unpublished(row[g.clockKey]))
+          g.clockKey: SyncClock.instance.issue(),
+    };
+  }
+
+  /// Marks pending, before the replay is applied, each replayed row that
+  /// cannot be ordered against the adopted copy: a fact-carrying row whose
+  /// row clock is null (a legacy row whose only unsent write was a fact), so
+  /// [restampRowForReplay] left it without one. The merge applies an
+  /// unordered copy whole, which let this device's snapshot fields (a stale
+  /// caption) overwrite newer ones a peer published. Marked pending first,
+  /// the row takes the merge's pending-unorderable path instead: the adopted
+  /// row keeps its fields and only the fact groups the replay's clocks win
+  /// come over.
+  ///
+  /// Only rows the adoption holds. That path skips a copy with no local row
+  /// at all, and for such a row the replay is its only way back.
+  ///
+  /// "No row clock" is read the way the merge reads it ([_extractHlc]):
+  /// absent, blank or malformed alike, so every row the merge would find
+  /// unorderable is marked. All marks commit in one transaction; each
+  /// mark's own transaction nests as a savepoint, so a library with many
+  /// legacy rows pays one commit, not one per row.
+  Future<void> _markUnorderableReplayPending(
+    Map<String, dynamic> restamped,
+  ) async {
+    final nowMillis = DateTime.now().millisecondsSinceEpoch;
+    final toMark = <({String entityType, String id})>[];
+    for (final entry in restamped.entries) {
+      final rows = entry.value;
+      if (rows is! List || SyncFactGroups.of(entry.key).isEmpty) continue;
+      final ids = [
+        for (final row in rows)
+          if (row is Map<String, dynamic> &&
+              _extractHlc(row) == null &&
+              row['id'] is String)
+            row['id'] as String,
+      ];
+      if (ids.isEmpty) continue;
+      final adopted = await _serializer.fetchRecords(entry.key, ids);
+      toMark.addAll([
+        for (final id in adopted.keys) (entityType: entry.key, id: id),
+      ]);
+    }
+    if (toMark.isEmpty) return;
+    await DatabaseService.instance.database.transaction(() async {
+      for (final row in toMark) {
+        await _syncRepository.markRecordPending(
+          entityType: row.entityType,
+          recordId: row.id,
+          localUpdatedAt: nowMillis,
+          stampClock: false,
+        );
+      }
+    });
+  }
+
+  /// Re-applies the pre-fence pending snapshot with FRESH HLC stamps. The
+  /// adopted watermark (maxRowHlc after the rebuild) is at or above the
+  /// snapshot's original stamps, so without re-stamping the rows would sort
+  /// below the publish watermark and never reach the cloud. Deletions are
+  /// re-logged through logDeletion (which stamps a fresh HLC) for the same
+  /// reason; their local effect still applies via the payload's deletions,
+  /// under the standard deletedAt-vs-updatedAt LWW (a peer's newer edit
+  /// legitimately revives the record -- unchanged semantics).
+  ///
+  /// [publishedThrough] is the watermark the snapshot was exported above;
+  /// [restampRowForReplay] refreshes only the clocks that sit over it.
+  Future<void> _replayPendingSnapshot(
+    SyncPayload pending, {
+    required String? publishedThrough,
+  }) async {
+    await _syncRepository.ensureSyncClockConfigured();
+    final dataJson = pending.data.toJson();
+    final restamped = <String, dynamic>{};
+    for (final entry in dataJson.entries) {
+      final rows = entry.value;
+      if (rows is! List) {
+        restamped[entry.key] = rows;
+        continue;
+      }
+      restamped[entry.key] = [
+        for (final row in rows)
+          if (row is Map<String, dynamic> && row.containsKey('hlc'))
+            restampRowForReplay(
+              entry.key,
+              row,
+              publishedThrough: publishedThrough,
+            )
+          else
+            row,
+      ];
+    }
+    final data = SyncData.fromJson(restamped);
+    final payload = SyncPayload(
+      version: pending.version,
+      exportedAt: pending.exportedAt,
+      deviceId: pending.deviceId,
+      checksum: await SyncDataSerializer.checksumOfOffIsolate(data),
+      data: data,
+      deletions: pending.deletions,
+    );
+    await _markUnorderableReplayPending(restamped);
+    await _applyRemotePayload(payload, null);
+    // Re-mark the replayed rows pending: the fence's resetSyncState cleared
+    // the pending table, and the remote-apply path above does not repopulate
+    // it, so without this _shouldSkipPublishAfterAdopt would read "nothing to
+    // say" and the replayed records would never publish until an unrelated
+    // later edit re-tripped the gate. (The publish CONTENT is selected by the
+    // HLC watermark; these marks only open the gate.) One transaction for
+    // all of them, each mark nesting as a savepoint: one commit for the
+    // snapshot, not one per row.
+    final nowMillis = DateTime.now().millisecondsSinceEpoch;
+    await DatabaseService.instance.database.transaction(() async {
+      for (final entry in restamped.entries) {
+        final rows = entry.value;
+        if (rows is! List) continue;
+        for (final row in rows) {
+          final id = row is Map<String, dynamic> ? row['id'] : null;
+          if (id is! String) continue;
+          // No stamp: restampRowForReplay already chose this row's clocks
+          // and the apply above wrote them. Stamping here would bump the row
+          // clock even for a row that is pending on a fact write alone,
+          // republishing this device's whole snapshot of it over a peer's
+          // newer edit, which is exactly what that restamp avoids.
+          await _syncRepository.markRecordPending(
+            entityType: entry.key,
+            recordId: id,
+            localUpdatedAt: nowMillis,
+            stampClock: false,
+          );
+        }
+      }
+    });
+    for (final entry in pending.deletions.entries) {
+      for (final d in entry.value) {
+        await _syncRepository.logDeletion(
+          entityType: entry.key,
+          recordId: d.id,
+          deletedAt: d.deletedAt,
+        );
+      }
+    }
+  }
+
+  Future<SyncResult> adoptReplacedLibrary() async {
+    try {
+      return await _adoptReplacedLibraryRun();
+    } finally {
+      await _flushAfterRun('library adopt');
+    }
+  }
+
+  Future<SyncResult> _adoptReplacedLibraryRun() async {
+    final provider = _cloudProvider;
+    final store = _epochStore;
+    if (provider == null || store == null) {
+      return SyncResult(
+        status: SyncResultStatus.error,
+        message: _l10n.settings_cloudSync_result_noProvider,
+      );
+    }
+    try {
+      final marker = await readLibraryEpochMarker(provider);
+      if (marker == null) {
+        return SyncResult(
+          status: SyncResultStatus.error,
+          message: _l10n.settings_cloudSync_result_noReplacementMarker,
+        );
+      }
+
+      final folderId = await provider.getOrCreateSyncFolder();
+      // Stream each epoch device's base to a temp file (bounded memory); the
+      // streaming apply (#358) replaces the old in-memory collect + union,
+      // which OOM-crashed iOS adopting a large library.
+      final sources = await _collectEpochBaseSources(
+        provider,
+        folderId,
+        marker.epochId,
+      );
+      if (sources.newerSchemaPeerDeviceIds.isNotEmpty) {
+        // Held (#1341): the epoch library was published across a breaking
+        // schema change this build predates, so adopting it would apply what
+        // pull holds. Decided before the empty-set branch below, which would
+        // otherwise read a held library as unreadable and re-establish from
+        // local. Nothing changes locally; adopt succeeds after the update.
+        _log.warning(
+          'Adopt held: epoch ${marker.epochId} was published from a newer '
+          'schema by ${sources.newerSchemaPeerDeviceIds}',
+        );
+        return SyncResult(
+          status: SyncResultStatus.error,
+          message: _l10n.settings_cloudSync_result_cloudLibraryNewerSchema,
+          newerSchemaPeerDeviceIds: sources.newerSchemaPeerDeviceIds,
+          newerSchemaPeerNames: sources.newerSchemaPeerNames,
+        );
+      }
+      if (sources.baseFilePaths.isEmpty) {
+        // No current-format library for this epoch. If the marker is stale
+        // (old-format backend or an orphaned replace), re-establish from the
+        // local library rather than bricking; the notifier's follow-up sync
+        // then publishes our base. Otherwise it is a replace in flight --
+        // applying an empty set would wipe this library to zero, so wait.
+        if (await _recoverUnreadableEpoch(provider, marker)) {
+          return SyncResult(
+            status: SyncResultStatus.success,
+            message: _l10n.settings_cloudSync_result_previousLibraryUnreadable,
+          );
+        }
+        return SyncResult(
+          status: SyncResultStatus.error,
+          message: _l10n.settings_cloudSync_result_replacementStillUploading,
+        );
+      }
+
+      try {
+        await ChangeLogScope.suppressed<void>(
+          DatabaseService.instance.databaseOrNull,
+          label: ChangeLogLabels.libraryReplaced,
+          source: ChangeLogSource.sync,
+          lease: kChangeLogLongLease,
+          body: () => _serializer.applyInDeferredFkTransaction(
+            () => _adoptApplyStreaming(
+              baseFilePaths: sources.baseFilePaths,
+              baseExportedAt: sources.baseExportedAt,
+              changesets: sources.changesets,
+            ),
+          ),
+        );
+      } finally {
+        for (final path in sources.baseFilePaths) {
+          await _baseSink.deleteQuietly(path);
+        }
+      }
+
+      // Re-baseline under the adopted epoch. Our tombstones are obsolete --
+      // the restored library is authoritative.
+      await _syncRepository.resetSyncState(clearDeletionLog: true);
+      // Record what adopt just applied as each epoch device's transport cursor.
+      // resetSyncState wiped the cursors; without re-establishing them the next
+      // sync cold-starts and redundantly re-downloads the whole base we just
+      // adopted (the "slow second sync"). The streamed apply covered each
+      // device through its `appliedThrough` seq, so the next pull skips it.
+      final cursorStore = PeerCursorStore(DatabaseService.instance.database);
+      for (final c in sources.cursors) {
+        await cursorStore.upsert(
+          peerDeviceId: c.deviceId,
+          provider: provider.providerId,
+          baseSeqApplied: c.baseSeq,
+          lastSeqApplied: c.appliedThrough,
+        );
+      }
+      // Record the deferred self-base marker: our library is now exactly the
+      // adopted epoch, which the peers already published, so no sync may ever
+      // re-upload it as our own full base (#358, the slow first sync after
+      // adopt). Local changes publish as changesets against the adopted max
+      // HLC recorded here; the log folds into a real base at compaction.
+      await _publishStateStore.markAdoptedPendingBase(
+        provider.providerId,
+        await _syncRepository.maxRowHlc(),
+      );
+      await _syncRepository.setLastAcceptedEpochId(marker.epochId);
+      await store.setLastAccepted(marker);
+      SyncClock.instance.reset();
+      _log.info('Adopted replaced library (epoch ${marker.epochId})');
+      return SyncResult(
+        status: SyncResultStatus.success,
+        message: _l10n.settings_cloudSync_result_adoptedRestoredLibrary,
+      );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to adopt replaced library',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return _libraryFailure(
+        e,
+        _l10n.settings_cloudSync_result_adoptFailed('$e'),
+      );
+    }
+  }
+
+  /// In-memory union/delete/upsert adopt apply (parity reference for the
+  /// streaming path [_adoptApplyStreaming]). Runs inside the caller's
+  /// deferred-FK transaction. Unions every payload's `data` (latest export
+  /// wins; [payloads] must be sorted ascending by exportedAt), deletes local
+  /// rows absent from the union, then upserts the union and repairs FKs.
+  Future<void> _applyAdoptInMemory(
+    List<SyncPayload> payloads,
+    SyncPayload localSnapshot,
+  ) async {
+    // Union the restored records; for ids present in several files the latest
+    // export wins (payloads are sorted ascending).
+    final cloudIds = <String, Set<String>>{};
+    final restored = <String, Map<String, Map<String, dynamic>>>{};
+    for (final payload in payloads) {
+      for (final entry in payload.data.toJson().entries) {
+        final entityType = entry.key;
+        final records = (entry.value as List).cast<Map<String, dynamic>>();
+        for (final record in records) {
+          final id = recordIdForEntity(entityType, record);
+          if (id == null) continue;
+          (cloudIds[entityType] ??= <String>{}).add(id);
+          // A later copy wins for the keys it carries; a column an older
+          // build omits keeps the earlier copy's value (#2553), as the
+          // streaming path's upserts do.
+          final byId = restored[entityType] ??= {};
+          byId[id] = overlayOntoLocal(entityType, record, byId[id]);
+        }
+      }
+    }
+
+    // Delete local rows the restored library does not contain.
+    for (final entry in localSnapshot.data.toJson().entries) {
+      final entityType = entry.key;
+      final records = (entry.value as List).cast<Map<String, dynamic>>();
+      for (final record in records) {
+        final id = recordIdForEntity(entityType, record);
+        if (id == null) continue;
+        if (!(cloudIds[entityType]?.contains(id) ?? false)) {
+          await _serializer.deleteRecord(entityType, id);
+        }
+      }
+    }
+
+    // The holds describe the copy being replaced (issue #4954). None is left
+    // for the rows written here to settle, so this adopt notes none of them.
+    await _serializer.discardHeldReferences();
+
+    // Upsert every restored record.
+    for (final entry in restored.entries) {
+      for (final record in entry.value.values) {
+        await _serializer.upsertRecord(entry.key, record);
+      }
+      await _landAdoptedFactClears(entry.key, entry.value.values);
+      await _landAdoptedChildClears(entry.key, entry.value.values);
+    }
+
+    await _serializer.repairDanglingForeignKeys();
+    await _repairLegacyPeerRows();
+  }
+
+  /// Lands the explicit fact clears an adopt's upsert would drop.
+  ///
+  /// Adopt applies rows straight through the serializer's upsert, which
+  /// builds with nullToAbsent, so a cleared stamp in the library being
+  /// adopted leaves this device's own value in place and the adopted
+  /// library is not the one the cloud holds (media sync program spec 5.1).
+  /// The merge path solves this with a targeted write; adopt needs the same
+  /// one.
+  ///
+  /// Only rows that carry an explicit null: adopt is a wholesale replace
+  /// applied in sequence, so a non-null value already landed through the
+  /// upsert and re-writing it would cost an UPDATE per media row for
+  /// nothing. There is no per-group clock resolution to do either, because
+  /// there is no local side to resolve against; the sequence is the answer.
+  Future<void> _landAdoptedFactClears(
+    String entityType,
+    Iterable<Map<String, dynamic>> rows,
+  ) async {
+    final groups = SyncFactGroups.of(entityType);
+    if (groups.isEmpty) return;
+    for (final row in rows) {
+      final id = recordIdForEntity(entityType, row);
+      if (id == null) continue;
+      for (final g in groups) {
+        // An explicitly null CLOCK counts as well as an explicitly null
+        // value. The v224 backstop adds the fact clock columns without
+        // backfilling them, so a row adopted from a library that upgraded
+        // that way carries a null clock beside non-null facts. The upsert
+        // omits nulls, so the local clock would survive and the adopted
+        // group would look newer than it is, instead of falling back to the
+        // row clock as a null clock is meant to.
+        //
+        // Still only explicit keys: a key the row omits is one the sender
+        // never had, and writing null for it would clear a fact nobody
+        // asked to clear.
+        final clears = [
+          ...g.columns.keys,
+          g.clockKey,
+        ].any((k) => row.containsKey(k) && row[k] == null);
+        if (clears) await _serializer.writeFactGroup(entityType, id, g, row);
+      }
+    }
+  }
+
+  /// Lands the explicit clears on parent-gated children an adopt's upsert
+  /// would drop (#2644).
+  ///
+  /// The same gap as [_landAdoptedFactClears]: without this, an adopted row
+  /// keeps a value the library cleared, under the clock of the change that
+  /// cleared it, so every later copy ties and nothing repairs it. As there,
+  /// the replay order is the resolution and there is no local side to weigh;
+  /// [SyncDataSerializer.clearChildColumns] skips the columns already null
+  /// and batches the rest. Only the keys a clear may touch are collected, and
+  /// a table with none (the tag and type links) is skipped outright, since an
+  /// adopt replays every row.
+  Future<void> _landAdoptedChildClears(
+    String entityType,
+    Iterable<Map<String, dynamic>> rows,
+  ) async {
+    final clearable = _serializer.clearableChildKeys(entityType);
+    if (clearable.isEmpty) return;
+    final clears = <String, Set<String>>{};
+    for (final row in rows) {
+      final id = recordIdForEntity(entityType, row);
+      if (id == null) continue;
+      final nulls = {
+        for (final k in clearable)
+          if (row.containsKey(k) && row[k] == null) k,
+      };
+      if (nulls.isNotEmpty) clears[id] = nulls;
+    }
+    await _serializer.clearChildColumns(entityType, clears);
+  }
+
+  /// Test seam: in-memory adopt of [payloads] (the parity reference). Captures
+  /// the local snapshot, sorts payloads ascending, and applies in one
+  /// deferred-FK transaction. No re-baseline, so a parity comparison sees only
+  /// the data effects. See sync_adopt_streaming_parity_test.dart.
+  @visibleForTesting
+  Future<void> debugAdoptInMemory(List<SyncPayload> payloads) async {
+    final local = await _serializer.exportData(
+      deviceId: 'adopt',
+      deletions: const [],
+    );
+    final sorted = [...payloads]
+      ..sort((a, b) => a.exportedAt.compareTo(b.exportedAt));
+    await _serializer.applyInDeferredFkTransaction(
+      () => _applyAdoptInMemory(sorted, local),
+    );
+  }
+
+  /// Streaming replace-adopt apply (production path). Runs inside the caller's
+  /// deferred-FK transaction. Clears every synced table, then upserts every
+  /// restored row in exportedAt order (each base temp file streamed in 500-row
+  /// batches, plus in-memory changesets), then repairs FKs. Bounded memory: one
+  /// batch of rows at a time, independent of library size -- unlike the old
+  /// path it holds NO id set (#358 adopt OOM: a full-library cloud-id set plus
+  /// per-entity local-id sets pushed a large library past the iOS jetsam
+  /// limit).
+  ///
+  /// Equivalent to [_applyAdoptInMemory]: clearing then re-inserting the cloud
+  /// union yields the same final rows as upsert-then-delete-not-in-cloud (both
+  /// converge the DB to the cloud union), `upsertRecord` is an unconditional
+  /// overwrite so ascending exportedAt order is latest-export-wins, and a null
+  /// record id is skipped exactly as the in-memory path does. Enforced by
+  /// sync_adopt_streaming_parity_test.dart.
+  Future<void> _adoptApplyStreaming({
+    required List<String> baseFilePaths,
+    required List<int> baseExportedAt,
+    required List<SyncPayload> changesets,
+  }) async {
+    try {
+      await _adoptApplyStreamingRows(
+        baseFilePaths: baseFilePaths,
+        baseExportedAt: baseExportedAt,
+        changesets: changesets,
+      );
+      // An adopted library is rows from peers like any other apply's, so
+      // the data rungs run over them too, inside the caller's transaction
+      // and change-log scope.
+      await _repairLegacyPeerRows();
+    } finally {
+      // The device-local values the table clears remembered belong to this
+      // adopt's refill only (issue #2947).
+      _serializer.endAdoptRefill();
+    }
+  }
+
+  Future<void> _adoptApplyStreamingRows({
+    required List<String> baseFilePaths,
+    required List<int> baseExportedAt,
+    required List<SyncPayload> changesets,
+  }) async {
+    // Replace semantics: clear every synced table, then insert the cloud union
+    // (latest export wins). Equivalent to the old upsert-then-delete-not-in-
+    // cloud, but needs no in-RAM id set to diff against, so adopt memory stays
+    // bounded regardless of library size (#358 adopt OOM). The legacy sample
+    // entities are still applied from a not-yet-upgraded peer's point of view
+    // (v182 receive-side tolerance) below, but there is no local table to
+    // clear for them any more (v183 dropped `dive_profiles` /
+    // `tank_pressure_profiles`; an inbound row now stages in a per-connection
+    // staging table instead), so the clear loop skips them; the series tables,
+    // which [entityHasUpdatedAt] already lists, get no special treatment.
+    for (final entity in _baseApplyEntityFlags.keys) {
+      if (inboundOnlyLegacyEntities.containsKey(entity)) continue;
+      await _serializer.deleteAllRecords(entity);
+    }
+    // The holds describe the copy being replaced (issue #4954). None is left
+    // for the rows written here to settle, so this adopt notes none of them.
+    await _serializer.discardHeldReferences();
+
+    // Batched upsert of a table's rows (skipping null-id rows, matching the
+    // in-memory path). Batching is the throughput lever: a large adopt is
+    // millions of rows, and row-by-row upserts froze the UI (#358 adopt).
+    Future<void> applyBatch(
+      String table,
+      List<Map<String, dynamic>> records,
+    ) async {
+      final valid = [
+        for (final r in records)
+          if (recordIdForEntity(table, r) != null) r,
+      ];
+      if (valid.isEmpty) return;
+      await _serializer.upsertRecords(table, valid);
+      await _landAdoptedFactClears(table, valid);
+      await _landAdoptedChildClears(table, valid);
+    }
+
+    // Apply units: each base file and each changeset, ascending by exportedAt
+    // (latest export wins under the unconditional upsert).
+    final units = <({int at, String? file, SyncPayload? changeset})>[
+      for (var i = 0; i < baseFilePaths.length; i++)
+        (at: baseExportedAt[i], file: baseFilePaths[i], changeset: null),
+      for (final c in changesets) (at: c.exportedAt, file: null, changeset: c),
+    ]..sort((a, b) => a.at.compareTo(b.at));
+
+    // v182 receive-side tolerance: true once a legacy diveProfiles /
+    // tankPressureProfiles row has been applied from any unit, so the
+    // packer only runs when the adopted library actually carried some.
+    var sawLegacySamples = false;
+    var sawParents = false;
+
+    for (final unit in units) {
+      final changeset = unit.changeset;
+      if (changeset != null) {
+        // changeset.data.toJson() omits diveProfiles/tankPressureProfiles
+        // (inbound only, never re-exported through toJson), so they are
+        // folded back in from the typed fields fromJson already parsed them
+        // into, matching the raw wire shape a not-yet-upgraded peer sends.
+        final changesetData = {
+          ...changeset.data.toJson(),
+          'diveProfiles': changeset.data.diveProfiles,
+          'tankPressureProfiles': changeset.data.tankPressureProfiles,
+        };
+        for (final entry in changesetData.entries) {
+          if (!_baseApplyEntityFlags.containsKey(entry.key)) continue;
+          final records = (entry.value as List).cast<Map<String, dynamic>>();
+          if (records.isNotEmpty &&
+              inboundOnlyLegacyEntities.containsKey(entry.key)) {
+            sawLegacySamples = true;
+          }
+          if (records.isNotEmpty &&
+              (entry.key == 'dives' || entry.key == 'diveTanks')) {
+            sawParents = true;
+          }
+          await applyBatch(entry.key, records);
+        }
+        continue;
+      }
+
+      // Base file: stream `data` rows, batching 500 per table. Read directly
+      // off disk, so a not-yet-upgraded peer's raw diveProfiles /
+      // tankPressureProfiles rows are present here regardless of what this
+      // build's own SyncData.toJson would emit.
+      const batchSize = 500;
+      String? currentTable;
+      var batch = <Map<String, dynamic>>[];
+      Future<void> flush() async {
+        final table = currentTable;
+        if (table == null || batch.isEmpty) return;
+        await applyBatch(table, batch);
+        batch = <Map<String, dynamic>>[];
+      }
+
+      await BaseJsonStreamReader().parse(
+        SyncTempFiles.openRead(unit.file!),
+        wantRows: (section, table) =>
+            section == 'data' && _baseApplyEntityFlags.containsKey(table),
+        onRow: (section, table, rowBytes) async {
+          if (table != currentTable) {
+            await flush();
+            currentTable = table;
+          }
+          if (inboundOnlyLegacyEntities.containsKey(table)) {
+            sawLegacySamples = true;
+          }
+          if (table == 'dives' || table == 'diveTanks') {
+            sawParents = true;
+          }
+          batch.add(jsonDecode(utf8.decode(rowBytes)) as Map<String, dynamic>);
+          if (batch.length >= batchSize) await flush();
+        },
+      );
+      await flush();
+    }
+
+    await _packLegacySamplesIfPresent(
+      sawLegacySamples,
+      parentsArrived: sawParents,
+    );
+
+    await _serializer.repairDanglingForeignKeys();
+  }
+
+  /// Test seam: streaming adopt of base temp files + in-memory changesets.
+  @visibleForTesting
+  Future<void> debugAdoptStreaming(
+    List<String> baseFilePaths,
+    List<int> baseExportedAt,
+    List<SyncPayload> changesets,
+  ) => _serializer.applyInDeferredFkTransaction(
+    () => _adoptApplyStreaming(
+      baseFilePaths: baseFilePaths,
+      baseExportedAt: baseExportedAt,
+      changesets: changesets,
+    ),
+  );
+
+  /// True when we adopted a restored library and have nothing of our own to
+  /// publish yet -- so this sync skips the publish entirely (saving a nonce
+  /// ring slot and the manifest round-trip). This gate is an optimization
+  /// only: if it misfires towards publishing, the writer sees no rows above
+  /// the adopted watermark and no-ops.
+  ///
+  /// The marker is a publish-state row with a null `baseSeq`: adopt records
+  /// it, and it stays null while the writer publishes post-adopt changesets
+  /// without a base, until compaction folds the log into a real base (or a
+  /// cloud-manifest-lost cold-start re-bases). A device that has published a
+  /// base (baseSeq set) or never adopted (no row at all) falls straight
+  /// through and publishes normally. The skip clears the moment we have any
+  /// local change: [SyncRepository.hasUnsyncedChanges] counts pending / conflict
+  /// / deletion rows, which are written in the same transaction as the edit, so
+  /// it is reliable even in the window before the HLC clock is reconfigured.
+  Future<bool> _shouldSkipPublishAfterAdopt(
+    String providerId,
+    List<DeletionLogData> deletions,
+  ) async {
+    final state = await _publishStateStore.get(providerId);
+    if (state == null || state.baseSeq != null) return false;
+    // Equivalent to !hasUnsyncedChanges(), but reuses the [deletions] the caller
+    // already fetched instead of re-reading the deletion log on this path.
+    if (deletions.isNotEmpty) return false;
+    return (await _syncRepository.getPendingCount()) == 0 &&
+        (await _syncRepository.getConflictCount()) == 0;
+  }
+
+  /// Stream every epoch-stamped changeset log into adopt sources: each device's
+  /// base assembled to a temp file (bounded memory, via [BasePartFileSink],
+  /// which verifies per-part and whole-file checksums as bytes land), its base
+  /// export time, and its post-base changesets decoded in memory (small
+  /// deltas). Skips a device whose base parts are not all present or whose base
+  /// fails its checksum (a publish still in flight -> retry next adopt). A
+  /// fetch that was interrupted is not that: it says nothing about the cloud,
+  /// so the failure propagates, as [BaseFetchInterrupted] for a base and as
+  /// itself for a manifest, a changeset or a refused base, and the caller
+  /// aborts.
+  /// Replaces the old in-memory collect that decoded every device's whole base
+  /// into RAM and OOM-crashed iOS adopting a large library (#358). The caller
+  /// owns the returned temp files and must delete them.
+  ///
+  /// Compatibility floor (#1341): an epoch device whose declared floor exceeds
+  /// this build's schema is held exactly as ChangesetReader.pull holds it and
+  /// reported in `newerSchemaPeerDeviceIds`. Pull can hold one peer and merge
+  /// the rest because it is additive; both callers here are delete-all-refill,
+  /// so a partial refill would drop every row that lives only in the held
+  /// base. A held peer therefore voids the whole collection: no bases are
+  /// returned (any already assembled are deleted here), and the caller must
+  /// abort rather than read the empty set as "no library".
+  Future<
+    ({
+      List<String> baseFilePaths,
+      List<int> baseExportedAt,
+      List<SyncPayload> changesets,
+      List<({String deviceId, int baseSeq, int appliedThrough})> cursors,
+      Set<String> newerSchemaPeerDeviceIds,
+      Map<String, String> newerSchemaPeerNames,
+    })
+  >
+  _collectEpochBaseSources(
+    CloudStorageProvider provider,
+    String folderId,
+    String? epochId, {
+    Set<String> excludeDeviceIds = const {},
+  }) async {
+    final files = await provider.listFiles(
+      folderId: folderId,
+      namePattern: ChangesetLogLayout.prefix,
+    );
+    final byName = {for (final f in files) f.name: f};
+    final deviceIds = <String>{
+      for (final f in files)
+        if (ChangesetLogLayout.deviceIdOf(f.name) != null)
+          ChangesetLogLayout.deviceIdOf(f.name)!,
+    };
+    final baseFilePaths = <String>[];
+    final baseExportedAt = <int>[];
+    final changesets = <SyncPayload>[];
+    final cursors = <({String deviceId, int baseSeq, int appliedThrough})>[];
+    final newerSchemaPeerDeviceIds = <String>{};
+    final newerSchemaPeerNames = <String, String>{};
+    final selfDeviceId = await _syncRepository.getDeviceId();
+    try {
+      for (final deviceId in deviceIds) {
+        if (excludeDeviceIds.contains(deviceId)) continue;
+        final manifestFile = byName[ChangesetLogLayout.manifestName(deviceId)];
+        if (manifestFile == null) continue;
+        final manifest = await _usableManifest(provider, manifestFile.id);
+        if (manifest == null) continue;
+        // Recorded unconditionally: the manifest parsed, so a missing name is
+        // the peer's current state and clears any name it published before.
+        //
+        // Never for this device, though. Unlike a pull, this scan reads every
+        // manifest in the folder including its own, and PeerDeviceNameStore
+        // documents that this device is not in it: the device identity
+        // service already knows its own name, and a self entry would show up
+        // as a peer to anything that lists the map.
+        //
+        // Guarded on its own: nothing above catches here, so a failed
+        // preferences write would abort the whole scan and with it the
+        // library adoption, over optional metadata.
+        if (deviceId != selfDeviceId) {
+          try {
+            await _peerNames?.record(deviceId, manifest.deviceName);
+          } catch (e) {
+            _log.warning(
+              'Could not record the name for peer $deviceId',
+              error: e,
+            );
+          }
+        }
+        if (manifest.epochId != epochId) continue;
+        final baseSeq = manifest.baseSeq;
+        if (baseSeq == null) continue;
+        // Compatibility-floor filter, the adopt-side twin of the one in
+        // ChangesetReader.pull: a manifest's schemaVersion is its writer's
+        // AppDatabase.minimumCompatibleSchemaVersion. Checked after the base
+        // check because a base-less peer contributes nothing to adopt either
+        // way (pull holds its changesets on its own).
+        final peerSchema = manifest.schemaVersion;
+        if (peerSchema != null &&
+            peerSchema > AppDatabase.currentSchemaVersion) {
+          newerSchemaPeerDeviceIds.add(deviceId);
+          final name = manifest.deviceName;
+          if (name != null && name.isNotEmpty) {
+            newerSchemaPeerNames[deviceId] = name;
+          }
+          continue;
+        }
+        // Once any peer is held the collection is void: keep scanning manifests
+        // only to name every held peer, and fetch no more bases.
+        if (newerSchemaPeerDeviceIds.isNotEmpty) continue;
+        final partCount = manifest.basePartCount ?? 0;
+        if (partCount <= 0) continue;
+        final path = await _baseSink.assemble(
+          name: 'ssv1_adopt_${deviceId}_$baseSeq',
+          partCount: partCount,
+          wholeChecksum: manifest.baseChecksum,
+          partChecksums: manifest.basePartChecksums,
+          downloadPart: (i) async {
+            final pf =
+                byName[ChangesetLogLayout.basePartName(deviceId, baseSeq, i)];
+            if (pf == null) return null;
+            return provider.downloadFile(pf.id);
+          },
+        );
+        // Base incomplete/corrupt: skip this device.
+        if (path == null) continue;
+        baseFilePaths.add(path);
+        baseExportedAt.add(await _readBaseExportedAt(path));
+        // Track the last CONTIGUOUS seq we apply (base, then changesets up to the
+        // first gap or damaged one) so adopt can record it as this peer's
+        // cursor. Otherwise the next sync cold-starts and re-downloads the whole
+        // base we just applied.
+        var appliedThrough = baseSeq;
+        for (var seq = baseSeq + 1; seq <= manifest.headSeq; seq++) {
+          final cf = byName[ChangesetLogLayout.changesetName(deviceId, seq)];
+          if (cf == null) break;
+          // Damage has the standing of a gap, as in ChangesetReader.pull: the
+          // cursor stops short of it, which a replace reads as a library it
+          // must wait for. An encrypted library shows it as a corrupt envelope
+          // and a plain one as a failed checksum. A read that failed says
+          // nothing about the file, so that still aborts the collection.
+          final Uint8List bytes;
+          try {
+            bytes = await provider.downloadFile(cf.id);
+          } on EnvelopeCorruptException {
+            break;
+          }
+          final decoded = await _changesetCodec.decodeVerifiedChangeset(bytes);
+          if (!decoded.checksumValid) break;
+          changesets.add(decoded.payload);
+          appliedThrough = seq;
+        }
+        cursors.add((
+          deviceId: deviceId,
+          baseSeq: baseSeq,
+          appliedThrough: appliedThrough,
+        ));
+      }
+    } catch (_) {
+      // BaseFetchInterrupted says nothing about this device's base, and both
+      // callers are delete-all-refill: going on without it would drop its
+      // rows, and an empty set would read as "no library". So it, like any
+      // other failure here, aborts the collection. The temp files assembled so
+      // far are not the caller's to delete until this returns.
+      for (final path in baseFilePaths) {
+        await _baseSink.deleteQuietly(path);
+      }
+      rethrow;
+    }
+    if (newerSchemaPeerDeviceIds.isNotEmpty) {
+      for (final path in baseFilePaths) {
+        await _baseSink.deleteQuietly(path);
+      }
+      return (
+        baseFilePaths: const <String>[],
+        baseExportedAt: const <int>[],
+        changesets: const <SyncPayload>[],
+        cursors: const <({String deviceId, int baseSeq, int appliedThrough})>[],
+        newerSchemaPeerDeviceIds: newerSchemaPeerDeviceIds,
+        newerSchemaPeerNames: newerSchemaPeerNames,
+      );
+    }
+    return (
+      baseFilePaths: baseFilePaths,
+      baseExportedAt: baseExportedAt,
+      changesets: changesets,
+      cursors: cursors,
+      newerSchemaPeerDeviceIds: newerSchemaPeerDeviceIds,
+      newerSchemaPeerNames: newerSchemaPeerNames,
+    );
+  }
+
+  /// Read a base file's `exportedAt` (the cross-device latest-wins order key)
+  /// from a bounded prefix rather than parsing the whole base: it is the second
+  /// top-level member of the payload JSON, always within the first bytes. 0 if
+  /// absent (an unstamped/legacy base sorts first, which is the safe default).
+  Future<int> _readBaseExportedAt(String path) async {
+    final bytes = <int>[];
+    await for (final chunk in SyncTempFiles.openRead(path, 0, 65536)) {
+      bytes.addAll(chunk);
+    }
+    final head = utf8.decode(bytes, allowMalformed: true);
+    final match = RegExp(r'"exportedAt"\s*:\s*(\d+)').firstMatch(head);
+    return match == null ? 0 : (int.tryParse(match.group(1)!) ?? 0);
+  }
+
+  /// Download and parse the cloud epoch marker. Returns null when absent.
+  /// Throws on listing/parse failure: "unreadable" must be distinguishable
+  /// from "absent" -- the caller fails the sync closed rather than guessing.
+  ///
+  /// The listing is a sync's first cloud request, so it also carries the
+  /// provider's cold start (an OAuth token refresh, the sync-folder lookup).
+  /// It gets the same 30 s as the download: the HTTP layer alone allows 15 s
+  /// to connect, and a shorter cap failed slow but working connections.
+  Future<LibraryEpochMarker?> readLibraryEpochMarker(
+    CloudStorageProvider provider,
+  ) async {
+    final files = await provider
+        .listFiles(namePattern: libraryEpochFileName)
+        .timeout(const Duration(seconds: 30));
+    final candidates = files
+        .where((f) => !_isConflictCopy(f.name))
+        .where((f) => f.name == libraryEpochFileName)
+        .toList();
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
+    final bytes = await provider
+        .downloadFile(candidates.first.id)
+        .timeout(const Duration(seconds: 30));
+    if (SyncEnvelope.hasMagic(bytes)) {
+      // Encrypted library and this device has no (matching) key: distinct
+      // from corruption so the caller can prompt for the passphrase.
+      throw SyncEncryptionRequired(
+        libraryKeyId: SyncEnvelope.libraryKeyIdOf(bytes),
+        message: _l10n.settings_cloudSync_result_epochMarkerEncrypted,
+      );
+    }
+    final decoded = jsonDecode(utf8.decode(bytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('Library epoch marker is not a JSON object');
+    }
+    return LibraryEpochMarker.fromJson(decoded);
+  }
+
+  /// Upload (or overwrite) the cloud epoch marker.
+  Future<void> writeLibraryEpochMarker(
+    CloudStorageProvider provider,
+    LibraryEpochMarker marker,
+  ) async {
+    final bytes = Uint8List.fromList(utf8.encode(jsonEncode(marker.toJson())));
+    String? folderId;
+    try {
+      folderId = await provider.getOrCreateSyncFolder();
+    } catch (_) {
+      folderId = null;
+    }
+    await provider
+        .uploadFile(bytes, libraryEpochFileName, folderId: folderId)
+        .timeout(const Duration(seconds: 60));
+    _log.info('Wrote library epoch marker ${marker.epochId}');
+  }
+
+  /// Download and parse the cloud "library moved" marker, or null when absent.
+  /// Unlike the epoch marker this returns null on any failure rather than
+  /// throwing: the moved marker is purely advisory, so an unreadable one must
+  /// never fail a sync closed.
+  Future<LibraryMovedMarker?> readLibraryMovedMarker(
+    CloudStorageProvider provider,
+  ) async {
+    try {
+      final files = await provider
+          .listFiles(namePattern: libraryMovedFileName)
+          .timeout(const Duration(seconds: 8));
+      final candidates = files
+          .where((f) => !_isConflictCopy(f.name))
+          .where((f) => f.name == libraryMovedFileName)
+          .toList();
+      if (candidates.isEmpty) return null;
+      candidates.sort((a, b) => b.modifiedTime.compareTo(a.modifiedTime));
+      final bytes = await provider
+          .downloadFile(candidates.first.id)
+          .timeout(const Duration(seconds: 30));
+      final decoded = jsonDecode(utf8.decode(bytes));
+      if (decoded is! Map<String, dynamic>) return null;
+      return LibraryMovedMarker.fromJson(decoded);
+    } catch (e) {
+      _log.warning('Could not read library moved marker: $e');
+      return null;
+    }
+  }
+
+  /// Write the "library moved" marker to [provider] (the OLD backend). Left
+  /// behind on switch so a straggler still pointed at this backend learns the
+  /// library moved on. Best-effort: never throws.
+  Future<void> writeLibraryMovedMarker(
+    CloudStorageProvider provider,
+    LibraryMovedMarker marker,
+  ) async {
+    try {
+      final bytes = Uint8List.fromList(
+        utf8.encode(jsonEncode(marker.toJson())),
+      );
+      String? folderId;
+      try {
+        folderId = await provider.getOrCreateSyncFolder();
+      } catch (_) {
+        folderId = null;
+      }
+      await provider
+          .uploadFile(bytes, libraryMovedFileName, folderId: folderId)
+          .timeout(const Duration(seconds: 60));
+      _log.info('Wrote library moved marker -> ${marker.toProviderId}');
+    } catch (e) {
+      _log.warning('Could not write library moved marker: $e');
+    }
+  }
+
+  /// Remove the orphaned sync payload files from a backend the user switched
+  /// away from. Deletes the dive-library data files (the privacy/cost concern)
+  /// but deliberately KEEPS the moved marker: it carries no dive data and
+  /// still tells any not-yet-migrated straggler where the library went.
+  /// Best-effort; never throws.
+  Future<void> cleanupOldBackend(CloudStorageProvider provider) async {
+    await deleteAllSyncFiles(provider);
   }
 
   /// Sign out from the current cloud provider
@@ -982,9 +6392,15 @@ class SyncService {
 class _MergeResult {
   final int recordsApplied;
   final int conflictsFound;
+  final int recordsFailed;
 
   const _MergeResult({
     required this.recordsApplied,
     required this.conflictsFound,
+    this.recordsFailed = 0,
   });
 }
+
+/// A peer copy's stamps for the revived-parent check: its updatedAt and its
+/// own clock.
+typedef _ParentStamp = ({int? updatedAt, Hlc? clock});

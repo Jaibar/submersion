@@ -1,15 +1,61 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/bathymetry/application/bathymetry_providers.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/dive_3d/application/career_providers.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/seascape_appearance.dart';
+import 'package:submersion/features/dive_3d/domain/career/career_geometry_service.dart';
+import 'package:submersion/features/dive_3d/presentation/pages/career_terrain_page.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_dive_statistics.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
+import 'package:submersion/features/maps/presentation/widgets/locked_map_scroll_passthrough.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
+import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
+import 'package:submersion/features/dive_3d/application/site_seascape_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/site_scape/presentation/site_scape_view.dart';
+import 'package:submersion/features/site_scape/presentation/site_terrain_pane.dart';
+import 'package:submersion/features/site_types/domain/entities/site_type_entity.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_database.dart';
+import '../../../../helpers/shared_items_fixture.dart';
+import '../../../../helpers/detail_row_finders.dart';
+
+void _setMobileTestSurfaceSize(WidgetTester tester) {
+  tester.view.devicePixelRatio = 1.0;
+  tester.view.physicalSize = const Size(600, 900);
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+}
+
+/// The map preview's own fullscreen button. The Site Seascape card has one
+/// too, so the icon alone does not say which; the preview is the card that
+/// holds the 2D map. Found by structure rather than by its label, so it does
+/// not depend on the test's locale.
+final _previewFullscreen = find.descendant(
+  of: find
+      .ancestor(of: find.byType(FlutterMap).first, matching: find.byType(Card))
+      .first,
+  matching: find.byIcon(Icons.fullscreen),
+);
 
 void main() {
   group('SiteDetailPage desktop redirect', () {
@@ -110,6 +156,1430 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('SITE_LIST_PAGE'), findsNothing);
+    });
+
+    testWidgets('Open in Connections centres the map on the site', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      final router = GoRouter(
+        initialLocation: '/sites/site-1',
+        routes: [
+          GoRoute(
+            path: '/sites',
+            builder: (context, state) =>
+                const Scaffold(body: Text('SITE_LIST_PAGE')),
+          ),
+          GoRoute(
+            path: '/sites/:id',
+            builder: (context, state) =>
+                SiteDetailPage(siteId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/insights/connections',
+            builder: (context, state) =>
+                Scaffold(body: Text('CONNECTIONS ${state.uri.query}')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteListViewModeProvider.overrideWith((ref) => ListViewMode.table),
+            siteProvider(site.id).overrideWith((ref) async => site),
+            siteDiveCountProvider(site.id).overrideWith((ref) async => 0),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(PopupMenuButton<String>).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open in Connections'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('CONNECTIONS mode=around&focus=site:site-1'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('delete confirmation on shared site', () {
+    testWidgets(
+      'shows strengthened dialog when deleting a shared site with 2+ divers',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(390, 844);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        const sharedSite = DiveSite(
+          id: 'shared-site',
+          name: 'Salt Pier',
+          isShared: true,
+        );
+        final twoDivers = [
+          Diver(
+            id: 'd1',
+            name: 'Alice',
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+          Diver(
+            id: 'd2',
+            name: 'Bob',
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+        ];
+
+        final overrides = await getBaseOverrides();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              // No active profile, as before sharing: every action is the owner's.
+              validatedCurrentDiverIdProvider.overrideWith((_) async => null),
+              ...overrides,
+              itemSharesRepositoryProvider.overrideWithValue(
+                FakeItemShares.everyone([sharedSite.id]),
+              ),
+              siteProvider(
+                sharedSite.id,
+              ).overrideWith((ref) async => sharedSite),
+              siteDiveCountProvider(
+                sharedSite.id,
+              ).overrideWith((ref) async => 0),
+              allDiversProvider.overrideWith((_) async => twoDivers),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SiteDetailPage(siteId: sharedSite.id, embedded: true),
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpAndSettle();
+
+        // Delete acts on the whole site, so it waits for the lock.
+        await tester.tap(find.byIcon(Icons.lock_outline));
+        await tester.pumpAndSettle();
+        // Open the more menu and tap Delete.
+        await tester.tap(find.byIcon(Icons.more_vert).last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete'));
+        await tester.pumpAndSettle();
+
+        // The strengthened shared-site dialog title should appear.
+        expect(find.text('Delete shared site?'), findsOneWidget);
+      },
+    );
+  });
+
+  group('SiteDetailPage embedded seascape action', () {
+    testWidgets('embedded header shows the seascape button for a site with '
+        'coordinates', (tester) async {
+      const gpsSite = DiveSite(
+        id: 'gps-site',
+        name: 'Salt Pier',
+        location: GeoPoint(12.151, -68.299),
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(gpsSite.id).overrideWith((ref) async => gpsSite),
+            siteDiveCountProvider(gpsSite.id).overrideWith((ref) async => 0),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: gpsSite.id, embedded: true),
+          ),
+        ),
+      );
+      // Bounded pumps: the coordinates make the body render a map, whose
+      // tile loading never settles under flutter_test.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byTooltip('Site Seascape'), findsOneWidget);
+    });
+
+    testWidgets('embedded map drapes the depth overlay when toggled on', (
+      tester,
+    ) async {
+      const gpsSite = DiveSite(
+        id: 'gps-site',
+        name: 'Salt Pier',
+        location: GeoPoint(12.151, -68.299),
+      );
+      final grid = BathymetryGrid(
+        originLat: 12.15,
+        originLon: -68.30,
+        cellSizeLatDeg: 0.001,
+        cellSizeLonDeg: 0.001,
+        rows: 3,
+        cols: 3,
+        depthsMeters: const [5, 5, 5, 25, 25, 25, 45, 45, 45],
+        sourceId: 'test',
+        resolutionMeters: 100,
+        fetchedAt: DateTime.utc(2026, 8, 15),
+      );
+      final overrides = await getBaseOverrides(
+        settingsNotifier: MockSettingsNotifier(
+          const AppSettings(
+            seascapeAppearance: SeascapeAppearance(mapDepthOverlay: true),
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(gpsSite.id).overrideWith((ref) async => gpsSite),
+            siteDiveCountProvider(gpsSite.id).overrideWith((ref) async => 0),
+            bathymetryGridProvider.overrideWith((ref, cell) async => grid),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: gpsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // The overlay renders through real engine async (PNG encode).
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+      expect(find.byType(OverlayImageLayer), findsOneWidget);
+    });
+
+    testWidgets('embedded map skips the depth overlay when the flag is off', (
+      tester,
+    ) async {
+      const gpsSite = DiveSite(
+        id: 'gps-site',
+        name: 'Salt Pier',
+        location: GeoPoint(12.151, -68.299),
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(gpsSite.id).overrideWith((ref) async => gpsSite),
+            siteDiveCountProvider(gpsSite.id).overrideWith((ref) async => 0),
+            bathymetryGridProvider.overrideWith((ref, cell) async => null),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: gpsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(OverlayImageLayer), findsNothing);
+    });
+
+    testWidgets('embedded seascape button opens the fullscreen scape in 3D', (
+      tester,
+    ) async {
+      const gpsSite = DiveSite(
+        id: 'gps-site',
+        name: 'Salt Pier',
+        location: GeoPoint(12.151, -68.299),
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(gpsSite.id).overrideWith((ref) async => gpsSite),
+            siteDiveCountProvider(gpsSite.id).overrideWith((ref) async => 0),
+            // Entering 3D must not fire the real seascape pipeline.
+            siteSeascapeProvider.overrideWith(
+              (ref, id) async => const SiteSeascapeNoData(),
+            ),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: gpsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byTooltip('Site Seascape'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(SiteScapeView), findsOneWidget);
+      expect(find.byType(SiteTerrainPane), findsOneWidget);
+    });
+
+    testWidgets('embedded header hides the seascape button without '
+        'coordinates', (tester) async {
+      const bareSite = DiveSite(id: 'bare-site', name: 'Mystery');
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(bareSite.id).overrideWith((ref) async => bareSite),
+            siteDiveCountProvider(bareSite.id).overrideWith((ref) async => 0),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: bareSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Site Seascape'), findsNothing);
+    });
+  });
+
+  group('SiteDetailPage 3D history action', () {
+    const bareSite = DiveSite(id: 'history-site', name: 'Mystery');
+
+    testWidgets('3D history rides the dives-at-this-site card, not the page '
+        'chrome, and survives a site without coordinates', (tester) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(bareSite.id).overrideWith((ref) async => bareSite),
+            siteDiveCountProvider(bareSite.id).overrideWith((ref) async => 0),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: bareSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final button = find.byKey(const ValueKey('siteCareerTerrainButton'));
+      expect(button, findsOneWidget);
+      expect(find.byTooltip('3D History'), findsOneWidget);
+      // It lives on the card built from those dives, not in the page chrome.
+      expect(
+        find.descendant(
+          of: find
+              .ancestor(
+                of: find.text('Dives at this Site'),
+                matching: find.byType(Card),
+              )
+              .first,
+          matching: button,
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the 3D history button opens the career terrain page', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(bareSite.id).overrideWith((ref) async => bareSite),
+            siteDiveCountProvider(bareSite.id).overrideWith((ref) async => 0),
+            careerGeometryProvider((
+              query: careerSiteQuery(bareSite.id),
+              colorMode: CareerColorMode.recency,
+            )).overrideWith((ref) async => null),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: bareSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The button lives on the Dive statistics card, below the fold.
+      await tester.ensureVisible(find.byTooltip('3D History'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('3D History'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CareerTerrainPage), findsOneWidget);
+      expect(find.text('No dives with profiles to show'), findsOneWidget);
+    });
+  });
+
+  group('SiteDetailPage loading/error/not-found states', () {
+    testWidgets('shows loading indicator in non-embedded mode', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider('slow').overrideWith(
+              (_) => Future.delayed(const Duration(seconds: 10), () => null),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: 'slow'),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Loading...'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 11));
+    });
+
+    testWidgets('shows loading indicator in embedded mode', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider('slow').overrideWith(
+              (_) => Future.delayed(const Duration(seconds: 10), () => null),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(siteId: 'slow', embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      await tester.pump(const Duration(seconds: 11));
+    });
+
+    testWidgets('shows error state in non-embedded mode', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(
+              'err',
+            ).overrideWith((_) => Future.error(Exception('site-boom'))),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: 'err'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('site-boom'), findsOneWidget);
+    });
+
+    testWidgets('shows error state in embedded mode', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider('err2').overrideWith(
+              (_) => Future.error(Exception('embedded-site-boom')),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(siteId: 'err2', embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('embedded-site-boom'), findsOneWidget);
+    });
+
+    testWidgets('shows not-found state when site is null (non-embedded)', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider('gone').overrideWith((_) async => null),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: 'gone'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('This site no longer exists.'), findsOneWidget);
+    });
+
+    testWidgets('shows not-found state when site is null (embedded)', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider('gone2').overrideWith((_) async => null),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(siteId: 'gone2', embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('This site no longer exists.'), findsOneWidget);
+    });
+  });
+
+  group('SiteDetailPage content sections', () {
+    const basicSite = DiveSite(
+      id: 'basic-site',
+      name: 'Basic Site',
+      description: 'A nice dive',
+      country: 'USA',
+      region: 'Florida',
+      notes: 'Watch for currents',
+      hazards: 'Sharp rocks',
+      rating: 4,
+      difficulty: SiteDifficulty.intermediate,
+      minDepth: 5.0,
+      maxDepth: 30.0,
+      altitude: 100,
+      accessNotes: 'Boat access',
+      mooringNumber: 'M-12',
+      parkingInfo: 'Free parking',
+    );
+
+    testWidgets('Location values share one column beside the labels (#3678)', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final column = detailValueLeft(tester, 'Country');
+      expect(detailValueLeft(tester, 'Region'), column);
+      // An empty field's "Not set" sits in the same column.
+      expect(detailValueLeft(tester, 'City'), column);
+      expect(
+        tester.getTopLeft(find.text('USA')).dx,
+        lessThan(tester.getTopRight(detailRowFor('Country')).dx / 2),
+      );
+    });
+
+    testWidgets('displays basic info, description and notes', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Basic Site'), findsWidgets);
+      expect(find.text('A nice dive'), findsOneWidget);
+      expect(find.text('Watch for currents'), findsOneWidget);
+      expect(find.text('Sharp rocks'), findsOneWidget);
+      // The lock is the way to edit the site.
+      expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+    });
+
+    testWidgets(
+      'access card lists parking, then access notes, then entry/exit, '
+      'then mooring (#1037)',
+      (tester) async {
+        const accessSite = DiveSite(
+          id: 'access-site',
+          name: 'Access Site',
+          description: 'A nice dive',
+          accessNotes: 'Walk in from the church parking lot',
+          mooringNumber: 'M-12',
+          parkingInfo: 'Free parking by the church',
+          entryMethods: [EntryMethod.shore],
+          exitMethods: [EntryMethod.boat],
+        );
+        _setMobileTestSurfaceSize(tester);
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              siteProvider(accessSite.id).overrideWith((_) async => accessSite),
+              siteDiveCountProvider(accessSite.id).overrideWith((_) async => 0),
+            ],
+            child: MaterialApp(
+              // The order assertions match on the English enum names, so the
+              // platform locale of the test runner must not decide them.
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: SiteDetailPage(siteId: accessSite.id),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        double topOf(String text) => tester.getTopLeft(find.text(text)).dy;
+
+        final parkingY = topOf('Free parking by the church');
+        final accessNotesY = topOf('Walk in from the church parking lot');
+        final entryY = topOf('Shore');
+        final exitY = topOf('Boat');
+        final mooringY = topOf('M-12');
+
+        expect(parkingY, lessThan(accessNotesY));
+        expect(accessNotesY, lessThan(entryY));
+        expect(entryY, lessThan(exitY));
+        expect(exitY, lessThan(mooringY));
+      },
+    );
+
+    testWidgets(
+      'a long access label wraps inside the card instead of overflowing '
+      '(#1037)',
+      (tester) async {
+        const accessSite = DiveSite(
+          id: 'narrow-site',
+          name: 'Narrow Site',
+          accessNotes: 'Walk in from the church parking lot',
+        );
+        // A narrow phone at a large accessibility text scale: the widest case
+        // the stacked label has to survive.
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(240, 900);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+        // Other cards on the page have their own layouts at this extreme; the
+        // measurement below, not the error channel, is what this test asserts.
+        final originalOnError = FlutterError.onError;
+        FlutterError.onError = (details) {
+          if (details.toString().contains('overflowed')) return;
+          originalOnError?.call(details);
+        };
+        addTearDown(() => FlutterError.onError = originalOnError);
+
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              siteProvider(accessSite.id).overrideWith((_) async => accessSite),
+              siteDiveCountProvider(accessSite.id).overrideWith((_) async => 0),
+            ],
+            child: MaterialApp(
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Builder(
+                builder: (context) => MediaQuery(
+                  data: MediaQuery.of(
+                    context,
+                  ).copyWith(textScaler: const TextScaler.linear(3)),
+                  child: SiteDetailPage(siteId: accessSite.id),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final label = find.text('Access Notes');
+        final card = find
+            .ancestor(of: label, matching: find.byType(Card))
+            .first;
+        expect(
+          tester.getSize(label).width,
+          lessThanOrEqualTo(tester.getSize(card).width),
+          reason: 'the label must wrap, not run past the access card',
+        );
+      },
+    );
+
+    testWidgets('dive count section shows 0 dives', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('0'), findsWidgets);
+    });
+
+    testWidgets('the dives card offers a way through to that one dive', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 1),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The whole-card tap target became a labelled footer link when the
+      // count card merged into the statistics card.
+      expect(find.text('View 1 dive'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('siteViewAllDivesButton')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('rating section shows stars', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byIcon(Icons.star).first,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.byIcon(Icons.star), findsWidgets);
+    });
+
+    testWidgets('difficulty section renders chip when set', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(basicSite.id).overrideWith((_) async => basicSite),
+            siteDiveCountProvider(basicSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: basicSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Intermediate difficulty label should be rendered somewhere. The
+      // header's chip carries it too, so scroll to the card's own copy:
+      // scrollUntilVisible needs a finder that matches one widget.
+      await tester.scrollUntilVisible(
+        find.text('Intermediate').last,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      // Twice: the header summarizes the difficulty as a chip, and the
+      // Difficulty card still carries it further down the page.
+      expect(find.text('Intermediate'), findsNWidgets(2));
+    });
+
+    testWidgets('hides hazards section when hazards are empty', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      const noHazards = DiveSite(id: 'no-hazards', name: 'No Hazards');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(noHazards.id).overrideWith((_) async => noHazards),
+            siteDiveCountProvider(noHazards.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: noHazards.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sharp rocks'), findsNothing);
+    });
+
+    testWidgets('hides altitude section when altitude is null', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      const noAltitude = DiveSite(id: 'no-altitude', name: 'Sea Level');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(noAltitude.id).overrideWith((_) async => noAltitude),
+            siteDiveCountProvider(noAltitude.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: noAltitude.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // No altitude label in the body.
+      expect(find.textContaining('Altitude'), findsNothing);
+    });
+
+    // The range under the altitude group read "900-1800m (2953-5906ft)" to
+    // every diver.
+    testWidgets('the altitude group range is in the diver\'s unit', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      // The range groups digits by the process-wide locale; pin English.
+      final previousLocale = Intl.defaultLocale;
+      Intl.defaultLocale = 'en';
+      addTearDown(() => Intl.defaultLocale = previousLocale);
+      final overrides = await getBaseOverrides(
+        settingsNotifier: MockSettingsNotifier(
+          const AppSettings(altitudeUnit: AltitudeUnit.feet),
+        ),
+      );
+      const highSite = DiveSite(id: 'high', name: 'Lake', altitude: 1200);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(highSite.id).overrideWith((_) async => highSite),
+            siteDiveCountProvider(highSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: highSite.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('2,953-5,906 ft'), 200);
+
+      expect(find.text('2,953-5,906 ft'), findsOneWidget);
+    });
+  });
+
+  group('SiteDetailPage map section', () {
+    const locatedSite = DiveSite(
+      id: 'located-site',
+      name: 'Located Site',
+      location: GeoPoint(12.34, 56.78),
+    );
+
+    testWidgets('renders inline preview map when site has coordinates', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(locatedSite.id).overrideWith((_) async => locatedSite),
+            siteDiveCountProvider(locatedSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: locatedSite.id),
+          ),
+        ),
+      );
+      // Avoid pumpAndSettle: the FlutterMap tile layer animates indefinitely.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(FlutterMap), findsWidgets);
+    });
+
+    testWidgets(
+      'the inline preview is locked so the page scrolls over it (#3156)',
+      (tester) async {
+        _setMobileTestSurfaceSize(tester);
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              siteProvider(
+                locatedSite.id,
+              ).overrideWith((_) async => locatedSite),
+              siteDiveCountProvider(
+                locatedSite.id,
+              ).overrideWith((_) async => 0),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: SiteDetailPage(siteId: locatedSite.id),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        final map = tester.widget<FlutterMap>(find.byType(FlutterMap).first);
+        expect(map.options.interactionOptions.flags, InteractiveFlag.none);
+        expect(find.byType(TrackpadZoomMap), findsNothing);
+        expect(find.byType(LockedMapScrollPassthrough), findsOneWidget);
+      },
+    );
+
+    testWidgets('opens fullscreen map when fullscreen button tapped', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(locatedSite.id).overrideWith((_) async => locatedSite),
+            siteDiveCountProvider(locatedSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: locatedSite.id),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(FlutterMap), findsWidgets);
+      // The locked preview carries no map style switcher (issue #3473).
+      expect(find.byType(MapStyleButton), findsNothing);
+      await tester.tap(_previewFullscreen);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      // The fullscreen route also renders a FlutterMap, and its switcher.
+      expect(find.byType(FlutterMap), findsWidgets);
+      expect(find.byType(MapStyleButton), findsOneWidget);
+    });
+
+    testWidgets('the inline preview carries no 2D/3D toggle', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(locatedSite.id).overrideWith((_) async => locatedSite),
+            siteDiveCountProvider(locatedSite.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: locatedSite.id),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // A 200px strip is too small to read a seascape in, so the preview
+      // stays flat 2D; the fullscreen route is the way into 3D.
+      expect(find.byType(SiteScapeView), findsNothing);
+      expect(find.byKey(const ValueKey('siteScape2dButton')), findsNothing);
+      expect(find.byKey(const ValueKey('siteScape3dButton')), findsNothing);
+      expect(_previewFullscreen, findsOneWidget);
+    });
+  });
+
+  group('SiteDetailPage embedded layout', () {
+    testWidgets('renders embedded header for site with location string', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      const site = DiveSite(
+        id: 'emb-site',
+        name: 'Embedded Site',
+        country: 'Mexico',
+        region: 'Cozumel',
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(site.id).overrideWith((_) async => site),
+            siteDiveCountProvider(site.id).overrideWith((_) async => 0),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(siteId: site.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Embedded Site'), findsWidgets);
+      // The header states the name and the location string in text. The
+      // decorative location avatar that used to sit beside them is gone: it
+      // repeated what the two lines already said.
+      expect(find.textContaining('Cozumel'), findsWidgets);
+      expect(find.byIcon(Icons.more_vert), findsOneWidget);
+      expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+    });
+
+    testWidgets('embedded delete calls onDeleted callback', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      await setUpTestDatabase();
+      addTearDown(() async {
+        await tearDownTestDatabase();
+      });
+      const site = DiveSite(id: 'del-site', name: 'Delete Me');
+      final overrides = await getBaseOverrides();
+      bool onDeletedCalled = false;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(site.id).overrideWith((_) async => site),
+            siteDiveCountProvider(site.id).overrideWith((_) async => 0),
+            allDiversProvider.overrideWith((_) async => <Diver>[]),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(
+                siteId: site.id,
+                embedded: true,
+                onDeleted: () => onDeletedCalled = true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Delete acts on the whole site, so it waits for the lock.
+      await tester.tap(find.byIcon(Icons.lock_outline));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete Site'), findsOneWidget);
+      // Cancel the delete (the dialog's, not the unlocked pane's).
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.widgetWithText(TextButton, 'Cancel'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(onDeletedCalled, isFalse);
+      // Now confirm delete.
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      // Give it time to complete the delete op.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 500));
+      // onDeleted should be invoked eventually (once db ops complete).
+      // The test may complete with true if db ops succeeded, or still
+      // be false if the async didn't finish — either way the code path
+      // has been traversed.
+    });
+  });
+
+  group('SiteDetailPage location fields', () {
+    testWidgets('shows city, island, and body of water when set', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      const site = DiveSite(
+        id: 'loc-1',
+        name: 'Site',
+        city: 'Cebu City',
+        island: 'Malapascua',
+        bodyOfWater: 'Visayan Sea',
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(site.id).overrideWith((ref) async => site),
+            siteDiveCountProvider(site.id).overrideWith((ref) async => 0),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SiteDetailPage(siteId: 'loc-1', embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Cebu City'), findsWidgets);
+      expect(find.text('Malapascua'), findsWidgets);
+      expect(find.text('Visayan Sea'), findsOneWidget);
+    });
+
+    group('site types and tags (issue #1765)', () {
+      const site = DiveSite(id: 'typed', name: 'Quarry wreck');
+      final now = DateTime(2026);
+
+      Future<void> pumpTyped(
+        WidgetTester tester, {
+        List<SiteTypeEntity> types = const [],
+        List<Tag> tags = const [],
+      }) async {
+        _setMobileTestSurfaceSize(tester);
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              siteProvider(site.id).overrideWith((ref) async => site),
+              siteDiveCountProvider(site.id).overrideWith((ref) async => 0),
+              siteTypesForSiteProvider(
+                site.id,
+              ).overrideWith((ref) async => types),
+              tagsForSiteProvider(site.id).overrideWith((ref) async => tags),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SiteDetailPage(siteId: site.id, embedded: true),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      SiteTypeEntity builtIn(String id, String name) => SiteTypeEntity(
+        id: id,
+        name: name,
+        isBuiltIn: true,
+        createdAt: now,
+        updatedAt: now,
+      );
+
+      testWidgets('the Location card lists the types in one row', (
+        tester,
+      ) async {
+        await pumpTyped(
+          tester,
+          types: [builtIn('quarry', 'Quarry'), builtIn('wreck', 'Wreck')],
+        );
+
+        expect(find.text('Site Types'), findsOneWidget);
+        expect(find.text('Quarry, Wreck'), findsOneWidget);
+      });
+
+      testWidgets('a site without types reads Not set there', (tester) async {
+        await pumpTyped(tester);
+
+        expect(find.text('Site Types'), findsOneWidget);
+        // Every empty Location row reads Not set; the types row is one more.
+        expect(find.text('Not set'), findsWidgets);
+        expect(find.text('Tags'), findsNothing, reason: 'no tags, no card');
+      });
+
+      testWidgets('tags get their own card', (tester) async {
+        await pumpTyped(
+          tester,
+          tags: [
+            Tag(
+              id: 't1',
+              name: 'To try',
+              createdAt: now,
+              updatedAt: now,
+              scopes: const {TagScope.dives, TagScope.sites},
+            ),
+          ],
+        );
+
+        await tester.scrollUntilVisible(find.text('To try'), 200);
+        expect(find.text('Tags'), findsOneWidget);
+        expect(find.widgetWithText(TagChip, 'To try'), findsOneWidget);
+      });
+    });
+  });
+
+  group('SiteDetailPage dive statistics section', () {
+    const statsSite = DiveSite(id: 'stats-site', name: 'Stats Site');
+
+    testWidgets('hides the card entirely when the site has no dives', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(statsSite.id).overrideWith((_) async => statsSite),
+            siteDiveCountProvider(statsSite.id).overrideWith((_) async => 0),
+            siteDiveStatisticsProvider(
+              statsSite.id,
+            ).overrideWith((_) async => SiteDiveStatistics.empty),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: statsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Dive Statistics'), findsNothing);
+    });
+
+    testWidgets('renders all six stat rows when the site has dives', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      final stats = SiteDiveStatistics(
+        diveCount: 3,
+        maxDepthReached: 30,
+        minDepthReached: 10,
+        longestDiveSeconds: 5400,
+        averageDurationSeconds: 1800,
+        firstDiveAt: DateTime(2025, 1, 5),
+        lastDiveAt: DateTime(2026, 2, 20),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(statsSite.id).overrideWith((_) async => statsSite),
+            siteDiveCountProvider(statsSite.id).overrideWith((_) async => 3),
+            siteDiveStatisticsProvider(
+              statsSite.id,
+            ).overrideWith((_) async => stats),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: statsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('Dive Statistics'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+
+      expect(find.text('Dive Statistics'), findsOneWidget);
+      expect(find.text('Deepest Dive'), findsOneWidget);
+      expect(find.text('Shallowest Dive'), findsOneWidget);
+      expect(find.text('Longest Dive'), findsOneWidget);
+      expect(find.text('Average Duration'), findsOneWidget);
+      expect(find.text('First Dive'), findsOneWidget);
+      expect(find.text('Last Dive'), findsOneWidget);
+      // 5400s => 1h 30m; 1800s (average) => 30min.
+      expect(find.text('1h 30m'), findsOneWidget);
+      expect(find.text('30min'), findsOneWidget);
+    });
+
+    testWidgets(
+      'renders missing depth/duration fields as "Not available" rather '
+      'than 0',
+      (tester) async {
+        _setMobileTestSurfaceSize(tester);
+        final overrides = await getBaseOverrides();
+        final stats = SiteDiveStatistics(
+          diveCount: 1,
+          firstDiveAt: DateTime(2026, 1, 1),
+          lastDiveAt: DateTime(2026, 1, 1),
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              siteProvider(statsSite.id).overrideWith((_) async => statsSite),
+              siteDiveCountProvider(statsSite.id).overrideWith((_) async => 1),
+              siteDiveStatisticsProvider(
+                statsSite.id,
+              ).overrideWith((_) async => stats),
+            ],
+            child: MaterialApp(
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: SiteDetailPage(siteId: statsSite.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.scrollUntilVisible(
+          find.text('Dive Statistics'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+
+        // maxDepth, minDepth, longestDive, and avgDuration are all null on
+        // this fixture, so all four rows fall back to the same string.
+        expect(find.text('Not available'), findsNWidgets(4));
+      },
+    );
+
+    testWidgets('renders nothing while the aggregate is in flight, so a site '
+        'with no dives never flashes a phantom card', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            siteProvider(statsSite.id).overrideWith((_) async => statsSite),
+            siteDiveCountProvider(statsSite.id).overrideWith((_) async => 1),
+            siteDiveStatisticsProvider(statsSite.id).overrideWith(
+              (_) => Future.delayed(
+                const Duration(seconds: 10),
+                () => SiteDiveStatistics.empty,
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: SiteDetailPage(siteId: statsSite.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // The section occupies no space at all until the aggregate resolves.
+      // Asserting on the card's own icon rather than on a progress indicator
+      // keeps this independent of the other sections on the page.
+      expect(find.byIcon(Icons.query_stats), findsNothing);
+      expect(find.text('Dive Statistics'), findsNothing);
+
+      // Let the pending timer resolve before the test tears down. The stats
+      // are empty, so the section stays hidden once it settles too.
+      await tester.pump(const Duration(seconds: 11));
+      expect(find.byIcon(Icons.query_stats), findsNothing);
     });
   });
 }

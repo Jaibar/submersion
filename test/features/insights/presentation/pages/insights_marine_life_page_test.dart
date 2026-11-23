@@ -1,0 +1,177 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_marine_life_page.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
+
+GoRouter _router() => GoRouter(
+  initialLocation: '/stats',
+  routes: [
+    GoRoute(
+      path: '/stats',
+      builder: (context, state) =>
+          const Scaffold(body: InsightsMarineLifePage(embedded: true)),
+    ),
+    GoRoute(
+      path: '/species',
+      builder: (context, state) => const Scaffold(body: Text('SPECIES PAGE')),
+      routes: [
+        GoRoute(
+          path: ':speciesId',
+          builder: (context, state) => Scaffold(
+            body: Text('DETAIL ${state.pathParameters['speciesId']}'),
+          ),
+        ),
+      ],
+    ),
+  ],
+);
+
+final _whaleShark = RankingItem(
+  id: 'sp_whale_shark',
+  name: 'Whale Shark',
+  count: 5,
+  kind: 'shark',
+);
+
+Future<void> _pump(
+  WidgetTester tester, {
+  Locale locale = const Locale('en'),
+  List<RankingItem>? sightings,
+}) async {
+  final overrides = await getBaseOverrides();
+  await tester.pumpWidget(
+    testAppRouter(
+      router: _router(),
+      locale: locale,
+      overrides: [
+        ...overrides,
+        uniqueSpeciesCountProvider.overrideWith((ref) async => 3),
+        mostCommonSightingsProvider.overrideWith(
+          (ref) async => sightings ?? [_whaleShark],
+        ),
+        bestSitesForMarineLifeProvider.overrideWith(
+          (ref) async => <RankingItem>[],
+        ),
+      ],
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  testWidgets('offers a See all species card that opens the Species page', (
+    tester,
+  ) async {
+    await _pump(tester);
+
+    expect(find.text('See all species'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('see_all_species')));
+    await tester.pumpAndSettle();
+    expect(find.text('SPECIES PAGE'), findsOneWidget);
+  });
+
+  testWidgets('renders the most common species under its localized name', (
+    tester,
+  ) async {
+    await _pump(tester, locale: const Locale('de'));
+
+    expect(find.text('Walhai'), findsOneWidget);
+    expect(find.text('Whale Shark'), findsNothing);
+  });
+
+  // Issue #4339: the query returns the stored category key, which rendered
+  // as "fish" under a German locale.
+  testWidgets('renders the species category under its localized label', (
+    tester,
+  ) async {
+    await _pump(tester, locale: const Locale('de'));
+
+    expect(find.text('Hai'), findsOneWidget);
+    expect(find.text('shark'), findsNothing);
+  });
+
+  testWidgets('renders the species category label in English too', (
+    tester,
+  ) async {
+    await _pump(tester);
+
+    expect(find.text('Shark'), findsOneWidget);
+    expect(find.text('shark'), findsNothing);
+  });
+
+  testWidgets('a row without a category key keeps its own subtitle', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      locale: const Locale('de'),
+      sightings: [
+        RankingItem(
+          id: 'b0d7c1de-0000-4000-8000-000000000000',
+          name: 'Mein Barsch',
+          count: 2,
+          subtitle: 'Steg',
+        ),
+      ],
+    );
+
+    expect(find.text('Mein Barsch'), findsOneWidget);
+    expect(find.text('Steg'), findsOneWidget);
+  });
+
+  testWidgets('an unknown category key is shown as stored', (tester) async {
+    await _pump(
+      tester,
+      locale: const Locale('de'),
+      sightings: [
+        RankingItem(
+          id: 'b0d7c1de-0000-4000-8000-000000000001',
+          name: 'Mein Krake',
+          count: 1,
+          kind: 'cephalopod',
+        ),
+      ],
+    );
+
+    expect(find.text('cephalopod'), findsOneWidget);
+  });
+
+  testWidgets('tapping a ranked species still opens its detail page', (
+    tester,
+  ) async {
+    await _pump(tester);
+
+    await tester.tap(find.text('Whale Shark'));
+    await tester.pumpAndSettle();
+    expect(find.text('DETAIL sp_whale_shark'), findsOneWidget);
+  });
+
+  // Issue #4385: a long ranking shows ten rows and opens the rest behind
+  // Show all instead of dropping everything past the tenth.
+  testWidgets('a long sightings ranking opens the rest behind Show all', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      sightings: [
+        for (var i = 0; i < 14; i++)
+          RankingItem(id: 'sp$i', name: 'Species $i', count: 30 - i),
+      ],
+    );
+
+    expect(find.text('Species 9'), findsOneWidget);
+    expect(find.text('Species 10'), findsNothing);
+
+    await tester.ensureVisible(find.text('Show all'));
+    await tester.tap(find.text('Show all'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Species 13'), findsOneWidget);
+    expect(find.text('Show less'), findsOneWidget);
+  });
+}

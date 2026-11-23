@@ -1,0 +1,149 @@
+import 'package:flutter/widgets.dart';
+
+/// Dive-gear glyphs drawn for Submersion, vendored alongside the font they
+/// live in.
+///
+/// Neither Material Icons nor Material Design Icons has a wetsuit, a drysuit,
+/// a BCD, a rebreather, a hood, a glove, a dive bootie, a reel, a DPV or a
+/// regulator, so the equipment list reached for metaphors instead: a hanger
+/// for both exposure suits, a hiking figure for boots, an infinity symbol for
+/// a reel, a kick scooter for a DPV. Issue #1189 reported the result as icons
+/// that "don't really fit the equipment".
+///
+/// The constants below are drawn in `tool/equipment_glyphs.py` and compiled
+/// into `assets/fonts/submersion-equipment.ttf` by
+/// `tool/build_equipment_icon_font.py`. Regenerate with:
+///
+/// ```sh
+/// pip install fonttools
+/// python3 tool/build_equipment_icon_font.py --verify
+/// ```
+///
+/// Shipping them as a font rather than as SVG assets or custom painters keeps
+/// [equipmentTypeIcon] returning [IconData], so all of its call sites keep
+/// working and the glyphs inherit `IconTheme` size, colour, opacity and
+/// directionality for free. Because every constant here is `const`, Flutter's
+/// icon tree-shaker subsets the font at build time.
+///
+/// Code points sit in the Unicode Private Use Area and are assigned in the
+/// declaration order of `tool/equipment_glyphs.py`. They are baked into the
+/// committed font, so reordering that file without rebuilding the font would
+/// silently swap glyphs.
+abstract final class SubmersionIcons {
+  /// The family declared for the generated font in `pubspec.yaml`.
+  static const String fontFamily = 'Submersion Equipment';
+
+  /// One-piece exposure suit with an open neck.
+  static const IconData wetsuit = IconData(0xe900, fontFamily: fontFamily);
+
+  /// Five-finger dive glove above a sealed wrist cuff.
+  static const IconData gloves = IconData(0xe901, fontFamily: fontFamily);
+
+  /// Dive bootie with a flared sole.
+  static const IconData boots = IconData(0xe902, fontFamily: fontFamily);
+
+  /// The wetsuit silhouette with the attached hood and boots that tell a
+  /// drysuit apart from it.
+  static const IconData drysuit = IconData(0xe903, fontFamily: fontFamily);
+
+  /// Second stage seen side-on, with its purge face and LP hose.
+  static const IconData regulator = IconData(0xe904, fontFamily: fontFamily);
+
+  /// Buoyancy vest with a waist belt and a corrugated inflator hose.
+  static const IconData bcd = IconData(0xe905, fontFamily: fontFamily);
+
+  /// Scrubber canister flanked by counterlungs.
+  static const IconData rebreather = IconData(0xe906, fontFamily: fontFamily);
+
+  /// Hood seen front-on, its face opening running out through the neck.
+  static const IconData hood = IconData(0xe907, fontFamily: fontFamily);
+
+  /// Finger spool with line paying out.
+  static const IconData reel = IconData(0xe908, fontFamily: fontFamily);
+
+  /// Diver propulsion vehicle: torpedo hull with a shrouded prop.
+  static const IconData dpv = IconData(0xe909, fontFamily: fontFamily);
+
+  /// Drysuit undersuit: the suit silhouette again, quilted.
+  static const IconData undersuit = IconData(0xe90a, fontFamily: fontFamily);
+
+  /// Base layer: a long-sleeved thermal top, stopping at the hips.
+  static const IconData baselayer = IconData(0xe90b, fontFamily: fontFamily);
+
+  /// A cylinder with a band clamped around it and a cam buckle on the side.
+  static const IconData tankBand = IconData(0xe90c, fontFamily: fontFamily);
+
+  /// Pouch with a quick-release pull handle and a lead block inside.
+  static const IconData weightPocket = IconData(0xe90d, fontFamily: fontFamily);
+
+  /// Pouch under a pointed flap held down by a snap.
+  static const IconData gearPocket = IconData(0xe90e, fontFamily: fontFamily);
+
+  /// A lens barrel seen side-on: mount, ribbed grip and a flared front.
+  static const IconData lens = IconData(0xe90f, fontFamily: fontFamily);
+
+  /// A dome port seen side-on: a half-dome on its mounting collar.
+  static const IconData port = IconData(0xe910, fontFamily: fontFamily);
+
+  /// A camera tray with a handle rising at each end and a camera on it.
+  static const IconData trayHandle = IconData(0xe911, fontFamily: fontFamily);
+
+  /// Two arm segments with ball ends, joined by a ball clamp with its knob.
+  static const IconData armClamp = IconData(0xe912, fontFamily: fontFamily);
+
+  /// A video light seen front-on: a square head round a wide LED, on a ball
+  /// mount.
+  static const IconData videoLight = IconData(0xe913, fontFamily: fontFamily);
+
+  /// A foam float: a fat banded body with a ball at each end.
+  static const IconData floatArm = IconData(0xe914, fontFamily: fontFamily);
+
+  /// A sleeveless vest with an attached hood and a front zip (#3108).
+  static const IconData vest = IconData(0xe915, fontFamily: fontFamily);
+
+  /// A sock seen side-on: a ribbed cuff over the leg and a rounded foot,
+  /// with no sole, which is what tells it apart from the bootie.
+  static const IconData socks = IconData(0xe916, fontFamily: fontFamily);
+
+  // Tank roles (#2901): one glyph per way a cylinder is carried. Picked by
+  // `TankRole.icon`, never directly.
+
+  /// An upright cylinder with its valve and handwheel: back gas.
+  static const IconData tankBackGas = IconData(0xe917, fontFamily: fontFamily);
+
+  /// A pair of cylinders with the left one solid: sidemount left.
+  static const IconData tankSidemountLeft = IconData(
+    0xe918,
+    fontFamily: fontFamily,
+  );
+
+  /// A pair of cylinders with the right one solid: sidemount right.
+  static const IconData tankSidemountRight = IconData(
+    0xe919,
+    fontFamily: fontFamily,
+  );
+
+  /// A tilted cylinder on a leash with a bolt snap at each end: stage, deco
+  /// and bailout.
+  static const IconData tankSlung = IconData(0xe91a, fontFamily: fontFamily);
+
+  /// A short bottle strapped beside a full-size cylinder: pony.
+  static const IconData tankPony = IconData(0xe91b, fontFamily: fontFamily);
+
+  /// A stubby cylinder beside a scrubber canister: a rebreather's diluent or
+  /// oxygen supply.
+  static const IconData tankRebreather = IconData(
+    0xe91c,
+    fontFamily: fontFamily,
+  );
+
+  /// A DIN first stage seen side-on.
+  static const IconData firstStage = IconData(0xe91d, fontFamily: fontFamily);
+
+  /// A second stage seen face-on.
+  static const IconData secondStage = IconData(0xe91e, fontFamily: fontFamily);
+
+  /// Two upright cylinders joined by a manifold, both solid: a twin set
+  /// (issue #3374).
+  static const IconData tankTwinSet = IconData(0xe91f, fontFamily: fontFamily);
+}

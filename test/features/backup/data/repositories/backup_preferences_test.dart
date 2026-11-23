@@ -1,7 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:submersion/core/services/accounts/account_kind.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/domain/entities/backup_copy_account.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
 
@@ -22,7 +24,7 @@ void main() {
       expect(settings.frequency, BackupFrequency.weekly);
       expect(settings.retentionCount, 10);
       expect(settings.lastBackupTime, isNull);
-      expect(settings.cloudBackupEnabled, true);
+      expect(settings.cloudBackupEnabled, false);
     });
 
     test('setEnabled persists value', () async {
@@ -30,6 +32,97 @@ void main() {
 
       final settings = backupPreferences.getSettings();
       expect(settings.enabled, true);
+    });
+
+    test('backupEncryptionEnabled defaults false and round-trips', () async {
+      expect(backupPreferences.getSettings().backupEncryptionEnabled, isFalse);
+      await backupPreferences.setBackupEncryptionEnabled(true);
+      expect(backupPreferences.getSettings().backupEncryptionEnabled, isTrue);
+    });
+
+    test('scheduled failure defaults empty and round-trips', () async {
+      expect(backupPreferences.getSettings().lastScheduledFailureAt, isNull);
+      final at = DateTime(2026, 10, 17, 9, 30);
+      await backupPreferences.setLastScheduledFailure(at, 'disk full');
+      final settings = backupPreferences.getSettings();
+      expect(settings.lastScheduledFailureAt, at);
+      expect(settings.lastScheduledFailureMessage, 'disk full');
+    });
+
+    test('lastCloudCopyMissing defaults false and round-trips', () async {
+      expect(backupPreferences.getSettings().lastCloudCopyMissing, isFalse);
+      await backupPreferences.setLastCloudCopyMissing(true);
+      expect(backupPreferences.getSettings().lastCloudCopyMissing, isTrue);
+    });
+
+    test('lastCloudCopyNeedsSignIn defaults false and round-trips', () async {
+      expect(backupPreferences.getSettings().lastCloudCopyNeedsSignIn, isFalse);
+      await backupPreferences.setLastCloudCopyNeedsSignIn(true);
+      expect(backupPreferences.getSettings().lastCloudCopyNeedsSignIn, isTrue);
+    });
+
+    test('lastBackupDestination defaults null and round-trips', () async {
+      expect(backupPreferences.getSettings().lastBackupDestination, isNull);
+      await backupPreferences.setLastBackupDestination(
+        LastBackupDestination.cloud,
+      );
+      expect(
+        backupPreferences.getSettings().lastBackupDestination,
+        LastBackupDestination.cloud,
+      );
+    });
+
+    test('a cloud destination keeps its account, any other drops it', () async {
+      await backupPreferences.setLastBackupDestination(
+        LastBackupDestination.cloud,
+        cloudAccountId: 'acct-drive',
+      );
+      expect(
+        backupPreferences.getSettings().lastBackupCloudAccountId,
+        'acct-drive',
+      );
+
+      await backupPreferences.setLastBackupDestination(
+        LastBackupDestination.device,
+      );
+      expect(backupPreferences.getSettings().lastBackupCloudAccountId, isNull);
+    });
+
+    test('copy destination defaults null and round-trips', () async {
+      expect(backupPreferences.getSettings().copyAccountId, isNull);
+      await backupPreferences.setCopyDestination(
+        accountId: 'acct-b',
+        kind: AccountKind.webdav,
+      );
+      final read = backupPreferences.getSettings();
+      expect(read.copyAccountId, 'acct-b');
+      expect(read.copyAccountKind, AccountKind.webdav);
+
+      await backupPreferences.setCopyDestination(accountId: null, kind: null);
+      expect(backupPreferences.getSettings().copyAccountId, isNull);
+      expect(backupPreferences.getSettings().copyAccountKind, isNull);
+    });
+
+    test('an unknown stored copy kind reads as no destination', () async {
+      SharedPreferences.setMockInitialValues({
+        'backup_copy_account_id': 'acct-x',
+        'backup_copy_account_kind': 'ftp',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final read = BackupPreferences(prefs).getSettings();
+      expect(read.copyAccountId, isNull);
+      expect(read.copyAccountKind, isNull);
+    });
+
+    test('an unknown stored destination reads as null', () async {
+      SharedPreferences.setMockInitialValues({
+        'backup_last_destination': 'moon',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        BackupPreferences(prefs).getSettings().lastBackupDestination,
+        isNull,
+      );
     });
 
     test('setFrequency persists value', () async {
@@ -65,10 +158,10 @@ void main() {
     });
 
     test('setCloudBackupEnabled persists value', () async {
-      await backupPreferences.setCloudBackupEnabled(false);
+      await backupPreferences.setCloudBackupEnabled(true);
 
       final settings = backupPreferences.getSettings();
-      expect(settings.cloudBackupEnabled, false);
+      expect(settings.cloudBackupEnabled, true);
     });
 
     test('getSettings returns null backupLocation by default', () {
@@ -99,6 +192,93 @@ void main() {
 
       final settings = bp.getSettings();
       expect(settings.frequency, BackupFrequency.weekly);
+    });
+  });
+
+  group('Keep all (issue #4535)', () {
+    Future<BackupPreferences> withCount(int count) async {
+      SharedPreferences.setMockInitialValues({'backup_retention_count': count});
+      return BackupPreferences(await SharedPreferences.getInstance());
+    }
+
+    test('a count above the custom maximum reads as Keep all', () async {
+      // Shown as Keep all, so it must prune as Keep all too, not as a
+      // finite limit of 10000.
+      final prefs = await withCount(BackupSettings.maxCustomRetentionCount + 1);
+      expect(
+        prefs.getSettings().retentionCount,
+        BackupSettings.keepAllRetentionCount,
+      );
+    });
+
+    test('the sentinel reads back unchanged', () async {
+      final prefs = await withCount(BackupSettings.keepAllRetentionCount);
+      expect(
+        prefs.getSettings().retentionCount,
+        BackupSettings.keepAllRetentionCount,
+      );
+    });
+
+    test('a typed count reads back unchanged', () async {
+      final prefs = await withCount(BackupSettings.maxCustomRetentionCount);
+      expect(
+        prefs.getSettings().retentionCount,
+        BackupSettings.maxCustomRetentionCount,
+      );
+    });
+  });
+
+  group('BackupPreferences cross-device retention (#3503)', () {
+    test('is off by default', () {
+      final settings = backupPreferences.getSettings();
+      expect(settings.crossDeviceRetentionAccount, isNull);
+      expect(settings.crossDeviceRetentionFor('acct'), isFalse);
+      expect(settings.crossDeviceRetentionFor(''), isFalse);
+    });
+
+    test('is on only for the folder key it was confirmed for', () async {
+      await backupPreferences.setCrossDeviceRetentionAccount('acct');
+      final settings = backupPreferences.getSettings();
+      expect(settings.crossDeviceRetentionFor('acct'), isTrue);
+      expect(settings.crossDeviceRetentionFor('other'), isFalse);
+      expect(settings.crossDeviceRetentionFor('provider:fake'), isFalse);
+    });
+
+    test('null turns it off', () async {
+      await backupPreferences.setCrossDeviceRetentionAccount('acct');
+      await backupPreferences.setCrossDeviceRetentionAccount(null);
+      expect(
+        backupPreferences.getSettings().crossDeviceRetentionFor('acct'),
+        isFalse,
+      );
+    });
+  });
+
+  group('BackupPreferences backup-location bookmark', () {
+    test('getBackupLocationBookmark returns null by default', () {
+      expect(backupPreferences.getBackupLocationBookmark(), isNull);
+    });
+
+    test(
+      'setBackupLocationBookmark persists and round-trips the bytes',
+      () async {
+        await backupPreferences.setBackupLocationBookmark([1, 2, 3, 250]);
+        expect(backupPreferences.getBackupLocationBookmark(), [1, 2, 3, 250]);
+      },
+    );
+
+    test('setBackupLocationBookmark(null) clears the bookmark', () async {
+      await backupPreferences.setBackupLocationBookmark([1, 2, 3]);
+      await backupPreferences.setBackupLocationBookmark(null);
+      expect(backupPreferences.getBackupLocationBookmark(), isNull);
+    });
+
+    test('setBackupLocation(null) also clears the bookmark', () async {
+      await backupPreferences.setBackupLocation('/custom/icloud/dir');
+      await backupPreferences.setBackupLocationBookmark([9, 8, 7]);
+      await backupPreferences.setBackupLocation(null);
+      expect(backupPreferences.getSettings().backupLocation, isNull);
+      expect(backupPreferences.getBackupLocationBookmark(), isNull);
     });
   });
 
@@ -181,6 +361,73 @@ void main() {
       final history = backupPreferences.getHistory();
       expect(history, hasLength(1));
       expect(history.first.id, 'r3');
+    });
+  });
+
+  group('BackupPreferences location label', () {
+    test(
+      'backup location label round-trips and clears with the location',
+      () async {
+        await backupPreferences.setBackupLocation('content://tree/1');
+        await backupPreferences.setBackupLocationLabel('Backups');
+        expect(backupPreferences.backupLocationLabel, 'Backups');
+
+        await backupPreferences.setBackupLocation(null);
+        expect(backupPreferences.backupLocationLabel, isNull);
+      },
+    );
+
+    test('setBackupLocationLabel(null) clears the label directly', () async {
+      await backupPreferences.setBackupLocationLabel('Backups');
+      expect(backupPreferences.backupLocationLabel, 'Backups');
+
+      await backupPreferences.setBackupLocationLabel(null);
+      expect(backupPreferences.backupLocationLabel, isNull);
+    });
+  });
+
+  group('BackupPreferences extra copy accounts (#3782)', () {
+    test('default to none', () {
+      final settings = backupPreferences.getSettings();
+      expect(settings.extraCopyAccounts, isEmpty);
+      expect(settings.lastExtraCopyMissingIds, isEmpty);
+    });
+
+    test('extra copy accounts round-trip in order', () async {
+      const accounts = [
+        BackupCopyAccount(accountId: 'git-row', kind: AccountKind.git),
+        BackupCopyAccount(accountId: 'db-row', kind: AccountKind.dropbox),
+      ];
+      await backupPreferences.setExtraCopyAccounts(accounts);
+      expect(backupPreferences.getSettings().extraCopyAccounts, accounts);
+    });
+
+    test('an entry with an unknown kind is dropped', () async {
+      SharedPreferences.setMockInitialValues({
+        'backup_extra_copy_accounts':
+            '[{"id":"a","kind":"carrierPigeon"},{"id":"b","kind":"git"}]',
+      });
+      final prefs = BackupPreferences(await SharedPreferences.getInstance());
+      expect(prefs.getSettings().extraCopyAccounts, const [
+        BackupCopyAccount(accountId: 'b', kind: AccountKind.git),
+      ]);
+    });
+
+    test('malformed JSON reads as none', () async {
+      SharedPreferences.setMockInitialValues({
+        'backup_extra_copy_accounts': '{not json',
+      });
+      final prefs = BackupPreferences(await SharedPreferences.getInstance());
+      expect(prefs.getSettings().extraCopyAccounts, isEmpty);
+    });
+
+    test('last extra copy missing ids round-trip', () async {
+      await backupPreferences.setLastExtraCopyMissingIds(['git-row']);
+      expect(backupPreferences.getSettings().lastExtraCopyMissingIds, [
+        'git-row',
+      ]);
+      await backupPreferences.setLastExtraCopyMissingIds(const []);
+      expect(backupPreferences.getSettings().lastExtraCopyMissingIds, isEmpty);
     });
   });
 }

@@ -1,0 +1,376 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/equipment_picker_sheet.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_picker_filter.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_arrangement_provider.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../../helpers/mock_providers.dart';
+import '../../../../../helpers/folded_groups.dart';
+
+EquipmentItem _item(
+  String id,
+  EquipmentType type, {
+  EquipmentStatus status = EquipmentStatus.active,
+}) => EquipmentItem(id: id, name: 'Item $id', type: type, status: status);
+
+Future<void> _pump(
+  WidgetTester tester, {
+  required List<EquipmentItem> equipment,
+  Set<String> selectedIds = const {},
+  bool hideSpare = false,
+  EquipmentPickerFilter filter = EquipmentPickerFilter.none,
+  EquipmentArrangement? arrangement,
+  void Function(EquipmentItem)? onSelected,
+  List<Diver> divers = const [],
+  String? activeDiverId,
+  String? title,
+  String? hint,
+  String? Function(String equipmentId)? overlapNote,
+}) async {
+  // Tall enough to render every row without scrolling. The picker groups
+  // by type (#1486, #1576) and this fixture gives every type exactly one
+  // item, so the list is one heading plus one tile per type; the assembly
+  // part types (#1487) brought the enum to 36.
+  tester.view.physicalSize = const Size(900, 6400);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        activeEquipmentProvider.overrideWith((ref) async => equipment),
+        equipmentPickerFilterProvider.overrideWith((ref) => filter),
+        if (arrangement != null)
+          equipmentArrangementProvider.overrideWithValue(arrangement),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        allDiversProvider.overrideWith((ref) async => divers),
+        validatedCurrentDiverIdProvider.overrideWith(
+          (ref) async => activeDiverId,
+        ),
+      ],
+      child: MaterialApp(
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: EquipmentPickerSheet(
+            scrollController: ScrollController(),
+            selectedEquipmentIds: selectedIds,
+            hideSpare: hideSpare,
+            onEquipmentSelected: onSelected ?? (_) {},
+            title: title,
+            hint: hint,
+            overlapNote: overlapNote,
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  // The picker opens with its groups folded (#3364).
+  await openFoldedGroups(tester);
+}
+
+void main() {
+  group('shared gear (issue #2046)', () {
+    const own = EquipmentItem(
+      id: 'mine',
+      diverId: 'owner',
+      name: 'My BCD',
+      type: EquipmentType.bcd,
+    );
+    const hers = EquipmentItem(
+      id: 'hers',
+      diverId: 'wife',
+      name: 'Her Reg',
+      type: EquipmentType.regulator,
+    );
+    final t = DateTime(2026);
+    final bill = Diver(id: 'owner', name: 'Bill', createdAt: t, updatedAt: t);
+    final anna = Diver(id: 'wife', name: 'Anna', createdAt: t, updatedAt: t);
+
+    testWidgets('lists shared gear under Shared with me and its owner', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: [hers, own],
+        divers: [bill, anna],
+        activeDiverId: 'owner',
+      );
+      expect(find.text('Shared with me'), findsOneWidget);
+      expect(find.text('From Anna'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('equipment-owner-chip-wife')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('equipment-owner-chip-owner')),
+        findsNothing,
+      );
+      expect(
+        tester.getTopLeft(find.text('My BCD')).dy,
+        lessThan(tester.getTopLeft(find.text('Her Reg')).dy),
+      );
+    });
+
+    testWidgets('only shared gear still gets the section header', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: [hers],
+        divers: [bill, anna],
+        activeDiverId: 'owner',
+      );
+      expect(find.text('Shared with me'), findsOneWidget);
+    });
+
+    testWidgets('no section with a single profile', (tester) async {
+      await _pump(
+        tester,
+        equipment: [own],
+        divers: [bill],
+        activeDiverId: 'owner',
+      );
+      expect(find.text('Shared with me'), findsNothing);
+    });
+  });
+
+  testWidgets('lists equipment of every type with icons', (tester) async {
+    // One item per type exercises the full icon mapping.
+    final equipment = [
+      for (final (i, type) in EquipmentType.values.indexed) _item('e$i', type),
+    ];
+    await _pump(tester, equipment: equipment);
+    expect(find.text('Add Equipment'), findsOneWidget);
+    expect(find.byType(ListTile), findsNWidgets(EquipmentType.values.length));
+  });
+
+  testWidgets('filters out already selected items and selects on tap', (
+    tester,
+  ) async {
+    final equipment = [
+      _item('a', EquipmentType.regulator),
+      _item('b', EquipmentType.mask),
+    ];
+    EquipmentItem? selected;
+    await _pump(
+      tester,
+      equipment: equipment,
+      selectedIds: {'a'},
+      onSelected: (item) => selected = item,
+    );
+    expect(find.text('Item a'), findsNothing);
+    await tester.tap(find.text('Item b'));
+    expect(selected?.id, 'b');
+  });
+
+  // A caller whose pick means more than "add it to the dive" says so, as
+  // the tank editor's cylinder picker does (issue #2599).
+  testWidgets('a caller can retitle the picker and add a hint', (tester) async {
+    await _pump(
+      tester,
+      equipment: [_item('a', EquipmentType.tank)],
+      title: 'My cylinders',
+      hint: 'Copies the cylinder into this tank.',
+    );
+    expect(find.text('My cylinders'), findsOneWidget);
+    expect(find.text('Add Equipment'), findsNothing);
+    expect(find.text('Copies the cylinder into this tank.'), findsOneWidget);
+  });
+
+  testWidgets('no hint by default', (tester) async {
+    await _pump(tester, equipment: [_item('a', EquipmentType.tank)]);
+    expect(find.text('Add Equipment'), findsOneWidget);
+    expect(find.text('Copies the cylinder into this tank.'), findsNothing);
+  });
+
+  testWidgets('shows empty state when there is no equipment', (tester) async {
+    await _pump(tester, equipment: const []);
+    expect(find.text('No equipment yet'), findsOneWidget);
+    expect(find.text('Add equipment from the Equipment tab'), findsOneWidget);
+  });
+
+  testWidgets('shows all-selected state when everything is on the dive', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      equipment: [_item('a', EquipmentType.fins)],
+      selectedIds: {'a'},
+    );
+    expect(find.text('All equipment already selected'), findsOneWidget);
+    expect(find.text('Remove items to add different ones'), findsOneWidget);
+  });
+
+  group('spare gear (#1803)', () {
+    final equipment = [
+      _item('reg', EquipmentType.regulator),
+      _item('hose', EquipmentType.other, status: EquipmentStatus.spare),
+    ];
+
+    testWidgets('hideSpare keeps spare gear out of the picker', (tester) async {
+      await _pump(tester, equipment: equipment, hideSpare: true);
+
+      expect(find.text('Item reg'), findsOneWidget);
+      expect(find.text('Item hose'), findsNothing);
+    });
+
+    testWidgets('without hideSpare spare gear is still offered', (
+      tester,
+    ) async {
+      // The transmitter registry links cylinders regardless of whether they
+      // are in the dive rotation, so it does not opt in.
+      await _pump(tester, equipment: equipment);
+
+      expect(find.text('Item reg'), findsOneWidget);
+      expect(find.text('Item hose'), findsOneWidget);
+    });
+
+    testWidgets('says the rest is spare when that is all that is left', (
+      tester,
+    ) async {
+      // Blaming "no equipment" or "all selected" would send the diver to the
+      // wrong place: the gear exists, it is just marked Spare.
+      await _pump(
+        tester,
+        equipment: equipment,
+        selectedIds: {'reg'},
+        hideSpare: true,
+      );
+
+      expect(find.text('Remaining gear is marked Spare'), findsOneWidget);
+      expect(
+        find.text("Set an item's status to Active to add it to a dive"),
+        findsOneWidget,
+      );
+      expect(find.text('No equipment yet'), findsNothing);
+      expect(find.text('All equipment already selected'), findsNothing);
+    });
+
+    testWidgets('says the category is spare when the diver filters to one '
+        'that only holds spare gear', (tester) async {
+      // Active gear of another category keeps the picker non-empty overall,
+      // so "No equipment in this category" would be a lie: the category does
+      // hold gear, it is just marked Spare.
+      await _pump(
+        tester,
+        equipment: equipment,
+        hideSpare: true,
+        filter: const EquipmentPickerFilter(type: EquipmentType.other),
+      );
+
+      expect(find.text('Remaining gear is marked Spare'), findsOneWidget);
+      expect(find.text('No equipment in this category'), findsNothing);
+    });
+
+    testWidgets('still blames the category when it holds no gear at all', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: equipment,
+        hideSpare: true,
+        filter: const EquipmentPickerFilter(type: EquipmentType.fins),
+      );
+
+      expect(find.text('No equipment in this category'), findsOneWidget);
+      expect(find.text('Remaining gear is marked Spare'), findsNothing);
+    });
+
+    testWidgets('the status filter never offers a Spare chip when hidden', (
+      tester,
+    ) async {
+      await _pump(tester, equipment: equipment, hideSpare: true);
+
+      await tester.tap(find.byIcon(Icons.filter_list));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Active'), findsWidgets);
+      expect(find.text('Spare'), findsNothing);
+    });
+  });
+
+  testWidgets('rows show brand, model and identifier under the name', (
+    tester,
+  ) async {
+    final pouch = EquipmentItem(
+      id: 'p',
+      name: 'Pouches',
+      type: EquipmentType.other,
+      brand: 'Palantic',
+      model: 'Drop-Bottom',
+      attributes: [
+        EquipmentAttribute.curated(
+          equipmentId: 'p',
+          key: EquipmentAttrKeys.identifier,
+          valueText: 'P2',
+        ),
+      ],
+    );
+    await _pump(tester, equipment: [pouch]);
+    expect(find.text('Pouches'), findsOneWidget);
+    expect(find.text('Palantic Drop-Bottom · ID P2'), findsOneWidget);
+  });
+
+  testWidgets('two identical items are told apart by serial number', (
+    tester,
+  ) async {
+    EquipmentItem pouch(String id, String serial) => EquipmentItem(
+      id: id,
+      name: 'Pouches',
+      type: EquipmentType.other,
+      brand: 'Palantic',
+      model: 'Drop-Bottom',
+      serialNumber: serial,
+    );
+    await _pump(tester, equipment: [pouch('b', 'X2'), pouch('a', 'X1')]);
+    expect(find.text('Palantic Drop-Bottom · S/N X1'), findsOneWidget);
+    expect(find.text('Palantic Drop-Bottom · S/N X2'), findsOneWidget);
+  });
+
+  testWidgets('ungrouped, the type name leads the details that follow', (
+    tester,
+  ) async {
+    // No type heading to say what the row is, so the row says it itself.
+    const pouch = EquipmentItem(
+      id: 'p',
+      name: 'Pouches',
+      type: EquipmentType.other,
+      brand: 'Palantic',
+      model: 'Drop-Bottom',
+    );
+    await _pump(
+      tester,
+      equipment: [pouch],
+      arrangement: EquipmentArrangement.defaults.copyWith(groupByType: false),
+    );
+    expect(find.text('Other · Palantic Drop-Bottom'), findsOneWidget);
+  });
+
+  testWidgets('an item also on another profile dive says so (issue #2853)', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      equipment: [
+        _item('a', EquipmentType.light),
+        _item('b', EquipmentType.mask),
+      ],
+      overlapNote: (id) => id == 'a' ? "Also on Anna's dive, 10:02" : null,
+    );
+    expect(find.text("Also on Anna's dive, 10:02"), findsOneWidget);
+    expect(find.byIcon(Icons.info_outline), findsOneWidget);
+  });
+}

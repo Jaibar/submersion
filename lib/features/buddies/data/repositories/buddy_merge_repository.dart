@@ -1,52 +1,27 @@
 import 'package:drift/drift.dart';
-import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/geography/country_code_save.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_card_columns.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_country_columns.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_merge_snapshot.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart'
     as domain;
+import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
+import 'package:submersion/features/dive_roles/domain/services/dive_role_set.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_location_buddy_links.dart';
+import 'package:submersion/features/media/data/repositories/media_people_buddy_merge.dart';
+import 'package:submersion/features/media/data/repositories/media_people_repository.dart';
 
-/// Snapshot of a DiveBuddies junction row for undo.
-class DiveBuddySnapshot {
-  final String id;
-  final String diveId;
-  final String buddyId;
-  final String role;
-  final int createdAt;
-
-  const DiveBuddySnapshot({
-    required this.id,
-    required this.diveId,
-    required this.buddyId,
-    required this.role,
-    required this.createdAt,
-  });
-}
-
-/// Snapshot captured before a buddy merge for undo.
-class BuddyMergeSnapshot {
-  final domain.Buddy originalSurvivor;
-  final List<domain.Buddy> deletedBuddies;
-  final List<DiveBuddySnapshot> deletedDiveBuddyEntries;
-  final List<DiveBuddySnapshot> modifiedDiveBuddyEntries;
-
-  const BuddyMergeSnapshot({
-    required this.originalSurvivor,
-    required this.deletedBuddies,
-    required this.deletedDiveBuddyEntries,
-    required this.modifiedDiveBuddyEntries,
-  });
-}
-
-/// Result from a buddy merge operation.
-class BuddyMergeResult {
-  final String survivorId;
-  final BuddyMergeSnapshot? snapshot;
-
-  const BuddyMergeResult({required this.survivorId, this.snapshot});
-}
+// The merge's undo snapshots, which every caller of the merge handles.
+export 'package:submersion/features/buddies/data/repositories/buddy_merge_snapshot.dart';
 
 /// Repository handling buddy merge and bulk-delete operations.
 ///
@@ -55,16 +30,9 @@ class BuddyMergeResult {
 class BuddyMergeRepository {
   AppDatabase get _db => DatabaseService.instance.database;
   final SyncRepository _syncRepository = SyncRepository();
+  final CertificationRepository _certRepo = CertificationRepository();
+  final DiveRoleLinkRepository _roleLinks = DiveRoleLinkRepository();
   final _log = LoggerService.forClass(BuddyMergeRepository);
-
-  static const _roleRank = {
-    'solo': 0,
-    'student': 1,
-    'buddy': 2,
-    'diveGuide': 3,
-    'diveMaster': 4,
-    'instructor': 5,
-  };
 
   /// Look up a buddy by [id]. Returns null if not found.
   Future<domain.Buddy?> _getBuddyById(String id) async {
@@ -78,31 +46,31 @@ class BuddyMergeRepository {
     return domain.Buddy(
       id: row.id,
       diverId: row.diverId,
+      linkedDiverId: row.linkedDiverId,
       name: row.name,
       email: row.email,
       phone: row.phone,
-      certificationLevel: _parseCertificationLevel(row.certificationLevel),
-      certificationAgency: _parseCertificationAgency(row.certificationAgency),
+      country: row.country,
+      countryCode: row.countryCode,
+      // Cert level/agency are derived from the certifications table at
+      // hydration (issue #553); merge snapshots don't need the derived value.
+      certificationLevel: null,
+      certificationAgency: null,
       photoPath: row.photoPath,
+      photo: row.photo,
       notes: row.notes,
+      isFavorite: row.isFavorite,
+      excludedFromRankings: row.excludedFromRankings,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
-    );
-  }
-
-  CertificationLevel? _parseCertificationLevel(String? value) {
-    if (value == null) return null;
-    return CertificationLevel.values.firstWhere(
-      (l) => l.name == value,
-      orElse: () => CertificationLevel.other,
-    );
-  }
-
-  CertificationAgency? _parseCertificationAgency(String? value) {
-    if (value == null) return null;
-    return CertificationAgency.values.firstWhere(
-      (a) => a.name == value,
-      orElse: () => CertificationAgency.other,
+      // Buddy card fields (issue #3728) ride through the snapshot, so an
+      // undone merge restores them.
+      cardId: row.cardId,
+      socialHandle: row.socialHandle,
+      cardDiveCount: row.cardDiveCount,
+      cardDivingSince: BuddyCardColumns.divingSince(row.cardDivingSince),
+      cardLastDive: BuddyCardColumns.lastDive(row.cardLastDive),
+      cardReceivedAt: BuddyCardColumns.receivedAt(row.cardReceivedAt),
     );
   }
 
@@ -115,6 +83,16 @@ class BuddyMergeRepository {
   /// Returns a [BuddyMergeResult] that can be used to undo the operation,
   /// or `null` if the merge was a no-op.
   Future<BuddyMergeResult?> mergeBuddies({
+    required domain.Buddy mergedBuddy,
+    required List<String> buddyIds,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.merge,
+    body: () =>
+        _mergeBuddiesInner(mergedBuddy: mergedBuddy, buddyIds: buddyIds),
+  );
+
+  Future<BuddyMergeResult?> _mergeBuddiesInner({
     required domain.Buddy mergedBuddy,
     required List<String> buddyIds,
   }) async {
@@ -157,6 +135,23 @@ class BuddyMergeRepository {
         throw StateError('Cannot merge buddies from different divers');
       }
 
+      // A buddy is at most one local profile (issue #2002). Two different
+      // links cannot be reconciled by picking one, so refuse; the diver
+      // merge reconciles profiles first.
+      final links = allBuddies
+          .map((b) => b.linkedDiverId)
+          .whereType<String>()
+          .toSet();
+      if (links.length > 1) {
+        throw StateError('Cannot merge buddies linked to different profiles');
+      }
+      final survivingLink = links.isEmpty
+          ? null
+          : (mergedBuddy.linkedDiverId ?? links.single);
+      final linkedSurvivor = survivingLink == null
+          ? survivorBuddy.clearLinkedDiver()
+          : survivorBuddy.copyWith(linkedDiverId: survivingLink);
+
       // Capture snapshot of all DiveBuddies for ALL buddies (survivor + duplicates)
       final allDiveBuddyRows = await (_db.select(
         _db.diveBuddies,
@@ -173,15 +168,44 @@ class BuddyMergeRepository {
           )
           .toList(growable: false);
 
+      // Role sets (#1221): captured before any write, both the raw rows for
+      // undo and the resolved sets the union below starts from.
+      final roleDiveIds = {
+        for (final row in allDiveBuddyRows) row.diveId,
+      }.toList(growable: false);
+      final roleRows = await (_db.select(
+        _db.diveBuddyRoles,
+      )..where((t) => t.buddyId.isIn(orderedIds))).get();
+      final roleSets = {
+        for (final entry in (await _roleLinks.buddyRoleIdsForDives(
+          roleDiveIds,
+        )).entries)
+          entry.key: {...entry.value},
+      };
+
       final deletedDiveBuddyEntries = <DiveBuddySnapshot>[];
       final modifiedDiveBuddyEntries = <DiveBuddySnapshot>[];
       // Track which survivor rows have already been snapshotted so that
       // 3+ buddy merges don't record intermediate roles.
       final modifiedRowIds = <String>{};
+      final repointedCertifications = <CertificationInstructorSnapshot>[];
+      final repointedOwnerCerts = <CertificationOwnerSnapshot>[];
+      // Document id -> the duplicate buddy it was filed under (#2613).
+      final documentOwners = <String, String>{};
+      var mediaPeople = const MediaPeopleMergeSnapshot();
+      var placeLinks = const <String, String>{};
 
       await _db.transaction(() async {
-        // Update survivor with merged fields
-        await _updateBuddyRow(survivorBuddy, now);
+        // Update survivor with merged fields. Its country code is read
+        // against the stored row, as every other write does (issue #4457).
+        await _updateBuddyRow(
+          linkedSurvivor,
+          now,
+          countryBefore: (
+            country: originalSurvivor.country,
+            code: originalSurvivor.countryCode,
+          ),
+        );
         await _syncRepository.markRecordPending(
           entityType: 'buddies',
           recordId: survivorId,
@@ -215,6 +239,17 @@ class BuddyMergeRepository {
                 recordId: dupRow.id,
                 localUpdatedAt: now,
               );
+              // The duplicate's roles on this dive move with the link.
+              final moved =
+                  roleSets[dupRow.diveId]?[duplicateId] ?? [dupRow.role];
+              await _roleLinks.deleteBuddyRoles(dupRow.diveId, [duplicateId]);
+              await _roleLinks.writeBuddyRoles(
+                dupRow.diveId,
+                survivorId,
+                moved,
+                now: now,
+              );
+              (roleSets[dupRow.diveId] ??= {})[survivorId] = moved;
               // Update our local map so subsequent duplicates see updated state
               survivorDiveMap[dupRow.diveId] = DiveBuddy(
                 id: dupRow.id,
@@ -224,45 +259,42 @@ class BuddyMergeRepository {
                 createdAt: dupRow.createdAt,
               );
             } else {
-              // Collision: compare roles via hierarchy
-              final dupRank = _roleRank[dupRow.role] ?? 0;
-              final survivorRank = _roleRank[existingSurvivorRow.role] ?? 0;
-
-              if (dupRank > survivorRank) {
-                // Duplicate's role outranks survivor's - upgrade survivor entry.
-                // Only snapshot the original role the first time this row is
-                // modified, so 3+ merges don't record intermediate roles.
-                if (!modifiedRowIds.contains(existingSurvivorRow.id)) {
-                  modifiedRowIds.add(existingSurvivorRow.id);
-                  modifiedDiveBuddyEntries.add(
-                    DiveBuddySnapshot(
-                      id: existingSurvivorRow.id,
-                      diveId: existingSurvivorRow.diveId,
-                      buddyId: existingSurvivorRow.buddyId,
-                      role: existingSurvivorRow.role,
-                      createdAt: existingSurvivorRow.createdAt,
-                    ),
-                  );
-                }
-
-                await (_db.update(_db.diveBuddies)
-                      ..where((t) => t.id.equals(existingSurvivorRow.id)))
-                    .write(DiveBuddiesCompanion(role: Value(dupRow.role)));
-                await _syncRepository.markRecordPending(
-                  entityType: 'diveBuddies',
-                  recordId: existingSurvivorRow.id,
-                  localUpdatedAt: now,
-                );
-
-                // Update in-memory map so subsequent duplicates see the new role
-                survivorDiveMap[dupRow.diveId] = DiveBuddy(
-                  id: existingSurvivorRow.id,
-                  diveId: existingSurvivorRow.diveId,
-                  buddyId: existingSurvivorRow.buddyId,
-                  role: dupRow.role,
-                  createdAt: existingSurvivorRow.createdAt,
+              // Collision: the survivor keeps every role either held on
+              // this dive (issue #1221). Only snapshot the survivor row the
+              // first time it is modified, so 3+ merges don't record
+              // intermediate roles.
+              final union = DiveRoleSet.union([
+                roleSets[dupRow.diveId]?[survivorId] ??
+                    [existingSurvivorRow.role],
+                roleSets[dupRow.diveId]?[duplicateId] ?? [dupRow.role],
+              ]);
+              if (!modifiedRowIds.contains(existingSurvivorRow.id)) {
+                modifiedRowIds.add(existingSurvivorRow.id);
+                modifiedDiveBuddyEntries.add(
+                  DiveBuddySnapshot(
+                    id: existingSurvivorRow.id,
+                    diveId: existingSurvivorRow.diveId,
+                    buddyId: existingSurvivorRow.buddyId,
+                    role: existingSurvivorRow.role,
+                    createdAt: existingSurvivorRow.createdAt,
+                  ),
                 );
               }
+              await _roleLinks.deleteBuddyRoles(dupRow.diveId, [duplicateId]);
+              await _roleLinks.writeBuddyRoles(
+                dupRow.diveId,
+                survivorId,
+                union,
+                now: now,
+              );
+              (roleSets[dupRow.diveId] ??= {})[survivorId] = union;
+              survivorDiveMap[dupRow.diveId] = DiveBuddy(
+                id: existingSurvivorRow.id,
+                diveId: existingSurvivorRow.diveId,
+                buddyId: existingSurvivorRow.buddyId,
+                role: union.first,
+                createdAt: existingSurvivorRow.createdAt,
+              );
 
               // Delete the duplicate's junction entry
               deletedDiveBuddyEntries.add(
@@ -284,6 +316,98 @@ class BuddyMergeRepository {
             }
           }
         }
+
+        // Re-point certification instructor links (issue #395).
+        final linkedCerts = await (_db.select(
+          _db.certifications,
+        )..where((t) => t.instructorId.isIn(duplicateIds))).get();
+        for (final cert in linkedCerts) {
+          repointedCertifications.add(
+            CertificationInstructorSnapshot(
+              certificationId: cert.id,
+              instructorId: cert.instructorId!,
+            ),
+          );
+          await (_db.update(
+            _db.certifications,
+          )..where((t) => t.id.equals(cert.id))).write(
+            CertificationsCompanion(
+              instructorId: Value(survivorId),
+              updatedAt: Value(now),
+            ),
+          );
+          await _syncRepository.markRecordPending(
+            entityType: 'certifications',
+            recordId: cert.id,
+            localUpdatedAt: now,
+          );
+        }
+
+        // Survivor inherits the union of certs: reassign owner (buddyId) from
+        // duplicates to survivor so the duplicate-buddy delete below does not
+        // CASCADE them away (issue #553).
+        final ownedCerts = await (_db.select(
+          _db.certifications,
+        )..where((t) => t.buddyId.isIn(duplicateIds))).get();
+        for (final cert in ownedCerts) {
+          repointedOwnerCerts.add(
+            CertificationOwnerSnapshot(
+              certificationId: cert.id,
+              previousBuddyId: cert.buddyId!,
+            ),
+          );
+          await (_db.update(
+            _db.certifications,
+          )..where((t) => t.id.equals(cert.id))).write(
+            CertificationsCompanion(
+              buddyId: Value(survivorId),
+              updatedAt: Value(now),
+            ),
+          );
+          await _syncRepository.markRecordPending(
+            entityType: 'certifications',
+            recordId: cert.id,
+            localUpdatedAt: now,
+          );
+        }
+
+        // The duplicates' documents move to the survivor (issue #2613).
+        documentOwners.addAll(
+          await DocumentRepository().reassignOwner(
+            DocumentOwnerKind.buddy,
+            duplicateIds,
+            survivorId,
+          ),
+        );
+
+        // Their people tags move to the survivor, and albums filtered on a
+        // duplicate follow (issue #1745). Before the delete, whose cascade
+        // would drop the tags untombstoned.
+        mediaPeople = await repointMediaPeopleForMerge(
+          _db,
+          _syncRepository,
+          fromBuddyIds: duplicateIds,
+          toBuddyId: survivorId,
+          now: now,
+        );
+        mediaPeople = mediaPeople.withAlbumFilters(
+          await repointSmartAlbumBuddies(
+            _db,
+            _syncRepository,
+            fromBuddyIds: duplicateIds,
+            toBuddyId: survivorId,
+            now: now,
+          ),
+        );
+
+        // Their gear places follow, before the delete's SET NULL (#3790).
+        placeLinks = await repointEquipmentLocationBuddyLinks(
+          _db,
+          _syncRepository,
+          fromBuddyIds: duplicateIds,
+          toBuddyId: survivorId,
+          now: now,
+        );
 
         // Delete duplicate buddy rows (CASCADE cleans remaining junction rows)
         for (final duplicateId in duplicateIds) {
@@ -330,6 +454,13 @@ class BuddyMergeRepository {
           deletedBuddies: deletedBuddies,
           deletedDiveBuddyEntries: allDeleted,
           modifiedDiveBuddyEntries: modifiedDiveBuddyEntries,
+          repointedCertifications: repointedCertifications,
+          repointedOwnerCerts: repointedOwnerCerts,
+          roleRows: roleRows,
+          roleDiveIds: roleDiveIds,
+          documentOriginalBuddyIds: documentOwners,
+          mediaPeople: mediaPeople,
+          placeOriginalBuddyIds: placeLinks,
         ),
       );
     } catch (e, stackTrace) {
@@ -343,7 +474,13 @@ class BuddyMergeRepository {
   }
 
   /// Reverse a merge operation using a previously captured [BuddyMergeSnapshot].
-  Future<void> undoMerge(BuddyMergeSnapshot snapshot) async {
+  Future<void> undoMerge(BuddyMergeSnapshot snapshot) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.undoMerge,
+    body: () => _undoMergeInner(snapshot),
+  );
+
+  Future<void> _undoMergeInner(BuddyMergeSnapshot snapshot) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     try {
@@ -365,16 +502,20 @@ class BuddyMergeRepository {
           await _db
               .into(_db.buddies)
               .insert(
-                BuddiesCompanion(
+                BuddyCardColumns.of(buddy).copyWith(
                   id: Value(buddy.id),
                   diverId: Value(buddy.diverId),
+                  linkedDiverId: Value(buddy.linkedDiverId),
                   name: Value(buddy.name),
                   email: Value(buddy.email),
                   phone: Value(buddy.phone),
-                  certificationLevel: Value(buddy.certificationLevel?.name),
-                  certificationAgency: Value(buddy.certificationAgency?.name),
+                  country: Value(buddy.country),
+                  countryCode: Value(buddy.countryCode),
                   photoPath: Value(buddy.photoPath),
+                  photo: Value(buddy.photo),
                   notes: Value(buddy.notes),
+                  isFavorite: Value(buddy.isFavorite),
+                  excludedFromRankings: Value(buddy.excludedFromRankings),
                   createdAt: Value(buddy.createdAt.millisecondsSinceEpoch),
                   updatedAt: Value(buddy.updatedAt.millisecondsSinceEpoch),
                 ),
@@ -420,6 +561,74 @@ class BuddyMergeRepository {
             localUpdatedAt: now,
           );
         }
+
+        // 4b. Restore the merged buddies' role rows (issue #1221), touching
+        // no other person's roles on those dives.
+        await _roleLinks.restoreRows(
+          diveIds: snapshot.roleDiveIds,
+          buddyRows: snapshot.roleRows,
+          onlyBuddyIds: {
+            snapshot.originalSurvivor.id,
+            for (final b in snapshot.deletedBuddies) b.id,
+          },
+        );
+
+        // 5. Restore certification instructor links.
+        for (final entry in snapshot.repointedCertifications) {
+          await (_db.update(
+            _db.certifications,
+          )..where((t) => t.id.equals(entry.certificationId))).write(
+            CertificationsCompanion(
+              instructorId: Value(entry.instructorId),
+              updatedAt: Value(now),
+            ),
+          );
+          await _syncRepository.markRecordPending(
+            entityType: 'certifications',
+            recordId: entry.certificationId,
+            localUpdatedAt: now,
+          );
+        }
+
+        // 4c. Gear places back on the re-created buddies (issue #3790).
+        await restoreEquipmentLocationBuddyLinks(
+          _db,
+          _syncRepository,
+          snapshot.placeOriginalBuddyIds,
+          now: now,
+        );
+
+        // 5a. People tags back to the re-created buddies (issue #1745).
+        await undoMediaPeopleMerge(
+          _db,
+          _syncRepository,
+          snapshot.mediaPeople,
+          now: now,
+        );
+
+        // 5b. Put documents back under the re-created buddies (#2613).
+        await DocumentRepository().restoreOwners(
+          DocumentOwnerKind.buddy,
+          snapshot.documentOriginalBuddyIds,
+        );
+
+        // 6. Restore certification buddy-owner links (issue #553). The deleted
+        // duplicate buddies were re-created in step 2, so the FK target exists.
+        for (final entry in snapshot.repointedOwnerCerts) {
+          await (_db.update(
+            _db.certifications,
+          )..where((t) => t.id.equals(entry.certificationId))).write(
+            CertificationsCompanion(
+              buddyId: Value(entry.previousBuddyId),
+              updatedAt: Value(now),
+            ),
+          );
+          await _syncRepository.markRecordPending(
+            entityType: 'certifications',
+            recordId: entry.certificationId,
+            localUpdatedAt: now,
+          );
+        }
       });
 
       SyncEventBus.notifyLocalChange();
@@ -435,14 +644,60 @@ class BuddyMergeRepository {
   }
 
   /// Bulk delete multiple buddies.
-  Future<void> bulkDeleteBuddies(List<String> ids) async {
+  Future<void> bulkDeleteBuddies(List<String> ids) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.bulkDelete,
+    body: () => _bulkDeleteBuddiesInner(ids),
+  );
+
+  Future<void> _bulkDeleteBuddiesInner(List<String> ids) async {
     if (ids.isEmpty) return;
     try {
       _log.info('Bulk deleting ${ids.length} buddies');
-      await (_db.delete(_db.buddies)..where((t) => t.id.isIn(ids))).go();
-      for (final id in ids) {
-        await _syncRepository.logDeletion(entityType: 'buddies', recordId: id);
-      }
+      // Atomic (issue #553 review): tombstone each buddy's certs (the cascade
+      // removes them silently otherwise), delete the buddies, and tombstone
+      // them -- all in one transaction.
+      await _db.transaction(() async {
+        // Delete + tombstone cert rows inline (no per-cert notifyLocalChange):
+        // a single notify fires after commit instead of one per cert. Batch the
+        // cert lookup (getCertificationsForBuddies) to avoid an N+1 per buddy.
+        final certsByBuddy = await _certRepo.getCertificationsForBuddies(ids);
+        // The buddies' documents and their certifications' documents go
+        // with them, tombstoned (issue #2613).
+        final documents = DocumentRepository();
+        await documents.deleteForOwners(DocumentOwnerKind.certification, [
+          for (final certs in certsByBuddy.values)
+            for (final cert in certs) cert.id,
+        ]);
+        await documents.deleteForOwners(DocumentOwnerKind.buddy, ids);
+        // Their people tags too (issue #1745).
+        await MediaPeopleRepository().deleteForBuddies(ids);
+        // Their gear places stay, without the link (issue #3790).
+        await clearEquipmentLocationBuddyLinks(
+          _db,
+          _syncRepository,
+          ids,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        for (final certs in certsByBuddy.values) {
+          for (final cert in certs) {
+            await (_db.delete(
+              _db.certifications,
+            )..where((t) => t.id.equals(cert.id))).go();
+            await _syncRepository.logDeletion(
+              entityType: 'certifications',
+              recordId: cert.id,
+            );
+          }
+        }
+        await (_db.delete(_db.buddies)..where((t) => t.id.isIn(ids))).go();
+        for (final id in ids) {
+          await _syncRepository.logDeletion(
+            entityType: 'buddies',
+            recordId: id,
+          );
+        }
+      });
       SyncEventBus.notifyLocalChange();
       _log.info('Bulk deleted ${ids.length} buddies');
     } catch (e, stackTrace) {
@@ -455,17 +710,39 @@ class BuddyMergeRepository {
     }
   }
 
-  Future<void> _updateBuddyRow(domain.Buddy buddy, int now) async {
+  /// Writes [buddy] over its row. With [countryBefore] (a merge), the
+  /// country goes through [BuddyCountryColumns]; without it (an undo
+  /// restoring a snapshot), the stored country and code come back as they
+  /// were.
+  Future<void> _updateBuddyRow(
+    domain.Buddy buddy,
+    int now, {
+    KnownCountryCode? countryBefore,
+  }) async {
+    final country = countryBefore == null
+        ? BuddiesCompanion(
+            country: Value(buddy.country),
+            countryCode: Value(buddy.countryCode),
+          )
+        : BuddyCountryColumns.of(
+            country: buddy.country,
+            code: buddy.countryCode,
+            before: countryBefore,
+          );
     await (_db.update(_db.buddies)..where((t) => t.id.equals(buddy.id))).write(
-      BuddiesCompanion(
+      BuddyCardColumns.of(buddy).copyWith(
         diverId: Value(buddy.diverId),
+        linkedDiverId: Value(buddy.linkedDiverId),
         name: Value(buddy.name),
         email: Value(buddy.email),
         phone: Value(buddy.phone),
-        certificationLevel: Value(buddy.certificationLevel?.name),
-        certificationAgency: Value(buddy.certificationAgency?.name),
+        country: country.country,
+        countryCode: country.countryCode,
         photoPath: Value(buddy.photoPath),
+        photo: Value(buddy.photo),
         notes: Value(buddy.notes),
+        isFavorite: Value(buddy.isFavorite),
+        excludedFromRankings: Value(buddy.excludedFromRankings),
         updatedAt: Value(now),
       ),
     );

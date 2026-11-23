@@ -1,9 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_planner/data/services/plan_calculator_service.dart';
 import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
 
 void main() {
   group('PlanCalculatorService reserve pressure', () {
@@ -60,10 +63,11 @@ void main() {
     test(
       'no gasLow warning when reserve entered as psi is below remaining',
       () {
-        // This profile ends with ~35 bar (~508 psi) remaining.
-        // A user entering 500 psi as reserve (≈ 34.47 bar) should see
-        // NO warning, because 35 bar remaining > 34.47 bar reserve.
-        final result = calculateWithReserve(psiToBar(500));
+        // This profile ends with ~25.6 bar (~371 psi) remaining once gas
+        // compressibility is accounted for. A user entering 350 psi as
+        // reserve (≈ 24.13 bar) should see NO warning, because
+        // 25.6 bar remaining > 24.13 bar reserve.
+        final result = calculateWithReserve(psiToBar(350));
         final gasLowWarnings = result.warnings
             .where((w) => w.type == PlanWarningType.gasLow)
             .toList();
@@ -74,7 +78,7 @@ void main() {
     );
 
     test('gasLow warning when reserve entered as psi is above remaining', () {
-      // Same profile (~508 psi remaining). A user entering 600 psi as
+      // Same profile (~371 psi remaining). A user entering 600 psi as
       // reserve (≈ 41.37 bar) should trigger a warning.
       final reserveBar = psiToBar(600);
       final result = calculateWithReserve(reserveBar);
@@ -104,8 +108,9 @@ void main() {
     );
 
     test('no gasLow warning when bar reserve is below remaining', () {
-      // With 35 bar remaining, a 30 bar reserve should produce no warning.
-      final result = calculateWithReserve(30);
+      // With ~25.6 bar remaining (compressibility-aware), a 20 bar reserve
+      // should produce no warning.
+      final result = calculateWithReserve(20);
       final gasLowWarnings = result.warnings
           .where((w) => w.type == PlanWarningType.gasLow)
           .toList();
@@ -115,7 +120,7 @@ void main() {
     });
 
     test('gasLow warning when bar reserve is above remaining', () {
-      // With 35 bar remaining, a 40 bar reserve should trigger a warning.
+      // With ~25.6 bar remaining, a 40 bar reserve should trigger a warning.
       final result = calculateWithReserve(40);
       final gasLowWarnings = result.warnings
           .where((w) => w.type == PlanWarningType.gasLow)
@@ -124,6 +129,400 @@ void main() {
       expect(gasLowWarnings, hasLength(1));
       expect(gasLowWarnings.first.threshold, 40);
       expect(result.gasConsumptions.first.reserveViolation, isTrue);
+    });
+  });
+
+  group('PlanCalculatorService ppO2 in the plan water (issue #3913)', () {
+    final calculator = PlanCalculatorService();
+
+    PlanResult resultFor(
+      GasMix gasMix, {
+      required double depth,
+      required DiveEnvironment environment,
+    }) {
+      final tank = DiveTank(
+        id: 'back',
+        volume: 24,
+        startPressure: 230,
+        gasMix: gasMix,
+      );
+      return calculator.calculatePlan(
+        segments: calculator.createSimplePlan(
+          maxDepth: depth,
+          bottomTimeMinutes: 5,
+          tank: tank,
+        ),
+        tanks: [tank],
+        sacRate: 15,
+        environment: environment,
+      );
+    }
+
+    Iterable<PlanWarning> ofType(PlanResult result, PlanWarningType type) =>
+        result.warnings.where((w) => w.type == type);
+
+    for (final altitude in [null, 3000.0]) {
+      test('fresh water at ${altitude ?? 0} m is a working-limit warning', () {
+        final environment = DiveEnvironment.forConditions(
+          altitudeMeters: altitude,
+          waterType: WaterType.fresh,
+        );
+        final expected = environment.pressureAtDepth(35) * 0.36;
+
+        final result = resultFor(
+          const GasMix(o2: 36),
+          depth: 35,
+          environment: environment,
+        );
+
+        expect(result.maxPpO2, closeTo(expected, 1e-12));
+        expect(ofType(result, PlanWarningType.ppO2Critical), isEmpty);
+        expect(ofType(result, PlanWarningType.ppO2High), isNotEmpty);
+      });
+    }
+
+    test('CNS accrues at the plan water pressure', () {
+      final thin = DiveEnvironment.forConditions(
+        altitudeMeters: 3000,
+        waterType: WaterType.fresh,
+      );
+
+      double cnsIn(DiveEnvironment environment) => resultFor(
+        const GasMix(o2: 36),
+        depth: 35,
+        environment: environment,
+      ).cnsEnd;
+
+      expect(cnsIn(thin), lessThan(cnsIn(DiveEnvironment.standard)));
+    });
+
+    test('oxygen at 6 m in salt water reads 1.60 and is not critical', () {
+      final salt = DiveEnvironment.forConditions(waterType: WaterType.salt);
+
+      final result = resultFor(
+        const GasMix(o2: 100),
+        depth: 6,
+        environment: salt,
+      );
+
+      expect(result.maxPpO2, greaterThan(1.6));
+      expect(ofType(result, PlanWarningType.ppO2Critical), isEmpty);
+    });
+
+    test('a gas reading 1.40 raises no working-limit warning', () {
+      final salt = DiveEnvironment.forConditions(waterType: WaterType.salt);
+      final depth = salt.depthAtPressure(1.403 / 0.32);
+
+      final result = resultFor(
+        const GasMix(o2: 32),
+        depth: depth,
+        environment: salt,
+      );
+
+      expect(ofType(result, PlanWarningType.ppO2High), isEmpty);
+    });
+
+    test('a gas reading 1.41 raises the working-limit warning', () {
+      final salt = DiveEnvironment.forConditions(waterType: WaterType.salt);
+      final depth = salt.depthAtPressure(1.406 / 0.32);
+
+      final result = resultFor(
+        const GasMix(o2: 32),
+        depth: depth,
+        environment: salt,
+      );
+
+      expect(ofType(result, PlanWarningType.ppO2High), isNotEmpty);
+    });
+
+    test('EAN40 at 30 m in salt water reads 1.61 and stays critical', () {
+      final salt = DiveEnvironment.forConditions(waterType: WaterType.salt);
+
+      final result = resultFor(
+        const GasMix(o2: 40),
+        depth: 30,
+        environment: salt,
+      );
+
+      expect(result.maxPpO2.toStringAsFixed(2), '1.61');
+      expect(ofType(result, PlanWarningType.ppO2Critical), isNotEmpty);
+    });
+  });
+
+  group('PlanCalculatorService gas in the plan water (issue #4010)', () {
+    final calculator = PlanCalculatorService();
+    const tank = DiveTank(
+      id: 'back',
+      volume: 24,
+      startPressure: 230,
+      gasMix: GasMix(),
+    );
+
+    PlanResult resultIn(DiveEnvironment environment) =>
+        calculator.calculatePlan(
+          segments: calculator.createSimplePlan(
+            maxDepth: 30,
+            bottomTimeMinutes: 20,
+            tank: tank,
+          ),
+          tanks: const [tank],
+          sacRate: 15,
+          environment: environment,
+        );
+
+    test('gas is breathed at the plan water pressure', () {
+      final environment = DiveEnvironment.forConditions(
+        altitudeMeters: 3000,
+        waterType: WaterType.fresh,
+      );
+
+      final result = resultIn(environment);
+
+      expect(result.segmentResults, isNotEmpty);
+      for (final segment in result.segmentResults.values) {
+        final minutes = (segment.endRuntime - segment.startRuntime) / 60.0;
+        expect(
+          segment.gasConsumedLiters,
+          closeTo(
+            15 * minutes * environment.pressureAtDepth(segment.avgDepth),
+            1e-9,
+          ),
+        );
+      }
+    });
+
+    test('a thinner water leaves more in the cylinder', () {
+      final thin = DiveEnvironment.forConditions(
+        altitudeMeters: 3000,
+        waterType: WaterType.fresh,
+      );
+
+      double remainingIn(DiveEnvironment environment) =>
+          resultIn(environment).gasConsumptions.first.remainingPressure!;
+
+      expect(
+        remainingIn(thin),
+        greaterThan(remainingIn(DiveEnvironment.standard)),
+      );
+    });
+  });
+
+  group('PlanCalculatorService ideal ascent gas', () {
+    final calculator = PlanCalculatorService();
+
+    // Deep air dive that incurs deco; the only difference between the two
+    // runs is the carried gas set passed to calculatePlan (which feeds the
+    // ascent gas plan). The bottom loading is identical.
+    const air = DiveTank(
+      id: 'back',
+      name: 'Back gas',
+      volume: 24,
+      startPressure: 230,
+      gasMix: GasMix(o2: 21),
+      role: TankRole.backGas,
+    );
+    const ean50 = DiveTank(
+      id: 'deco',
+      name: 'EAN50',
+      volume: 11.1,
+      startPressure: 200,
+      gasMix: GasMix(o2: 50),
+      role: TankRole.deco,
+    );
+
+    // Descent + bottom only, ending AT depth so calculatePlan builds the full
+    // deco schedule from the bottom (createSimplePlan ends at the surface).
+    List<PlanSegment> decoSegments() => [
+      PlanSegment.travel(
+        id: 'descent',
+        fromDepth: 0,
+        targetDepth: 45,
+        tankId: air.id,
+        gasMix: air.gasMix,
+        order: 0,
+        ratePerMinute: 18.0,
+      ),
+      PlanSegment.hold(
+        id: 'bottom',
+        depth: 45,
+        durationMinutes: 25,
+        tankId: air.id,
+        gasMix: air.gasMix,
+        order: 1,
+      ),
+    ];
+
+    int totalStopSeconds(List<DiveTank> tanks) {
+      final result = calculator.calculatePlan(
+        segments: decoSegments(),
+        tanks: tanks,
+        sacRate: 15,
+      );
+      return result.decoSchedule.fold<int>(
+        0,
+        (sum, stop) => sum + stop.durationSeconds,
+      );
+    }
+
+    test('ideal-gas ascent gives <= deco time than fixed back gas', () {
+      final fixedTotal = totalStopSeconds([air]);
+      final idealTotal = totalStopSeconds([air, ean50]);
+
+      expect(fixedTotal, greaterThan(0));
+      expect(idealTotal, lessThanOrEqualTo(fixedTotal));
+    });
+
+    test('a diluent ascent gas follows its own CCR Dil MOD limit', () {
+      const dil = DiveTank(
+        id: 'dil',
+        name: 'EAN40 dil',
+        volume: 11.1,
+        startPressure: 200,
+        gasMix: GasMix(o2: 40),
+        role: TankRole.diluent,
+      );
+      // Deep enough that the deco schedule carries a stop at 30 m and 27 m:
+      // within EAN40's 30 m Dil MOD (ppO2 1.6) but above its 25 m bottom
+      // limit MOD (ppO2 1.4), so only the fix reaches the diluent there.
+      final segments = [
+        PlanSegment.travel(
+          id: 'descent',
+          fromDepth: 0,
+          targetDepth: 60,
+          tankId: air.id,
+          gasMix: air.gasMix,
+          order: 0,
+          ratePerMinute: 18.0,
+        ),
+        PlanSegment.hold(
+          id: 'bottom',
+          depth: 60,
+          durationMinutes: 35,
+          tankId: air.id,
+          gasMix: air.gasMix,
+          order: 1,
+        ),
+      ];
+
+      final withDilMod = PlanCalculatorService(ccrDiluentModPpO2: 1.6);
+      final result = withDilMod.calculatePlan(
+        segments: segments,
+        tanks: [air, dil],
+        sacRate: 15,
+      );
+      final stop30 = result.decoSchedule.firstWhere((s) => s.depth == 30);
+      final stop27 = result.decoSchedule.firstWhere((s) => s.depth == 27);
+      expect(stop30.gasMix.o2, closeTo(40, 1e-6));
+      expect(stop27.gasMix.o2, closeTo(40, 1e-6));
+
+      // At the bottom ppO2 limit instead, those same stops fall back to
+      // back gas: the bug this guards against.
+      final withoutDilMod = PlanCalculatorService(ccrDiluentModPpO2: 1.4);
+      final buggy = withoutDilMod.calculatePlan(
+        segments: segments,
+        tanks: [air, dil],
+        sacRate: 15,
+      );
+      final buggyStop30 = buggy.decoSchedule.firstWhere((s) => s.depth == 30);
+      expect(buggyStop30.gasMix.o2, closeTo(21, 1e-6));
+    });
+
+    // Regression for a Copilot review finding (issue #3580 follow-up): a
+    // plan's own Custom band override must govern even when the diver's
+    // Settings ppO2DecoBandsEnabled toggle is off - "Custom" is a per-plan
+    // opt-in, not something the global switch can silently veto.
+    test("a plan's custom band override takes effect even when "
+        'ppO2DecoBandsEnabled is off', () {
+      // EAN50 (50% O2) falls in band3 (45-99%). At the flat 1.6 limit its
+      // MOD is 22 m, which lets it cover the 18 m stop (see "deco stops
+      // report the gas actually breathed at each stop" below). Lowering
+      // band3 to 1.3 bar brings that MOD to 16 m, pushing the 18 m stop
+      // back onto back gas - but only if the override actually took
+      // effect despite the global toggle staying off.
+      final overridden = calculator.calculatePlan(
+        segments: decoSegments(),
+        tanks: [air, ean50],
+        sacRate: 15,
+        decoPpO2Band3: 1.3,
+      );
+      final overriddenStop18 = overridden.decoSchedule.firstWhere(
+        (s) => s.depth == 18,
+      );
+      expect(overriddenStop18.gasMix.o2, closeTo(21, 1e-6));
+
+      // Same plan, no override: the flat 1.6 limit keeps EAN50 eligible
+      // at 18 m, same as the dedicated gas-selection test below.
+      final plain = calculator.calculatePlan(
+        segments: decoSegments(),
+        tanks: [air, ean50],
+        sacRate: 15,
+      );
+      final plainStop18 = plain.decoSchedule.firstWhere((s) => s.depth == 18);
+      expect(plainStop18.gasMix.o2, closeTo(50, 1e-6));
+    });
+
+    test('deco stops report the gas actually breathed at each stop', () {
+      final result = calculator.calculatePlan(
+        segments: decoSegments(),
+        tanks: [air, ean50],
+        sacRate: 15,
+      );
+
+      // EAN50 (MOD 22 m @1.6) must be selected at the 21/18/.../6 m stops.
+      final ean50Stop = result.decoSchedule.firstWhere(
+        (s) => s.depth <= 21 && s.depth > 6,
+        orElse: () => result.decoSchedule.first,
+      );
+      expect(ean50Stop.gasMix.o2, closeTo(50, 1e-6));
+    });
+  });
+
+  group('PlanCalculatorService createSimplePlan', () {
+    final calculator = PlanCalculatorService();
+
+    const tank = DiveTank(
+      id: 'tank-1',
+      name: 'AL80',
+      volume: 11.1,
+      workingPressure: 207,
+      startPressure: 200,
+      gasMix: GasMix(o2: 21, he: 0),
+      order: 0,
+    );
+
+    test('shallow plan ascends straight to the surface, no safety stop', () {
+      final segments = calculator.createSimplePlan(
+        maxDepth: 8,
+        bottomTimeMinutes: 30,
+        tank: tank,
+      );
+
+      // Descent, bottom, one direct ascent - nothing at 5 m.
+      expect(segments, hasLength(3));
+      expect(segments.map((s) => s.order), [0, 1, 2]);
+      expect(segments.map((s) => s.targetDepth), [8.0, 8.0, 0.0]);
+      expect(segments.any((s) => s.targetDepth == 5.0), isFalse);
+
+      expect(segments[1].durationSeconds, 30 * 60);
+      // 8 m at the default ascent rate, expressed as a duration.
+      expect(
+        segments.last.durationSeconds,
+        closeTo(8 / calculator.defaultAscentRate * 60, 1),
+      );
+      expect(segments.every((s) => s.tankId == tank.id), isTrue);
+    });
+
+    test('plan deeper than 10 m inserts a 3 min safety stop at 5 m', () {
+      final segments = calculator.createSimplePlan(
+        maxDepth: 18,
+        bottomTimeMinutes: 40,
+        tank: tank,
+      );
+
+      expect(segments, hasLength(5));
+      expect(segments.map((s) => s.order), [0, 1, 2, 3, 4]);
+      expect(segments.map((s) => s.targetDepth), [18.0, 18.0, 5.0, 5.0, 0.0]);
+      expect(segments[3].durationSeconds, 3 * 60);
     });
   });
 }

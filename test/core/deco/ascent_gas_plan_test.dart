@@ -1,0 +1,154 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/deco/ascent/ascent_gas_plan.dart';
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+
+void main() {
+  group('FixedAscentGas', () {
+    test('returns the same gas at every depth', () {
+      final plan = FixedAscentGas(fN2: 0.79, fHe: 0.0);
+      expect(plan.gasForDepth(40).fN2, 0.79);
+      expect(plan.gasForDepth(0).fN2, 0.79);
+      expect(plan.gasForDepth(40).fHe, 0.0);
+    });
+
+    test('reports no switch depths', () {
+      final plan = FixedAscentGas(fN2: airN2Fraction);
+      expect(plan.switchDepthsBetween(40, 0), isEmpty);
+    });
+  });
+
+  group('OptimalOcAscentGas', () {
+    // Back gas air (fO2 0.21), EAN50 (fO2 0.50), O2 (fO2 1.0); ppO2 ceiling 1.6.
+    // MOD(EAN50,1.6) = (1.6/0.5 - 1)*10 = 22.0 m. MOD(O2,1.6) = 6.0 m.
+    final gases = <AvailableGas>[
+      const AvailableGas(fN2: 0.79, fHe: 0.0, maxPpO2Mod: double.infinity),
+      const AvailableGas(fN2: 0.50, fHe: 0.0, maxPpO2Mod: 22.0),
+      const AvailableGas(fN2: 0.0, fHe: 0.0, maxPpO2Mod: 6.0),
+    ];
+    final plan = OptimalOcAscentGas(gases: gases, maxPpO2: 1.6);
+
+    test('picks the richest eligible gas at depth', () {
+      expect(plan.gasForDepth(40).fN2, 0.79); // only air is eligible at 40 m
+      expect(
+        plan.gasForDepth(21).fN2,
+        0.50,
+      ); // EAN50 eligible (<= 22 m), richest
+      expect(plan.gasForDepth(6).fN2, 0.0); // O2 eligible at its MOD (6 m)
+      expect(plan.gasForDepth(3).fN2, 0.0); // O2 still richest
+    });
+
+    test('is eligible exactly at a gas MOD', () {
+      expect(plan.gasForDepth(22).fN2, 0.50); // EAN50 ppO2 == 1.6 at 22 m
+    });
+
+    test('enumerates switch depths descending within a leg', () {
+      expect(plan.switchDepthsBetween(40, 0), [22.0, 6.0]);
+      expect(plan.switchDepthsBetween(40, 12), [
+        22.0,
+      ]); // 6 m is outside (40,12)
+      expect(plan.switchDepthsBetween(9, 6), isEmpty); // no MOD strictly inside
+    });
+
+    group('travelLegBoundaries (#3225)', () {
+      test('a leg crossing both MODs gets both as its interior boundaries', () {
+        expect(travelLegBoundaries(plan, fromDepth: 40, toDepth: 0), [
+          40.0,
+          22.0,
+          6.0,
+          0.0,
+        ]);
+      });
+
+      test('a leg crossing only the shallower MOD gets only that one', () {
+        expect(travelLegBoundaries(plan, fromDepth: 40, toDepth: 12), [
+          40.0,
+          22.0,
+          12.0,
+        ]);
+      });
+
+      test('a leg crossing nothing gets back exactly its own two ends -- '
+          'the ordinary, unsplit case every inter-stop leg is in practice', () {
+        expect(travelLegBoundaries(plan, fromDepth: 9, toDepth: 6), [9.0, 6.0]);
+      });
+    });
+
+    group('breakGasForDepth', () {
+      // Air (fO2 0.21), EAN32 (fO2 0.32), EAN50 (fO2 0.50), hypoxic 10/70
+      // trimix back gas (fO2 0.10), and O2 (fO2 1.0); ppO2 ceiling 1.6.
+      const air = AvailableGas(
+        fN2: 0.79,
+        fHe: 0.0,
+        maxPpO2Mod: double.infinity,
+      );
+      const ean32 = AvailableGas(fN2: 0.68, fHe: 0.0, maxPpO2Mod: 40.0);
+      const ean50 = AvailableGas(fN2: 0.50, fHe: 0.0, maxPpO2Mod: 22.0);
+      const trimix1070 = AvailableGas(
+        fN2: 0.20,
+        fHe: 0.70,
+        maxPpO2Mod: double.infinity,
+      );
+      const o2 = AvailableGas(fN2: 0.0, fHe: 0.0, maxPpO2Mod: 6.0);
+
+      test(
+        'prefers air over a richer EAN50 - closest to 0.21, not highest O2',
+        () {
+          final plan = OptimalOcAscentGas(
+            gases: [air, ean50, o2],
+            maxPpO2: 1.6,
+          );
+          final breakGas = plan.breakGasForDepth(6);
+          expect(breakGas, isNotNull);
+          expect(breakGas!.fN2, 0.79);
+          expect(breakGas.fHe, 0.0);
+        },
+      );
+
+      test('prefers EAN32 over EAN50 when no air is carried', () {
+        final plan = OptimalOcAscentGas(gases: [ean32, ean50], maxPpO2: 1.6);
+        final breakGas = plan.breakGasForDepth(6);
+        expect(breakGas, isNotNull);
+        expect(breakGas!.fN2, 0.68);
+        expect(breakGas.fHe, 0.0);
+      });
+
+      test('rejects a hypoxic back gas and picks EAN50 instead', () {
+        final plan = OptimalOcAscentGas(
+          gases: [trimix1070, ean50, o2],
+          maxPpO2: 1.6,
+        );
+        final breakGas = plan.breakGasForDepth(6);
+        expect(breakGas, isNotNull);
+        expect(breakGas!.fN2, 0.50);
+        expect(breakGas.fHe, 0.0);
+      });
+
+      test('returns null when the only non-O2 gas is hypoxic', () {
+        final plan = OptimalOcAscentGas(gases: [trimix1070, o2], maxPpO2: 1.6);
+        expect(plan.breakGasForDepth(6), isNull);
+      });
+    });
+
+    // Issue #3961: gasForDepth always answers, so a caller that must not
+    // breathe a gas past its MOD has to be able to ask first.
+    group('coverage', () {
+      const ean50 = AvailableGas(fN2: 0.50, fHe: 0.0, maxPpO2Mod: 22.0);
+      const o2 = AvailableGas(fN2: 0.0, fHe: 0.0, maxPpO2Mod: 6.0);
+      final shallowOnly = OptimalOcAscentGas(gases: [o2, ean50], maxPpO2: 1.6);
+
+      test('deepestMod is the deepest MOD of any gas, in any order', () {
+        expect(shallowOnly.deepestMod, 22.0);
+      });
+
+      test('coversDepth holds to the deepest MOD, and not past it', () {
+        expect(shallowOnly.coversDepth(0), isTrue);
+        expect(shallowOnly.coversDepth(22.0), isTrue);
+        expect(shallowOnly.coversDepth(22.01), isFalse);
+      });
+
+      test('a depth coversDepth rejects still gets a gas from gasForDepth', () {
+        expect(shallowOnly.gasForDepth(40).fN2, 0.50);
+      });
+    });
+  });
+}

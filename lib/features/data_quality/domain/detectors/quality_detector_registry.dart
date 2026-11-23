@@ -1,0 +1,42 @@
+import 'package:submersion/features/data_quality/domain/detectors/clock_offset_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/depth_spike_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/duplicate_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/gas_mod_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/impossible_gas_mix_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/impossible_rate_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/missing_gas_switch_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/pressure_anomaly_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/quality_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/sample_gap_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/shared_gear_overlap_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/source_conflict_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/split_pair_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/tank_assignment_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/temp_anomaly_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/transmitter_gear_serial_mismatch_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/transmitter_role_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/unknown_transmitter_detector.dart';
+
+const List<QualityDetector> kQualityDetectors = [
+  ClockOffsetDetector(),
+  DuplicateDetector(),
+  SplitPairDetector(),
+  SampleGapDetector(),
+  DepthSpikeDetector(),
+  ImpossibleRateDetector(),
+  TempAnomalyDetector(),
+  PressureAnomalyDetector(),
+  ImpossibleGasMixDetector(),
+  GasModDetector(),
+  TankAssignmentDetector(),
+  MissingGasSwitchDetector(),
+  UnknownTransmitterDetector(),
+  SourceConflictDetector(),
+  SharedGearOverlapDetector(),
+  TransmitterRoleDetector(),
+  TransmitterGearSerialMismatchDetector(),
+];
+
+Map<String, int> qualityDetectorVersions() => {
+  for (final d in kQualityDetectors) d.id: d.version,
+};

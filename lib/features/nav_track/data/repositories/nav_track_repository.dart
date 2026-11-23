@@ -1,0 +1,762 @@
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart'
+    show GeoPoint;
+import 'package:submersion/features/nav_track/data/repositories/nav_track_source_markers.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track.dart'
+    as domain;
+import 'package:submersion/features/nav_track/domain/entities/nav_track_marker.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track_point.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_corrector.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_point_codec.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_site_anchor_rule.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_source_file_codec.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_source_metadata_codec.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_stats.dart';
+
+part 'nav_track_repository_imports.dart';
+part 'nav_track_repository_links.dart';
+
+/// Persistence for measured underwater routes (spec
+/// 2026-09-10-underwater-nav-track-design.md, issues #1195, #1445).
+///
+/// Mirrors `GpsTrackRepository`'s shape: a synced blob-per-row table, one
+/// write per import (routes arrive complete from a file, unlike a phone's
+/// live-recorded GPS track, so there is no local buffer to checkpoint),
+/// and tombstoned deletes so a route removed on one device stays removed
+/// on every other.
+class NavTrackRepository with _NavTrackRouteLinks, _NavTrackRouteImports {
+  static const String entityType = 'navTracks';
+
+  /// Injectable seam so a test can hand in a fake site lookup instead of a
+  /// real database-backed [SiteRepository]; production builds the default.
+  NavTrackRepository({SiteRepository? siteRepository})
+    : _siteRepository = siteRepository ?? SiteRepository();
+
+  @override
+  final SiteRepository _siteRepository;
+
+  @override
+  AppDatabase get _db => DatabaseService.instance.database;
+  @override
+  final SyncRepository _syncRepository = SyncRepository();
+  @override
+  final _uuid = const Uuid();
+  @override
+  final _log = LoggerService.forClass(NavTrackRepository);
+
+  Stream<void> watchChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.navTracks));
+
+  /// Emits when the row for [routeId] changes (or disappears), and stays
+  /// quiet for writes to any other route.
+  ///
+  /// For readers that hydrate a route's points: decoding the blob is the
+  /// expensive part of a read, so a rename or relink of one route must not
+  /// make every other open route decode its own again. Every write to a
+  /// route stamps its `updatedAt` or `hlc` (a local edit bumps both, a
+  /// synced row arrives with the peer's), so comparing that pair on each
+  /// table change is enough to tell.
+  ///
+  /// The baseline stamp is read when this is called, ahead of the caller's
+  /// own read of the route, and each table change compares against the
+  /// stamp before it (asyncMap handles one change at a time), so a write
+  /// landing between the caller's read and the first table event still
+  /// emits.
+  Stream<void> watchRouteChanges(String routeId) {
+    // Table stream first: it reaches the database synchronously, so an
+    // unavailable one fails the caller's provider exactly as [watchChanges]
+    // does, before the baseline read below is ever issued.
+    final tableChanges = watchChanges();
+    var previous = _changeStamp(routeId);
+    return tableChanges
+        .asyncMap((_) async {
+          final before = await previous;
+          final current = _changeStamp(routeId);
+          previous = current;
+          return before != await current;
+        })
+        .where((changed) => changed)
+        .map((_) {});
+  }
+
+  Future<(int, String?)?> _changeStamp(String routeId) async {
+    final table = _db.navTracks;
+    final row =
+        await (_db.selectOnly(table)
+              ..addColumns([table.updatedAt, table.hlc])
+              ..where(table.id.equals(routeId)))
+            .getSingleOrNull();
+    if (row == null) return null;
+    return (row.read(table.updatedAt)!, row.read(table.hlc));
+  }
+
+  @override
+  Future<domain.NavTrack?> getById(
+    String id, {
+    bool includePoints = true,
+  }) async {
+    if (!includePoints) {
+      final rows = await _selectWithoutPoints(
+        where: 'id = ?',
+        variables: [Variable.withString(id)],
+      );
+      return rows.isEmpty ? null : _toDomain(rows.single, includePoints: false);
+    }
+    final row = await (_db.select(
+      _db.navTracks,
+    )..where((t) => t.id.equals(id))).getSingleOrNull();
+    return row == null ? null : _toDomain(row, includePoints: true);
+  }
+
+  /// Routes linked to [diveId], primary first.
+  ///
+  /// Ties are broken by the earliest recording, then by id. isPrimary is
+  /// decided per device, so two devices that each linked a route to the same
+  /// dive before syncing leave that dive with two primaries; the tie-break
+  /// makes every device agree which of them the seascape draws.
+  Future<List<domain.NavTrack>> getForDive(
+    String diveId, {
+    bool includePoints = false,
+  }) async {
+    final rows = includePoints
+        ? await (_db.select(_db.navTracks)
+                ..where((t) => t.diveId.equals(diveId))
+                ..orderBy([
+                  (t) => OrderingTerm.desc(t.isPrimary),
+                  (t) => OrderingTerm.asc(t.startTime),
+                  (t) => OrderingTerm.asc(t.id),
+                ]))
+              .get()
+        : await _selectWithoutPoints(
+            where: 'dive_id = ?',
+            variables: [Variable.withString(diveId)],
+            orderBy: 'is_primary DESC, start_time ASC, id ASC',
+          );
+    return [for (final r in rows) _toDomain(r, includePoints: includePoints)];
+  }
+
+  /// Every route with no dive link, most recently recorded first -- the
+  /// routes area's own candidates for the match sweep and the manual link
+  /// picker.
+  ///
+  /// [diverId] limits it to that diver's routes and the ownerless ones
+  /// (shared with every diver); null reads every route.
+  Future<List<domain.NavTrack>> getUnlinked({
+    bool includePoints = false,
+    String? diverId,
+  }) async {
+    final rows = includePoints
+        ? await (_db.select(_db.navTracks)
+                ..where(
+                  (t) =>
+                      t.diveId.isNull() &
+                      (diverId == null
+                          ? const Constant(true)
+                          : _visibleTo(t, diverId)),
+                )
+                ..orderBy([(t) => OrderingTerm.desc(t.startTime)]))
+              .get()
+        : await _selectWithoutPoints(
+            where: diverId == null
+                ? 'dive_id IS NULL'
+                : 'dive_id IS NULL AND $_visibleToSql',
+            variables: [if (diverId != null) Variable.withString(diverId)],
+            orderBy: 'start_time DESC',
+          );
+    return [for (final r in rows) _toDomain(r, includePoints: includePoints)];
+  }
+
+  /// Every route for the routes area's own list, unlinked first and then
+  /// most recently recorded within each group. [diverId] scopes it as in
+  /// [getUnlinked]; [ids] narrows it to those routes (Global Search's few
+  /// rows, issue #4247).
+  Future<List<domain.NavTrack>> getAll({
+    bool includePoints = false,
+    String? diverId,
+    List<String>? ids,
+  }) async {
+    if (ids != null && ids.isEmpty) return const [];
+    final where = [
+      if (diverId != null) _visibleToSql,
+      if (ids != null) 'id IN (${List.filled(ids.length, '?').join(', ')})',
+    ];
+    final rows = includePoints
+        ? await (_db.select(_db.navTracks)
+                ..where(
+                  (t) => diverId == null
+                      ? const Constant(true)
+                      : _visibleTo(t, diverId),
+                )
+                ..where(
+                  (t) => ids == null ? const Constant(true) : t.id.isIn(ids),
+                )
+                ..orderBy([(t) => OrderingTerm.desc(t.startTime)]))
+              .get()
+        : await _selectWithoutPoints(
+            where: where.isEmpty ? null : where.join(' AND '),
+            variables: [
+              if (diverId != null) Variable.withString(diverId),
+              ...?ids?.map(Variable.withString),
+            ],
+            orderBy: 'start_time DESC',
+          );
+    final tracks = [
+      for (final r in rows) _toDomain(r, includePoints: includePoints),
+    ];
+    tracks.sort((a, b) {
+      final unlinkedCompare = (a.diveId == null ? 0 : 1).compareTo(
+        b.diveId == null ? 0 : 1,
+      );
+      if (unlinkedCompare != 0) return unlinkedCompare;
+      return b.startTime.compareTo(a.startTime);
+    });
+    return tracks;
+  }
+
+  /// A route [diverId] may see: their own, or an ownerless one.
+  static Expression<bool> _visibleTo($NavTracksTable t, String diverId) =>
+      t.diverId.equals(diverId) | t.diverId.isNull();
+
+  /// [_visibleTo] for a raw read; binds one variable, the diver id.
+  static const _visibleToSql = '(diver_id = ? OR diver_id IS NULL)';
+
+  /// Writes a route's georeferencing and drift correction. Every field of
+  /// [correction] is written, including nulls -- unlike `NavTrack.copyWith`,
+  /// this is the one place a route's anchor or end target can be cleared.
+  Future<void> updateCorrection(
+    String routeId,
+    NavTrackCorrection correction,
+  ) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.navTracks,
+      )..where((t) => t.id.equals(routeId))).write(
+        NavTracksCompanion(
+          anchorLatitude: Value(correction.anchor?.latitude),
+          anchorLongitude: Value(correction.anchor?.longitude),
+          endMode: Value(correction.endMode.wireValue),
+          endLatitude: Value(correction.endPoint?.latitude),
+          endLongitude: Value(correction.endPoint?.longitude),
+          trustFraction: Value(correction.trustFraction),
+          headingOffsetDeg: Value(correction.headingOffsetDeg),
+          scaleFactor: Value(correction.scaleFactor),
+          updatedAt: Value(now),
+        ),
+      );
+      await _markPending(routeId, now);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to update the correction on nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Changes the dive site linked to [routeId] after import (unlike the
+  /// import review page's site picker, which only ever sets it once).
+  ///
+  /// [anchor], when given, is written as the new anchor too. The caller
+  /// decides whether to pass it: the safe rule (spec 2026-09-10-underwater-
+  /// nav-track-design.md item 5) is that the anchor should follow the new
+  /// site's pin only when the diver never moved the start point away from
+  /// the old site's pin (the current anchor is unset, or still exactly
+  /// equals the old site's stored location) -- never when they already
+  /// corrected it by hand. Passing null leaves the stored anchor untouched
+  /// either way, unless [clearAnchor] asks for it to be removed: an anchor
+  /// that followed the old site's pin has nothing to follow when the new
+  /// site has no coordinates, and keeping it would leave the route sitting
+  /// at the old site.
+  Future<void> setSite(
+    String routeId,
+    String? siteId, {
+    GeoPoint? anchor,
+    bool clearAnchor = false,
+  }) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final writeAnchor = anchor != null || clearAnchor;
+      await (_db.update(
+        _db.navTracks,
+      )..where((t) => t.id.equals(routeId))).write(
+        NavTracksCompanion(
+          siteId: Value(siteId),
+          anchorLatitude: writeAnchor
+              ? Value(anchor?.latitude)
+              : const Value.absent(),
+          anchorLongitude: writeAnchor
+              ? Value(anchor?.longitude)
+              : const Value.absent(),
+          updatedAt: Value(now),
+        ),
+      );
+      await _markPending(routeId, now);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to change the site on nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Writes the values the route's page edits in place (issue #4527): its
+  /// name, site, device and correction, each as given (null clears it).
+  /// Never the link columns: a dive is linked through [link], [relink] and
+  /// [unlink], which keep the owner, the primary route and inheritance.
+  Future<void> writeEditedColumns(
+    String routeId, {
+    required String? name,
+    required String? siteId,
+    required String? equipmentId,
+    required String? deviceName,
+    required NavTrackCorrection correction,
+  }) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.navTracks,
+      )..where((t) => t.id.equals(routeId))).write(
+        NavTracksCompanion(
+          name: Value(name),
+          siteId: Value(siteId),
+          equipmentId: Value(equipmentId),
+          deviceName: Value(deviceName),
+          anchorLatitude: Value(correction.anchor?.latitude),
+          anchorLongitude: Value(correction.anchor?.longitude),
+          endMode: Value(correction.endMode.wireValue),
+          endLatitude: Value(correction.endPoint?.latitude),
+          endLongitude: Value(correction.endPoint?.longitude),
+          trustFraction: Value(correction.trustFraction),
+          headingOffsetDeg: Value(correction.headingOffsetDeg),
+          scaleFactor: Value(correction.scaleFactor),
+          updatedAt: Value(now),
+        ),
+      );
+      await _markPending(routeId, now);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to write the edited values of nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Renames [routeId], or clears its label back to the file name default
+  /// when [name] is null.
+  Future<void> rename(String routeId, String? name) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(_db.navTracks)..where((t) => t.id.equals(routeId)))
+          .write(NavTracksCompanion(name: Value(name), updatedAt: Value(now)));
+      await _markPending(routeId, now);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to rename nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Sets or clears [routeId]'s device/equipment after it has already been
+  /// saved -- the import review screen (`NavTrackEquipmentPickerSheet`'s
+  /// only other call site) can only set this once, at import time; this is
+  /// the detail page's "Change device" entry point for doing it afterward.
+  /// Both fields clear together: [equipmentId] null with no [deviceName]
+  /// means "no equipment chosen", the same as the import path.
+  Future<void> setEquipment(
+    String routeId, {
+    String? equipmentId,
+    String? deviceName,
+  }) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.navTracks,
+      )..where((t) => t.id.equals(routeId))).write(
+        NavTracksCompanion(
+          equipmentId: Value(equipmentId),
+          deviceName: Value(deviceName),
+          updatedAt: Value(now),
+        ),
+      );
+      await _markPending(routeId, now);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to set equipment on nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Whether the dive [diveId] exists: a route links only to a dive that
+  /// does.
+  Future<bool> diveExists(String diveId) async =>
+      await (_db.selectOnly(_db.dives)
+            ..addColumns([_db.dives.id])
+            ..where(_db.dives.id.equals(diveId)))
+          .getSingleOrNull() !=
+      null;
+
+  /// Whether the dive site [siteId] exists: a route's site must.
+  Future<bool> siteExists(String siteId) async =>
+      await (_db.selectOnly(_db.diveSites)
+            ..addColumns([_db.diveSites.id])
+            ..where(_db.diveSites.id.equals(siteId)))
+          .getSingleOrNull() !=
+      null;
+
+  /// Ids of every route currently linked to [diveId].
+  ///
+  /// Call this BEFORE the dive row is deleted and pass the result to
+  /// [normalizeAfterDiveDeletion] after the delete completes: the `nav_tracks
+  /// .dive_id` foreign key's own `SET NULL` action fires as part of the
+  /// delete itself, so by the time the dive is gone there is no way to tell
+  /// "was linked to this dive" from "was never linked" by querying
+  /// `nav_tracks` alone.
+  Future<List<String>> routeIdsLinkedToDive(String diveId) =>
+      _idsWhere((t) => t.diveId.equals(diveId));
+
+  /// [routeIdsLinkedToDive] for many dives, in one query per chunk rather
+  /// than one per dive, and under SQLite's bound-variable limit however many
+  /// dives a bulk delete selects (issue #1953). A repeated dive id is
+  /// looked up once, so each route comes back once.
+  Future<List<String>> routeIdsLinkedToDives(List<String> diveIds) async {
+    final routeIds = <String>[];
+    for (final chunk in seriesIdChunks(diveIds.toSet().toList())) {
+      routeIds.addAll(await _idsWhere((t) => t.diveId.isIn(chunk)));
+    }
+    return routeIds;
+  }
+
+  /// The rows of every route linked to [diveIds], in [getForDive]'s order
+  /// across all of them, with `points` left empty: for a caller that keeps
+  /// only the link columns, as [restoreLinks] does, the blob is megabytes it
+  /// never reads.
+  Future<List<NavTrackRow>> linkedRowsForDives(List<String> diveIds) async {
+    final rows = <NavTrackRow>[];
+    for (final chunk in seriesIdChunks(diveIds.toSet().toList())) {
+      rows.addAll(
+        await _selectWithoutPoints(
+          where: 'dive_id IN (${List.filled(chunk.length, '?').join(', ')})',
+          variables: [for (final id in chunk) Variable.withString(id)],
+        ),
+      );
+    }
+    rows.sort((a, b) {
+      if (a.isPrimary != b.isPrimary) return a.isPrimary ? -1 : 1;
+      final byStart = a.startTime.compareTo(b.startTime);
+      return byStart != 0 ? byStart : a.id.compareTo(b.id);
+    });
+    return rows;
+  }
+
+  /// Moves every route linked to [fromDiveIds] onto [toDiveId], for a
+  /// consolidate or merge folding those dives into it (issue #3918). Call
+  /// this before they are deleted: unlike an intentional delete, the link is
+  /// part of what the diver is keeping.
+  ///
+  /// How each link came about carries over. [link] settles the rest as for
+  /// any new link: the owner follows the dive, a route with no position
+  /// inherits the dive's, and a primary already on [toDiveId] stays primary.
+  /// A route with a site or an anchor keeps both, as the two dives are one
+  /// ([_relinkForFold]): [restoreLinks] relies on that.
+  /// Moving in [linkedRowsForDives]' order means that with none there, the
+  /// earliest of the routes coming in takes the role.
+  Future<void> moveLinks({
+    required List<String> fromDiveIds,
+    required String toDiveId,
+  }) async {
+    for (final route in await linkedRowsForDives(fromDiveIds)) {
+      final linkMode =
+          domain.NavTrackLinkMode.fromWireValue(route.linkMode) ??
+          domain.NavTrackLinkMode.manual;
+      await _relinkForFold(
+        route.id,
+        fromDiveId: route.diveId!,
+        toDiveId: toDiveId,
+        linkMode: linkMode,
+      );
+    }
+  }
+
+  /// Writes back the link columns of [rows], read by [linkedRowsForDives]
+  /// before a fold that is now being undone. The dives must exist again by
+  /// now. Only those columns are restored, so a rename or a correction made
+  /// since stands, and a route deleted since stays deleted. A dive left with
+  /// no primary route gets one, for a route linked after the fold whose
+  /// primary has gone back to its own dive.
+  ///
+  /// Only a route moved onto [survivingDiveId] with no position of its own
+  /// can have been given one by [link], so only that route goes back to none,
+  /// even if the diver set one since: the row cannot tell the two apart.
+  /// Every other route's site and anchor are left alone, so whatever the
+  /// diver changed since stands.
+  Future<void> restoreLinks(
+    List<NavTrackRow> rows, {
+    required String survivingDiveId,
+  }) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final row in rows) {
+        final keepsPosition =
+            row.diveId == survivingDiveId ||
+            row.siteId != null ||
+            (row.anchorLatitude != null && row.anchorLongitude != null);
+        final rowsAffected =
+            await (_db.update(
+              _db.navTracks,
+            )..where((t) => t.id.equals(row.id))).write(
+              NavTracksCompanion(
+                diveId: Value(row.diveId),
+                diverId: Value(row.diverId),
+                linkMode: Value(row.linkMode),
+                isPrimary: Value(row.isPrimary),
+                siteId: keepsPosition
+                    ? const Value.absent()
+                    : const Value(null),
+                anchorLatitude: keepsPosition
+                    ? const Value.absent()
+                    : const Value(null),
+                anchorLongitude: keepsPosition
+                    ? const Value.absent()
+                    : const Value(null),
+                updatedAt: Value(now),
+              ),
+            );
+        if (rowsAffected > 0) await _markPending(row.id, now);
+      }
+      for (final diveId in {for (final r in rows) r.diveId}.nonNulls) {
+        await _promoteSiblingIfNoPrimary(diveId, now);
+      }
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to restore nav track links',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Normalizes routes whose linked dive was just deleted.
+  ///
+  /// The `nav_tracks.dive_id` foreign key's `SET NULL` action already
+  /// cleared `diveId` for these rows as part of the dive delete, but that is
+  /// a single-column database-level action: it cannot also restore the
+  /// schema invariant that `linkMode` is null exactly when `diveId` is null,
+  /// reset `isPrimary` to its default, or mark the rows pending for sync.
+  /// This does the rest, treating the dive-tombstone unlink as an ordinary
+  /// route update rather than leaving it as a bare foreign-key side effect.
+  Future<void> normalizeAfterDiveDeletion(List<String> routeIds) async {
+    if (routeIds.isEmpty) return;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final chunk in seriesIdChunks(routeIds)) {
+        await (_db.update(_db.navTracks)..where((t) => t.id.isIn(chunk))).write(
+          NavTracksCompanion(
+            linkMode: const Value(null),
+            isPrimary: const Value(true),
+            updatedAt: Value(now),
+          ),
+        );
+      }
+      for (final routeId in routeIds) {
+        await _markPending(routeId, now);
+      }
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to normalize nav tracks after dive deletion: $routeIds',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> delete(String routeId) async {
+    try {
+      final route = await getById(routeId, includePoints: false);
+      final diveId = route?.diveId;
+      await (_db.delete(
+        _db.navTracks,
+      )..where((t) => t.id.equals(routeId))).go();
+      await _syncRepository.logDeletion(
+        entityType: entityType,
+        recordId: routeId,
+      );
+      SyncEventBus.notifyLocalChange();
+      if (diveId != null) {
+        await _promoteSiblingIfNoPrimary(
+          diveId,
+          DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to delete nav track $routeId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Deletes [routeId] in favour of [withRouteId], a re-import of the same
+  /// recording. When the old route was the primary route of the dive the
+  /// new one is linked to, the new route takes that role over before the
+  /// delete; otherwise [delete]'s own fallback would promote whichever
+  /// sibling was recorded earliest, silently changing the route the
+  /// seascape draws.
+  Future<void> replace(String routeId, {required String withRouteId}) async {
+    final old = await getById(routeId, includePoints: false);
+    final replacement = await getById(withRouteId, includePoints: false);
+    final takesOverPrimary =
+        old != null &&
+        old.isPrimary &&
+        old.diveId != null &&
+        replacement?.diveId == old.diveId;
+    if (takesOverPrimary) await setPrimary(withRouteId);
+    await delete(routeId);
+  }
+
+  /// Rows of every column but `points` and `source_file`, which stand in as
+  /// empty blobs (`source_file` stays null when the row has none, so
+  /// [_toDomain] can still tell whether it does).
+  ///
+  /// For reads that never decode the points: the blobs can be megabytes per
+  /// route, and a plain select would still pull every one of them out of
+  /// SQLite only for [_toDomain] to drop it. [where] and [orderBy] are SQL
+  /// fragments over the table's own column names, with [variables] bound to
+  /// the placeholders in [where].
+  Future<List<NavTrackRow>> _selectWithoutPoints({
+    String? where,
+    List<Variable> variables = const [],
+    String? orderBy,
+  }) async {
+    final table = _db.navTracks;
+    final columns = [
+      for (final column in table.$columns)
+        if (column != table.points && column != table.sourceFile)
+          '"${column.name}"',
+    ].join(', ');
+    final rows = await _db
+        .customSelect(
+          "SELECT $columns, X'' AS points, "
+          "CASE WHEN source_file IS NULL THEN NULL ELSE X'' END "
+          'AS source_file FROM nav_tracks'
+          '${where == null ? '' : ' WHERE $where'}'
+          '${orderBy == null ? '' : ' ORDER BY $orderBy'}',
+          variables: variables,
+          readsFrom: {table},
+        )
+        .get();
+    return [for (final row in rows) table.map(row.data)];
+  }
+
+  /// Ids of the routes matching [filter], without reading any other column.
+  @override
+  Future<List<String>> _idsWhere(
+    Expression<bool> Function($NavTracksTable t) filter, {
+    GeneratedColumn<Object>? orderBy,
+    int? limit,
+  }) async {
+    final table = _db.navTracks;
+    final query = _db.selectOnly(table)
+      ..addColumns([table.id])
+      ..where(filter(table));
+    if (orderBy != null) query.orderBy([OrderingTerm.asc(orderBy)]);
+    if (limit != null) query.limit(limit);
+    final rows = await query.get();
+    return [for (final row in rows) row.read(table.id)!];
+  }
+
+  @override
+  Future<void> _markPending(String routeId, int now) async {
+    await _syncRepository.markRecordPending(
+      entityType: entityType,
+      recordId: routeId,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// Decodes a stored points blob, or null if it cannot be read.
+  ///
+  /// The blob is peer-supplied (nav_tracks syncs, and the points column
+  /// rides as base64), so a malformed one is a data condition, not a
+  /// programming error: every caller here degrades to a route with no
+  /// points rather than propagating and taking the whole list down with
+  /// one bad row.
+  List<NavTrackPoint>? _decodePointsOrNull(String id, Uint8List blob) {
+    try {
+      return decodeNavTrackPoints(blob);
+    } on NavTrackCodecException catch (e, stackTrace) {
+      _log.error(
+        'Unreadable points blob on nav track $id; reporting it with no points',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  domain.NavTrack _toDomain(NavTrackRow row, {required bool includePoints}) {
+    final points = includePoints
+        ? _decodePointsOrNull(row.id, row.points) ?? const <NavTrackPoint>[]
+        : const <NavTrackPoint>[];
+    return domain.NavTrack(
+      id: row.id,
+      diveId: row.diveId,
+      linkMode: domain.NavTrackLinkMode.fromWireValue(row.linkMode),
+      isPrimary: row.isPrimary,
+      siteId: row.siteId,
+      source: domain.NavTrackSource.fromWireValue(row.source),
+      sourceRef: row.sourceRef,
+      deviceName: row.deviceName,
+      name: row.name,
+      equipmentId: row.equipmentId,
+      startTime: row.startTime,
+      endTime: row.endTime,
+      tzOffsetMinutes: row.tzOffsetMinutes,
+      timeOffsetSeconds: row.timeOffsetSeconds,
+      pointCount: row.pointCount,
+      totalDistance: row.totalDistance,
+      maxDepth: row.maxDepth,
+      maxSpeed: row.maxSpeed,
+      avgSpeed: row.avgSpeed,
+      durationSeconds: row.durationSeconds,
+      anchorLatitude: row.anchorLatitude,
+      anchorLongitude: row.anchorLongitude,
+      endMode: domain.NavTrackEndModeWire.fromWireValue(row.endMode),
+      endLatitude: row.endLatitude,
+      endLongitude: row.endLongitude,
+      trustFraction: row.trustFraction,
+      headingOffsetDeg: row.headingOffsetDeg,
+      scaleFactor: row.scaleFactor,
+      sourceMetadata: decodeNavTrackSourceMetadata(row.sourceMetadata),
+      points: points,
+      hasSourceFile: row.sourceFile != null,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+    );
+  }
+}

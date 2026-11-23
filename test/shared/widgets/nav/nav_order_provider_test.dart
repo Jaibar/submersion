@@ -1,0 +1,312 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
+import 'package:submersion/shared/widgets/nav/nav_id_aliases.dart';
+import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
+
+import '../../../support/fake_app_settings_repository.dart';
+
+ProviderContainer _container(AppSettingsRepository repo) {
+  return ProviderContainer(
+    overrides: [appSettingsRepositoryProvider.overrideWithValue(repo)],
+  );
+}
+
+/// Reads a notifier and lets its async load settle.
+Future<List<String>> _loaded(
+  ProviderContainer container,
+  StateNotifierProvider<NavOrderNotifier, List<String>> provider,
+) async {
+  container.read(provider);
+  await Future<void>.delayed(Duration.zero);
+  return container.read(provider);
+}
+
+void main() {
+  group('NavOrderNotifier', () {
+    test(
+      'initial state is the canonical order before async load completes',
+      () {
+        final container = _container(FakeAppSettingsRepository());
+        addTearDown(container.dispose);
+
+        expect(container.read(navPhoneOrderNotifierProvider), movableNavIds);
+      },
+    );
+
+    test('loads and normalizes stored ids on construction', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navPrimaryIds = ['equipment', 'buddies', 'insights'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      final order = await _loaded(container, navPhoneOrderNotifierProvider);
+
+      expect(order.take(3).toList(), ['equipment', 'buddies', 'insights']);
+      expect(order.toSet(), movableNavIds.toSet());
+    });
+
+    test('normalizes invalid stored ids during load', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navPrimaryIds = ['dashboard', 'more', 'unknown'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      expect(
+        await _loaded(container, navPhoneOrderNotifierProvider),
+        movableNavIds,
+      );
+    });
+
+    test('a read failure leaves the canonical order in place', () async {
+      final repo = FakeAppSettingsRepository()
+        ..throwOnNavRead = StateError('database down');
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      expect(
+        await _loaded(container, navPhoneOrderNotifierProvider),
+        movableNavIds,
+      );
+    });
+
+    test('setOrder writes the full order through and updates state', () async {
+      final repo = FakeAppSettingsRepository();
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      final reordered = [
+        'insights',
+        ...movableNavIds.where((id) => id != 'insights'),
+      ];
+      await container
+          .read(navPhoneOrderNotifierProvider.notifier)
+          .setOrder(reordered);
+
+      expect(repo.navPrimaryIds, withLegacyNavIds(reordered));
+      expect(container.read(navPhoneOrderNotifierProvider), reordered);
+    });
+
+    test('setOrder normalizes a partial input before writing', () async {
+      final repo = FakeAppSettingsRepository();
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await container.read(navPhoneOrderNotifierProvider.notifier).setOrder([
+        'dashboard',
+        'more',
+        'equipment',
+      ]);
+
+      expect(repo.navPrimaryIds!.first, 'equipment');
+      expect(
+        repo.navPrimaryIds!.toSet(),
+        withLegacyNavIds(movableNavIds).toSet(),
+      );
+    });
+
+    test('resetToDefaults writes the canonical order', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navPrimaryIds = ['equipment', 'buddies', 'insights'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await _loaded(container, navPhoneOrderNotifierProvider);
+      await container
+          .read(navPhoneOrderNotifierProvider.notifier)
+          .resetToDefaults();
+
+      expect(repo.navPrimaryIds, withLegacyNavIds(movableNavIds));
+      expect(container.read(navPhoneOrderNotifierProvider), movableNavIds);
+    });
+
+    test('loads stored shortcuts and resolves them for the bar', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navPrimaryIds = ['shortcut:gas-blender', 'dives', 'sites'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await _loaded(container, navPhoneOrderNotifierProvider);
+      final primary = container.read(navPrimaryDestinationsProvider(3));
+
+      expect(primary.map((d) => d.id), [
+        'dashboard',
+        'shortcut:gas-blender',
+        'dives',
+        'sites',
+        'more',
+      ]);
+      expect(primary[1].route, '/shortcut/gas-blender');
+    });
+
+    test('the rail resolves a stored shortcut too', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navRailIds = ['shortcut:insights-gas', 'dives'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await _loaded(container, navRailOrderNotifierProvider);
+      final rail = container.read(navRailDestinationsProvider);
+
+      expect(rail.take(3).map((d) => d.id), [
+        'dashboard',
+        'shortcut:insights-gas',
+        'dives',
+      ]);
+    });
+
+    test('resetToDefaults drops shortcuts', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navRailIds = ['shortcut:insights-gas', 'dives'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await _loaded(container, navRailOrderNotifierProvider);
+      await container
+          .read(navRailOrderNotifierProvider.notifier)
+          .resetToDefaults();
+
+      expect(container.read(navRailOrderNotifierProvider), movableNavIds);
+    });
+  });
+
+  group('phone and rail orders are independent', () {
+    test('each notifier loads from its own storage key', () async {
+      final repo = FakeAppSettingsRepository()
+        ..navPrimaryIds = ['equipment', 'buddies', 'insights']
+        ..navRailIds = ['tracks', 'planning'];
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      final phone = await _loaded(container, navPhoneOrderNotifierProvider);
+      final rail = await _loaded(container, navRailOrderNotifierProvider);
+
+      expect(phone.take(3).toList(), ['equipment', 'buddies', 'insights']);
+      expect(rail.take(2).toList(), ['tracks', 'planning']);
+    });
+
+    test('writing the rail order leaves the phone order untouched', () async {
+      final repo = FakeAppSettingsRepository();
+      final container = _container(repo);
+      addTearDown(container.dispose);
+
+      await _loaded(container, navPhoneOrderNotifierProvider);
+      await container.read(navRailOrderNotifierProvider.notifier).setOrder([
+        'settings',
+        ...movableNavIds.where((id) => id != 'settings'),
+      ]);
+
+      expect(repo.navPrimaryIds, isNull);
+      expect(repo.navRailIds!.first, 'settings');
+      expect(container.read(navPhoneOrderNotifierProvider), movableNavIds);
+    });
+  });
+
+  group('derived providers', () {
+    test(
+      'navPrimaryDestinationsProvider returns [home, ...3 middle, more]',
+      () async {
+        final repo = FakeAppSettingsRepository()
+          ..navPrimaryIds = ['equipment', 'buddies', 'insights'];
+        final container = _container(repo);
+        addTearDown(container.dispose);
+
+        await _loaded(container, navPhoneOrderNotifierProvider);
+
+        expect(
+          container
+              .read(navPrimaryDestinationsProvider(3))
+              .map((d) => d.id)
+              .toList(),
+          ['dashboard', 'equipment', 'buddies', 'insights', 'more'],
+        );
+      },
+    );
+
+    test(
+      'navPrimaryDestinationsProvider grows with a larger slot count',
+      () async {
+        final repo = FakeAppSettingsRepository()
+          ..navPrimaryIds = ['equipment', 'buddies', 'insights', 'dives'];
+        final container = _container(repo);
+        addTearDown(container.dispose);
+
+        await _loaded(container, navPhoneOrderNotifierProvider);
+
+        expect(
+          container
+              .read(navPrimaryDestinationsProvider(4))
+              .map((d) => d.id)
+              .toList(),
+          ['dashboard', 'equipment', 'buddies', 'insights', 'dives', 'more'],
+        );
+      },
+    );
+
+    test(
+      'navOverflowDestinationsProvider follows the stored phone order',
+      () async {
+        // 'settings' pulled to the front of the overflow tail, which canonical
+        // order would have placed last.
+        final tail = ['settings', 'dives', 'sites'];
+        final repo = FakeAppSettingsRepository()
+          ..navPrimaryIds = ['equipment', 'buddies', 'insights', ...tail];
+        final container = _container(repo);
+        addTearDown(container.dispose);
+
+        await _loaded(container, navPhoneOrderNotifierProvider);
+
+        final overflow = container
+            .read(navOverflowDestinationsProvider(3))
+            .map((d) => d.id)
+            .toList();
+
+        expect(overflow.take(3).toList(), tail);
+        expect(overflow, isNot(contains('equipment')));
+        expect(overflow, isNot(contains('dashboard')));
+        expect(overflow, isNot(contains('more')));
+        expect(overflow.length, movableNavIds.length - 3);
+      },
+    );
+
+    test(
+      'navRailDestinationsProvider is pinned Home then the rail order',
+      () async {
+        final repo = FakeAppSettingsRepository()
+          ..navRailIds = ['insights', 'tracks'];
+        final container = _container(repo);
+        addTearDown(container.dispose);
+
+        await _loaded(container, navRailOrderNotifierProvider);
+
+        final rail = container
+            .read(navRailDestinationsProvider)
+            .map((d) => d.id)
+            .toList();
+
+        expect(rail.take(3).toList(), ['dashboard', 'insights', 'tracks']);
+        expect(rail.length, movableNavIds.length + 1);
+        expect(rail, isNot(contains('more')));
+      },
+    );
+  });
+
+  group('in a browser (#4121)', () {
+    test('every destination and movable id is still offered', () {
+      final container = ProviderContainer(
+        overrides: [
+          appSettingsRepositoryProvider.overrideWithValue(
+            FakeAppSettingsRepository(),
+          ),
+          deviceCapabilitiesProvider.overrideWithValue(DeviceCapabilities.web),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(navDestinationsProvider), kNavDestinations);
+      expect(container.read(movableNavIdsProvider), movableNavIds);
+    });
+  });
+}

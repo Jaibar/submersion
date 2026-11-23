@@ -1,5 +1,7 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/utils/minutes_seconds.dart';
+
 /// Represents a gas switch event during a dive.
 ///
 /// Tracks when the diver switched to a different tank/gas mix.
@@ -22,6 +24,11 @@ class GasSwitch extends Equatable {
   /// When this record was created
   final DateTime createdAt;
 
+  /// The computer that logged this switch, or null when it applies to every
+  /// computer on the dive (manual entries, file imports other than a backup
+  /// that names one, older rows).
+  final String? computerId;
+
   const GasSwitch({
     required this.id,
     required this.diveId,
@@ -29,14 +36,29 @@ class GasSwitch extends Equatable {
     required this.tankId,
     this.depth,
     required this.createdAt,
+    this.computerId,
   });
 
-  /// Timestamp formatted as MM:SS
-  String get timestampFormatted {
-    final minutes = timestamp ~/ 60;
-    final seconds = timestamp % 60;
-    return '$minutes:${seconds.toString().padLeft(2, '0')}';
-  }
+  /// Whether this switch belongs to [computer]'s own gas plan.
+  bool appliesTo(String computer) =>
+      computerId == null || computerId == computer;
+
+  /// Whether the dive editor shows this switch on a dive whose primary
+  /// computer is [primaryComputer]: that computer's and untagged ones, and
+  /// on a dive with no primary computer the untagged ones only. Another
+  /// computer's are left alone.
+  bool shownInEditor(String? primaryComputer) =>
+      shownFor(computerId, primaryComputer);
+
+  /// [shownInEditor] for a switch of [computerId], read without the rest
+  /// of the switch.
+  static bool shownFor(String? computerId, String? primaryComputer) =>
+      primaryComputer == null
+      ? computerId == null
+      : computerId == null || computerId == primaryComputer;
+
+  /// Timestamp formatted as m:ss, the shape the switch editor reads back.
+  String get timestampFormatted => formatMinutesSeconds(timestamp);
 
   /// Depth formatted with unit
   String depthFormatted({bool metric = true}) {
@@ -56,19 +78,31 @@ class GasSwitch extends Equatable {
     String? tankId,
     double? depth,
     DateTime? createdAt,
+    String? computerId,
+    bool clearComputerId = false,
+    bool clearDepth = false,
   }) {
     return GasSwitch(
       id: id ?? this.id,
       diveId: diveId ?? this.diveId,
       timestamp: timestamp ?? this.timestamp,
       tankId: tankId ?? this.tankId,
-      depth: depth ?? this.depth,
+      depth: clearDepth ? null : (depth ?? this.depth),
       createdAt: createdAt ?? this.createdAt,
+      computerId: clearComputerId ? null : (computerId ?? this.computerId),
     );
   }
 
   @override
-  List<Object?> get props => [id, diveId, timestamp, tankId, depth, createdAt];
+  List<Object?> get props => [
+    id,
+    diveId,
+    timestamp,
+    tankId,
+    depth,
+    createdAt,
+    computerId,
+  ];
 }
 
 /// Extended gas switch info including tank details (for display purposes).
@@ -107,6 +141,9 @@ class GasSwitchWithTank extends Equatable {
 
   /// Whether this is air
   bool get isAir => o2Fraction >= 0.20 && o2Fraction <= 0.22 && heFraction == 0;
+
+  /// Whether this is pure oxygen (used as deco gas)
+  bool get isOxygen => o2Fraction >= 0.99 && heFraction == 0;
 
   /// ppO2 at switch depth
   double get ppO2AtDepth {

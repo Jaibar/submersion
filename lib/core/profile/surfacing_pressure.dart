@@ -1,0 +1,221 @@
+import 'package:submersion/core/profile/tank_pressure_glitches.dart';
+
+/// Depth below which a diver counts as being on the surface, in meters.
+///
+/// Matches Subsurface's long-standing `SURFACE_THRESHOLD` of 750 mm, so a
+/// dive imported from either app agrees on where the dive ended.
+const double kSurfaceThresholdMeters = 0.75;
+
+/// How far a reported end pressure may sit from the last post-surfacing
+/// reading and still count as having come from it, in bar.
+///
+/// Sources quantize pressure before converting it: Shearwater logs units of
+/// 2 psi (about 0.14 bar), and exported files often round to whole psi or bar.
+/// The artifact this guards against is measured in tens of bar, so a tolerance
+/// this small cannot let one through.
+const double kPressureMatchToleranceBar = 0.5;
+
+/// One profile sample, reduced to what the surfacing rule needs: when it was
+/// taken, how deep the diver was, and what each cylinder read at that instant.
+///
+/// [tankPressuresBar] is keyed by cylinder index and is empty for a sample that
+/// carries no transmitter reading.
+class SurfacingProfilePoint {
+  const SurfacingProfilePoint({
+    required this.timeSeconds,
+    required this.depthMeters,
+    this.tankPressuresBar = const {},
+  });
+
+  final int timeSeconds;
+  final double depthMeters;
+  final Map<int, double> tankPressuresBar;
+}
+
+/// What one cylinder read on either side of the surfacing moment.
+class SurfacingTankReading {
+  const SurfacingTankReading({
+    required this.atSurfacing,
+    required this.lastAfterSurfacing,
+  });
+
+  /// The cylinder's most recent reading at or before surfacing: the pressure
+  /// it actually held at the end of the dive.
+  final double atSurfacing;
+
+  /// The cylinder's last reading in the post-surfacing tail, or null when the
+  /// recording stopped at the surface.
+  final double? lastAfterSurfacing;
+}
+
+/// The last dive-computer second any of [points] was still deeper than
+/// [kSurfaceThresholdMeters], or null when none was.
+///
+/// Surfacing is the last sample deeper than the threshold, so a diver who
+/// drops back down after a surface break is measured from the final descent.
+///
+/// Shared by [surfacingTankReadings] and by callers that need to place the
+/// surfacing moment against a series of their own, such as
+/// `PressureAnomalyDetector` (issue #2220), so the two places that need to
+/// agree on where a dive ended cannot drift apart.
+int? lastTimeBelowSurfaceThreshold(Iterable<({int t, double depth})> points) {
+  int? surfacingTime;
+  for (final p in points) {
+    if (p.depth > kSurfaceThresholdMeters &&
+        (surfacingTime == null || p.t > surfacingTime)) {
+      surfacingTime = p.t;
+    }
+  }
+  return surfacingTime;
+}
+
+/// What each cylinder read on either side of the moment the diver surfaced,
+/// keyed by cylinder index.
+///
+/// Dive computers keep recording for a while after the diver reaches the
+/// surface, so the last reading in the profile is not the reading at the end of
+/// the dive. On a rebreather whose oxygen cylinder feeds a constant mass flow
+/// orifice, closing the valve topside leaves the hose bleeding down through
+/// that orifice, and the tail of the recording can shed most of the cylinder's
+/// apparent contents (issue #1092).
+///
+/// Each cylinder is read independently and carries its most recent value
+/// forward, because transmitters report on their own cadence and the
+/// surfacing sample may hold no reading for a given cylinder.
+///
+/// Cylinders with no reading at or before surfacing are left out: there is
+/// nothing to correct a reported end pressure with. Returns an empty map when
+/// the profile never went below the threshold or carries no pressure at all.
+/// Sample order in [points] does not matter.
+///
+/// A caller that already holds [tankReadingsOf] for [points] passes it as
+/// [tankReadings], so each cylinder is grouped and scanned for glitches once.
+Map<int, SurfacingTankReading> surfacingTankReadings(
+  List<SurfacingProfilePoint> points, {
+  Map<int, TankReadings>? tankReadings,
+}) {
+  final surfacingTime = lastTimeBelowSurfaceThreshold(
+    points.map((p) => (t: p.timeSeconds, depth: p.depthMeters)),
+  );
+  if (surfacingTime == null) {
+    return const {};
+  }
+
+  final glitches = _glitchReadings(tankReadings ?? tankReadingsOf(points));
+  final atSurfacing = <int, double>{};
+  final atSurfacingTime = <int, int>{};
+  final afterSurfacing = <int, double>{};
+  final afterSurfacingTime = <int, int>{};
+  for (var pointIndex = 0; pointIndex < points.length; pointIndex++) {
+    final p = points[pointIndex];
+    final surfaced = p.timeSeconds > surfacingTime;
+    final values = surfaced ? afterSurfacing : atSurfacing;
+    final times = surfaced ? afterSurfacingTime : atSurfacingTime;
+    for (final entry in p.tankPressuresBar.entries) {
+      if (glitches.contains((pointIndex, entry.key))) continue;
+      final seen = times[entry.key];
+      if (seen == null || p.timeSeconds >= seen) {
+        values[entry.key] = entry.value;
+        times[entry.key] = p.timeSeconds;
+      }
+    }
+  }
+
+  return {
+    for (final entry in atSurfacing.entries)
+      entry.key: SurfacingTankReading(
+        atSurfacing: entry.value,
+        lastAfterSurfacing: afterSurfacing[entry.key],
+      ),
+  };
+}
+
+/// One cylinder's readings of a profile in time order, the profile point
+/// each came from, and what [scanPressureGlitches] finds in them.
+class TankReadings {
+  const TankReadings({
+    required this.readings,
+    required this.pointIndices,
+    required this.scan,
+  });
+
+  /// The cylinder's readings, sorted by time.
+  final List<PressureReading> readings;
+
+  /// For each of [readings], its index into the profile points.
+  final List<int> pointIndices;
+
+  /// The glitches of [readings]; its indices are into [readings].
+  final PressureGlitchScan scan;
+}
+
+/// One cylinder's `(point index, reading)` pairs as [TankReadings], in time
+/// order with readings sharing a second kept in point order.
+TankReadings _tankReadings(List<(int, PressureReading)> indexed) {
+  // Sort by time, tie-broken by point order: List.sort is not stable.
+  final sorted = [...indexed]
+    ..sort((a, b) {
+      final byTime = a.$2.t.compareTo(b.$2.t);
+      return byTime != 0 ? byTime : a.$1.compareTo(b.$1);
+    });
+  final readings = [for (final r in sorted) r.$2];
+  return TankReadings(
+    readings: readings,
+    pointIndices: [for (final r in sorted) r.$1],
+    scan: scanPressureGlitches(readings),
+  );
+}
+
+/// Each cylinder's [TankReadings] from [points], keyed by cylinder index.
+Map<int, TankReadings> tankReadingsOf(List<SurfacingProfilePoint> points) {
+  final byTank = <int, List<(int, PressureReading)>>{};
+  for (var i = 0; i < points.length; i++) {
+    final p = points[i];
+    for (final entry in p.tankPressuresBar.entries) {
+      (byTank[entry.key] ??= []).add((i, (t: p.timeSeconds, bar: entry.value)));
+    }
+  }
+  return {
+    for (final entry in byTank.entries) entry.key: _tankReadings(entry.value),
+  };
+}
+
+/// Every `(point index, cylinder index)` reading that [scanPressureGlitches]
+/// finds to be a dropout or misread (issue #2441).
+///
+/// A dropout that happens to sit at the surfacing sample would otherwise
+/// become the cylinder's pressure at surfacing.
+Set<(int, int)> _glitchReadings(Map<int, TankReadings> tankReadings) => {
+  for (final entry in tankReadings.entries)
+    for (final i in entry.value.scan.glitchIndices)
+      (entry.value.pointIndices[i], entry.key),
+};
+
+/// The end pressure to record for a cylinder, given what the source reported
+/// and what the profile read around surfacing.
+///
+/// Only a reported pressure that matches the last post-surfacing reading is
+/// corrected. That match is the evidence that the source simply took the last
+/// sample it saw and so inherited the post-surfacing bleed-down. A source that
+/// read its end pressure from anywhere else -- a log header, or a transmitter
+/// that dropped out before the diver surfaced -- is left alone, because its
+/// value has an origin this rule knows nothing about.
+///
+/// Beyond that, the correction only ever raises [reportedBar], and a source
+/// that reported nothing keeps reporting nothing rather than gaining a
+/// fabricated value.
+double? trimEndPressureBar({
+  required double? reportedBar,
+  required SurfacingTankReading? reading,
+}) {
+  if (reportedBar == null || reading == null) {
+    return reportedBar;
+  }
+  final tail = reading.lastAfterSurfacing;
+  if (tail == null ||
+      (tail - reportedBar).abs() > kPressureMatchToleranceBar ||
+      reading.atSurfacing <= reportedBar) {
+    return reportedBar;
+  }
+  return reading.atSurfacing;
+}

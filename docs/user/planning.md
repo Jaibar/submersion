@@ -1,0 +1,392 @@
+# Planning & Calculators
+
+Submersion's Planning area gathers the tools you use before a dive: a full dive
+planner with saved plans, a quick decompression calculator, seven gas
+calculators, a weight calculator, a surface-interval tool, and two live clocks
+for flying after diving and your current oxygen load. Everything runs on your
+device with no account or connection.
+
+> [!NOTE]
+> **Where to find it:** **Planning** in the navigation. The list starts with the
+> **Dive Planner** and your three most recent saved plans, then the **Tools**.
+> On a tablet or computer, tools open beside the list; the Dive Planner and Gas
+> Calculators take the whole window.
+
+> [!WARNING]
+> These tools are for planning purposes only. Always verify their numbers
+> against your training and dive on a dive computer. The decompression figures
+> come from a software model (Bühlmann ZH-L16C with gradient factors) and can
+> differ from what your computer shows.
+
+<!-- screenshot: images/planning/hub.png: the Planning list with the dive planner, saved plans and tools -->
+
+| Tool | What it answers |
+|------|-----------------|
+| **Dive Planner** | What does this whole dive look like: depths, gases, deco, gas use, and what if it goes wrong? |
+| **Deco Calculator** | At this depth on this gas, how long is my no-stop time, and what do I owe if I stay? |
+| **Gas Calculators** | What is my MOD, best mix, gas use, reserve, narcotic depth or gas density, and how do I blend trimix? |
+| **Weight Calculator** | How much lead should I carry, and where? |
+| **Surface Interval** | How long must I wait before my next dive? |
+| **Flying after diving** | When can I fly? |
+| **Current CNS/OTU load** | How much oxygen exposure am I still carrying? |
+
+---
+
+## Dive Planner
+
+The dive planner builds a whole dive: you set the depths and times you intend,
+choose your cylinders, and Submersion computes the ascent and every
+decompression stop, then shows your runtime, gas use, oxygen exposure, and
+what happens if the dive goes deeper, longer, or loses a gas.
+
+<!-- screenshot: images/planning/dive-planner.png: dive planner with editor, chart and results -->
+
+### Layout
+
+On a wide screen the planner shows three panes side by side: the editor on the
+left, the profile chart in the middle, and the results on the right. Either side
+pane can be collapsed. On a phone the chart sits on top, with **Tanks**,
+**Plan**, **Setup** and **Results** below it, and a button to view the chart full
+screen.
+
+The top bar shows the plan's name (tap it to rename) and a mode chip. Tap the
+chip to switch between open circuit (OC), closed-circuit rebreather (CCR), and
+semi-closed rebreathers (SCR and pSCR). On wider screens, chips for the gradient
+factors and altitude jump straight to the matching settings.
+
+### Tanks
+
+Under **Tanks**, **Add Tank** opens a tank with a **Name**, **Volume (L)**,
+**Start (bar)**, **O₂ %** and **He %**. Switch on **Also used as travel gas** for
+a cylinder you breathe on the way down, and on a rebreather plan mark
+**Bailout gas**. You do not pick a role: the planner works out back gas, deco and
+stage cylinders from the gas and how it is used. **Saved tanks** keeps tanks you
+reuse from plan to plan.
+
+A new plan starts with one 11.1 L tank at 200 bar on air.
+
+### Start time and site
+
+**Dive details** (above the tanks) holds the dive's name, its **Start**, the
+**Surface interval** and its **Site**. Start and site are optional. On a
+series of dives, a dive's start and its surface interval set each other:
+change the interval and the start follows, or set the start and the interval
+is measured from the end of the dive before. Whichever you set last holds
+when an earlier dive gets longer or shorter. A later dive's start can be set
+once the first dive has one, or follows a logged dive.
+
+The planner doesn't use the site; the planned dive you create from the plan
+takes it, with the start time (or now, if there is none).
+
+With a keyboard, Alt+Left and Alt+Right move to the previous and next dive of
+a series, except while you are typing in a field.
+
+### Building the profile
+
+Under **Dive Segments**, each segment is a point you want to reach: a
+**Depth (m)**, a **Duration (min)**, and the **Tank / Gas** you breathe there. The
+planner shows whether each one is a descent, a level stretch or an ascent, and
+you can drag segments into a new order. You only describe the part of the dive
+you choose; the ascent and the decompression stops are always computed.
+
+You can also edit on the chart: drag a point to move it, double-tap to add one,
+and right-click (or long press) for a gas menu. With a point selected, the arrow
+keys change its depth (up and down) or its time by a minute (left and right),
+and Delete removes it.
+
+For a quick start, choose **Quick Plan** from the menu: give a depth (5 to
+40 m, default 18) and a time (5 to 120 minutes, default 45), and it replaces the
+segments with a simple square dive. **Plan as DPV mission** instead builds the
+profile from a scooter route.
+
+### Plan settings
+
+**Plan Settings** (the **Setup** tab on a phone) holds the settings for the whole
+dive:
+
+| Group | Settings |
+|-------|----------|
+| **Decompression** | **GF Low** and **GF High** (10 to 100; a new plan starts from your settings, 50/85 by default), the **Last stop** depth (3, 4, 5 or 6 m), and **Air breaks** for long oxygen stops |
+| **Rates** | **Descent rate** 18 m/min, **Ascent rate** 9 m/min, slower rates between and at shallow stops, and a **Final ascent rate (last 3 m)** of 1 m/min |
+| **Gas** | **Bottom RMV** (15 L/min, with an offer to use your logged average), **Reserve** (50 bar, or 500 psi), and **Gas options**: deco RMV, a stress factor and problem-solving time for minimum-gas sums, the ppO₂ limits, and whether to treat oxygen as narcotic for this plan |
+| **Environment** | Altitude, **Water type** (salt, fresh, or a custom salinity), and **Treat O₂ as narcotic**, which here changes your setting for every plan and calculator (the switch under **Gas options** applies to this plan only) |
+| **CCR** | Low and high setpoints (0.7 and 1.3 bar from your settings) and the depth to switch between them (10 m) |
+| **SCR** | **Injection rate** and **VO₂** (12 and 1.3 L/min from your settings; leave a box empty to follow them), with the loop oxygen they give at that VO₂, at rest and at hard work |
+| **pSCR** | The pSCR ratio and **VO₂** (0.72 L/min from your settings), with the loop's ppO₂ drop at the plan's bottom RMV |
+| **Contingencies** | **Extra depth** (5 m), **Extra minutes** (5), and a **Turn pressure rule**: none, all usable, halves, thirds or custom |
+| **Gear & Weights** | The gear for the dive and a predicted lead weight; see [Weight Planner](weight-planner.md) |
+
+> [!NOTE]
+> A lower gradient factor is more conservative. See the [Glossary](glossary.md)
+> for gradient factors, RMV, ppO₂ and the other terms used here.
+
+On a series of dives, the first dive's settings are the series'. Changing
+**Decompression**, **Rates**, **Gas**, **Environment** or **Contingencies** on
+the first dive changes them on every later dive that hasn't set its own.
+Changing one on a later dive makes it that dive's own, and the section says
+**This dive only**, with **Reset to series** and **Apply to all dives**. CCR,
+SCR, pSCR and Gear & Weights are always each dive's own.
+
+Tanks work the same way: a later dive takes the first dive's tanks and gases
+until you change its own. A tank starts with what was left in it after the
+dive before only while it is the same tank, the same size and gas; a
+different tank starts full. A pressure you fill or type stays.
+
+### Reading the results
+
+The results pane leads with **Runtime**, **NDL** (or **TTS** once the dive needs
+decompression), **CNS** and the number of **Warnings**, and the same figures sit
+as chips under the chart. The chart draws the ceiling, gas switches and stops.
+
+- **Decompression Schedule** lists each stop's depth, duration, runtime and gas,
+  or "No decompression required". Tap a stop to set a minimum time for it.
+- **Gas Consumption** shows, for each tank, the gas used, the pressure left at
+  the end, the turn pressure and the minimum gas.
+  On a semi-closed loop the supply is charged at what the loop draws: the
+  injection rate on SCR, and your RMV scaled by the pSCR ratio on pSCR.
+- **Bailout (open circuit)**, on a CCR plan, works out the worst-case bailout:
+  when it happens, how long the ascent takes, and whether your bailout gas
+  covers it.
+- **Contingencies** recompute the dive deeper, longer, and both, and with each
+  deco or stage gas lost. Select one to preview it on the chart; every headline
+  figure switches to it.
+- **Range table** shows the time to surface if you go 3 or 6 m deeper or
+  shallower, or 5 or 10 minutes longer or shorter. Red cells are dives you could
+  not do as planned.
+
+The planner warns about:
+
+| Warning | When |
+|---------|------|
+| ppO₂ | Above your working limit (1.4 bar), or critical above your deco limit (1.6 bar) |
+| Hypoxic gas | Breathing a gas whose oxygen partial pressure is below 0.16 bar at that depth |
+| END | Above your END limit (30 m by default) |
+| Gas density | Above 5.2 g/L, or critical above 6.2 g/L |
+| CNS | At 80%, or critical at 100% |
+| OTU | Above 300 for the dive |
+| Gas supply | A tank running empty, a reserve broken, or a tank ending below its minimum gas |
+| Missing gas | An open-circuit deco dive with no deco gas, or a rebreather deco dive with no bailout gas |
+| Bailout gas | A rebreather plan deeper than the maximum operating depth of every bailout gas, or bailout gases that turn hypoxic on the way to the surface. These do not stop a plan being diveable |
+| Diluent MOD | A diluent breathed deeper than its maximum operating depth |
+| Surface interval | A dive of a series, or one following a logged dive, less than 10 minutes after the dive before |
+| Starts before the dive before ends | A start you set that falls before the dive before it ends (critical) |
+| Starts owing deco | The tissues carried in from the dive before still have a ceiling when this dive starts (critical) |
+| Reverse profile | A dive more than 12 m deeper than the dive before it |
+
+On a series, CNS and OTU count the dives before: each dive starts from what the
+earlier ones left.
+
+### Saving, sharing and comparing plans
+
+Tap the save button to keep a plan. The first save asks you to
+**Name your plan**, suggesting a name from the site, depth and date. **Saved plans** (in the
+menu, and on the Planning list) lets you open, rename, duplicate, share, import
+and delete plans. A deleted plan can be restored with **Undo** for a few
+seconds.
+
+A plan of several dives saves as one series: saving keeps every dive, and
+opening any of them opens the whole series on that dive. In **Saved plans** a
+series is one row, with its number of dives (and how many you have dived,
+once you have dived any), deepest depth and total runtime, and a line for each
+dive that opens the series there and shows what that dive
+was dived as. Rename, duplicate, share and delete act on the whole series; link
+and unlink act on one dive, from its line. A series can't be compared.
+
+Leaving the planner with unsaved changes to a series, or opening another plan
+over unsaved changes, asks whether to **Save**, **Discard** or **Cancel**.
+
+In **Saved plans**, **Compare** puts two or three plans side by side: their
+profiles overlaid on one chart, with depth, runtime, TTS, deco and gas use for
+each.
+
+From the menu you can also:
+
+- **Export slate (PDF):** a printable slate with the runtime table, gas plan,
+  contingencies, range table and bailout. It is available once the plan has
+  at least one segment, since an empty plan has no schedule to print.
+- **Export plan file:** a `.subplan` file another Submersion user can import.
+  A series goes in one file, without the logged dive it follows, which is in
+  your log rather than theirs. Start times go in the file; sites stay out.
+- **Reset Plan** or **Delete plan**.
+
+### Plans and logged dives
+
+- **Follow a dive** plans a repetitive dive: pick one of your last 30 dives, and
+  the planner starts from the tissue loading that dive left, with the surface
+  interval set to the time since it ended, so the plan starts now. A dive that
+  ended less than an hour ago gets an hour. The dive needs a recorded profile.
+  A plan following a dive saves with it, and reopens from that dive's tissue
+  loading, CNS and OTU. **Stop following** takes the logged dive away again.
+- **Logged dives in the series bar.** The dives a plan follows lead the bar.
+  Tap one to see it in the planner's own layout, read-only: its profile where
+  the plan's chart was, its details and tanks, and in the results what it
+  carries into the next dive, its runtime and the warnings its safety review
+  found. If the dive was dived from a plan, its schedule, gas and range table
+  show **As planned**, and the chart shows the plan beside the dive;
+  **Compare with its plan** opens the dive's Compare page. A logged dive has
+  no segments or Setup of its own. Tap a planned dive to go back.
+- **Rebuild in planner** opens a logged dive in the planner. In the dive's menu
+  choose **Compare…**, then **Rebuild in planner...** in the Compare page's
+  menu; a dive Compare can't branch, such as a gauge dive, goes straight there.
+  The results then compare the plan with what you actually did, and can show the
+  original on the chart. A replan is discarded when you leave unless you save
+  it.
+- **Create planned dives** puts every dive of the plan in your log as a
+  planned dive, each at its own start time and site, with its full computed
+  profile and gas switches, linked back to the plan. A series with no start
+  time asks for the first dive's. Once they are there the menu says **Update
+  planned dives**, which rewrites the planned dives in place after you change
+  the plan; a dive you have already dived is left alone. It is greyed out
+  while your log already matches the plan, and comes back as soon as you
+  change a dive, add one, remove one, or edit a planned dive in the log.
+  Saving the plan never
+  changes your log. A dive you remove from the series is offered for deletion
+  from the log the next time you update, if it is still only planned. Nothing
+  is written while any dive has critical warnings; the message names it. A
+  download from your dive computer on that day or the next fills the planned
+  dive in place.
+- **Dived dives.** Once a planned dive is dived, by **Mark as logged**, the
+  edit page's switch or a download, the planner treats it as what happened.
+  Its chip in the series bar becomes the solid diver with the logged dive's
+  name or number, and it can no longer be removed from the series. It opens
+  as a logged dive, with its details, its plan drawn beside it on the chart,
+  and no segments; switch **Actual** to **Plan** to see the plan itself. The
+  plan is locked once its dive is dived: you can scroll it and open its
+  settings to read them, but not change it, on the chart or anywhere else.
+  The open icon in either view's **Dive details** opens the dive in your
+  log. A single plan linked to a
+  dived dive no longer offers **Create planned dive**; use **Duplicate** in
+  **Saved plans** for a copy you can change. The dives after it
+  start from what it really left: its tissue loading, CNS, OTU and the gas
+  left in each tank, from when it really ended, so their times and results
+  update. Undo a download and the dive goes back to its plan.
+- **Open in dive log** in the plan's menu opens the dive's entry in your log,
+  planned or dived. **Open in planner** on a planned dive's banner, and **View
+  in planner** in a dived dive's menu, take you back to the plan it came
+  from, on that dive. In the saved plans list, tap a dive's **Waiting for the
+  dive** or **Dived as #N** to open it in your log.
+- **As planned** for a later dive of a series, in the planner, on the dive
+  log's chart and in Compare, starts from what the dives before it were
+  planned to leave, not from a fresh diver.
+- **Link to a logged dive** joins a saved plan to a dive you have already
+  logged, from the saved plans list or the plan's menu. The dive's
+  [Compare](compare.md) section then shows the plan beside what you did, and the
+  plan shows **Dived as #N**.
+
+Your current plan stays as you left it while you move around the app.
+
+---
+
+## Deco Calculator
+
+The deco calculator is a quick, single-screen alternative to the planner for a
+square dive. Set the **Depth** (0 to 60 m, default 18), the **Bottom Time** (0 to
+120 minutes, default 30), and the **Gas Mix**: Air, EAN32, EAN36, EAN50,
+Tx 21/35 or Tx 18/45, or a custom trimix with 18 to 100% oxygen and up to 65%
+helium. You can also set the altitude and water type.
+
+The results update as you move the sliders: NDL, ceiling, TTS, GF99, surfacing
+GF, any deco stops, and the loading of all 16 tissue compartments. A gas panel
+shows the mix's MOD (at a ppO₂ of 1.4) and END, and warns when the depth is past
+the MOD, the ppO₂ is too high, the END is too deep, or the mix is hypoxic.
+
+The calculator uses the gradient factors from your settings (see
+[Settings](settings.md)). **Add to Planner** carries the depth, time and gas to
+the dive planner.
+
+> [!WARNING]
+> **Add to Planner** replaces the current plan's segments and its first tank's
+> gas. Save the plan first if you want to keep it.
+
+---
+
+## Gas Calculators
+
+Seven calculators for the gas arithmetic divers do by hand or on a slate.
+
+<!-- screenshot: images/planning/gas-calculators.png: gas calculators -->
+
+| Calculator | What it does |
+|------------|--------------|
+| **MOD** | The maximum operating depth of a mix for a ppO₂ limit, in three modes: recreational nitrox, open-circuit technical (including the minimum depth for a hypoxic mix), and CCR. Remembers your last inputs. |
+| **Best Mix** | The richest nitrox you can breathe at a target depth for a ppO₂ limit of 1.2, 1.4 or 1.6, with the MOD of common mixes for reference |
+| **Consumption** | The gas a dive at an average depth and time uses at your RMV, and what that leaves in your tank |
+| **Rock Bottom** | The minimum gas to get you and a buddy to the surface from depth, using stressed breathing rates, a problem-solving time, and an optional safety stop. Turn the dive before you reach it. |
+| **MND/END** | The maximum narcotic depth of a mix for your END limit, and its equivalent narcotic depth at any depth |
+| **Gas Density** | The density of a mix at depth, open circuit or CCR, against the recommended limits |
+| **Trimix blender** | The fill procedure for a trimix blend, with billing and a record of past fills |
+
+The END limit and whether oxygen counts as narcotic come from your settings.
+Adding helium pushes the MND deeper, which is why trimix is used for deep diving.
+
+---
+
+## Weight Calculator
+
+The weight calculator predicts how much lead your rig needs and where to put it,
+from your own weighting history, your gear and the physics of your tanks. It has
+its own page: see [Weight Planner](weight-planner.md).
+
+---
+
+## Surface Interval
+
+When you plan a second dive in a day, the surface-interval tool tells you how
+long to wait. It models how your tissues off-gas at the surface and finds the
+shortest surface interval that keeps the next dive within its no-decompression
+limit.
+
+Enter:
+
+- **First Dive:** the depth (6 to 60 m), time (5 to 120 minutes) and gas of the
+  dive you made.
+- **Second Dive:** the depth, time and gas of the dive you plan.
+- Your current surface interval, with the slider under the tissue chart (up to 4
+  hours).
+
+The tool shows the **Minimum Surface Interval**, whether your current interval
+is already enough, and the **NDL for 2nd Dive** once you have waited. If no
+wait of up to six hours makes the second dive a no-stop dive, it says so.
+
+The **Tissue Recovery** chart plots all 16 compartments off-gassing, grouped into
+fast, medium and slow tissues, with markers for now and for the minimum
+interval.
+
+> [!NOTE]
+> This tool uses the Bühlmann ZH-L16C model with your gradient-factor settings.
+> Its results are planning estimates and may differ from your dive computer,
+> which is what you should follow between dives.
+
+---
+
+## Flying after diving
+
+A countdown to when you can fly, from the DAN/UHMS guideline intervals for your
+dives of the last 48 hours: 12, 18 or 24 hours after a single no-deco dive,
+repetitive dives, or a deco dive (or 18, 24 or 48 hours with the Strict
+setting). See [Safety](safety.md#flying-after-diving).
+
+## Current CNS/OTU load
+
+Your oxygen exposure right now. CNS decays with a 90-minute half-time and the
+page updates every minute. OTU is shown against the daily limit of 300 and the
+weekly limit of 850. When everything has cleared, it reads "No active load".
+
+---
+
+Your entries in the deco calculator, the gas calculators and the
+surface-interval tool are kept while the app is open and reset when you restart
+it, with two exceptions: the MOD calculator remembers its inputs, and the
+Trimix blender keeps its fill gases, conditions and billing defaults (also in
+**Settings > Manage > Trimix Mixer**). The
+weight calculator starts fresh each time.
+To keep a dive, save the plan or log it.
+
+## See also
+
+- [Logging Dives](dive-logging.md): record the dive you actually made
+- [Dive Computers](dive-computer.md): download real profiles instead of planning by hand
+- [Settings](settings.md): the gradient factors, ppO₂ limits and units these tools use
+- [Glossary](glossary.md): MOD, END, MND, GF, ppO₂, RMV and the other terms used here
+- [Safety](safety.md): flying after diving, the post-dive review, and the emergency card
+- [Weight Planner](weight-planner.md): predicted lead and placement from your own weighting history

@@ -1,0 +1,560 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/constants/gas_consumption_display.dart';
+import 'package:submersion/core/providers/provider.dart';
+
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/visibility_display.dart';
+import 'package:submersion/features/insights/presentation/info/insights_card_info.dart';
+import 'package:submersion/features/insights/presentation/insights_dive_filters.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_gas_lane_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/site_types/presentation/providers/site_type_providers.dart';
+import 'package:submersion/features/site_types/presentation/site_type_display.dart';
+import 'package:submersion/features/insights/presentation/widgets/horizontal_category_bar_chart.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/presentation/formatters/distribution_labels.dart';
+import 'package:submersion/features/insights/presentation/formatters/water_temp_band_label.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
+import 'package:submersion/features/insights/presentation/widgets/conditions/conditions_card_parts.dart';
+import 'package:submersion/features/insights/presentation/widgets/conditions/site_access_condition_cards.dart';
+import 'package:submersion/features/insights/presentation/widgets/conditions/surface_weather_group.dart';
+import 'package:submersion/features/insights/presentation/widgets/conditions/water_movement_group.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_charts.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
+import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
+import 'package:submersion/features/insights/presentation/widgets/water_temp_band_metrics_table.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+class InsightsConditionsPage extends ConsumerWidget {
+  final bool embedded;
+
+  const InsightsConditionsPage({super.key, this.embedded = false});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
+
+    final content = SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ConditionsGroupHeader(
+            title: context.l10n.insights_conditions_group_water,
+            isFirst: true,
+          ),
+          _buildVisibilitySection(context, ref),
+          const SizedBox(height: 16),
+          _buildWaterTypeSection(context, ref),
+          const SizedBox(height: 16),
+          _buildTemperatureTrendSection(context, ref, units),
+          const SizedBox(height: 16),
+          _buildTemperatureSection(context, ref, units),
+          const SizedBox(height: 16),
+          _buildTemperatureBandSection(context, ref, units),
+          // Each new group brings its own header and top spacing, and hides
+          // itself when nothing in it is recorded (issue #3118).
+          const SurfaceWeatherGroup(),
+          const WaterMovementGroup(),
+          ConditionsGroupHeader(
+            title: context.l10n.insights_conditions_group_siteAccess,
+          ),
+          _buildSiteTypeSection(context, ref),
+          const AltitudeConditionsCard(),
+          const SizedBox(height: 16),
+          _buildEntryMethodSection(context, ref),
+          const ExitMethodConditionsCard(),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_conditions_appBar_title,
+      body: content,
+    );
+  }
+
+  Widget _buildVisibilitySection(BuildContext context, WidgetRef ref) {
+    final visibilityAsync = ref.watch(visibilityDistributionProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_conditions_visibility_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_conditions_visibility_title,
+        summary: context.l10n.info_insights_visibility_summary,
+        terms: const [DiveTerm.loggedBeforeMeasurement, DiveTerm.spansBands],
+      ),
+      subtitle: context.l10n.insights_conditions_visibility_subtitle,
+      child: visibilityAsync.when(
+        data: (raw) {
+          // The repository returns stable keys; localization happens here.
+          final units = ref.watch(unitFormatterProvider);
+          final data = raw
+              .map(
+                (d) => DistributionSegment(
+                  label: visibilityDistributionLabel(
+                    d.label,
+                    context.l10n,
+                    units,
+                  ),
+                  count: d.count,
+                  percentage: d.percentage,
+                ),
+              )
+              .toList();
+          final description = data
+              .map((d) => '${d.label}: ${d.percentage.toStringAsFixed(0)}%')
+              .join(', ');
+          return Semantics(
+            label: context.l10n.insights_conditions_visibility_semanticLabel(
+              description,
+            ),
+            child: DistributionPieChart(
+              data: data,
+              colors: [
+                Colors.green.shade400,
+                Colors.blue.shade400,
+                Colors.orange.shade400,
+                Colors.grey.shade400,
+                // A fifth segment (ranges spanning bands, issue #3226)
+                // would otherwise reuse green.
+                Colors.purple.shade300,
+              ],
+              onOpenSegment: (index) => openChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_conditions_visibility_title,
+                row: data[index].label,
+                load: (repository, diverId, scope) =>
+                    repository.getVisibilityDiveIds(
+                      scale: ref.read(settingsProvider).visibilityScale,
+                      bucket: raw[index].label,
+                      diverId: diverId,
+                      filter: scope,
+                    ),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_conditions_visibility_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWaterTypeSection(BuildContext context, WidgetRef ref) {
+    final waterTypeAsync = ref.watch(waterTypeDistributionProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_conditions_waterType_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_conditions_waterType_title,
+        summary: context.l10n.info_insights_waterType_summary,
+        terms: const [DiveTerm.salinity],
+      ),
+      subtitle: context.l10n.insights_conditions_waterType_subtitle,
+      child: waterTypeAsync.when(
+        data: (raw) {
+          // The repository emits stable WaterType enum names; localization
+          // happens here, matching the visibility section above.
+          final data = localizeDistribution(
+            raw,
+            (key) => waterTypeDistributionLabel(key, context.l10n),
+          );
+          final description = data
+              .map((d) => '${d.label}: ${d.percentage.toStringAsFixed(0)}%')
+              .join(', ');
+          return Semantics(
+            label: context.l10n.insights_conditions_waterType_semanticLabel(
+              description,
+            ),
+            child: DistributionPieChart(
+              data: data,
+              colors: [for (final s in raw) _waterTypeColor(s.label)],
+              onOpenSegment: (index) => openFilteredChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_conditions_waterType_title,
+                row: data[index].label,
+                narrow: (scope) =>
+                    waterTypeDivesFilter(scope, raw[index].label),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_conditions_waterType_error,
+        ),
+      ),
+    );
+  }
+
+  /// Slice color for a water type key. Keyed by value rather than by position,
+  /// so each water type keeps its color whatever order the counts put it in,
+  /// and brackish no longer reuses salt's color.
+  static Color _waterTypeColor(String key) => switch (key) {
+    'salt' => Colors.blue.shade600,
+    'fresh' => Colors.cyan.shade400,
+    'brackish' => Colors.teal.shade500,
+    kNotRecordedDistributionKey => Colors.grey.shade500,
+    _ => Colors.indigo.shade300,
+  };
+
+  /// Dives per site type (issue #1765). Bars, not a pie: a dive at a site
+  /// with several types counts toward each, so the shares overlap.
+  Widget _buildSiteTypeSection(BuildContext context, WidgetRef ref) {
+    final distAsync = ref.watch(siteTypeDistributionProvider);
+    final typesById = ref.watch(siteTypesByIdProvider).value ?? const {};
+
+    return StatSectionCard(
+      title: context.l10n.insights_conditions_siteType_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_conditions_siteType_title,
+        summary: context.l10n.info_insights_siteType_summary,
+      ),
+      subtitle: context.l10n.insights_conditions_siteType_subtitle,
+      child: distAsync.when(
+        data: (raw) {
+          // The repository emits a built-in's slug, translated here, and a
+          // custom type's stored name, shown as is.
+          final data = [
+            for (final s in raw)
+              (
+                label:
+                    typesById[s.label]?.localizedName(context.l10n) ?? s.label,
+                count: s.count,
+              ),
+          ];
+          final description = data
+              .map((d) => '${d.label}: ${d.count}')
+              .join(', ');
+          return Semantics(
+            label: context.l10n.insights_conditions_siteType_semanticLabel(
+              description,
+            ),
+            child: HorizontalCategoryBarChart(
+              data: data,
+              barColor: Colors.teal.shade400,
+              onRowTap: (index) => openChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_conditions_siteType_title,
+                row: data[index].label,
+                load: (repository, diverId, scope) =>
+                    repository.getSiteTypeDiveIds(
+                      siteTypeId: raw[index].key!,
+                      diverId: diverId,
+                      filter: scope,
+                    ),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 120,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_conditions_siteType_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEntryMethodSection(BuildContext context, WidgetRef ref) {
+    final entryMethodAsync = ref.watch(entryMethodDistributionProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_conditions_entryMethod_title,
+      subtitle: context.l10n.insights_conditions_entryMethod_subtitle,
+      child: entryMethodAsync.when(
+        data: (data) {
+          if (data.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.directions_boat,
+              message: context.l10n.insights_conditions_entryMethod_empty,
+            );
+          }
+          final l10n = context.l10n;
+          // The repository emits stable EntryMethod enum names.
+          final chartData = data
+              .map(
+                (d) => (
+                  label: entryMethodDistributionLabel(d.label, l10n),
+                  count: d.count,
+                ),
+              )
+              .toList();
+          final description = chartData
+              .map(
+                (d) =>
+                    '${d.label}: ${l10n.insights_summary_tagUsage_diveCount(d.count)}',
+              )
+              .join(', ');
+          return Semantics(
+            label: l10n.insights_conditions_entryMethod_semanticLabel(
+              description,
+            ),
+            child: CategoryBarChart(
+              data: chartData,
+              barColor: Colors.teal,
+              onOpenBar: (index) => openFilteredChartDives(
+                context,
+                ref,
+                chart: l10n.insights_conditions_entryMethod_title,
+                row: chartData[index].label,
+                narrow: (scope) =>
+                    entryMethodDivesFilter(scope, data[index].label),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_conditions_entryMethod_error,
+        ),
+      ),
+    );
+  }
+
+  /// Water temperature as a time series, one point per dive.
+  ///
+  /// The sibling seasonal chart collapses every year into twelve calendar
+  /// buckets, which is meaningful for a diver with one home region and
+  /// meaningless for one who travels between cold and warm water (issue #299).
+  /// Both are kept because both readings are legitimate.
+  Widget _buildTemperatureTrendSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    return TrendChartSection(
+      chartId: TrendChartIds.waterTemp,
+      onDiveSelected: (diveId) => context.push('/dives/$diveId'),
+      title: context.l10n.insights_conditions_tempTrend_title,
+      infoSummary: context.l10n.info_insights_waterTempTrend_summary,
+      subtitle: context.l10n.insights_conditions_tempTrend_subtitle,
+      pointsAsync: ref.watch(waterTempTrendProvider),
+      errorMessage: context.l10n.insights_conditions_tempTrend_error,
+      lineColor: Colors.teal,
+      valueFormatter: (value) => units.formatTemperature(value),
+      // A per-year rate is a difference: no 32-degree offset in F.
+      rateFormatter: (value) => units.formatTemperatureDelta(value),
+    );
+  }
+
+  Widget _buildTemperatureSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final temperatureAsync = ref.watch(temperatureByMonthProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_conditions_temperature_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_conditions_temperature_title,
+        summary: context.l10n.info_insights_seasonalTemp_summary,
+      ),
+      subtitle: context.l10n.insights_conditions_temperature_subtitle,
+      child: temperatureAsync.when(
+        data: (data) {
+          if (data.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.thermostat,
+              message: context.l10n.insights_conditions_temperature_empty,
+            );
+          }
+
+          final months = insightsMonthLabels(context.l10n);
+
+          List<TrendDataPoint> toTrendData(double? Function(dynamic) selector) {
+            return data.where((d) => selector(d) != null).map((d) {
+              return TrendDataPoint(
+                date: DateTime(2024, d.month),
+                value: selector(d)!,
+                label: months[d.month - 1],
+              );
+            }).toList();
+          }
+
+          final minData = toTrendData((d) => d.minTemp);
+          final avgData = toTrendData((d) => d.avgTemp);
+          final maxData = toTrendData((d) => d.maxTemp);
+
+          return MultiTrendLineChart(
+            dataSeries: [minData, avgData, maxData],
+            seriesLabels: [
+              context.l10n.insights_conditions_temperature_seriesMin,
+              context.l10n.insights_conditions_temperature_seriesAvg,
+              context.l10n.insights_conditions_temperature_seriesMax,
+            ],
+            seriesColors: const [Colors.blue, Colors.green, Colors.red],
+            valueFormatter: (value) => units.formatTemperature(value),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_conditions_temperature_error,
+        ),
+      ),
+    );
+  }
+
+  /// Dives per water-temperature band (issue #1827).
+  ///
+  /// The bands arrive already defined in the diver's temperature unit, so
+  /// each tick carries just the numbers and the unit shows once on the
+  /// x-axis, as the time-at-depth chart does.
+  Widget _buildTemperatureBandSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final bandsAsync = ref.watch(waterTempBandDistributionProvider);
+    final l10n = context.l10n;
+
+    return StatSectionCard(
+      title: l10n.insights_conditions_waterTempBands_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_conditions_waterTempBands_title,
+        summary: context.l10n.info_insights_waterTempBands_summary,
+        terms: gasLaneTerms(
+          isRmv: ref.read(insightsGasLaneProvider) == GasConsumptionLane.rmv,
+        ),
+      ),
+      subtitle: l10n.insights_conditions_waterTempBands_subtitle,
+      child: bandsAsync.when(
+        data: (bands) {
+          if (bands.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.thermostat,
+              message: l10n.insights_conditions_waterTempBands_empty,
+            );
+          }
+          final symbol = units.temperatureSymbol;
+          final chartData = [
+            for (final band in bands)
+              (
+                label: waterTempBandLabel(lower: band.lower, upper: band.upper),
+                count: band.count,
+              ),
+          ];
+          final description = chartData
+              .map(
+                (d) =>
+                    '${d.label}$symbol: ${l10n.insights_summary_tagUsage_diveCount(d.count)}',
+              )
+              .join(', ');
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Semantics(
+                label: l10n.insights_conditions_waterTempBands_semanticLabel(
+                  description,
+                ),
+                child: CategoryBarChart(
+                  data: chartData,
+                  barColor: Colors.cyan.shade600,
+                  valueFormatter: l10n.insights_summary_tagUsage_diveCount,
+                  xAxisLabel: symbol,
+                  onOpenBar: (band) => openChartDives(
+                    context,
+                    ref,
+                    chart: l10n.insights_conditions_waterTempBands_title,
+                    row: '${chartData[band].label} $symbol',
+                    load: (repository, diverId, scope) async {
+                      final bands = await repository.getWaterTempBandPerDive(
+                        unit: ref.read(settingsProvider).temperatureUnit,
+                        diverId: diverId,
+                        filter: scope,
+                      );
+                      return [
+                        for (final entry in bands.entries)
+                          if (entry.value == band) entry.key,
+                      ];
+                    },
+                  ),
+                ),
+              ),
+              _buildTemperatureBandMetrics(context, ref),
+            ],
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: l10n.insights_conditions_waterTempBands_error,
+        ),
+      ),
+    );
+  }
+
+  /// Average SAC and bottom time per band, under the band chart (issue
+  /// #1873). Loads and fails on its own, so a failed average never takes
+  /// the counts down with it.
+  Widget _buildTemperatureBandMetrics(BuildContext context, WidgetRef ref) {
+    return ref
+        .watch(waterTempBandMetricsProvider)
+        .when(
+          data: (bands) => bands.isEmpty
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.only(top: 16),
+                  child: WaterTempBandMetricsTable(bands: bands),
+                ),
+          loading: () => const SizedBox(
+            height: 64,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+          error: (_, _) => StatEmptyState(
+            icon: Icons.error_outline,
+            message:
+                context.l10n.insights_conditions_waterTempBands_table_error,
+          ),
+        );
+  }
+}

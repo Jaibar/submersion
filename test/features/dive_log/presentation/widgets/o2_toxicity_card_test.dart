@@ -1,0 +1,294 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/deco/entities/o2_exposure.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/o2_toxicity_card.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+
+import '../../../../helpers/contrast_ratio.dart';
+import '../../../../helpers/l10n_test_helpers.dart';
+import '../../../../helpers/info_sheets.dart';
+
+void main() {
+  const units = UnitFormatter(AppSettings());
+
+  Widget buildCard(O2Exposure exposure, {Locale? locale}) =>
+      localizedMaterialApp(
+        locale: locale,
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: O2ToxicityCard(exposure: exposure, units: units),
+          ),
+        ),
+      );
+
+  group('O2ToxicityCard CNS minimum note', () {
+    const note = 'An earlier dive has no oxygen data, so this may be higher.';
+
+    testWidgets('shows the note when the starting CNS is a minimum', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(
+            cnsStart: 68,
+            cnsEnd: 72,
+            cnsUnknownDiveAge: Duration(minutes: 20),
+          ),
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(note), findsOneWidget);
+    });
+
+    testWidgets('omits the note when the CNS history is complete', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(cnsStart: 68, cnsEnd: 72),
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(note), findsNothing);
+    });
+  });
+
+  group('O2ToxicityCard "time above ppO2 limit" detail rows', () {
+    testWidgets('shows both rows when the dive spent time above each ceiling', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(
+            maxPpO2: 1.7,
+            maxPpO2Depth: 42,
+            timeAboveWarning: 180,
+            timeAboveCritical: 45,
+          ),
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Default thresholds: warning 1.4 bar, critical 1.6 bar.
+      expect(find.text('Time above 1.4 bar'), findsOneWidget);
+      expect(find.text('Time above 1.6 bar'), findsOneWidget);
+    });
+
+    testWidgets('the threshold follows the configured ppO2 limits', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(
+            maxPpO2: 1.8,
+            maxPpO2Depth: 48,
+            timeAboveWarning: 120,
+            timeAboveCritical: 30,
+            warningThreshold: 1.5,
+            criticalThreshold: 1.6,
+          ),
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Time above 1.5 bar'), findsOneWidget);
+      expect(find.text('Time above 1.6 bar'), findsOneWidget);
+    });
+
+    testWidgets('the row label comes from the active locale', (tester) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(
+            maxPpO2: 1.7,
+            maxPpO2Depth: 40,
+            timeAboveWarning: 90,
+          ),
+          locale: const Locale('fr'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Temps au-dessus de'), findsOneWidget);
+    });
+
+    testWidgets('neither row renders when the dive stayed within limits', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildCard(
+          const O2Exposure(maxPpO2: 1.2, maxPpO2Depth: 20),
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Time above'), findsNothing);
+    });
+  });
+
+  group('O2ToxicityCard live readout (liveCns)', () {
+    Widget buildLive(
+      O2Exposure exposure, {
+      required double liveCns,
+      double? dailyOtu,
+      double? weeklyOtu,
+    }) => localizedMaterialApp(
+      locale: const Locale('en'),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: O2ToxicityCard(
+            exposure: exposure,
+            units: units,
+            showDetails: false,
+            liveCns: liveCns,
+            dailyOtu: dailyOtu,
+            weeklyOtu: weeklyOtu,
+          ),
+        ),
+      ),
+    );
+
+    testWidgets('reads the live CNS but keeps the dive\'s own delta', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildLive(const O2Exposure(cnsStart: 10, cnsEnd: 50), liveCns: 12),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('12%'), findsOneWidget);
+      expect(find.text('50%'), findsNothing);
+      expect(find.text('Before last dive: 10%'), findsOneWidget);
+      expect(find.text('Last dive: +40.0%'), findsOneWidget);
+      expect(find.text('Last Dive'), findsOneWidget);
+    });
+
+    testWidgets('warns on the live CNS, not the dive\'s end value', (
+      tester,
+    ) async {
+      // 90% at the surface (a warning) has decayed to 30% (no warning).
+      await tester.pumpWidget(
+        buildLive(const O2Exposure(cnsEnd: 90), liveCns: 30),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('WARNING'), findsNothing);
+      expect(find.text('CRITICAL'), findsNothing);
+    });
+
+    testWidgets('ignores the dive\'s past ppO2 peak for the badge', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildLive(const O2Exposure(cnsEnd: 5, maxPpO2: 1.7), liveCns: 5),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('CRITICAL'), findsNothing);
+      expect(find.text('WARNING'), findsNothing);
+    });
+
+    testWidgets('the daily row shows the dailyOtu total it is given', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildLive(
+          const O2Exposure(otuStart: 250, otu: 20),
+          liveCns: 0,
+          dailyOtu: 30,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('30 / 300 OTU (10%)'), findsOneWidget);
+      expect(find.textContaining('270 / 300'), findsNothing);
+    });
+  });
+
+  // The badge label was fixed white, which read at about 2:1 on the orange
+  // warning fill in every theme and about 1.5:1 on the light dark-mode error
+  // fill.
+  group('warning and critical badges stay readable', () {
+    Widget buildThemed(Widget child, Brightness brightness) => MaterialApp(
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0077B6),
+          brightness: brightness,
+        ),
+      ),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      locale: const Locale('en'),
+      home: Scaffold(body: SingleChildScrollView(child: child)),
+    );
+
+    double labelContrast(WidgetTester tester, String label) {
+      final text = tester.widget<Text>(find.text(label));
+      final badge = tester.widget<Container>(
+        find
+            .ancestor(of: find.text(label), matching: find.byType(Container))
+            .first,
+      );
+      final fill = (badge.decoration! as BoxDecoration).color!;
+      return contrastRatio(text.style!.color!, fill);
+    }
+
+    const levels = {
+      'CRITICAL': O2Exposure(cnsEnd: 100),
+      'WARNING': O2Exposure(cnsEnd: 85),
+    };
+
+    for (final brightness in Brightness.values) {
+      for (final MapEntry(key: label, value: exposure) in levels.entries) {
+        testWidgets('card $label badge in ${brightness.name} mode', (
+          tester,
+        ) async {
+          await tester.pumpWidget(
+            buildThemed(
+              O2ToxicityCard(exposure: exposure, units: units),
+              brightness,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(labelContrast(tester, label), greaterThanOrEqualTo(4.5));
+        });
+
+        testWidgets('compact panel $label badge in ${brightness.name} mode', (
+          tester,
+        ) async {
+          await tester.pumpWidget(
+            buildThemed(CompactO2ToxicityPanel(exposure: exposure), brightness),
+          );
+          await tester.pumpAndSettle();
+
+          expect(labelContrast(tester, label), greaterThanOrEqualTo(4.5));
+        });
+      }
+    }
+  });
+
+  testWidgets('the header carries an info icon', (tester) async {
+    // The sheet reads the diver's units, which the app's ProviderScope holds.
+    await tester.pumpWidget(
+      ProviderScope(
+        child: buildCard(
+          const O2Exposure(cnsStart: 10, cnsEnd: 20),
+          locale: const Locale('en'),
+        ),
+      ),
+    );
+    expect(find.byType(InfoButton), findsOneWidget);
+    expect(await openEveryInfoSheet(tester), greaterThan(0));
+  });
+}

@@ -1,36 +1,101 @@
 /// File format types that can be detected by the universal import wizard.
 enum ImportFormat {
   csv,
+  // Submersion's own CSV exports (issue #1813): self-describing, so they
+  // skip Map Fields and parse like UDDF.
+  submersionDivesCsv,
+  submersionSitesCsv,
+  submersionEquipmentCsv,
+  submersionFillsCsv,
   uddf,
+  macdiveXml,
+  macdiveSqlite,
   subsurfaceXml,
   divingLogXml,
+  divingLogSqlite,
+
+  /// DiveMate's `.ddb` logbook: Diving Log's SQLite schema, written by
+  /// DiveMate (#3110).
+  diveMateDdb,
   suuntoSml,
   suuntoDm5,
   fit,
   shearwaterDb,
   scubapro,
   danDl7,
+  ratioXml,
   sqlite,
+
+  /// A Seacraft ENC / ENC3 / ENC3-PRO navigation console log (spec
+  /// 2026-09-10-underwater-nav-track-design.md). Deliberately
+  /// `isSupported == false`: this is a measured underwater route, not a
+  /// dive log, so the dive parser registry never sees it -- detection hands
+  /// it to `NavTrackImportReviewPage` instead of the universal import
+  /// pipeline.
+  navTrack,
+
+  /// A Suunto app "export as JSON" (or a saved cloud sml export). Like
+  /// [navTrack] it is a hand-off: the Suunto importer reads it into a dive
+  /// the way the Suunto Cloud import does (so its DiveRoute arrives too,
+  /// issue #1445), not the universal parser registry.
+  suuntoJson,
   unknown;
 
   String get displayName => switch (this) {
     csv => 'CSV',
+    submersionDivesCsv => 'Submersion Dives CSV',
+    submersionSitesCsv => 'Submersion Sites CSV',
+    submersionEquipmentCsv => 'Submersion Equipment CSV',
+    submersionFillsCsv => 'Submersion Fills CSV',
     uddf => 'UDDF',
+    macdiveXml => 'MacDive XML',
+    macdiveSqlite => 'MacDive SQLite',
     subsurfaceXml => 'Subsurface XML',
     divingLogXml => 'Diving Log XML',
+    divingLogSqlite => 'Diving Log',
+    diveMateDdb => 'DiveMate',
     suuntoSml => 'Suunto SML',
     suuntoDm5 => 'Suunto DM5',
     fit => 'Garmin FIT',
     shearwaterDb => 'Shearwater Cloud',
     scubapro => 'Scubapro',
     danDl7 => 'DAN DL7',
+    ratioXml => 'Ratio XML',
     sqlite => 'SQLite Database',
+    navTrack => 'Seacraft ENC log',
+    suuntoJson => 'Suunto JSON',
     unknown => 'Unknown',
   };
 
+  /// Whether the wizard asks the diver to map this format's columns.
+  /// A self-describing format has no Map Fields step to send them back to,
+  /// so a message about the file's columns cannot point at one (#2152).
+  bool get mapsColumns => this == csv;
+
+  /// Recognised, but imported by a dedicated flow rather than the universal
+  /// pipeline: the wizard keeps the file on the file-selection step and
+  /// shows that flow's hand-off card, a batch lists it as needing
+  /// individual import, and a shared or dropped file opens the flow
+  /// directly.
+  bool get isHandoff => this == navTrack || this == suuntoJson;
+
   /// Whether this format has a parser implemented in v1.5.
   bool get isSupported => switch (this) {
-    csv || uddf || subsurfaceXml || fit || shearwaterDb => true,
+    csv ||
+    submersionDivesCsv ||
+    submersionSitesCsv ||
+    submersionEquipmentCsv ||
+    submersionFillsCsv ||
+    uddf ||
+    subsurfaceXml ||
+    fit ||
+    shearwaterDb ||
+    macdiveXml ||
+    macdiveSqlite ||
+    divingLogSqlite ||
+    diveMateDdb ||
+    danDl7 ||
+    ratioXml => true,
     _ => false,
   };
 }
@@ -48,6 +113,8 @@ enum SourceApp {
   scubapro,
   ssiMyDiveGuide,
   dan,
+  diverLog,
+  ratio,
   generic;
 
   String get displayName => switch (this) {
@@ -62,21 +129,35 @@ enum SourceApp {
     scubapro => 'Scubapro',
     ssiMyDiveGuide => 'SSI MyDiveGuide',
     dan => 'DAN',
+    diverLog => 'DiverLog+',
+    ratio => 'Ratio Computers',
     generic => 'Unknown App',
   };
 
   /// Instructions for exporting from this app in a supported format.
   String? get exportInstructions => switch (this) {
     shearwater => null, // Native .db import supported
+    ratio => null, // Native XML import supported
     suunto =>
       'In Suunto DM5, select your dives and go to File > Export > UDDF.',
     scubapro =>
       'In Scubapro LogTRAK, select your dives and export as UDDF format.',
     ssiMyDiveGuide =>
       'In the SSI app, go to My Logbook and export your dives as CSV.',
+    divingLog =>
+      'In Diving Log or DiveLogDT, export your logbook (the SQLite file, '
+          'not DL7) and import it here. The DL7 export carries only depth '
+          'and time, so sites, buddies, equipment, weights and trips are '
+          'not in it.',
     dan =>
-      'DAN DL7 format support is planned for a future update. '
-          'Please export your dives in UDDF format if possible.',
+      'Export your dives as DAN DL7 (.zxu) files and import them directly '
+          'into Submersion.',
+    diverLog =>
+      'In DiverLog+, sync your dives to DiveCloud. Then sign in at '
+          'divecloud.net in a browser, select your dives, and choose Export '
+          'to download a ZIP of DL7 (.zxu) files with photos. Import that '
+          'ZIP directly into Submersion. Desktop DiverLog Full can also '
+          'export .zxu files via Export Dive Data.',
     _ => null,
   };
 }
@@ -109,6 +190,26 @@ class SourceOverrideOption {
       displayName: 'Submersion (UDDF)',
     ),
     SourceOverrideOption(
+      sourceApp: SourceApp.submersion,
+      format: ImportFormat.submersionDivesCsv,
+      displayName: 'Submersion (Dives CSV)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.submersion,
+      format: ImportFormat.submersionSitesCsv,
+      displayName: 'Submersion (Sites CSV)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.submersion,
+      format: ImportFormat.submersionEquipmentCsv,
+      displayName: 'Submersion (Equipment CSV)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.submersion,
+      format: ImportFormat.submersionFillsCsv,
+      displayName: 'Submersion (Fills CSV)',
+    ),
+    SourceOverrideOption(
       sourceApp: SourceApp.subsurface,
       format: ImportFormat.csv,
       displayName: 'Subsurface (CSV)',
@@ -124,14 +225,34 @@ class SourceOverrideOption {
       displayName: 'MacDive (CSV)',
     ),
     SourceOverrideOption(
+      sourceApp: SourceApp.macdive,
+      format: ImportFormat.macdiveXml,
+      displayName: 'MacDive (XML)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.macdive,
+      format: ImportFormat.macdiveSqlite,
+      displayName: 'MacDive (SQLite)',
+    ),
+    SourceOverrideOption(
       sourceApp: SourceApp.divingLog,
       format: ImportFormat.csv,
       displayName: 'Diving Log (CSV)',
     ),
     SourceOverrideOption(
+      sourceApp: SourceApp.divingLog,
+      format: ImportFormat.divingLogSqlite,
+      displayName: 'Diving Log (Logbook)',
+    ),
+    SourceOverrideOption(
       sourceApp: SourceApp.diveMate,
       format: ImportFormat.csv,
       displayName: 'DiveMate (CSV)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.diveMate,
+      format: ImportFormat.diveMateDdb,
+      displayName: 'DiveMate (database)',
     ),
     SourceOverrideOption(
       sourceApp: SourceApp.shearwater,
@@ -167,6 +288,21 @@ class SourceOverrideOption {
       sourceApp: SourceApp.scubapro,
       format: ImportFormat.uddf,
       displayName: 'Scubapro (UDDF)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.diverLog,
+      format: ImportFormat.danDl7,
+      displayName: 'DiverLog+ (DL7)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.dan,
+      format: ImportFormat.danDl7,
+      displayName: 'DAN (DL7)',
+    ),
+    SourceOverrideOption(
+      sourceApp: SourceApp.ratio,
+      format: ImportFormat.ratioXml,
+      displayName: 'Ratio Computers (XML)',
     ),
   ];
 
@@ -205,26 +341,6 @@ class SourceOverrideOption {
   int get hashCode => Object.hash(sourceApp, format);
 }
 
-/// Resolution choice for a dive that was flagged as a potential duplicate.
-///
-/// When a dive match is detected during import, the user can choose how to
-/// handle it:
-/// - [skip]: Do not import this dive at all (default for matched dives).
-/// - [importAsNew]: Import the dive as a brand-new separate entry.
-/// - [consolidate]: Attach the imported data as a secondary computer reading
-///   on the matched existing dive.
-enum DiveDuplicateResolution {
-  skip,
-  importAsNew,
-  consolidate;
-
-  String get displayName => switch (this) {
-    skip => 'Skip',
-    importAsNew => 'Import as New',
-    consolidate => 'Consolidate as additional computer',
-  };
-}
-
 /// Entity types that can be included in an import payload.
 ///
 /// Mirrors the existing `UddfEntityType` but used across all import formats.
@@ -239,7 +355,13 @@ enum ImportEntityType {
   certifications,
   courses,
   tags,
-  diveTypes;
+  diveTypes,
+  serviceRecords,
+  media,
+
+  /// Cylinder fills from the fills CSV (cylinder passports phase 5). Keyed
+  /// by passport id, never by an imported item.
+  fills;
 
   String get displayName => switch (this) {
     dives => 'Dives',
@@ -253,6 +375,9 @@ enum ImportEntityType {
     courses => 'Courses',
     tags => 'Tags',
     diveTypes => 'Dive Types',
+    serviceRecords => 'Service Records',
+    media => 'Photos',
+    fills => 'Fills',
   };
 
   String get shortName => switch (this) {
@@ -267,5 +392,8 @@ enum ImportEntityType {
     courses => 'Courses',
     tags => 'Tags',
     diveTypes => 'Types',
+    serviceRecords => 'Service',
+    media => 'Photos',
+    fills => 'Fills',
   };
 }

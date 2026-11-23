@@ -1,0 +1,92 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/planner/presentation/info/plan_results_info.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_kit.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_results_sheet.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_source_dive_compare_strip.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/planner/domain/services/plan_issue_grouping.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+/// The always-visible results column of Mission Control: headline stat tiles
+/// over the full results content.
+class PlanResultsPane extends ConsumerWidget {
+  const PlanResultsPane({
+    super.key,
+    required this.controller,
+    this.shrinkWrap = false,
+  });
+
+  final ScrollController controller;
+
+  /// When true, the results sheet lays out to its natural height instead of
+  /// scrolling on its own, so it can sit inside an outer scrollable (the
+  /// phone tab deck) rather than fighting it for scroll gestures.
+  final bool shrinkWrap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final outcome = ref.watch(activePlanOutcomeProvider);
+    final scheme = Theme.of(context).colorScheme;
+    final inDeco = outcome.owesDecompression;
+
+    String minutes(int seconds) => "${(seconds / 60).round()}'";
+
+    final tiles = [
+      PlanStatTile(
+        label: context.l10n.divePlanner_label_runtime,
+        value: minutes(outcome.runtimeSeconds),
+      ),
+      if (inDeco)
+        PlanStatTile(
+          label: context.l10n.divePlanner_label_tts,
+          value: minutes(outcome.ttsAtBottom),
+        )
+      else
+        PlanStatTile(
+          label: context.l10n.divePlanner_label_ndl,
+          value: minutes(outcome.ndlAtBottom),
+        ),
+      // CNS is an untranslatable acronym (same precedent as CCR).
+      PlanStatTile(label: 'CNS', value: '${outcome.cnsEnd.round()}%'),
+      PlanStatTile(
+        label: context.l10n.divePlanner_label_warnings,
+        value: '${groupPlanIssues(outcome.issues).length}',
+        emphasisColor: outcome.issues.isEmpty ? null : scheme.error,
+      ),
+    ];
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          child: InfoCorner(
+            title: context.l10n.divePlanner_tab_results,
+            info: (context) => planResultsTilesInfo(
+              context.l10n,
+              infoUnits(context),
+              inDeco: inDeco,
+            ),
+            child: GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              childAspectRatio: 2.2,
+              children: tiles,
+            ),
+          ),
+        ),
+        const PlanSourceDiveCompareStrip(),
+        if (shrinkWrap)
+          PlanResultsSheet(controller: controller, shrinkWrap: true)
+        else
+          Expanded(child: PlanResultsSheet(controller: controller)),
+      ],
+    );
+  }
+}

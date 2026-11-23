@@ -18,6 +18,8 @@ ProfileEvent mapDiveProfileEventToProfileEvent(DiveProfileEvent dbEvent) {
     depth: dbEvent.depth,
     value: dbEvent.value,
     tankId: dbEvent.tankId,
+    source: _parseSource(dbEvent.source),
+    computerId: dbEvent.computerId,
     createdAt: DateTime.fromMillisecondsSinceEpoch(dbEvent.createdAt),
   );
 }
@@ -46,15 +48,41 @@ EventSeverity _parseSeverity(String severity) {
   return EventSeverity.info;
 }
 
+/// Parse a string source to [EventSource] enum.
+///
+/// Falls back to [EventSource.imported] for unknown values — this matches
+/// the DB column's DEFAULT 'imported' and keeps pre-Slice-C rows and any
+/// malformed data interpretable rather than throwing.
+EventSource _parseSource(String source) {
+  for (final value in EventSource.values) {
+    if (value.name == source) {
+      return value;
+    }
+  }
+  return EventSource.imported;
+}
+
 /// Merges auto-detected events with DB-loaded events, deduplicating by
 /// (timestamp, eventType).
 ///
-/// When duplicates exist, the auto-detected event (from [autoEvents]) is
-/// kept. The result is sorted by timestamp ascending.
+/// When duplicates exist, the DB event (from [dbEvents]) is kept: it is the
+/// computer's own record and can carry its exact label (#1523), and the chart
+/// hides computed events by default on a dive that has the computer's, so
+/// keeping the computed one would drop the marker entirely.
+///
+/// [analyzedSource] is set for a per-source analysis and names the computer
+/// whose profile [autoEvents] were computed on; its `computerId` is null for
+/// a source with no computer (a file import). Only that computer's events
+/// (and ones with no computer) then win a tie; another computer's colliding
+/// event is kept alongside the computed one, because the chart hides it
+/// whenever that computer is not shown. A null [analyzedSource] (a
+/// dive-level analysis) lets any DB event win. The result is sorted by
+/// timestamp ascending.
 List<ProfileEvent> mergeEvents(
   List<ProfileEvent> autoEvents,
-  List<ProfileEvent> dbEvents,
-) {
+  List<ProfileEvent> dbEvents, {
+  ({String? computerId})? analyzedSource,
+}) {
   if (dbEvents.isEmpty) return List.of(autoEvents);
   if (autoEvents.isEmpty) {
     final sorted = List.of(dbEvents);
@@ -62,21 +90,54 @@ List<ProfileEvent> mergeEvents(
     return sorted;
   }
 
-  // Build a set of keys from auto-detected events for deduplication
-  final autoKeys = <(int, ProfileEventType)>{};
-  for (final event in autoEvents) {
-    autoKeys.add((event.timestamp, event.eventType));
-  }
+  // Build a set of keys from the DB events that win a tie
+  final dbKeys = <(int, ProfileEventType)>{
+    for (final event in dbEvents)
+      if (event.countsFor(analyzedSource)) (event.timestamp, event.eventType),
+  };
 
-  // Start with all auto-detected events, add non-duplicate DB events
-  final merged = List<ProfileEvent>.of(autoEvents);
-  for (final dbEvent in dbEvents) {
-    final key = (dbEvent.timestamp, dbEvent.eventType);
-    if (!autoKeys.contains(key)) {
-      merged.add(dbEvent);
+  // Start with all DB events, add non-duplicate auto-detected events
+  final merged = List<ProfileEvent>.of(dbEvents);
+  for (final autoEvent in autoEvents) {
+    if (!dbKeys.contains((autoEvent.timestamp, autoEvent.eventType))) {
+      merged.add(autoEvent);
     }
   }
 
   merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
   return merged;
+}
+
+/// [events] with [ProfileEvent.computerManufacturer] filled in from each
+/// event's computer, looked up once per computer through [manufacturerOf].
+/// An event with no computer, or one the lookup does not know, is returned
+/// unchanged.
+///
+/// The manufacturer only refines a marker label, so a lookup that throws
+/// leaves that computer's events unstamped rather than failing the events
+/// (and the profile analysis that awaits them). The repository lookup logs
+/// its own failure.
+Future<List<ProfileEvent>> withComputerManufacturers(
+  List<ProfileEvent> events,
+  Future<String?> Function(String computerId) manufacturerOf,
+) async {
+  final ids = {
+    for (final event in events)
+      if (event.computerId != null) event.computerId!,
+  }.toList();
+  if (ids.isEmpty) return events;
+  final found = await Future.wait([
+    for (final id in ids)
+      manufacturerOf(id).then<String?>((m) => m, onError: (Object _) => null),
+  ]);
+  final manufacturers = {for (var i = 0; i < ids.length; i++) ids[i]: found[i]};
+  return [
+    for (final event in events)
+      switch (manufacturers[event.computerId]) {
+        final String manufacturer => event.copyWith(
+          computerManufacturer: manufacturer,
+        ),
+        null => event,
+      },
+  ];
 }

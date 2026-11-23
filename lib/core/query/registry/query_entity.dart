@@ -1,0 +1,100 @@
+import 'package:meta/meta.dart';
+
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/query/registry/query_field.dart';
+import 'package:submersion/core/query/registry/query_relation.dart';
+
+@immutable
+class QueryEntity {
+  final QuerySubject subject;
+  final String table;
+  final String idColumn;
+
+  /// The per-diver column, or null for a table shared across divers. The
+  /// CALLER scopes the root; the compiler scopes only a hop into an entity
+  /// with [scopesHopsToDiver], and only when the caller names a diver.
+  final String? diverScopeColumn;
+
+  /// Whether rows of this entity reached through a relation belong to the
+  /// active diver alone: a shared site or trip holds several divers' dives,
+  /// and "sites I dived" means mine. Off for an entity another diver's row
+  /// may rightly point at (a dive's shared site is the partner's).
+  final bool scopesHopsToDiver;
+  final List<QueryField> fields;
+  final List<QueryRelation> relations;
+
+  /// What a bare text word searches, as SQL templates over `{r}` with one
+  /// or more `?` each; every `?` binds the LIKE term, already folded by
+  /// `foldForSearch`. A template folds its column with `search_fold(...)` to
+  /// match: LIKE folds ASCII case only, so neither "Écueil" (#3032) nor
+  /// "Jérémie" (#4498) was found without it.
+  final List<String> textSearchSql;
+
+  /// Tables [textSearchSql] and [textSearchExpansions] read besides the
+  /// entity's own.
+  final List<String> textSearchTables;
+
+  /// Text search alternatives whose binds come from the term itself rather
+  /// than from a LIKE: names the database does not hold, or a word that means
+  /// an exact value.
+  final List<TextSearchExpansion> textSearchExpansions;
+
+  /// Set where a sentence typed in plain words should be understood: date
+  /// phrases filter by date and filler words drop (#3457). Null on any entity
+  /// with no date field to filter by, because global search parses one text
+  /// once per record type and a phrase must not refuse the search there.
+  final PlainWordReading? plainWords;
+
+  const QueryEntity({
+    required this.subject,
+    required this.table,
+    this.idColumn = 'id',
+    this.diverScopeColumn,
+    this.scopesHopsToDiver = false,
+    this.fields = const [],
+    this.relations = const [],
+    this.textSearchSql = const [],
+    this.textSearchTables = const [],
+    this.textSearchExpansions = const [],
+    this.plainWords,
+  });
+
+  QueryField? field(String keyOrAlias) =>
+      fields.where((f) => f.matches(keyOrAlias)).firstOrNull;
+
+  QueryRelation? relation(String keyOrAlias) =>
+      relations.where((r) => r.matches(keyOrAlias)).firstOrNull;
+
+  /// Every name a path segment may use here, for suggestions.
+  Iterable<String> get segmentNames => [
+    for (final f in fields) ...[f.key, ...f.aliases],
+    for (final r in relations) ...[r.key, ...r.aliases],
+  ];
+}
+
+/// How an entity reads a sentence typed in plain words (#3457).
+@immutable
+class PlainWordReading {
+  /// The date field a date phrase filters on.
+  final String dateField;
+
+  /// Whether these lower-cased words, in order, are one term (`salt water`).
+  final bool Function(List<String> words) isPhrase;
+
+  const PlainWordReading({required this.dateField, required this.isPhrase});
+}
+
+/// One text search alternative worked out in Dart rather than by a LIKE: a
+/// built-in row's translated labels live in the app, not in its table, and a
+/// whole number names one exact dive number, not a substring.
+///
+/// [values] maps the raw search term to the bind values; [sql] is a template
+/// over `{r}` whose `{values}` becomes one `?` per value. No values leaves the
+/// alternative out, so the compiler never emits an empty `IN ()`.
+@immutable
+class TextSearchExpansion {
+  final String sql;
+  final Iterable<String> Function(String term) values;
+
+  const TextSearchExpansion({required this.sql, required this.values});
+}

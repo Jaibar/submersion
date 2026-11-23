@@ -1,0 +1,410 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:latlong2/latlong.dart';
+
+import 'package:submersion/core/providers/location_service_provider.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/location_service.dart';
+import 'package:submersion/core/theme/full_themes/submersion_theme.dart';
+import 'package:submersion/features/bathymetry/application/bathymetry_providers.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/dive_3d/application/site_seascape_providers.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/seascape_appearance.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_map_content.dart';
+import 'package:submersion/features/maps/domain/entities/heat_map_point.dart';
+import 'package:submersion/features/maps/presentation/providers/heat_map_providers.dart';
+import 'package:submersion/features/maps/presentation/widgets/my_location_button.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/site_scape/presentation/site_terrain_pane.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/glyph_contrast.dart';
+import '../../../../helpers/mock_providers.dart';
+
+DiveSite _site({
+  String id = 'site-1',
+  String name = 'Blue Hole',
+  double lat = 12.34,
+  double lng = 98.76,
+}) {
+  return DiveSite(id: id, name: name, location: GeoPoint(lat, lng));
+}
+
+Future<void> _pump(
+  WidgetTester tester, {
+  required List<SiteWithDiveCount> sites,
+  String? selectedId,
+  ValueListenable<String?>? selection,
+  AppSettings? settings,
+  BathymetryGrid? grid,
+  ThemeData? theme,
+  LocationService? location,
+}) async {
+  final base = await getBaseOverrides(
+    settingsNotifier: settings == null ? null : MockSettingsNotifier(settings),
+  );
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        ...base,
+        sitesWithCountsProvider.overrideWith((ref) async => sites),
+        siteCoverageHeatMapProvider.overrideWith(
+          (ref) async => <HeatMapPoint>[],
+        ),
+        bathymetryGridProvider.overrideWith((ref, cell) async => grid),
+        // Entering 3D must not fire the real seascape pipeline: park the
+        // pane on a terminal state.
+        siteSeascapeProvider.overrideWith(
+          (ref, id) async => const SiteSeascapeNoData(),
+        ),
+        if (location != null)
+          locationServiceProvider.overrideWithValue(location),
+      ],
+      child: MaterialApp(
+        theme: theme,
+        // Pinned: the morph test finds the terrain button by its English
+        // tooltip.
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          // A [selection] lets a test change selectedId on the mounted
+          // widget, the way the list pane does, to reach didUpdateWidget.
+          body: selection == null
+              ? SiteMapContent(selectedId: selectedId, onItemSelected: (_) {})
+              : ValueListenableBuilder<String?>(
+                  valueListenable: selection,
+                  builder: (context, id, _) =>
+                      SiteMapContent(selectedId: id, onItemSelected: (_) {}),
+                ),
+        ),
+      ),
+    ),
+  );
+  // Allow the FutureProviders to resolve and the map to build.
+  await tester.pump();
+  await tester.pump(const Duration(seconds: 1));
+}
+
+// Far enough apart that neither clusters with the other at the fit-all zoom.
+List<SiteWithDiveCount> _twoApartSites() => [
+  SiteWithDiveCount(
+    site: _site(id: 's-a', name: 'Alpha', lat: 10, lng: 20),
+    diveCount: 1,
+  ),
+  SiteWithDiveCount(
+    site: _site(id: 's-b', name: 'Bravo', lat: -10, lng: 40),
+    diveCount: 2,
+  ),
+];
+
+MapCamera _camera(WidgetTester tester) =>
+    tester.widget<FlutterMap>(find.byType(FlutterMap)).mapController!.camera;
+
+/// The on-screen marker for the site called [name] (world copies of it sit
+/// off-screen, so only one is hit-testable).
+Finder _marker(String name) => find
+    .byWidgetPredicate(
+      (w) => w is Semantics && w.properties.label == 'Dive site: $name',
+    )
+    .hitTestable();
+
+/// A device that is always at 25.0, -80.0.
+class _FixedLocation implements LocationService {
+  @override
+  Future<LocationResult?> getCurrentLocation({
+    bool includeGeocoding = true,
+    Duration timeout = const Duration(seconds: 15),
+    String languageCode = LocationService.defaultLanguageCode,
+  }) async => const LocationResult(latitude: 25, longitude: -80);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void _expectCenteredOn(MapCamera camera, LatLng target) {
+  expect(camera.center.latitude, closeTo(target.latitude, 1e-6));
+  expect(camera.center.longitude, closeTo(target.longitude, 1e-6));
+}
+
+void main() {
+  testWidgets('renders the FlutterMap with a dive site marker', (tester) async {
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+    );
+
+    expect(find.byType(FlutterMap), findsOneWidget);
+    expect(find.byIcon(Icons.zoom_out_map), findsOneWidget);
+    expect(find.byType(MyLocationButton), findsOneWidget);
+
+    // Tapping empty map (a corner, away from the centered marker) clears the
+    // selection via the map's onTap. No animation, so this is teardown-safe.
+    await tester.tapAt(
+      tester.getTopLeft(find.byType(FlutterMap)) + const Offset(5, 5),
+    );
+    // Flush flutter_map's double-tap disambiguation timer before teardown.
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(FlutterMap), findsOneWidget);
+  });
+
+  testWidgets('renders the FlutterMap and info card for a selected site', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      selectedId: 'site-1',
+    );
+
+    expect(find.byType(FlutterMap), findsOneWidget);
+    expect(find.text('Blue Hole'), findsOneWidget);
+  });
+
+  // A selected marker fills with primary, which dark themes make a light
+  // tone; the diver glyph stayed white on it (about 1.5:1).
+  testWidgets('selected marker glyph reads on its fill in dark mode', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      selectedId: 'site-1',
+      theme: submersionDark,
+    );
+
+    final glyph = find.byIcon(Icons.scuba_diving);
+    expect(glyph, findsOneWidget);
+    expect(glyphOnFillContrast(tester, glyph), greaterThanOrEqualTo(4.5));
+  });
+
+  testWidgets('depth overlay drapes the selected site when toggled on', (
+    tester,
+  ) async {
+    final grid = BathymetryGrid(
+      originLat: 12.34,
+      originLon: 98.76,
+      cellSizeLatDeg: 0.001,
+      cellSizeLonDeg: 0.001,
+      rows: 3,
+      cols: 3,
+      depthsMeters: const [5, 5, 5, 25, 25, 25, 45, 45, 45],
+      sourceId: 'test',
+      resolutionMeters: 100,
+      fetchedAt: DateTime.utc(2026, 8, 15),
+    );
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      selectedId: 'site-1',
+      settings: const AppSettings(
+        seascapeAppearance: SeascapeAppearance(mapDepthOverlay: true),
+      ),
+      grid: grid,
+    );
+    // The overlay renders through real engine async (PictureRecorder +
+    // PNG encode), which fake test time never runs: give it a runAsync
+    // window, then pump the resulting frame.
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    expect(find.byType(OverlayImageLayer), findsOneWidget);
+  });
+
+  testWidgets('depth overlay stays away when the flag is off', (tester) async {
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      selectedId: 'site-1',
+    );
+    expect(find.byType(OverlayImageLayer), findsNothing);
+  });
+
+  testWidgets('depth overlay needs a selection', (tester) async {
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      settings: const AppSettings(
+        seascapeAppearance: SeascapeAppearance(mapDepthOverlay: true),
+      ),
+    );
+    expect(find.byType(OverlayImageLayer), findsNothing);
+  });
+
+  testWidgets('info card terrain button morphs the pane to 3D in place', (
+    tester,
+  ) async {
+    final grid = BathymetryGrid(
+      originLat: 12.34,
+      originLon: 98.76,
+      cellSizeLatDeg: 0.001,
+      cellSizeLonDeg: 0.001,
+      rows: 3,
+      cols: 3,
+      depthsMeters: const [5, 5, 5, 25, 25, 25, 45, 45, 45],
+      sourceId: 'test',
+      resolutionMeters: 100,
+      fetchedAt: DateTime.utc(2026, 8, 15),
+    );
+    await _pump(
+      tester,
+      sites: [SiteWithDiveCount(site: _site(), diveCount: 3)],
+      selectedId: 'site-1',
+      grid: grid,
+    );
+    expect(find.byType(SiteTerrainPane), findsNothing);
+    // The info card's terrain button (tooltip disambiguates it from the
+    // docked toggle, which also uses Icons.terrain).
+    await tester.tap(find.byTooltip('Site Seascape'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    // No route push: the pane replaced the map inside the same widget.
+    expect(find.byType(SiteTerrainPane), findsOneWidget);
+    expect(find.byKey(const ValueKey('siteScape2dButton')), findsOneWidget);
+    // Back via the docked toggle.
+    await tester.tap(find.byKey(const ValueKey('siteScape2dButton')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(SiteTerrainPane), findsNothing);
+  });
+
+  testWidgets('renders a cluster marker for co-located sites', (tester) async {
+    // Two sites at the SAME location reliably cluster (distance 0 < radius),
+    // exercising the MarkerClusterLayer cluster builder.
+    await _pump(
+      tester,
+      sites: [
+        SiteWithDiveCount(
+          site: _site(id: 's-a', name: 'A'),
+          diveCount: 1,
+        ),
+        SiteWithDiveCount(
+          site: _site(id: 's-b', name: 'B'),
+          diveCount: 2,
+        ),
+      ],
+    );
+
+    expect(find.byType(FlutterMap), findsOneWidget);
+  });
+
+  testWidgets('a new selectedId eases the ready map onto that site', (
+    tester,
+  ) async {
+    final selection = ValueNotifier<String?>(null);
+    addTearDown(selection.dispose);
+    await _pump(tester, sites: _twoApartSites(), selection: selection);
+    // Opens framed on both sites, well wider than the zoom-12 close-up.
+    expect(_camera(tester).zoom, lessThan(10));
+
+    selection.value = 's-b';
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    final camera = _camera(tester);
+    _expectCenteredOn(camera, const LatLng(-10, 40));
+    expect(camera.zoom, closeTo(12, 1e-6));
+  });
+
+  testWidgets('the fit-all button reframes every site after a pan', (
+    tester,
+  ) async {
+    await _pump(tester, sites: _twoApartSites());
+    final framed = _camera(tester);
+
+    // Wander off somewhere else, then ask for every site again.
+    tester
+        .widget<FlutterMap>(find.byType(FlutterMap))
+        .mapController!
+        .move(const LatLng(50, -100), 8);
+    await tester.pump();
+    expect(_camera(tester).zoom, closeTo(8, 1e-6));
+
+    await tester.tap(find.byIcon(Icons.zoom_out_map));
+    await tester.pump();
+
+    final camera = _camera(tester);
+    _expectCenteredOn(camera, framed.center);
+    expect(camera.zoom, closeTo(framed.zoom, 1e-6));
+  });
+
+  // Issue #4808: the crosshair used to be the fit-all button, so pressing
+  // it on a map already framed on every site did nothing at all.
+  testWidgets('Show my location eases the camera onto the device', (
+    tester,
+  ) async {
+    await _pump(tester, sites: _twoApartSites(), location: _FixedLocation());
+    expect(_camera(tester).zoom, lessThan(10));
+
+    await tester.tap(find.byTooltip('Show my location'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    final camera = _camera(tester);
+    _expectCenteredOn(camera, const LatLng(25, -80));
+    expect(camera.zoom, closeTo(12, 1e-6));
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is Semantics && w.properties.label == 'Your location',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('tapping a marker eases the camera onto its site', (
+    tester,
+  ) async {
+    await _pump(tester, sites: _twoApartSites());
+    expect(_camera(tester).zoom, lessThan(10));
+
+    await tester.tap(_marker('Alpha'));
+    // Past flutter_map's double-tap window, then through the ease.
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(seconds: 1));
+
+    final camera = _camera(tester);
+    _expectCenteredOn(camera, const LatLng(10, 20));
+    expect(camera.zoom, closeTo(12, 1e-6));
+  });
+
+  testWidgets('tapping a cluster zooms in to its bounds', (tester) async {
+    // Two co-located sites cluster; a far one keeps the opening fit wide.
+    await _pump(
+      tester,
+      sites: [
+        SiteWithDiveCount(
+          site: _site(id: 's-a', name: 'A'),
+          diveCount: 1,
+        ),
+        SiteWithDiveCount(
+          site: _site(id: 's-b', name: 'B'),
+          diveCount: 2,
+        ),
+        SiteWithDiveCount(
+          site: _site(id: 's-far', name: 'Far', lat: -10, lng: 40),
+          diveCount: 1,
+        ),
+      ],
+    );
+    expect(_camera(tester).zoom, lessThan(10));
+
+    // The cluster layer ignores taps while its opening zoom animation runs,
+    // and the pump helper stops on the frame that starts it.
+    await tester.pump(const Duration(seconds: 1));
+    await tester.tap(find.text('2').hitTestable());
+    // Past flutter_map's double-tap window, then through the ease.
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(seconds: 1));
+
+    // A zero-size cluster bounds fits at animateToBounds' maxZoom of 14.
+    final camera = _camera(tester);
+    _expectCenteredOn(camera, const LatLng(12.34, 98.76));
+    expect(camera.zoom, closeTo(14, 1e-6));
+  });
+}

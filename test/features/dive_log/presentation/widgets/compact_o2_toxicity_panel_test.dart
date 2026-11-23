@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/deco/entities/o2_exposure.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/o2_toxicity_card.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
 
 import '../../../../helpers/l10n_test_helpers.dart';
+import '../../../../helpers/info_sheets.dart';
 
 void main() {
   // Shared exposure: 43 OTU this dive, 42 OTU from prior same-day dives
@@ -124,5 +127,72 @@ void main() {
       // Start = 0, so footer shows "Start: 0 OTU"
       expect(find.text('Start: 0 OTU'), findsOneWidget);
     });
+
+    testWidgets('renders the "time above ppO2 limit" lines when set', (
+      tester,
+    ) async {
+      const overLimit = O2Exposure(
+        cnsStart: 0,
+        cnsEnd: 10,
+        otu: 43,
+        otuStart: 0,
+        maxPpO2: 1.7,
+        maxPpO2Depth: 42,
+        timeAboveWarning: 150,
+        timeAboveCritical: 40,
+        warningThreshold: 1.4,
+        criticalThreshold: 1.6,
+      );
+
+      await tester.pumpWidget(buildPanel(exp: overLimit));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Time above 1.4 bar'), findsOneWidget);
+      expect(find.textContaining('Time above 1.6 bar'), findsOneWidget);
+    });
+
+    testWidgets('omits the "time above" lines when the dive stayed in range', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildPanel()); // shared exposure, maxPpO2 1.3
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Time above'), findsNothing);
+    });
+  });
+
+  group('CompactO2ToxicityPanel CNS minimum note', () {
+    const note = 'An earlier dive has no oxygen data, so this may be higher.';
+
+    testWidgets('shows the note when the starting CNS is a minimum', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildPanel(
+          exp: exposure.copyWith(
+            cnsUnknownDiveAge: const Duration(minutes: 20),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(note), findsOneWidget);
+    });
+
+    testWidgets('omits the note when the CNS history is complete', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildPanel());
+      await tester.pumpAndSettle();
+
+      expect(find.text(note), findsNothing);
+    });
+  });
+
+  testWidgets('header carries an info icon', (tester) async {
+    // The sheet reads the diver's units, which the app's ProviderScope holds.
+    await tester.pumpWidget(ProviderScope(child: buildPanel()));
+    expect(find.byType(InfoButton), findsOneWidget);
+    expect(await openEveryInfoSheet(tester), greaterThan(0));
   });
 }

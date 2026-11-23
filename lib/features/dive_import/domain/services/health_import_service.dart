@@ -1,24 +1,74 @@
+import 'package:submersion/features/dive_import/domain/entities/health_sample.dart';
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart';
+
+/// What the platform health API will tell us about read access.
+///
+/// Apple deliberately refuses to disclose whether *read* access was granted,
+/// so on iOS the answer is almost always [undetermined]. Treating that as
+/// "denied" is what broke Apple Watch import: the only honest reading of
+/// [undetermined] is "try the query and see what comes back".
+enum HealthPermissionStatus {
+  /// No health API on this platform, or it is unusable on this device.
+  unsupported,
+
+  /// The platform confirms we may read the data we asked for.
+  granted,
+
+  /// The platform confirms we may not read the data we asked for.
+  denied,
+
+  /// The platform will not say. Either access has never been requested, or
+  /// (iOS read access) the API refuses to disclose the answer by design.
+  undetermined,
+}
+
+/// Whether it is worth issuing a read query for this status.
+extension HealthPermissionStatusX on HealthPermissionStatus {
+  /// True unless the platform has definitively ruled a read out.
+  ///
+  /// [HealthPermissionStatus.undetermined] counts as readable: on iOS it is
+  /// the normal answer for a granted read, and a query on a genuinely
+  /// unauthorized type simply comes back empty.
+  bool get canAttemptRead =>
+      this != HealthPermissionStatus.unsupported &&
+      this != HealthPermissionStatus.denied;
+}
 
 /// Abstract interface for importing dives from platform health APIs.
 ///
 /// Implementations handle platform-specific APIs:
-/// - [HealthKitService] for Apple Watch (iOS/macOS)
+/// - `HealthKitService` for Apple Watch, iOS only. The `health` package
+///   declares android and ios platforms and nothing else, so there is no
+///   macOS path to support however capable the Mac is.
 /// - Future: GarminService, SuuntoService
 abstract class HealthImportService {
   /// Check if this health import service is available on the current platform.
   ///
-  /// Returns true if the underlying health API is accessible.
+  /// Reports platform capability only — whether a health API exists here at
+  /// all. It says nothing about permissions; use [permissionStatus] for that.
   Future<bool> isAvailable();
 
   /// Request necessary permissions to read dive data.
   ///
-  /// Returns true if all required permissions were granted.
+  /// Returns true if the request completed. On iOS a completed request does
+  /// not imply the user granted anything: Apple will not disclose read access.
+  /// Requesting again once the user has decided is a silent no-op, so callers
+  /// may call this on every visit rather than gating it behind a check.
   Future<bool> requestPermissions();
 
-  /// Check if permissions have already been granted.
+  /// Request read access to heart rate, heart rate variability and sleep,
+  /// for the per-dive health record (issue #637). Like [requestPermissions],
+  /// true means the request completed, not that anything was granted.
+  Future<bool> requestMetricsPermissions();
+
+  /// What the platform will tell us about read access.
+  Future<HealthPermissionStatus> permissionStatus();
+
+  /// Whether the platform *confirms* read access has been granted.
   ///
-  /// Returns true if we can read dive data without prompting.
+  /// This is [permissionStatus] narrowed to [HealthPermissionStatus.granted],
+  /// so it is false whenever the platform declines to answer. Never use it to
+  /// gate a read — use [HealthPermissionStatusX.canAttemptRead].
   Future<bool> hasPermissions();
 
   /// Fetch dives within the specified date range.
@@ -39,6 +89,28 @@ abstract class HealthImportService {
   ///
   /// Returns detailed profile samples including depth, temperature, HR.
   Future<List<ImportedProfileSample>> fetchDiveProfile(String sourceId);
+
+  /// Heart rate samples (bpm) from [start] to [end], from any workout or
+  /// none, in time order (issue #637). Instants are true UTC; empty when
+  /// the read is refused or unsupported.
+  Future<List<HealthSample>> fetchHeartRate({
+    required DateTime start,
+    required DateTime end,
+  });
+
+  /// Heart rate variability (SDNN, ms) samples from [start] to [end], in
+  /// time order, like [fetchHeartRate].
+  Future<List<HealthSample>> fetchHrv({
+    required DateTime start,
+    required DateTime end,
+  });
+
+  /// The stretches Health records as asleep from [start] to [end], in time
+  /// order, like [fetchHeartRate].
+  Future<List<SleepInterval>> fetchSleep({
+    required DateTime start,
+    required DateTime end,
+  });
 
   /// Get the import source type for this service.
   ImportSource get source;

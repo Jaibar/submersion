@@ -2,10 +2,14 @@ import 'package:flutter/material.dart';
 
 import 'package:submersion/core/presentation/widgets/dive_comparison_card.dart';
 import 'package:submersion/core/presentation/widgets/dive_sparkline.dart';
+import 'package:submersion/core/domain/models/incoming_dive_data.dart';
 import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_target_chip.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_trip_line.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/needs_decision_pill.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 
 /// A collapsed/expandable card summarising one duplicate item.
 ///
@@ -46,6 +50,21 @@ class DuplicateActionCard extends StatefulWidget {
   /// warning-colored border and a [NeedsDecisionPill] in the header.
   final bool isPending;
 
+  /// For a planned-fill row (issue #2002): the planned dive's label and the
+  /// action that opens the picker to change or drop the target.
+  final String? plannedDiveLabel;
+  final VoidCallback? onChangeFillTarget;
+
+  /// The other copy, when this row matches another dive in the same import
+  /// (#3110); the expanded card compares the two.
+  final IncomingDiveData? inBatchPartner;
+
+  /// The trip this dive will be saved in (issue #3022), when imported as new
+  /// or merged into a dive that has no trip (the merge passes its trip on).
+  /// Shown for those two actions only: any other leaves the matched dive's
+  /// trip as it is.
+  final String? tripName;
+
   const DuplicateActionCard({
     super.key,
     required this.item,
@@ -56,6 +75,10 @@ class DuplicateActionCard extends StatefulWidget {
     required this.existingDiveId,
     this.projectedDiveNumber,
     this.isPending = false,
+    this.plannedDiveLabel,
+    this.onChangeFillTarget,
+    this.inBatchPartner,
+    this.tripName,
   });
 
   @override
@@ -88,6 +111,7 @@ class _DuplicateActionCardState extends State<DuplicateActionCard> {
       DuplicateAction.consolidate => colorScheme.primary,
       DuplicateAction.skip => score >= 0.7 ? colorScheme.error : Colors.orange,
       DuplicateAction.replaceSource => Colors.blue.shade700,
+      DuplicateAction.fillPlanned => colorScheme.tertiary,
       null => colorScheme.tertiary,
     };
 
@@ -116,6 +140,13 @@ class _DuplicateActionCardState extends State<DuplicateActionCard> {
                 widget.selectedAction == DuplicateAction.importAsNew
                 ? widget.projectedDiveNumber
                 : null,
+            plannedDiveLabel: widget.plannedDiveLabel,
+            onChangeFillTarget: widget.onChangeFillTarget,
+            tripName: switch (widget.selectedAction) {
+              DuplicateAction.importAsNew ||
+              DuplicateAction.consolidate => widget.tripName,
+              _ => null,
+            },
           ),
           if (_expanded) _buildExpanded(context, colorScheme),
         ],
@@ -129,7 +160,7 @@ class _DuplicateActionCardState extends State<DuplicateActionCard> {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Text(
-          'Dive data not available for comparison.',
+          context.l10n.universalImport_compare_noDiveData,
           style: Theme.of(
             context,
           ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
@@ -142,11 +173,21 @@ class _DuplicateActionCardState extends State<DuplicateActionCard> {
       incoming: diveData,
       existingDiveId: widget.existingDiveId,
       matchScore: widget.matchResult.score,
-      incomingLabel: 'Incoming',
+      incomingLabel: context.l10n.universalImport_compare_incoming,
       selectedAction: widget.selectedAction,
       onActionChanged: widget.onActionChanged,
-      availableActions: widget.availableActions,
+      // A copy of another row in this import has no stored dive to fold
+      // into, and neither has a download waiting for its draft to be chosen
+      // (issue #637), so Consolidate is never offered for either.
+      availableActions:
+          widget.matchResult.inBatchIndex == null &&
+              widget.matchResult.fillCandidates.isEmpty
+          ? widget.availableActions
+          : widget.availableActions.difference({DuplicateAction.consolidate}),
       isPending: widget.isPending,
+      showFillPlanned: widget.matchResult.isFill,
+      fillsDraft: widget.matchResult.fillTarget?.kind == FillTargetKind.draft,
+      inBatchPartner: widget.inBatchPartner,
     );
   }
 }
@@ -162,6 +203,9 @@ class _CollapsedHeader extends StatelessWidget {
   final bool isPending;
   final VoidCallback onToggle;
   final int? projectedDiveNumber;
+  final String? plannedDiveLabel;
+  final VoidCallback? onChangeFillTarget;
+  final String? tripName;
 
   const _CollapsedHeader({
     required this.item,
@@ -171,6 +215,9 @@ class _CollapsedHeader extends StatelessWidget {
     required this.onToggle,
     this.isPending = false,
     this.projectedDiveNumber,
+    this.plannedDiveLabel,
+    this.onChangeFillTarget,
+    this.tripName,
   });
 
   @override
@@ -245,6 +292,75 @@ class _CollapsedHeader extends StatelessWidget {
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
+                      if (tripName case final trip?)
+                        ImportTripLine(tripName: trip),
+                      if (item.target case final target?)
+                        ImportTargetChip(target: target),
+                      // A planned-fill row names the dive it fills and offers
+                      // to change the target (issue #2002).
+                      if (matchResult.isFill &&
+                          selectedAction == DuplicateAction.fillPlanned)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                matchResult.fillTarget?.kind ==
+                                        FillTargetKind.draft
+                                    ? context.l10n
+                                          .universalImport_fillDraft_target(
+                                            plannedDiveLabel ??
+                                                matchResult.diveId,
+                                          )
+                                    : context.l10n
+                                          .universalImport_fillPlanned_target(
+                                            plannedDiveLabel ??
+                                                matchResult.diveId,
+                                          ),
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: colorScheme.tertiary,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (onChangeFillTarget != null)
+                              TextButton(
+                                key: const Key('fill_planned_change'),
+                                onPressed: onChangeFillTarget,
+                                child: Text(
+                                  context
+                                      .l10n
+                                      .universalImport_fillPlanned_change,
+                                ),
+                              ),
+                          ],
+                        ),
+                      // More than one draft could take it (issue #637):
+                      // nothing is chosen until the diver picks one.
+                      if (!matchResult.isFill &&
+                          matchResult.fillCandidates.isNotEmpty)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                context.l10n
+                                    .universalImport_fillDraft_ambiguous(
+                                      matchResult.fillCandidates.length,
+                                    ),
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: colorScheme.tertiary,
+                                ),
+                              ),
+                            ),
+                            if (onChangeFillTarget != null)
+                              TextButton(
+                                key: const Key('fill_draft_choose'),
+                                onPressed: onChangeFillTarget,
+                                child: Text(
+                                  context.l10n.universalImport_fillDraft_choose,
+                                ),
+                              ),
+                          ],
+                        ),
                     ],
                   ),
                 ),
@@ -277,7 +393,7 @@ class _CollapsedHeader extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    '$percent% match',
+                    context.l10n.universalImport_label_percentMatch(percent),
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: badgeBorderColor,
                       fontWeight: FontWeight.bold,
@@ -286,7 +402,11 @@ class _CollapsedHeader extends StatelessWidget {
                 ),
                 if (isPending) NeedsDecisionPill(colorScheme: colorScheme),
                 if (selectedAction != null)
-                  _ActionBadge(action: selectedAction!),
+                  _ActionBadge(
+                    action: selectedAction!,
+                    fillsDraft:
+                        matchResult.fillTarget?.kind == FillTargetKind.draft,
+                  ),
               ],
             ),
           ],
@@ -299,16 +419,38 @@ class _CollapsedHeader extends StatelessWidget {
 class _ActionBadge extends StatelessWidget {
   final DuplicateAction action;
 
-  const _ActionBadge({required this.action});
+  /// A fill row whose target is a draft (issue #637) says so.
+  final bool fillsDraft;
+
+  const _ActionBadge({required this.action, this.fillsDraft = false});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = context.l10n;
     final (label, color) = switch (action) {
-      DuplicateAction.skip => ('SKIP', theme.colorScheme.error),
-      DuplicateAction.importAsNew => ('IMPORT', Colors.green.shade700),
-      DuplicateAction.consolidate => ('CONSOLIDATE', Colors.green.shade700),
-      DuplicateAction.replaceSource => ('REPLACE', Colors.blue.shade700),
+      DuplicateAction.skip => (
+        l10n.universalImport_entityAction_skipBadge,
+        theme.colorScheme.error,
+      ),
+      DuplicateAction.importAsNew => (
+        l10n.universalImport_entityAction_importBadge,
+        Colors.green.shade700,
+      ),
+      DuplicateAction.consolidate => (
+        l10n.universalImport_entityAction_consolidateBadge,
+        Colors.green.shade700,
+      ),
+      DuplicateAction.replaceSource => (
+        l10n.universalImport_entityAction_replaceBadge,
+        Colors.blue.shade700,
+      ),
+      DuplicateAction.fillPlanned => (
+        fillsDraft
+            ? l10n.universalImport_label_fillDraft
+            : l10n.universalImport_label_fillPlanned,
+        theme.colorScheme.tertiary,
+      ),
     };
 
     return Container(

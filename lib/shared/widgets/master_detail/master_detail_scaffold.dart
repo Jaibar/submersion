@@ -1,9 +1,54 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/core/app/app_exit_guard.dart';
+import 'package:submersion/core/router/pushed_route.dart';
+import 'package:submersion/core/router/section_navigation.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/master_detail/detail_scroll_retainer.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_route_scope.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
+
+/// Width of the master (list) pane in a split view.
+///
+/// Exposed because it is the app's list-card width: anything rendering the
+/// same list rows outside a split view (the dashboard's recent dives, for
+/// one) has to match it or the same card appears at two different widths.
+const double kMasterPaneWidth = 440;
+
+/// Minimum width the master pane can be resized to.
+const double _kMasterPaneMinWidth = 280;
+
+/// Maximum width the master pane can be resized to.
+const double _kMasterPaneMaxWidth = 700;
+
+/// Width of the space reserved for the detail pane, subtracted from the
+/// available width when computing the resize maximum so the detail pane
+/// always keeps a usable minimum width.
+const double _kDetailPaneReservedWidth = 400;
+
+/// Width of the draggable divider between the master and detail panes.
+const double _kResizeHandleWidth = 8;
+
+/// A create button that [MasterDetailScaffold] re-targets at its create
+/// handler instead of wrapping in its own tap and semantics layer, so the
+/// button alone decides when it takes taps, focus and semantics.
+abstract interface class MasterDetailCreateFab implements Widget {
+  /// This button, calling [onPressed] when pressed.
+  Widget withOnPressed(VoidCallback onPressed);
+}
+
+/// Master pane width, user-resizable via the divider and shared across every
+/// [MasterDetailScaffold] instance for the lifetime of the app session (not
+/// persisted to disk, so it resets on restart).
+final masterPaneWidthProvider = StateProvider<double>(
+  (ref) => kMasterPaneWidth,
+);
 
 /// Mode for the detail pane in master-detail layout.
 enum DetailPaneMode {
@@ -118,7 +163,7 @@ class MasterDetailScaffold extends ConsumerStatefulWidget {
   /// When provided, this replaces the default create-mode navigation.
   final VoidCallback? onFabPressed;
 
-  /// Fixed width of the master pane in pixels (default 440).
+  /// Fixed width of the master pane in pixels (default [kMasterPaneWidth]).
   final double masterWidth;
 
   /// Route path to navigate to on mobile when an item is selected.
@@ -138,6 +183,17 @@ class MasterDetailScaffold extends ConsumerStatefulWidget {
   /// one scaffold's selection from being read by another.
   final String queryParamKey;
 
+  /// The record to reopen in the detail pane when the list is built without
+  /// one in its address: the list's last-opened record, resolved with
+  /// [rememberedListedId] against what the list currently shows (#3301).
+  ///
+  /// Loading makes the pane wait for the list; data(null) leaves it on the
+  /// summary. Null (the default) turns restoring off, for screens that are
+  /// not lists of records. Only a wide window restores, and never a pushed
+  /// list, a map view, or a pane the diver emptied on that same record (see
+  /// [closedPaneRecordProvider]).
+  final AsyncValue<String?>? rememberedSelectedId;
+
   const MasterDetailScaffold({
     super.key,
     required this.sectionId,
@@ -148,12 +204,13 @@ class MasterDetailScaffold extends ConsumerStatefulWidget {
     this.createBuilder,
     this.floatingActionButton,
     this.onFabPressed,
-    this.masterWidth = 440,
+    this.masterWidth = kMasterPaneWidth,
     this.mobileDetailRoute,
     this.mobileEditRoute,
     this.mobileCreateRoute,
     this.mapBuilder,
     this.queryParamKey = 'selected',
+    this.rememberedSelectedId,
   });
 
   @override
@@ -162,16 +219,46 @@ class MasterDetailScaffold extends ConsumerStatefulWidget {
 }
 
 class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
-  /// Get the currently selected item ID from URL query params
-  String? get _selectedId {
-    final state = GoRouterState.of(context);
-    return state.uri.queryParameters[widget.queryParamKey];
+  /// Last known scroll offset of the detail pane, preserved across item
+  /// selections so switching between items keeps the same section in view.
+  /// Mutated on scroll without setState (it must not trigger a rebuild); read
+  /// when a new detail is built. See [DetailScrollRetainer].
+  double _detailScrollOffset = 0;
+
+  /// Whether this mount has decided about reopening
+  /// [MasterDetailScaffold.rememberedSelectedId]. Decided once: a record the
+  /// diver opens, or a list that resolves later, never reopens anything after.
+  bool _restoreSettled = false;
+
+  /// The query this scaffold last read at its own address, under a
+  /// [MasterDetailRouteScope]; see [_query].
+  Map<String, String> _scopedQuery = const {};
+
+  /// The URL's query parameters, or under a [MasterDetailRouteScope] whose
+  /// path is not the current one, the ones last read at that path. A hidden
+  /// tab then keeps its own selection rather than reading the other tab's.
+  Map<String, String> get _query {
+    final uri = GoRouterState.of(context).uri;
+    final scopePath = MasterDetailRouteScope.pathOf(context);
+    if (scopePath == null) return uri.queryParameters;
+    if (uri.path == scopePath) _scopedQuery = uri.queryParameters;
+    return _scopedQuery;
   }
+
+  /// The list address this scaffold's URL changes go to: its
+  /// [MasterDetailRouteScope]'s path, or the current one. Under a scope, a
+  /// save that lands after the diver switched tabs returns to its own tab
+  /// instead of writing its id into the other tab's address.
+  String get _ownPath =>
+      MasterDetailRouteScope.pathOf(context) ??
+      GoRouterState.of(context).uri.path;
+
+  /// Get the currently selected item ID from URL query params
+  String? get _selectedId => _query[widget.queryParamKey];
 
   /// Get the current mode from URL query params
   DetailPaneMode get _mode {
-    final state = GoRouterState.of(context);
-    final modeParam = state.uri.queryParameters['mode'];
+    final modeParam = _query['mode'];
     switch (modeParam) {
       case 'edit':
         return DetailPaneMode.edit;
@@ -183,33 +270,50 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
   }
 
   /// Check if map view is active from URL query params
-  bool get _isMapView {
-    final state = GoRouterState.of(context);
-    return state.uri.queryParameters['view'] == 'map';
-  }
+  bool get _isMapView => _query['view'] == 'map';
 
   /// Navigate to view mode for an item
-  void _onItemSelected(String? itemId) {
-    final router = GoRouter.of(context);
-    final state = GoRouterState.of(context);
-    final currentPath = state.uri.path;
+  ///
+  /// URL changes here go through [SectionNavigation.goInPlace]: a pushed list
+  /// (a site's dives, say) replaces its own URL and keeps the page it was
+  /// opened from, where go() would erase it and the back arrow (#3292).
+  ///
+  /// Changing the selection leaves the record the pane shows: unsaved work
+  /// held there is asked about first (issue #4527).
+  Future<void> _onItemSelected(String? itemId) async {
+    // The record already shown leaves nothing behind: no need to ask. The
+    // pane may show something else in its place (a dive list's pane showing
+    // a site, `&site=`): the selection's address drops that, so it leaves.
+    final key = widget.queryParamKey;
+    final showsElse = _query.keys.any((k) => k != key && k != 'view');
+    final leaving =
+        itemId != _selectedId || _mode != DetailPaneMode.view || showsElse;
+    if (leaving && (!await _mayLeaveShown() || !mounted)) return;
+    final currentPath = _ownPath;
 
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
       // Desktop: Update URL with query param, preserving map view state
-      final key = widget.queryParamKey;
       if (itemId != null) {
         if (_isMapView) {
           // Preserve map view when selecting from map
-          router.go('$currentPath?$key=$itemId&view=map');
+          context.goInPlace('$currentPath?$key=$itemId&view=map');
         } else {
-          router.go('$currentPath?$key=$itemId');
+          context.goInPlace('$currentPath?$key=$itemId');
         }
       } else {
+        // An emptied pane stays empty when the list is returned to, while
+        // the list's remembered record is still the one it showed (#3301).
+        final shownId = _selectedId;
+        if (shownId != null) {
+          ref
+              .read(closedPaneRecordProvider.notifier)
+              .update((closed) => {...closed, widget.sectionId: shownId});
+        }
         // Clear selection, but preserve map view state
         if (_isMapView) {
-          router.go('$currentPath?view=map');
+          context.goInPlace('$currentPath?view=map');
         } else {
-          router.go(currentPath);
+          context.goInPlace(currentPath);
         }
       }
     } else {
@@ -218,52 +322,125 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
         final route =
             widget.mobileDetailRoute?.call(itemId) ??
             '/${widget.sectionId}/$itemId';
-        router.go(route);
+        _openFullPage(route);
       }
     }
   }
 
-  /// Navigate to create mode
-  void _onCreate() {
+  /// Opens [route] as a page of its own: on top of a pushed list, so Back
+  /// returns to it, otherwise with go() as before.
+  void _openFullPage(String route) {
     final router = GoRouter.of(context);
-    final state = GoRouterState.of(context);
-    final currentPath = state.uri.path;
+    if (isImperativelyPushed(context)) {
+      router.push(route);
+    } else {
+      router.go(route);
+    }
+  }
+
+  /// Whether the record the pane shows may be left: true at once unless
+  /// it holds unsaved work and the diver keeps it.
+  Future<bool> _mayLeaveShown() => ref.read(appExitGuardProvider).mayLeave();
+
+  /// Navigate to create mode
+  Future<void> _onCreate() async {
+    if (!await _mayLeaveShown() || !mounted) return;
+    final currentPath = _ownPath;
 
     if (ResponsiveBreakpoints.isMasterDetail(context) &&
         widget.createBuilder != null) {
       // Desktop with create builder: Use query params
-      router.go('$currentPath?mode=new');
+      context.goInPlace('$currentPath?mode=new');
     } else {
       // Mobile or no create builder: Navigate to full page
-      final route = widget.mobileCreateRoute ?? '/${widget.sectionId}/new';
-      router.go(route);
+      _openFullPage(widget.mobileCreateRoute ?? '/${widget.sectionId}/new');
     }
   }
 
   /// Handle save from edit/create mode - go back to view mode
   void _onSaved(String savedId) {
-    final router = GoRouter.of(context);
-    final state = GoRouterState.of(context);
-    final currentPath = state.uri.path;
+    final currentPath = _ownPath;
     final key = widget.queryParamKey;
-    router.go('$currentPath?$key=$savedId');
+    context.goInPlace('$currentPath?$key=$savedId');
   }
 
   /// Handle cancel from edit/create mode - go back to previous state
   void _onCancel() {
-    final router = GoRouter.of(context);
-    final state = GoRouterState.of(context);
-    final currentPath = state.uri.path;
+    final currentPath = _ownPath;
     final selectedId = _selectedId;
 
     if (selectedId != null) {
       // Was editing - go back to view mode
       final key = widget.queryParamKey;
-      router.go('$currentPath?$key=$selectedId');
+      context.goInPlace('$currentPath?$key=$selectedId');
     } else {
       // Was creating - go back to summary
-      router.go(currentPath);
+      context.goInPlace(currentPath);
     }
+  }
+
+  /// Reopens the list's remembered record when this list was built without a
+  /// selection in its address, as returning to it from another section does
+  /// (#3301). The URL stays the one source of what the pane shows: the
+  /// record goes back into it rather than into a second selection state.
+  void _restoreRememberedSelection({
+    required bool isDesktop,
+    required String? selectedId,
+  }) {
+    if (_restoreSettled) return;
+    final remembered = widget.rememberedSelectedId;
+    if (remembered == null ||
+        !isDesktop ||
+        selectedId != null ||
+        _query['mode'] != null ||
+        _isMapView ||
+        isImperativelyPushed(context)) {
+      _restoreSettled = true;
+      return;
+    }
+    // Built under a page of its own, or as a hidden training tab: decided
+    // once the diver comes back to it, which rebuilds this with the route.
+    if (!_isShowing) return;
+    // The list has not loaded yet; the next build checks again.
+    if (!remembered.hasValue) return;
+    _restoreSettled = true;
+    final id = remembered.value;
+    if (id == null) return;
+    if (ref.read(closedPaneRecordProvider)[widget.sectionId] == id) return;
+    final path = _ownPath;
+    final key = widget.queryParamKey;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _selectedId != null) return;
+      context.goInPlace('$path?$key=$id');
+    });
+  }
+
+  /// Whether this list is the page on screen: not a list built underneath a
+  /// page of its own (a record's page reached with go()), whose address a
+  /// restore would rewrite, and not a training tab the diver switched away
+  /// from.
+  bool get _isShowing {
+    final state = GoRouterState.of(context);
+    final scopePath = MasterDetailRouteScope.pathOf(context);
+    return state.uri.path == (scopePath ?? state.matchedLocation);
+  }
+
+  /// Ends the wait for a list that is still loading once the diver scrolls
+  /// it: the pane must not open, nor the list move, after they took over.
+  bool _onMasterScroll(UserScrollNotification notification) {
+    if (notification.direction != ScrollDirection.idle) _restoreSettled = true;
+    return false;
+  }
+
+  /// A record now shows in the pane, so it is no longer one the diver closed.
+  void _forgetClosedPane({required bool isDesktop, required String? shownId}) {
+    if (!isDesktop || shownId == null) return;
+    if (!ref.read(closedPaneRecordProvider).containsKey(widget.sectionId)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) forgetClosedPane(ref, widget.sectionId);
+    });
   }
 
   @override
@@ -271,6 +448,23 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
     final isDesktop = ResponsiveBreakpoints.isMasterDetail(context);
     final selectedId = _selectedId;
     final mode = _mode;
+    _restoreRememberedSelection(isDesktop: isDesktop, selectedId: selectedId);
+    _forgetClosedPane(isDesktop: isDesktop, shownId: selectedId);
+
+    // While an edit/create form is actually shown in the detail pane, keep
+    // keyboard Tab traversal confined to that pane. Without this, Tab crosses
+    // the divider into the master list on the left (issue #444). The list
+    // remains clickable and accessible; only Tab traversal is excluded. The
+    // master pane's create FAB is hidden for the same span (issue #3174).
+    //
+    // These conditions mirror _DetailPane._buildContent so the master pane is
+    // only excluded when the edit/create builder is genuinely rendered (not,
+    // e.g., for `?mode=new` with a null createBuilder, which shows a summary).
+    final isEditingDetail =
+        (mode == DetailPaneMode.create && widget.createBuilder != null) ||
+        (mode == DetailPaneMode.edit &&
+            selectedId != null &&
+            widget.editBuilder != null);
 
     if (!isDesktop) {
       // Mobile: Just show the master pane with Scaffold
@@ -282,39 +476,85 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
       );
     }
 
-    // Desktop: Split view with fixed-width master pane
+    // Desktop: Split view with a user-resizable master pane
     return Scaffold(
-      body: Row(
-        children: [
-          // Master pane (list) with fixed width
-          SizedBox(
-            width: widget.masterWidth,
-            child: _MasterPane(
-              floatingActionButton: widget.floatingActionButton != null
-                  ? _wrapFabForCreate(widget.floatingActionButton!)
-                  : null,
-              child: widget.masterBuilder(context, _onItemSelected, selectedId),
-            ),
-          ),
-          // Vertical divider
-          const VerticalDivider(width: 1, thickness: 1),
-          // Detail pane (or map view)
-          Expanded(
-            child: widget.mapBuilder != null && _isMapView
-                ? widget.mapBuilder!(context, selectedId, _onItemSelected)
-                : _DetailPane(
-                    selectedId: selectedId,
-                    mode: mode,
-                    detailBuilder: widget.detailBuilder,
-                    summaryBuilder: widget.summaryBuilder,
-                    editBuilder: widget.editBuilder,
-                    createBuilder: widget.createBuilder,
-                    onClose: () => _onItemSelected(null),
-                    onSaved: _onSaved,
-                    onCancel: _onCancel,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth =
+              (constraints.maxWidth -
+                      _kDetailPaneReservedWidth -
+                      _kResizeHandleWidth)
+                  .clamp(_kMasterPaneMinWidth, _kMasterPaneMaxWidth);
+          final width = ref
+              .watch(masterPaneWidthProvider)
+              .clamp(_kMasterPaneMinWidth, maxWidth);
+
+          return Row(
+            children: [
+              // Master pane (list), user-resizable
+              SizedBox(
+                key: const Key('master-detail-master-pane'),
+                width: width,
+                child: ExcludeFocusTraversal(
+                  excluding: isEditingDetail,
+                  child: _MasterPane(
+                    // Hidden while a form is open: the FAB sits at the
+                    // form's bottom edge and reads as its submit button, but
+                    // it never saves. It only switches the pane to create
+                    // mode, which drops an open edit form's changes
+                    // unprompted (issue #3174).
+                    floatingActionButton:
+                        widget.floatingActionButton != null && !isEditingDetail
+                        ? _wrapFabForCreate(widget.floatingActionButton!)
+                        : null,
+                    // The list's own create buttons hide for the same span
+                    // (issue #3192).
+                    child: NotificationListener<UserScrollNotification>(
+                      onNotification: _onMasterScroll,
+                      child: MasterDetailFormScope(
+                        isFormOpen: isEditingDetail,
+                        child: widget.masterBuilder(
+                          context,
+                          _onItemSelected,
+                          selectedId,
+                        ),
+                      ),
+                    ),
                   ),
-          ),
-        ],
+                ),
+              ),
+              // Draggable divider
+              _ResizeHandle(
+                onDrag: (delta) {
+                  final notifier = ref.read(masterPaneWidthProvider.notifier);
+                  notifier.state = (notifier.state + delta).clamp(
+                    _kMasterPaneMinWidth,
+                    maxWidth,
+                  );
+                },
+              ),
+              // Detail pane (or map view)
+              Expanded(
+                child: widget.mapBuilder != null && _isMapView
+                    ? widget.mapBuilder!(context, selectedId, _onItemSelected)
+                    : _DetailPane(
+                        selectedId: selectedId,
+                        mode: mode,
+                        detailBuilder: widget.detailBuilder,
+                        summaryBuilder: widget.summaryBuilder,
+                        editBuilder: widget.editBuilder,
+                        createBuilder: widget.createBuilder,
+                        onClose: () => _onItemSelected(null),
+                        onSaved: _onSaved,
+                        onCancel: _onCancel,
+                        detailScrollOffset: _detailScrollOffset,
+                        onDetailScrollOffsetChanged: (offset) =>
+                            _detailScrollOffset = offset,
+                      ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -323,6 +563,7 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
   /// If [onFabPressed] is provided, it replaces the default create behavior.
   Widget _wrapFabForCreate(Widget fab) {
     final handler = widget.onFabPressed ?? _onCreate;
+    if (fab is MasterDetailCreateFab) return fab.withOnPressed(handler);
     if (fab is FloatingActionButton && !fab.isExtended) {
       return FloatingActionButton(
         onPressed: handler,
@@ -340,6 +581,32 @@ class _MasterDetailScaffoldState extends ConsumerState<MasterDetailScaffold> {
       child: GestureDetector(
         onTap: handler,
         child: AbsorbPointer(child: fab),
+      ),
+    );
+  }
+}
+
+/// Draggable divider between the master and detail panes.
+class _ResizeHandle extends StatelessWidget {
+  final ValueChanged<double> onDrag;
+
+  const _ResizeHandle({required this.onDrag});
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: context.l10n.accessibility_label_resizeMasterPane,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: GestureDetector(
+          key: const Key('master-detail-resize-handle'),
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
+          child: const SizedBox(
+            width: _kResizeHandleWidth,
+            child: Center(child: VerticalDivider(width: 1, thickness: 1)),
+          ),
+        ),
       ),
     );
   }
@@ -387,6 +654,12 @@ class _DetailPane extends StatelessWidget {
   final void Function(String savedId) onSaved;
   final VoidCallback onCancel;
 
+  /// Offset to restore into a newly-built detail (see [DetailScrollRetainer]).
+  final double detailScrollOffset;
+
+  /// Records the detail pane's latest user-driven scroll offset.
+  final ValueChanged<double> onDetailScrollOffsetChanged;
+
   const _DetailPane({
     required this.selectedId,
     required this.mode,
@@ -395,6 +668,8 @@ class _DetailPane extends StatelessWidget {
     required this.onClose,
     required this.onSaved,
     required this.onCancel,
+    required this.detailScrollOffset,
+    required this.onDetailScrollOffsetChanged,
     this.editBuilder,
     this.createBuilder,
   });
@@ -428,11 +703,23 @@ class _DetailPane extends StatelessWidget {
       );
     }
 
-    // View mode with selected item
+    // View mode with selected item.
+    //
+    // The ValueKey deliberately rebuilds the detail subtree per item so each
+    // item gets fresh local state. The DetailScrollRetainer sits inside that
+    // per-item subtree and re-applies the pane's scroll offset once the new
+    // content has laid out, so switching items keeps the same section in view
+    // (compare a section across items without re-scrolling). A detail page
+    // opts in by attaching DetailScrollController.maybeOf(context) to its
+    // primary scroll view.
     if (selectedId != null) {
       return KeyedSubtree(
         key: ValueKey('detail_$selectedId'),
-        child: detailBuilder(context, selectedId!),
+        child: DetailScrollRetainer(
+          initialOffset: detailScrollOffset,
+          onOffsetChanged: onDetailScrollOffsetChanged,
+          child: detailBuilder(context, selectedId!),
+        ),
       );
     }
 

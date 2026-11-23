@@ -1,26 +1,39 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'package:submersion/features/dive_log/presentation/utils/chart_drag_crossing.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/domain/services/estimated_profile.dart';
+import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/chart_tank_pressures_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_annotations_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_health_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
 import 'package:submersion/features/dive_log/data/services/profile_markers_service.dart';
+import 'package:submersion/features/dive_log/presentation/utils/sac_normalization.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/estimated_profile_chart.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/chart_buoyancy_inputs.dart';
 
 /// Panel that displays the dive profile chart for the currently highlighted
-/// dive. Tooltip floats as an Overlay on top of all content below.
+/// dive, while the active filter lists it. Tooltip floats as an Overlay on
+/// top of all content below.
 class DiveProfilePanel extends ConsumerWidget {
   const DiveProfilePanel({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final highlightedId = ref.watch(highlightedDiveIdProvider);
+    final highlightedId = ref.watch(listedHighlightedDiveIdProvider);
 
     if (highlightedId == null) {
       return _buildEmptyState(context);
@@ -49,7 +62,7 @@ class DiveProfilePanel extends ConsumerWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Select a dive to view its profile',
+              context.l10n.diveLog_profilePanel_selectDive,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
               ),
@@ -222,11 +235,35 @@ class _DiveProfilePanelContentState
       );
     }
     if (dive.profile.isEmpty) {
+      // A dive logged by hand or imported without samples (#4112): an
+      // outline from its depth and times, drawn only, never stored. Not for
+      // a dive whose stored series is unreadable: it reads empty too.
+      final storedSeries = ref.watch(diveHasProfileSeriesProvider(dive.id));
+      final estimate = EstimatedProfile.forDive(
+        dive,
+        hasStoredSeries: storedSeries.value,
+      );
+      if (estimate != null) {
+        return _framed(context, dive, [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 12, 8),
+            child: EstimatedProfileChart(profile: estimate, height: 160),
+          ),
+        ]);
+      }
+      // Each dive asks afresh, so until the check answers, a dive that could
+      // be drawn says nothing: "No profile data" would blink before every
+      // estimated outline.
+      final awaitingCheck =
+          !storedSeries.hasValue &&
+          !storedSeries.hasError &&
+          EstimatedProfile.forDive(dive, hasStoredSeries: false) != null;
+      if (awaitingCheck) return const SizedBox(height: 100);
       return SizedBox(
         height: 100,
         child: Center(
           child: Text(
-            'No profile data for this dive',
+            context.l10n.diveLog_profilePanel_noProfileData,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
             ),
@@ -238,18 +275,58 @@ class _DiveProfilePanelContentState
   }
 
   Widget _buildProfileContent(BuildContext context, Dive dive) {
+    // The active source's own series on a multi-source dive, dive.profile
+    // (identical to the primary's) otherwise. Never the merged union: on a
+    // consolidated dive it interleaves two computers' samples, and this
+    // panel drew that as a full-band sawtooth with a doubled point count
+    // (#543). The analysis is computed over the same series so its curves
+    // stay index-aligned with what is drawn: sourceProfileAnalysisProvider
+    // resolves a stale selection to the primary the same way the provider
+    // above does.
+    final activeSourceProfile = ref.watch(
+      activeSourceProfileProvider(widget.diveId),
+    );
+    // Heart rate from Apple Health fills a profile that has none (issue
+    // #637); the length and order are unchanged, so the analysis stays
+    // index-aligned.
+    final chartProfile = withHealthHeartRate(
+      ref,
+      dive,
+      activeSourceProfile?.points ?? dive.profile,
+    );
+    // The net buoyancy line (issue #4593), modelled on the drawn series.
+    final buoyancy = watchChartBuoyancy(ref, widget.diveId, chartProfile);
+
+    // AsyncValue.value, not the valueOrNull polyfill: it keeps the previous
+    // value across a provider reload so the chart does not drop a series for
+    // a frame when a background write ticks the dive.
+    //
+    // That retention cannot cross a source switch: the analysis is keyed by
+    // source, so switching moves to a different family instance, which starts
+    // with no value. The outgoing source's curves are therefore never paired
+    // with the incoming source's series. Retention is scoped to a reload of
+    // ONE source's own analysis, where the series is the same one.
     final analysis = ref
-        .watch(profileAnalysisProvider(widget.diveId))
-        .valueOrNull;
-    final gasSwitches = ref
-        .watch(gasSwitchesProvider(widget.diveId))
-        .valueOrNull;
+        .watch(
+          sourceProfileAnalysisProvider((
+            diveId: widget.diveId,
+            sourceId: ref.watch(activeDiveSourceProvider(widget.diveId)),
+          )),
+        )
+        .value;
+    // As the detail and fullscreen charts (#4109): only the annotations the
+    // Notes still link.
+    final chartEvents = mergeChartEvents(
+      analysis?.events,
+      ref.watch(diveAnnotationsProvider(widget.diveId)).value ??
+          const <ProfileEvent>[],
+    );
+    final gasSwitches = ref.watch(gasSwitchesProvider(widget.diveId)).value;
     final tankPressures = ref
-        .watch(tankPressuresProvider(widget.diveId))
-        .valueOrNull;
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
-    final colorScheme = Theme.of(context).colorScheme;
+        .watch(activeSourceTankPressuresProvider(widget.diveId))
+        .value;
+    // Chart-only: real pressures augmented with linear estimates (#197).
+    final chartTankPressures = watchChartTankSeries(ref, widget.diveId);
     final trackingIndex = ref.watch(
       profileTrackingIndexProvider(widget.diveId),
     );
@@ -260,10 +337,10 @@ class _DiveProfilePanelContentState
       showPressureThresholdMarkersProvider,
     );
     final markers = <ProfileMarker>[];
-    if (dive.profile.isNotEmpty) {
+    if (chartProfile.isNotEmpty) {
       if (showMaxDepthMarker && analysis != null) {
         final m = ProfileMarkersService.getMaxDepthMarker(
-          profile: dive.profile,
+          profile: chartProfile,
           maxDepthTimestamp: analysis.maxDepthTimestamp,
           maxDepth: analysis.maxDepth,
         );
@@ -272,7 +349,7 @@ class _DiveProfilePanelContentState
       if (showPressureThresholdMarkers && dive.tanks.isNotEmpty) {
         markers.addAll(
           ProfileMarkersService.getPressureThresholdMarkers(
-            profile: dive.profile,
+            profile: chartProfile,
             tanks: dive.tanks,
             tankPressures: tankPressures,
           ),
@@ -280,135 +357,169 @@ class _DiveProfilePanelContentState
       }
     }
 
-    final siteName = dive.site?.name ?? 'Unknown Site';
-    final diveNumber = dive.diveNumber;
-    final depthText = units.formatDepth(dive.maxDepth);
-    final durationText = dive.effectiveRuntime != null
-        ? '${dive.effectiveRuntime!.inMinutes} min'
-        : '--';
-    final dateText = units.formatDateTime(dive.dateTime, l10n: null);
+    return _framed(context, dive, [
+      // Chart with cursor tracking
+      MouseRegion(
+        onExit: (event) {
+          // A drag that strays off the chart is still a scrub; the chart
+          // clears the cursor through onPointSelected when it ends (#4611).
+          if (isDragCrossing(event)) return;
+          ref.read(profileTrackingIndexProvider(widget.diveId).notifier).state =
+              null;
+        },
+        child: Listener(
+          key: _chartAreaKey,
+          onPointerHover: (e) => _onPointerUpdate(e.position),
+          onPointerMove: (e) => _onPointerUpdate(e.position),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 4, right: 4),
+            child: DiveProfileChart(
+              profile: chartProfile,
+              activeComputerId: activeSourceProfile?.computerId,
+              diveDuration: dive.effectiveRuntime,
+              maxDepth: dive.maxDepth,
+              ceilingCurve: analysis?.ceilingCurve,
+              decoStopCurve: analysis?.decoStopCurve,
+              labelCeilingAsCalculated:
+                  analysis?.computerStopsWithCalculatedCeiling ?? false,
+              ascentRates: analysis?.ascentRates,
+              events: chartEvents,
+              ndlCurve: analysis?.ndlCurve,
+              sacCurve: analysis?.smoothedSacCurve,
+              environment: analysis?.environment ?? DiveEnvironment.standard,
+              ppO2Curve: analysis?.ppO2Curve,
+              o2SensorCurves: analysis?.o2SensorCurves,
+              o2CellMvCurves: analysis?.o2CellMvCurves,
+              ppO2FromSensorAverage: analysis?.ppO2FromSensorAverage ?? false,
+              ppN2Curve: analysis?.ppN2Curve,
+              ppHeCurve: analysis?.ppHeCurve,
+              modCurve: analysis?.modCurve,
+              densityCurve: analysis?.densityCurve,
+              buoyancyCurve: buoyancy.curve,
+              buoyancyAvailable: buoyancy.available,
+              gfCurve: analysis?.gfCurve,
+              surfaceGfCurve: analysis?.surfaceGfCurve,
+              meanDepthCurve: analysis?.meanDepthCurve,
+              ttsCurve: analysis?.ttsCurve,
+              gasSwitchEfficiency: analysis?.gasSwitchEfficiency,
+              counterdiffusion: analysis?.counterdiffusion,
+              gtrCurve: analysis?.gtrCurve,
+              cnsCurve: analysis?.cnsCurve,
+              otuCurve: analysis?.otuCurve,
+              // As the detail and fullscreen charts (#3109): the curve
+              // normalised to Dive.sac, in bar of the reference cylinder,
+              // so that cylinder's volume converts it.
+              tankVolume: dive.sacReferenceVolume,
+              sacNormalizationFactor: calculateSacNormalizationFactor(
+                dive,
+                analysis,
+              ),
+              markers: markers,
+              showMaxDepthMarker: showMaxDepthMarker,
+              showPressureThresholdMarkers: showPressureThresholdMarkers,
+              tanks: dive.tanks,
+              tankPressures: chartTankPressures?.pressures,
+              estimatedTankIds: chartTankPressures?.estimatedTankIds,
+              gasSwitches: gasSwitches,
+              gasSegments: (dive.tanks.isEmpty || chartProfile.isEmpty)
+                  ? null
+                  : activeGasUsageSegments(
+                      dive,
+                      gasSwitches: gasSwitches,
+                      profile: chartProfile,
+                      computerId: activeSourceProfile?.computerId,
+                    ),
+              diveDurationSeconds: chartProfile.isEmpty
+                  ? null
+                  : chartProfile.last.timestamp,
+              tooltipPresentation: TooltipPresentation.external,
+              highlightedTimestamp:
+                  trackingIndex != null && trackingIndex < chartProfile.length
+                  ? chartProfile[trackingIndex].timestamp
+                  : null,
+              onPointSelected: (index) {
+                ref
+                        .read(
+                          profileTrackingIndexProvider(widget.diveId).notifier,
+                        )
+                        .state =
+                    index;
+              },
+              onTooltipData: _onTooltipData,
+            ),
+          ),
+        ),
+      ),
+      // Tiny spacer
+      const SizedBox(height: 4),
+    ]);
+  }
 
+  /// The strip's frame, recorded or estimated: [_buildHeaderBar] above
+  /// [body], with a rule along the bottom.
+  Widget _framed(BuildContext context, Dive dive, List<Widget> body) {
     return Container(
       decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide(color: colorScheme.outlineVariant, width: 1),
+          bottom: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+            width: 1,
+          ),
         ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
+        children: [_buildHeaderBar(context, dive), ...body],
+      ),
+    );
+  }
+
+  /// The dive number, site, date, max depth and runtime above the chart.
+  Widget _buildHeaderBar(BuildContext context, Dive dive) {
+    final units = ref.watch(unitFormatterProvider);
+    final textTheme = Theme.of(context).textTheme;
+    final diveNumber = dive.diveNumber;
+    final runtime = dive.effectiveRuntime;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
         children: [
-          // Header bar
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Row(
-              children: [
-                if (diveNumber != null)
-                  Text(
-                    '#$diveNumber',
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                if (diveNumber != null) const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    siteName,
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  dateText,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  depthText,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  durationText,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-              ],
-            ),
-          ),
-          // Chart with cursor tracking
-          MouseRegion(
-            onExit: (_) {
-              ref
-                      .read(
-                        profileTrackingIndexProvider(widget.diveId).notifier,
-                      )
-                      .state =
-                  null;
-            },
-            child: Listener(
-              key: _chartAreaKey,
-              onPointerHover: (e) => _onPointerUpdate(e.position),
-              onPointerMove: (e) => _onPointerUpdate(e.position),
-              child: Padding(
-                padding: const EdgeInsets.only(left: 4, right: 4),
-                child: DiveProfileChart(
-                  profile: dive.profile,
-                  diveDuration: dive.effectiveRuntime,
-                  maxDepth: dive.maxDepth,
-                  ceilingCurve: analysis?.ceilingCurve,
-                  ascentRates: analysis?.ascentRates,
-                  events: analysis?.events,
-                  ndlCurve: analysis?.ndlCurve,
-                  sacCurve: analysis?.smoothedSacCurve,
-                  ppO2Curve: analysis?.ppO2Curve,
-                  ppN2Curve: analysis?.ppN2Curve,
-                  ppHeCurve: analysis?.ppHeCurve,
-                  modCurve: analysis?.modCurve,
-                  densityCurve: analysis?.densityCurve,
-                  gfCurve: analysis?.gfCurve,
-                  surfaceGfCurve: analysis?.surfaceGfCurve,
-                  meanDepthCurve: analysis?.meanDepthCurve,
-                  ttsCurve: analysis?.ttsCurve,
-                  cnsCurve: analysis?.cnsCurve,
-                  otuCurve: analysis?.otuCurve,
-                  markers: markers,
-                  showMaxDepthMarker: showMaxDepthMarker,
-                  showPressureThresholdMarkers: showPressureThresholdMarkers,
-                  tanks: dive.tanks,
-                  tankPressures: tankPressures,
-                  gasSwitches: gasSwitches,
-                  tooltipBelow: true,
-                  highlightedTimestamp:
-                      trackingIndex != null &&
-                          trackingIndex < dive.profile.length
-                      ? dive.profile[trackingIndex].timestamp
-                      : null,
-                  onPointSelected: (index) {
-                    ref
-                            .read(
-                              profileTrackingIndexProvider(
-                                widget.diveId,
-                              ).notifier,
-                            )
-                            .state =
-                        index;
-                  },
-                  onTooltipData: _onTooltipData,
-                ),
+          if (diveNumber != null) ...[
+            Text(
+              '#$diveNumber',
+              style: textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
               ),
             ),
+            const SizedBox(width: 8),
+          ],
+          Expanded(
+            child: Text(
+              dive.site?.name ?? context.l10n.diveLog_listPage_unknownSite,
+              style: textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          // Tiny spacer
-          const SizedBox(height: 4),
+          const SizedBox(width: 8),
+          Text(
+            units.formatDateTime(dive.dateTime, l10n: context.l10n),
+            style: textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            units.formatDepth(dive.maxDepth),
+            style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            runtime != null ? '${runtime.inMinutes} min' : '--',
+            style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );

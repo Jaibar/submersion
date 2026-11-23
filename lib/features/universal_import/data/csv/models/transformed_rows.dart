@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/features/universal_import/data/csv/transforms/date_order.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 
 /// Output of the Transform stage. Typed field maps with standardized names.
@@ -8,22 +9,39 @@ class TransformedRows extends Equatable {
   /// Values are typed: double, int, DateTime, Duration, String.
   final List<Map<String, dynamic>> rows;
 
+  /// The spreadsheet row of each entry in [rows], numbered as
+  /// [ParsedCsv.sourceRowNumber] numbers them.
+  final List<int> sourceRows;
+
   /// Warnings accumulated during transformation.
   final List<ImportWarning> warnings;
 
   /// The file role these rows came from (e.g., 'primary', 'dive_profile').
   final String fileRole;
 
+  /// How this file's year-last numeric dates were read (the date column, or
+  /// the combined date-time column if there is none). Null when the file had
+  /// no such dates. A companion profile file uses it so both files read
+  /// alike.
+  final DateOrder? dateOrder;
+
   const TransformedRows({
     required this.rows,
+    this.sourceRows = const [],
     this.warnings = const [],
     this.fileRole = 'primary',
+    this.dateOrder,
   });
 
   bool get isEmpty => rows.isEmpty;
   bool get isNotEmpty => rows.isNotEmpty;
   int get rowCount => rows.length;
 
+  /// The spreadsheet row of `rows[index]`, or where it would sit in a file
+  /// with one header line when [sourceRows] does not say.
+  int sourceRowOf(int index) =>
+      index < sourceRows.length ? sourceRows[index] : index + 2;
+
   @override
-  List<Object?> get props => [rows, warnings, fileRole];
+  List<Object?> get props => [rows, warnings, fileRole, dateOrder, sourceRows];
 }

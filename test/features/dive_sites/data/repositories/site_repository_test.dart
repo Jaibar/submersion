@@ -32,6 +32,202 @@ void main() {
   });
 
   group('SiteRepository', () {
+    test('dive_sites table persists city and island columns', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await database
+          .into(database.diveSites)
+          .insert(
+            db.DiveSitesCompanion.insert(
+              id: 'site-ci',
+              name: 'Test Site',
+              createdAt: now,
+              updatedAt: now,
+              city: const Value('Cebu City'),
+              island: const Value('Malapascua'),
+              bodyOfWater: const Value('Visayan Sea'),
+            ),
+          );
+      final row = await (database.select(
+        database.diveSites,
+      )..where((t) => t.id.equals('site-ci'))).getSingle();
+      expect(row.city, 'Cebu City');
+      expect(row.island, 'Malapascua');
+      expect(row.bodyOfWater, 'Visayan Sea');
+    });
+
+    test('create then read round-trips city, island, bodyOfWater', () async {
+      const site = DiveSite(
+        id: 'rt-1',
+        name: 'Round Trip',
+        city: 'Cebu City',
+        island: 'Malapascua',
+        bodyOfWater: 'Visayan Sea',
+      );
+      await repository.createSite(site);
+      final loaded = await repository.getSiteById('rt-1');
+      expect(loaded!.city, 'Cebu City');
+      expect(loaded.island, 'Malapascua');
+      expect(loaded.bodyOfWater, 'Visayan Sea');
+    });
+
+    test('create then read round-trips waterType', () async {
+      const site = DiveSite(
+        id: 'wt-1',
+        name: 'Water Type Site',
+        waterType: WaterType.brackish,
+      );
+      await repository.createSite(site);
+      final loaded = await repository.getSiteById('wt-1');
+      expect(loaded!.waterType, WaterType.brackish);
+    });
+
+    test('imported water_type column is read back into the entity', () async {
+      // Importers write the column directly (no entity mapping).
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await database
+          .into(database.diveSites)
+          .insert(
+            db.DiveSitesCompanion.insert(
+              id: 'wt-ghost',
+              name: 'Imported Site',
+              createdAt: now,
+              updatedAt: now,
+              waterType: const Value('salt'),
+            ),
+          );
+      final loaded = await repository.getSiteById('wt-ghost');
+      expect(loaded!.waterType, WaterType.salt);
+    });
+
+    test('unknown water_type string maps to null (no crash)', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await database
+          .into(database.diveSites)
+          .insert(
+            db.DiveSitesCompanion.insert(
+              id: 'wt-bad',
+              name: 'Bad Water Type',
+              createdAt: now,
+              updatedAt: now,
+              waterType: const Value('lava'),
+            ),
+          );
+      final loaded = await repository.getSiteById('wt-bad');
+      expect(loaded!.waterType, isNull);
+    });
+
+    test('updateSite persists a changed waterType', () async {
+      const site = DiveSite(
+        id: 'wt-up',
+        name: 'Upd',
+        waterType: WaterType.salt,
+      );
+      await repository.createSite(site);
+      await repository.updateSite(site.copyWith(waterType: WaterType.fresh));
+      final loaded = await repository.getSiteById('wt-up');
+      expect(loaded!.waterType, WaterType.fresh);
+    });
+
+    test(
+      'waterType survives Drift row JSON serialization (sync path)',
+      () async {
+        // Sync serializes each row with row.toJson(); this proves the column
+        // rides that generic path. Key-agnostic: fromJson reads back whatever
+        // key toJson wrote.
+        const site = DiveSite(
+          id: 'wt-json',
+          name: 'JSON Site',
+          waterType: WaterType.fresh,
+        );
+        await repository.createSite(site);
+        final row = await (database.select(
+          database.diveSites,
+        )..where((t) => t.id.equals('wt-json'))).getSingle();
+        final restored = db.DiveSite.fromJson(row.toJson());
+        expect(restored.waterType, 'fresh');
+      },
+    );
+
+    test('imported body_of_water is now read back into the entity', () async {
+      // Simulate an importer writing the column directly (no entity mapping).
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await database
+          .into(database.diveSites)
+          .insert(
+            db.DiveSitesCompanion.insert(
+              id: 'ghost-1',
+              name: 'Ghost Column Site',
+              createdAt: now,
+              updatedAt: now,
+              bodyOfWater: const Value('Coral Sea'),
+            ),
+          );
+      final loaded = await repository.getSiteById('ghost-1');
+      expect(loaded!.bodyOfWater, 'Coral Sea');
+    });
+
+    test('search matches city, island, and bodyOfWater', () async {
+      await repository.createSite(
+        const DiveSite(id: 'q-1', name: 'Alpha', city: 'Naxos Town'),
+      );
+      await repository.createSite(
+        const DiveSite(id: 'q-2', name: 'Beta', island: 'Santorini'),
+      );
+      await repository.createSite(
+        const DiveSite(id: 'q-3', name: 'Gamma', bodyOfWater: 'Aegean Sea'),
+      );
+      expect((await repository.searchSites('Naxos')).map((s) => s.id), ['q-1']);
+      expect((await repository.searchSites('Santorini')).map((s) => s.id), [
+        'q-2',
+      ]);
+      expect((await repository.searchSites('Aegean')).map((s) => s.id), [
+        'q-3',
+      ]);
+    });
+
+    test('search finds a country stored in its own language by its name '
+        'in another (#4520)', () async {
+      await repository.createSite(
+        const DiveSite(id: 'c-th', name: 'Sail Rock', country: 'ประเทศไทย'),
+      );
+      await repository.createSite(
+        const DiveSite(id: 'c-co', name: 'La source', country: 'Colombia'),
+      );
+      for (final query in ['Thailand', 'Thaïlande', 'thai']) {
+        expect((await repository.searchSites(query)).map((s) => s.id), [
+          'c-th',
+        ], reason: query);
+      }
+    });
+
+    test('search finds a country stored before its name was readable, with '
+        'no code (#4520)', () async {
+      // The v361 backfill could not read these names, so they kept no code.
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final (id, country) in [
+        ('u-th', 'ประเทศไทย'),
+        ('u-ch', 'Schweiz/Suisse/Svizzera/Svizra'),
+      ]) {
+        await database
+            .into(database.diveSites)
+            .insert(
+              db.DiveSitesCompanion.insert(
+                id: id,
+                name: 'Uncoded $id',
+                createdAt: now,
+                updatedAt: now,
+                country: Value(country),
+              ),
+            );
+      }
+      expect((await repository.searchSites('Thailand')).map((s) => s.id), [
+        'u-th',
+      ]);
+      expect((await repository.searchSites('Switzerland')).map((s) => s.id), [
+        'u-ch',
+      ]);
+    });
+
     group('createSite', () {
       test(
         'should create a new site with generated ID when ID is empty',
@@ -145,6 +341,20 @@ void main() {
         expect(result[0].name, equals('Alpha Point'));
         expect(result[1].name, equals('Manta Bay'));
         expect(result[2].name, equals('Zebra Reef'));
+      });
+
+      test('orders by name ignoring case and accents (issue #2038)', () async {
+        for (final name in ['Zebra Reef', 'plage', 'Écueil', 'anchor reef']) {
+          await repository.createSite(DiveSite(id: '', name: name));
+        }
+
+        const expected = ['anchor reef', 'Écueil', 'plage', 'Zebra Reef'];
+        expect((await repository.getAllSites()).map((s) => s.name), expected);
+        // searchSites shares the ordering; every name contains an "e".
+        expect(
+          (await repository.searchSites('e')).map((s) => s.name),
+          expected,
+        );
       });
     });
 
@@ -370,6 +580,38 @@ void main() {
         expect(await repository.getSiteById('y'), isNotNull);
         expect(await repository.getSiteById('z'), isNull);
       });
+
+      test(
+        'should write one tombstone per site, each with its own clock',
+        () async {
+          await repository.createSite(const DiveSite(id: 'x', name: 'X Site'));
+          await repository.createSite(const DiveSite(id: 'y', name: 'Y Site'));
+          await repository.createSite(const DiveSite(id: 'z', name: 'Z Site'));
+
+          await repository.bulkDeleteSites(['x', 'z']);
+
+          final tombstones = await (database.select(
+            database.deletionLog,
+          )..where((t) => t.entityType.equals('diveSites'))).get();
+          expect(
+            tombstones.map((t) => t.recordId),
+            unorderedEquals(['x', 'z']),
+          );
+          expect(
+            tombstones.map((t) => t.hlc).toSet(),
+            hasLength(2),
+            reason: 'each site delete is its own event',
+          );
+          for (final t in tombstones) {
+            expect(t.hlc, isNotNull);
+            expect(
+              t.originHlc,
+              t.hlc,
+              reason: 'a local delete is its own origin',
+            );
+          }
+        },
+      );
 
       test('should no-op for empty list', () async {
         await repository.createSite(
@@ -704,6 +946,39 @@ void main() {
         expect(results.length, equals(1));
         expect(results[0].name, equals('Blue Hole'));
       });
+
+      // Issue #3377: LIKE folds ASCII only, so "österreich" missed a site in
+      // "Österreich" and an umlaut could only be found in its typed case.
+      test('folds non-ASCII capitals in every searched column', () async {
+        await repository.createSite(
+          const DiveSite(
+            id: 'at-1',
+            name: 'Österreich - Fernsteinsee',
+            country: 'Österreich',
+            region: 'Tirol',
+          ),
+        );
+        await repository.createSite(
+          const DiveSite(
+            id: 'eg-1',
+            name: 'Abu Dabbab 3',
+            country: 'Ägypten',
+            city: 'Marsa Alam',
+            island: 'Übersee',
+            bodyOfWater: 'Rotes Meer',
+          ),
+        );
+
+        Future<List<String>> ids(String q) async =>
+            (await repository.searchSites(q)).map((s) => s.id).toList();
+
+        expect(await ids('österreich'), ['at-1']);
+        expect(await ids('ÖSTERREICH'), ['at-1']);
+        expect(await ids('ägypten'), ['eg-1']);
+        expect(await ids('übersee'), ['eg-1']);
+        expect(await ids('MARSA'), ['eg-1']);
+        expect(await ids('rotes MEER'), ['eg-1']);
+      });
     });
 
     group('getDiveCountsBySite', () {
@@ -732,6 +1007,182 @@ void main() {
           expect(results[1].diveCount, equals(0));
         },
       );
+
+      test("a shared site's figures are the diver's own dives", () async {
+        // As a shared trip's stats are: the partner's dives at a site they
+        // share are theirs, not the diver's.
+        const ts = 1700000000000;
+        for (final id in ['A', 'B']) {
+          await database
+              .into(database.divers)
+              .insert(
+                db.DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+        final site = await repository.createSite(
+          const DiveSite(id: '', name: 'Shared', diverId: 'B', isShared: true),
+        );
+        for (final (id, diver, depth) in [
+          ('a1', 'A', 8.0),
+          ('b1', 'B', 30.0),
+          ('b2', 'B', 25.0),
+        ]) {
+          await database
+              .into(database.dives)
+              .insert(
+                db.DivesCompanion(
+                  id: Value(id),
+                  diverId: Value(diver),
+                  siteId: Value(site.id),
+                  maxDepth: Value(depth),
+                  diveDateTime: const Value(ts),
+                  createdAt: const Value(ts),
+                  updatedAt: const Value(ts),
+                ),
+              );
+        }
+
+        final mine = (await repository.getSitesWithDiveCounts(
+          diverId: 'A',
+        )).singleWhere((s) => s.site.id == site.id);
+        expect(mine.diveCount, 1);
+        expect(mine.maxDepthReached, 8.0);
+
+        final everyone = (await repository.getSitesWithDiveCounts())
+            .singleWhere((s) => s.site.id == site.id);
+        expect(everyone.diveCount, 3);
+      });
+    });
+
+    group('isShared persistence', () {
+      test('createSite persists isShared=true', () async {
+        const site = DiveSite(id: '', name: 'Shared Reef', isShared: true);
+        final created = await repository.createSite(site);
+
+        final readBack = await repository.getSiteById(created.id);
+        expect(readBack, isNotNull);
+        expect(readBack!.isShared, isTrue);
+      });
+
+      test('createSite defaults isShared to false', () async {
+        const site = DiveSite(id: '', name: 'Default Reef');
+        final created = await repository.createSite(site);
+
+        final readBack = await repository.getSiteById(created.id);
+        expect(readBack!.isShared, isFalse);
+      });
+
+      test('updateSite persists isShared changes', () async {
+        const site = DiveSite(id: '', name: 'Toggle');
+        final created = await repository.createSite(site);
+
+        await repository.updateSite(created.copyWith(isShared: true));
+
+        final readBack = await repository.getSiteById(created.id);
+        expect(readBack!.isShared, isTrue);
+      });
+    });
+
+    group('sharing actions', () {
+      late db.AppDatabase dbInstance;
+      const ts = 1700000000000;
+
+      setUp(() async {
+        dbInstance = DatabaseService.instance.database;
+        for (final id in ['A', 'B']) {
+          await dbInstance
+              .into(dbInstance.divers)
+              .insert(
+                db.DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+      });
+    });
+
+    group('visibility filter', () {
+      late db.AppDatabase dbInstance;
+      const ts = 1700000000000;
+
+      setUp(() async {
+        dbInstance = DatabaseService.instance.database;
+        for (final id in ['A', 'B', 'C']) {
+          await dbInstance
+              .into(dbInstance.divers)
+              .insert(
+                db.DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+      });
+
+      test('getAllSites returns owner + shared for a given diver', () async {
+        await repository.createSite(
+          const DiveSite(id: '', name: 'Salt A', diverId: 'A'),
+        );
+        await repository.createSite(
+          const DiveSite(id: '', name: 'Pier B', diverId: 'B'),
+        );
+        await repository.createSite(
+          const DiveSite(
+            id: '',
+            name: 'Shared Reef',
+            diverId: 'B',
+            isShared: true,
+          ),
+        );
+
+        final names = (await repository.getAllSites(
+          diverId: 'A',
+        )).map((s) => s.name).toSet();
+        expect(names, equals({'Salt A', 'Shared Reef'}));
+      });
+
+      test('getAllSites with null diverId returns everything', () async {
+        await repository.createSite(
+          const DiveSite(id: '', name: 'One', diverId: 'A'),
+        );
+        await repository.createSite(
+          const DiveSite(id: '', name: 'Two', diverId: 'B'),
+        );
+
+        final sites = await repository.getAllSites();
+        expect(sites.length, equals(2));
+      });
+
+      test('searchSites honors visibility filter', () async {
+        await repository.createSite(
+          const DiveSite(id: '', name: 'Bonaire Reef', diverId: 'A'),
+        );
+        await repository.createSite(
+          const DiveSite(
+            id: '',
+            name: 'Bonaire Pier',
+            diverId: 'B',
+            isShared: true,
+          ),
+        );
+        await repository.createSite(
+          const DiveSite(id: '', name: 'Bonaire Private', diverId: 'C'),
+        );
+
+        final results = await repository.searchSites('Bonaire', diverId: 'A');
+        final names = results.map((s) => s.name).toSet();
+        expect(names, equals({'Bonaire Reef', 'Bonaire Pier'}));
+      });
     });
   });
 

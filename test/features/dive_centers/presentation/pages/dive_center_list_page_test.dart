@@ -7,7 +7,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_centers/domain/constants/dive_center_field.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
-import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_page.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_routes.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_list_page.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_list_content.dart';
@@ -17,10 +17,12 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,11 +97,14 @@ Future<List<Override>> _buildOverrides({
 
   return [
     sharedPreferencesProvider.overrideWithValue(prefs),
-    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    // The view mode is read from the diver's saved settings (#3748).
+    settingsProvider.overrideWith(
+      (ref) =>
+          MockSettingsNotifier(AppSettings(diveCenterListViewMode: viewMode)),
+    ),
     currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
     allDiveCentersProvider.overrideWith((ref) async => <DiveCenter>[]),
     diveCenterListNotifierProvider.overrideWith((ref) => _MockDCListNotifier()),
-    diveCenterListViewModeProvider.overrideWith((ref) => viewMode),
     diveCenterTableConfigProvider.overrideWith(
       (ref) => _TestDCTableConfigNotifier(),
     ),
@@ -111,6 +116,37 @@ Future<List<Override>> _buildOverrides({
 // ---------------------------------------------------------------------------
 
 void main() {
+  // The pane a diver emptied is remembered per section, so the table and the
+  // list must agree on the section, or switching view reopens it (#3301).
+  testWidgets('the table\'s detail pane uses the list\'s section', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1400, 900);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final overrides = [
+      ...await _buildOverrides(viewMode: ListViewMode.table),
+      tableDetailsPaneProvider('diveCenters').overrideWith((ref) => true),
+    ];
+    await tester.pumpWidget(
+      _buildTestWidget(child: const DiveCenterListPage(), overrides: overrides),
+    );
+    await tester.pump();
+    // The empty list's row can overflow at this size; only the branch counts.
+    final error = tester.takeException();
+    expect(error == null || error.toString().contains('overflowed'), isTrue);
+
+    expect(
+      tester
+          .widget<MasterDetailScaffold>(find.byType(MasterDetailScaffold))
+          .sectionId,
+      'dive-centers',
+    );
+  });
+
   group('DiveCenterListPage layout branches', () {
     // The DiveCenterListContent empty-state has a Row that can overflow
     // at narrow widths. We suppress overflow errors here since these tests
@@ -167,6 +203,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TableModeLayout), findsOneWidget);
+      // Table mode titles the list with its entry count (#2669).
+      expect(
+        tester
+            .widget<TableModeLayout>(find.byType(TableModeLayout))
+            .appBarSubtitle,
+        isNotNull,
+      );
     });
 
     testWidgets('desktop mode renders MasterDetailScaffold', (tester) async {
@@ -326,7 +369,7 @@ void main() {
       await tester.tap(find.byIcon(Icons.search));
       await tester.pumpAndSettle();
 
-      // The search delegate should open, showing a search bar
+      // The search row opens under the app bar
       expect(find.byType(TextField), findsOneWidget);
     });
 
@@ -380,6 +423,104 @@ void main() {
       expect(find.text('Detailed'), findsOneWidget);
       expect(find.text('Compact'), findsOneWidget);
       expect(find.text('Table'), findsOneWidget);
+    });
+
+    // Table mode has no app bar inside the list, so "Select items" lives in
+    // the page header's overflow menu and drives the list through the
+    // controller the page hands it (issue #2775).
+    group('table mode "Select items"', () {
+      Future<void> pumpTablePage(WidgetTester tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await _buildOverrides(viewMode: ListViewMode.table);
+        await tester.pumpWidget(
+          _buildTestWidget(
+            child: const DiveCenterListPage(),
+            overrides: overrides,
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shows no separate Select strip above the table', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+        expect(find.byIcon(Icons.checklist), findsNothing);
+      });
+
+      testWidgets('is the first overflow entry and enters selection', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        await tester.tap(find.byIcon(Icons.more_vert));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+          lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+        );
+
+        await tester.tap(find.byKey(selectItemsMenuKey));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+        expect(find.text('0 selected'), findsOneWidget);
+      });
+
+      testWidgets('leaves the entry out while selecting', (tester) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+
+        // The header's overflow, not the selection bar's.
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byIcon(Icons.more_vert),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Detailed'), findsOneWidget);
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+      });
+
+      testWidgets('selection does not outlive leaving table mode', (
+        tester,
+      ) async {
+        // A row of the outgoing table layout overflows for the frame it is
+        // torn down in, as the file's view-mode test below also allows.
+        final originalOnError = FlutterError.onError;
+        FlutterError.onError = (details) {
+          if (details.toString().contains('overflowed')) return;
+          originalOnError?.call(details);
+        };
+        addTearDown(() => FlutterError.onError = originalOnError);
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(DiveCenterListPage)),
+        );
+        container
+            .read(settingsProvider.notifier)
+            .setDiveCenterListViewMode(ListViewMode.detailed);
+        await tester.pumpAndSettle();
+        container
+            .read(settingsProvider.notifier)
+            .setDiveCenterListViewMode(ListViewMode.table);
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      });
     });
 
     testWidgets('table mode popup menu changes view mode', (tester) async {
@@ -573,7 +714,7 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(DiveCenterEditPage), findsOneWidget);
+      expect(find.byType(DiveCenterDetailPage), findsOneWidget);
     });
 
     testWidgets('table mode edit builder invoked via edit query param', (
@@ -603,7 +744,120 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(DiveCenterEditPage), findsOneWidget);
+      expect(find.byType(DiveCenterDetailPage), findsOneWidget);
     });
+  });
+
+  group('empty list beside the create form (issue #3192)', () {
+    Future<void> pumpWideEmptyList(
+      WidgetTester tester, {
+      required String location,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1400, 900);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await _buildOverrides();
+      await tester.pumpWidget(
+        _buildTestWidget(
+          child: const DiveCenterListPage(),
+          overrides: overrides,
+          initialLocation: location,
+        ),
+      );
+      await tester.pump();
+      tester.takeException();
+      await tester.pump();
+      tester.takeException();
+    }
+
+    testWidgets('offers the first-center button beside the summary', (
+      tester,
+    ) async {
+      await pumpWideEmptyList(tester, location: '/dive-centers');
+
+      expect(find.byType(DiveCenterDetailPage), findsNothing);
+      expect(find.text('Add Your First Dive Center'), findsOneWidget);
+    });
+
+    testWidgets('hides the first-center button while the form is open', (
+      tester,
+    ) async {
+      await pumpWideEmptyList(tester, location: '/dive-centers?mode=new');
+
+      // Below the empty list, beside the form, it read as the form's Save:
+      // pressing it only reopened the create form and saved nothing.
+      expect(find.byType(DiveCenterDetailPage), findsOneWidget);
+      expect(find.text('Add Your First Dive Center'), findsNothing);
+      expect(find.text('Import'), findsOneWidget);
+    });
+  });
+
+  // A new dive centre opens on its page behind the phase 3 switch (issue
+  // #4527, phase 3, plan 11).
+  testWidgets("the pane's new centre is the page", (tester) async {
+    void onSaved(String id) {}
+    void onCancel() {}
+    late BuildContext context;
+    await tester.pumpWidget(
+      Builder(
+        builder: (c) {
+          context = c;
+          return const SizedBox.shrink();
+        },
+      ),
+    );
+    final page =
+        newDiveCenterPane(context, onSaved, onCancel) as DiveCenterDetailPage;
+    expect(page.embedded, isTrue);
+    expect(page.newDiveCenter, isTrue);
+    expect(page.onCreated, same(onSaved));
+    expect(page.onCreateCancelled, same(onCancel));
+  });
+
+  testWidgets('Add on a phone opens the new centre once created', (
+    tester,
+  ) async {
+    final router = GoRouter(
+      initialLocation: '/dive-centers',
+      routes: [
+        GoRoute(
+          path: '/dive-centers',
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () => openNewDiveCenter(context),
+              child: const Text('add'),
+            ),
+          ),
+          routes: [
+            GoRoute(
+              path: 'new',
+              builder: (context, _) => Scaffold(
+                body: TextButton(
+                  onPressed: () => context.pop('n1'),
+                  child: const Text('NEW'),
+                ),
+              ),
+            ),
+            GoRoute(
+              path: ':id',
+              builder: (_, state) =>
+                  Text('CENTRE ${state.pathParameters['id']}'),
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('add'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('NEW'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('CENTRE n1'), findsOneWidget);
   });
 }

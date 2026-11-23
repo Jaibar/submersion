@@ -1,5 +1,8 @@
 import 'dart:typed_data';
 
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
+
 /// Phases of the download process.
 enum DownloadPhase {
   initializing,
@@ -92,6 +95,12 @@ class DownloadedDive {
   /// Start time of the dive
   final DateTime startTime;
 
+  /// Whether the source reported [startTime]. False when it reported none
+  /// and [startTime] is the moment of the download, a stand-in the diver can
+  /// see and correct; nothing is placed by it, such as the trip whose dates
+  /// cover it (issue #3022).
+  final bool startTimeReported;
+
   /// Total dive duration in seconds
   final int durationSeconds;
 
@@ -106,6 +115,16 @@ class DownloadedDive {
 
   /// Maximum temperature in Celsius (if available)
   final double? maxTemperature;
+
+  /// Atmospheric pressure in bar the computer measured at the surface (if
+  /// available)
+  final double? surfacePressure;
+
+  /// GPS entry/exit fixes in decimal degrees (Shearwater Swift), if available
+  final double? entryLatitude;
+  final double? entryLongitude;
+  final double? exitLatitude;
+  final double? exitLongitude;
 
   /// Depth-time profile points
   final List<ProfileSample> profile;
@@ -131,6 +150,12 @@ class DownloadedDive {
   /// Personal deco conservatism adjustment
   final int? decoConservatism;
 
+  /// Dive-level tissue state the computer itself reported (start/end
+  /// compartment loadings), when the source carries one. Never computed by
+  /// the app; persisted verbatim on the dive. CNS and OTU are [cnsStart],
+  /// [cnsEnd] and [otu], never the snapshot (issue #2555).
+  final ComputerTissueSnapshot? computerTissue;
+
   /// Dive events from the computer
   final List<DownloadedEvent> events;
 
@@ -140,14 +165,56 @@ class DownloadedDive {
   /// Raw fingerprint bytes from libdivecomputer
   final Uint8List? rawFingerprint;
 
+  /// Breathing/logging mode reported by the computer (oc/ccr/scr/gauge).
+  final DiveMode diveMode;
+
+  /// CCR/SCR diluent gas mix (issue #1879), derived from the first cylinder
+  /// tagged [TankRole.diluent] in [tanks]. Null when no tank carries that
+  /// role, e.g. the computer's transmitter naming does not follow the
+  /// O/D convention libdivecomputer relies on.
+  final double? diluentO2;
+
+  /// Helium fraction of [diluentO2], 0.0 for a helium-free diluent.
+  final double? diluentHe;
+
+  /// Bottom time in seconds as the source itself counted it, when it reports
+  /// one (Garmin's FIT dive_summary). Null for libdivecomputer downloads,
+  /// whose bottom time is derived from the profile on import instead.
+  final int? bottomTimeSeconds;
+
+  /// Surface interval before this dive in seconds, as the source reported it.
+  final int? surfaceIntervalSeconds;
+
+  /// Water type the computer was set to for this dive, when it reports one.
+  final WaterType? waterType;
+
+  /// CNS% at the start of the dive, as the source reported it (what earlier
+  /// dives left). Stored as `dives.cns_start`; null leaves the column at its
+  /// default of 0.
+  final double? cnsStart;
+
+  /// CNS% at the end of the dive, as the source reported it. When null the
+  /// import falls back to the highest per-sample CNS in [profile].
+  final double? cnsEnd;
+
+  /// Oxygen toxicity units accumulated over the dive, as the source reported
+  /// them.
+  final double? otu;
+
   const DownloadedDive({
     this.diveNumber,
     required this.startTime,
+    this.startTimeReported = true,
     required this.durationSeconds,
     required this.maxDepth,
     this.avgDepth,
     this.minTemperature,
     this.maxTemperature,
+    this.surfacePressure,
+    this.entryLatitude,
+    this.entryLongitude,
+    this.exitLatitude,
+    this.exitLongitude,
     required this.profile,
     this.tanks = const [],
     this.gasSwitches = const [],
@@ -156,9 +223,19 @@ class DownloadedDive {
     this.gfLow,
     this.gfHigh,
     this.decoConservatism,
+    this.computerTissue,
+    this.diveMode = DiveMode.oc,
     this.events = const [],
     this.rawData,
     this.rawFingerprint,
+    this.diluentO2,
+    this.diluentHe,
+    this.bottomTimeSeconds,
+    this.surfaceIntervalSeconds,
+    this.waterType,
+    this.cnsStart,
+    this.cnsEnd,
+    this.otu,
   });
 
   /// Duration as a Duration object
@@ -185,8 +262,18 @@ class ProfileSample {
   /// Tank index for pressure (0-based)
   final int? tankIndex;
 
+  /// Every tank's pressure in bar at this sample, indexed by tank index, with
+  /// null where that tank reported nothing. libdivecomputer reports one
+  /// pressure per air-integrated transmitter, so a single sample can carry
+  /// several; [pressure]/[tankIndex] hold only the last of them (issue #1223).
+  /// Null when the source reports at most one pressure per sample.
+  final List<double?>? tankPressures;
+
   /// Heart rate in bpm (if available)
   final int? heartRate;
+
+  /// Compass heading in degrees (0-359); null when not reported.
+  final double? heading;
 
   /// CCR setpoint in bar (if available)
   final double? setpoint;
@@ -221,13 +308,41 @@ class ProfileSample {
   /// Time to surface in seconds
   final int? tts;
 
+  /// Individual CCR O2 cell ppO2 readings in bar (sensor 1..6), null when that
+  /// cell has no reading. [ppo2] holds the aggregate/computed value.
+  final double? o2Sensor1;
+  final double? o2Sensor2;
+  final double? o2Sensor3;
+  final double? o2Sensor4;
+  final double? o2Sensor5;
+  final double? o2Sensor6;
+
+  /// Raw O2 cell output in millivolts (sensor 1..6), null when that cell
+  /// reports none. Present even when the matching [o2Sensor1]..[o2Sensor6] is
+  /// null because the logged calibration could not be trusted (issue #810).
+  final int? o2SensorMv1;
+  final int? o2SensorMv2;
+  final int? o2SensorMv3;
+  final int? o2SensorMv4;
+  final int? o2SensorMv5;
+  final int? o2SensorMv6;
+
+  /// Shearwater Avelo mode (issue #4664): the computer's buoyancy figure in
+  /// kilograms (negative is heavy), the Hydrotank's gas remaining in percent
+  /// and the computer's own RMV in litres per minute.
+  final double? aveloBuoyancy;
+  final int? aveloGasRemaining;
+  final double? computerRmv;
+
   const ProfileSample({
     required this.timeSeconds,
     required this.depth,
     this.temperature,
     this.pressure,
     this.tankIndex,
+    this.tankPressures,
     this.heartRate,
+    this.heading,
     this.setpoint,
     this.ppo2,
     this.cns,
@@ -239,6 +354,21 @@ class ProfileSample {
     this.decoTime,
     this.decoDepth,
     this.tts,
+    this.o2Sensor1,
+    this.o2Sensor2,
+    this.o2Sensor3,
+    this.o2Sensor4,
+    this.o2Sensor5,
+    this.o2Sensor6,
+    this.o2SensorMv1,
+    this.o2SensorMv2,
+    this.o2SensorMv3,
+    this.o2SensorMv4,
+    this.o2SensorMv5,
+    this.o2SensorMv6,
+    this.aveloBuoyancy,
+    this.aveloGasRemaining,
+    this.computerRmv,
   });
 }
 
@@ -262,6 +392,34 @@ class DownloadedTank {
   /// Tank volume in liters
   final double? volumeLiters;
 
+  /// Inferred cylinder role (a [TankRole] name, e.g. 'deco'), or null to use
+  /// the default. Derived from the computer's tank usage / the gas mix.
+  final String? role;
+
+  /// Where [role] came from when the computer took it from something
+  /// unverified, such as the transmitter's name (issue #2595); null when the
+  /// role is the computer's own data or the app's gas heuristic.
+  final TankRoleSource? roleSource;
+
+  /// Serial of the air-integration transmitter that reported this tank, or
+  /// null when the computer did not report one. Two computers paired to the
+  /// same transmitter logged the same cylinder.
+  final String? transmitterSerial;
+
+  /// False when the computer gave this tank no gas of its own and the
+  /// resolver filled in a default (100% for an oxygen supply, air
+  /// otherwise), as on every Shearwater transmitter it cannot link to a
+  /// mix (issue #3307). A later step must never write that default over a
+  /// mix someone fixed.
+  final bool mixRecorded;
+
+  /// True for a cylinder made from a gas on a rebreather computer's gas list
+  /// that no transmitter read, that the computer tagged with no usage, and
+  /// that the diver never breathed (issue #3668). The cylinder is still
+  /// resolved; a writer drops it when the diver asks for that, after the
+  /// bailout transmitter claim has seen it.
+  final bool unusedOcGas;
+
   const DownloadedTank({
     required this.index,
     required this.o2Percent,
@@ -269,7 +427,38 @@ class DownloadedTank {
     this.startPressure,
     this.endPressure,
     this.volumeLiters,
+    this.role,
+    this.roleSource,
+    this.transmitterSerial,
+    this.mixRecorded = true,
+    this.unusedOcGas = false,
   });
+
+  DownloadedTank copyWith({
+    int? index,
+    double? o2Percent,
+    double? hePercent,
+    double? startPressure,
+    double? endPressure,
+    double? volumeLiters,
+    String? role,
+    TankRoleSource? roleSource,
+    String? transmitterSerial,
+    bool? mixRecorded,
+    bool? unusedOcGas,
+  }) => DownloadedTank(
+    index: index ?? this.index,
+    o2Percent: o2Percent ?? this.o2Percent,
+    hePercent: hePercent ?? this.hePercent,
+    startPressure: startPressure ?? this.startPressure,
+    endPressure: endPressure ?? this.endPressure,
+    volumeLiters: volumeLiters ?? this.volumeLiters,
+    role: role ?? this.role,
+    roleSource: roleSource ?? this.roleSource,
+    transmitterSerial: transmitterSerial ?? this.transmitterSerial,
+    mixRecorded: mixRecorded ?? this.mixRecorded,
+    unusedOcGas: unusedOcGas ?? this.unusedOcGas,
+  );
 
   /// Whether this is air (21% O2)
   bool get isAir => o2Percent >= 20.5 && o2Percent <= 21.5 && hePercent == 0.0;

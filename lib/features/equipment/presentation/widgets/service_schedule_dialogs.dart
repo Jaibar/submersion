@@ -1,0 +1,509 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/currency.dart';
+import 'package:submersion/core/utils/number_input.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/domain/entities/exposure_unit.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/domain/services/service_due_engine.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/exposure_interval_input.dart';
+import 'package:submersion/features/equipment/presentation/utils/exposure_unit_display.dart';
+import 'package:submersion/features/settings/presentation/providers/hidden_built_ins_provider.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/app_date_picker.dart';
+import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
+
+/// Invalidate every provider that reflects clock state for [equipmentId].
+void invalidateServiceClockProviders(WidgetRef ref, String equipmentId) {
+  ref.invalidate(serviceClockStatusesProvider(equipmentId));
+  ref.invalidate(serviceSchedulesForEquipmentProvider(equipmentId));
+  // dueClocks/worstClock (badges, dashboard, trip) and serviceUrgency (Service
+  // Due sort + table forecast columns) all derive from this single per-item
+  // evaluation, so invalidating it refreshes them all with one re-eval.
+  // Schedule writes touch only service_schedules, so its
+  // invalidateSelfWhen(watchEquipmentChanges) never fires for them -- it must
+  // be invalidated explicitly here.
+  ref.invalidate(activeEquipmentClocksProvider);
+}
+
+/// Bottom sheet listing service kinds that apply to [equipmentType] and are
+/// not yet attached; tapping one makes an enabled schedule with no
+/// overrides (kind defaults apply).
+///
+/// It writes nothing, in an item page's sitting (issue #4527, phase 3):
+/// [attachedKindIds] are the kinds the sitting's clocks have, and [onHold]
+/// is handed the new clock, with an id of its own, and any interval set for
+/// it; [records] are the sitting's service records.
+Future<void> showServiceKindPicker(
+  BuildContext context,
+  WidgetRef ref, {
+  required String equipmentId,
+  required EquipmentType equipmentType,
+  required Set<String> attachedKindIds,
+  required void Function(ServiceSchedule schedule) onHold,
+  List<ServiceRecord>? records,
+}) async {
+  final kinds = await ref.read(serviceKindsProvider.future);
+  final attached = attachedKindIds;
+  // Built-in kinds the diver hid are not offered (issue #401).
+  final hidden = ref.read(
+    hiddenBuiltInIdsProvider(BuiltInCatalog.serviceKinds),
+  );
+  final candidates = kinds
+      .where(
+        (k) =>
+            k.appliesTo(equipmentType) &&
+            !attached.contains(k.id) &&
+            !(k.isBuiltIn && hidden.contains(k.id)),
+      )
+      .toList();
+  if (!context.mounted) return;
+
+  await showModalBottomSheet<void>(
+    context: context,
+    builder: (sheetContext) => SafeArea(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final kind in candidates)
+              Semantics(
+                button: true,
+                label: kind.name,
+                child: ListTile(
+                  leading: const Icon(Icons.schedule),
+                  title: Text(kind.name),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    final now = DateTime.now();
+                    final created = ServiceSchedule(
+                      id: const Uuid().v4(),
+                      equipmentId: equipmentId,
+                      serviceKindId: kind.id,
+                      createdAt: now,
+                      updatedAt: now,
+                    );
+                    onHold(created);
+                    // A kind with no default interval yields an invisible
+                    // clock until an interval is set, so configure it now.
+                    final needsInterval =
+                        kind.defaultIntervalDays == null &&
+                        kind.defaultIntervalDives == null &&
+                        kind.defaultIntervalHours == null;
+                    if (needsInterval && context.mounted) {
+                      await showScheduleOverrideDialog(
+                        context,
+                        ref,
+                        schedule: created,
+                        kind: kind,
+                        onHold: onHold,
+                        records: records,
+                      );
+                    }
+                  },
+                ),
+              ),
+            const Divider(height: 1),
+            Semantics(
+              button: true,
+              label: sheetContext.l10n.equipment_serviceClocks_manageKinds,
+              child: ListTile(
+                leading: const Icon(Icons.settings),
+                title: Text(
+                  sheetContext.l10n.equipment_serviceClocks_manageKinds,
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  context.push('/equipment/service-types');
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Edits one schedule's interval overrides and baseline date. Accepts the
+/// schedule and its kind directly so it serves brand-new and unconfigured
+/// clocks as well as existing ones.
+///
+/// It writes nothing, in an item page's sitting (issue #4527, phase 3):
+/// [records] are the sitting's service records, which judge the baseline,
+/// and Save hands the clock to [onHold].
+Future<void> showScheduleOverrideDialog(
+  BuildContext context,
+  WidgetRef ref, {
+  required ServiceSchedule schedule,
+  required ServiceKind kind,
+  required void Function(ServiceSchedule schedule) onHold,
+  List<ServiceRecord>? records,
+}) async {
+  // Only a baseline the clock still counts from is offered for editing. A
+  // later service (logged here, synced in, or written by an older build)
+  // takes the clock over while the stored date stays (so deleting that
+  // service restores it); showing that date would claim a start the clock
+  // no longer uses.
+  final judged =
+      records ??
+      await ref
+          .read(serviceRecordRepositoryProvider)
+          .getRecordsForEquipment(schedule.equipmentId);
+  final inEffect = baselineInEffect(
+    serviceKindId: schedule.serviceKindId,
+    baseline: schedule.anchorDate,
+    baselineSetAt: schedule.anchorSetAt,
+    records: judged,
+  );
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (context) => _ScheduleOverrideDialog(
+      schedule: schedule,
+      kind: kind,
+      initialBaseline: inEffect ? schedule.anchorDate : null,
+      onHold: onHold,
+    ),
+  );
+}
+
+class _ScheduleOverrideDialog extends ConsumerStatefulWidget {
+  final ServiceSchedule schedule;
+  final ServiceKind kind;
+
+  /// The baseline the clock counts from, or null when it has none in
+  /// effect (see [baselineInEffect]).
+  final DateTime? initialBaseline;
+
+  /// Takes the clock, in an item page's sitting.
+  final void Function(ServiceSchedule schedule) onHold;
+
+  const _ScheduleOverrideDialog({
+    required this.schedule,
+    required this.kind,
+    required this.initialBaseline,
+    required this.onHold,
+  });
+
+  @override
+  ConsumerState<_ScheduleOverrideDialog> createState() =>
+      _ScheduleOverrideDialogState();
+}
+
+class _ScheduleOverrideDialogState
+    extends ConsumerState<_ScheduleOverrideDialog> {
+  late final TextEditingController _days;
+  late final TextEditingController _dives;
+  late final TextEditingController _hours;
+  late final TextEditingController _defaultCost;
+  late final Map<ExposureUnit, TextEditingController> _exposure;
+
+  /// Null means "inherit": the kind's currency, else the diver's default.
+  String? _defaultCurrency;
+
+  /// The interval fields are plain TextFields with no validation, but a
+  /// negative price would prefill the record dialog and immediately fail
+  /// validation there, so the cost field gets a real Form to validate in.
+  final _formKey = GlobalKey<FormState>();
+
+  DateTime? _anchorDate;
+
+  /// Whether the diver chose a date in the picker, even the one already
+  /// shown: that is what setting a baseline means, and it stamps the set
+  /// time that lets the baseline outrank earlier records.
+  bool _baselinePicked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.schedule;
+    _days = TextEditingController(text: s.intervalDays?.toString() ?? '');
+    _dives = TextEditingController(text: s.intervalDives?.toString() ?? '');
+    // Fractional, so the seed uses the diver's decimal separator to match how
+    // the field is read back (#1091).
+    final hours = s.intervalHours;
+    _hours = TextEditingController(
+      text: hours == null ? '' : formatDecimalForInput(hours),
+    );
+    // Same decimal-separator pairing as the hours field above (#1091).
+    final cost = s.defaultCost;
+    _defaultCost = TextEditingController(
+      text: cost == null ? '' : formatDecimalForInput(cost),
+    );
+    _defaultCurrency = s.defaultCurrency;
+    _anchorDate = widget.initialBaseline;
+    _exposure = {
+      for (final unit in ExposureUnit.mapUnits)
+        unit: TextEditingController(
+          text: switch (s.exposureIntervals[unit]) {
+            null => '',
+            final v when unit.isFractional => formatDecimalForInput(v),
+            final v => v.round().toString(),
+          },
+        ),
+    };
+  }
+
+  @override
+  void dispose() {
+    _days.dispose();
+    _dives.dispose();
+    _hours.dispose();
+    _defaultCost.dispose();
+    for (final c in _exposure.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  String _hint(num? kindDefault) => kindDefault == null ? '' : '$kindDefault';
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = widget.kind;
+    final l10n = context.l10n;
+    return AlertDialog(
+      title: Text('${l10n.equipment_scheduleDialog_title}: ${kind.name}'),
+      content: SingleChildScrollView(
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: _days,
+                validator: numberValidator(context, integer: true),
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: l10n.equipment_scheduleDialog_intervalDays,
+                  hintText: kind.defaultIntervalDays == null
+                      ? null
+                      : l10n.equipment_scheduleDialog_inheritHint(
+                          _hint(kind.defaultIntervalDays),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _dives,
+                validator: numberValidator(context, integer: true),
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: l10n.equipment_scheduleDialog_intervalDives,
+                  hintText: kind.defaultIntervalDives == null
+                      ? null
+                      : l10n.equipment_scheduleDialog_inheritHint(
+                          _hint(kind.defaultIntervalDives),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _hours,
+                validator: numberValidator(context),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: l10n.equipment_scheduleDialog_intervalHours,
+                  hintText: kind.defaultIntervalHours == null
+                      ? null
+                      : l10n.equipment_scheduleDialog_inheritHint(
+                          _hint(kind.defaultIntervalHours),
+                        ),
+                ),
+              ),
+              for (final unit in ExposureUnit.mapUnits) ...[
+                const SizedBox(height: 12),
+                TextFormField(
+                  key: Key('service-schedule-exposure-${unit.name}'),
+                  controller: _exposure[unit],
+                  validator: numberValidator(
+                    context,
+                    integer: !unit.isFractional,
+                  ),
+                  keyboardType: unit.isFractional
+                      ? const TextInputType.numberWithOptions(decimal: true)
+                      : TextInputType.number,
+                  decoration: InputDecoration(
+                    labelText: unit.intervalLabel(l10n),
+                    hintText: switch (kind.exposureIntervals[unit]) {
+                      null => null,
+                      final v when unit.isFractional =>
+                        l10n.equipment_scheduleDialog_inheritHint(
+                          formatDecimalForInput(v),
+                        ),
+                      final v => l10n.equipment_scheduleDialog_inheritHint(
+                        v.round().toString(),
+                      ),
+                    },
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              // Per-item price override. Blank inherits the kind's value, shown
+              // as the hint, exactly like the interval fields above (#829).
+              TextFormField(
+                key: const Key('service-schedule-default-cost'),
+                controller: _defaultCost,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: l10n.equipment_scheduleDialog_defaultCostLabel,
+                  hintText: kind.defaultCost == null
+                      ? l10n.equipment_serviceKinds_defaultCostHint
+                      : l10n.equipment_scheduleDialog_inheritHint(
+                          formatDecimalForInput(kind.defaultCost!),
+                        ),
+                ),
+                validator: numberValidator(
+                  context,
+                  check: (cost) => cost < 0
+                      ? l10n.equipment_serviceDialog_costValidation
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 12),
+              // The currency this item's price is in. Null inherits the kind's,
+              // then the diver's default, matching how the cost resolves.
+              DropdownButtonFormField<String?>(
+                key: const Key('service-schedule-default-currency'),
+                initialValue: _defaultCurrency,
+                decoration: InputDecoration(
+                  labelText: l10n.equipment_scheduleDialog_defaultCurrencyLabel,
+                ),
+                items: [
+                  DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text(
+                      l10n.equipment_serviceKinds_defaultCurrencyInherit,
+                    ),
+                  ),
+                  for (final code in currencyCodesWith(_defaultCurrency))
+                    DropdownMenuItem<String?>(value: code, child: Text(code)),
+                ],
+                onChanged: (value) => setState(() => _defaultCurrency = value),
+              ),
+              const SizedBox(height: 12),
+              Semantics(
+                button: true,
+                label: l10n.equipment_scheduleDialog_anchorDate,
+                child: InkWell(
+                  onTap: () async {
+                    final picked = await showAppDatePicker(
+                      context: context,
+                      initialDate: _anchorDate ?? DateTime.now(),
+                      firstDate: DateTime(1950),
+                      lastDate: DateTime.now(),
+                    );
+                    if (picked != null) {
+                      setState(() {
+                        _anchorDate = picked;
+                        _baselinePicked = true;
+                      });
+                    }
+                  },
+                  child: InputDecorator(
+                    decoration: InputDecoration(
+                      labelText: l10n.equipment_scheduleDialog_anchorDate,
+                      helperText: l10n.equipment_scheduleDialog_anchorHint,
+                      prefixIcon: const Icon(Icons.calendar_today),
+                      suffixIcon: _anchorDate == null
+                          ? null
+                          : IconButton(
+                              tooltip:
+                                  l10n.equipment_scheduleDialog_clearAnchor,
+                              icon: const Icon(Icons.clear),
+                              onPressed: () =>
+                                  setState(() => _anchorDate = null),
+                            ),
+                    ),
+                    child: Text(
+                      _anchorDate == null
+                          ? '-'
+                          : ref
+                                .watch(unitFormatterProvider)
+                                .formatDate(_anchorDate),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(l10n.equipment_scheduleDialog_cancel),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (!(_formKey.currentState?.validate() ?? true)) return;
+            final schedule = widget.schedule;
+            // Stamps the baseline's set time when the date changed or was
+            // picked, so records logged before it cannot outrank it. A
+            // pre-v213 baseline shown here (only while no service of the kind
+            // exists, see baselineInEffect) is stamped too: that moves
+            // nothing now, and makes the hint's promise hold from here on.
+            // A baseline a later service took over is hidden, not dropped:
+            // left untouched it stays stored, so deleting that service hands
+            // the clock back to it.
+            final hiddenUntouched =
+                widget.initialBaseline == null &&
+                _anchorDate == null &&
+                !_baselinePicked;
+            final legacyInEffect =
+                widget.initialBaseline != null && schedule.anchorSetAt == null;
+            final baseline = hiddenUntouched
+                ? schedule
+                : schedule.withBaseline(
+                    _anchorDate,
+                    now: DateTime.now(),
+                    picked: _baselinePicked || legacyInEffect,
+                  );
+            // copyWith cannot null a field; build the updated entity directly.
+            final updated = ServiceSchedule(
+              id: schedule.id,
+              equipmentId: schedule.equipmentId,
+              serviceKindId: schedule.serviceKindId,
+              intervalDays: serviceFieldNumber(
+                _days.text,
+                integer: true,
+              )?.toInt(),
+              intervalDives: serviceFieldNumber(
+                _dives.text,
+                integer: true,
+              )?.toInt(),
+              intervalHours: serviceFieldNumber(_hours.text),
+              exposureIntervals: parseExposureIntervals({
+                for (final e in _exposure.entries) e.key: e.value.text,
+              }),
+              defaultCost: serviceFieldNumber(_defaultCost.text),
+              defaultCurrency: _defaultCurrency,
+              anchorDate: baseline.anchorDate,
+              anchorSetAt: baseline.anchorSetAt,
+              enabled: schedule.enabled,
+              createdAt: schedule.createdAt,
+              updatedAt: schedule.updatedAt,
+            );
+            widget.onHold(updated);
+            Navigator.pop(context);
+          },
+          child: Text(l10n.equipment_scheduleDialog_save),
+        ),
+      ],
+    );
+  }
+}

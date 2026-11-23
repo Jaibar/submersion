@@ -1,17 +1,40 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import 'package:submersion/core/services/storage/gc/storage_gc_store.dart';
+import 'package:submersion/core/database/database_engine_preflight.dart';
 import 'package:submersion/core/database/database_version_exception.dart';
 import 'package:submersion/core/domain/entities/migration_progress.dart';
 import 'package:submersion/core/presentation/pages/startup_page.dart';
+import 'package:submersion/core/presentation/startup_brightness.dart';
+import 'package:submersion/core/presentation/startup_failure.dart';
+import 'package:submersion/core/presentation/startup_theme.dart';
+import 'package:submersion/core/presentation/widgets/interrupted_restore_view.dart';
+import 'package:submersion/core/presentation/widgets/ocean_background.dart';
+import 'package:submersion/core/presentation/widgets/startup_failure_view.dart';
+import 'package:submersion/core/presentation/widgets/startup_restore_card.dart';
+import 'package:submersion/core/presentation/widgets/version_mismatch_view.dart';
+import 'package:submersion/core/theme/app_theme_registry.dart';
 import 'package:submersion/core/services/database_location_service.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/core/services/restore_journal.dart';
+import 'package:submersion/core/services/startup_recovery_service.dart';
+import 'package:submersion/features/backup/data/services/backup_service.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/pre_downgrade_backup_service.dart';
 import 'package:submersion/features/backup/data/services/pre_migration_backup_service.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/entities/backup_type.dart';
 import 'package:submersion/features/backup/domain/exceptions/backup_failed_exception.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../helpers/theme_presets_warm_up.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,6 +47,43 @@ class _FakeLocationService extends DatabaseLocationService {
 
   @override
   Future<String> getDatabasePath() async => _path;
+}
+
+/// A fake [DatabaseLocationService] that returns a caller-provided path.
+/// Used by recovery tests so each test has its own isolated db file path —
+/// necessary because the recovery flow actually invokes sqlite3 against the
+/// path (unlike most lifecycle tests where the path is never touched).
+class _CustomPathLocationService extends DatabaseLocationService {
+  final String _path;
+  _CustomPathLocationService(super.prefs, this._path);
+
+  @override
+  Future<String> getDatabasePath() async => _path;
+}
+
+/// A fake [DatabaseLocationService] that succeeds for the first [failAfter]
+/// calls, then throws on every call thereafter. Used to drive the
+/// `_runRecovery` catch block (which only fires when a non-SqliteException
+/// escapes) without corrupting a real SQLite file.
+class _FlakyLocationService extends DatabaseLocationService {
+  final String path;
+  final int failAfter;
+  int calls = 0;
+
+  _FlakyLocationService(
+    super.prefs, {
+    required this.path,
+    required this.failAfter,
+  });
+
+  @override
+  Future<String> getDatabasePath() async {
+    calls++;
+    if (calls > failAfter) {
+      throw StateError('simulated location failure');
+    }
+    return path;
+  }
 }
 
 /// A synchronous no-op subclass of [PreMigrationBackupService] for tests that
@@ -42,6 +102,83 @@ class _NoOpBackupService extends PreMigrationBackupService {
     required String appVersion,
   }) async {
     // Intentional no-op: skip all file I/O in widget tests.
+  }
+}
+
+/// Records that the newer database was preserved, without copying anything.
+class _RecordingPreDowngradeService extends PreDowngradeBackupService {
+  _RecordingPreDowngradeService({
+    required super.preferences,
+    this.error,
+    this.journal,
+  }) : super(
+         livePathProvider: () async => '/tmp/test.db',
+         backupsDirProvider: () async => '/tmp/test-backups',
+       );
+
+  final Object? error;
+
+  /// Shared with the restore override, so a test can assert the ORDER of the
+  /// two rather than only that both happened. Preserving after the swap would
+  /// copy the file the swap already replaced.
+  final List<String>? journal;
+
+  int calls = 0;
+  int? preservedSchemaVersion;
+
+  @override
+  Future<BackupRecord> preserve({
+    required int storedSchemaVersion,
+    required String appVersion,
+  }) async {
+    calls++;
+    preservedSchemaVersion = storedSchemaVersion;
+    journal?.add('preserve');
+    if (error != null) throw error!;
+    return BackupRecord(
+      id: 'preserved',
+      filename: 'newer.db',
+      timestamp: DateTime.utc(2026, 9, 1),
+      sizeBytes: 4096,
+      location: BackupLocation.local,
+      localPath: '/tmp/test-backups/newer.db',
+      type: BackupType.preDowngrade,
+      fromSchemaVersion: storedSchemaVersion,
+      pinned: true,
+    );
+  }
+}
+
+/// A [RestoreJournal] that touches no files: startup asks it whether a
+/// restore was interrupted, and it records what the diver chose.
+class _FakeRestoreJournal extends RestoreJournal {
+  _FakeRestoreJournal({this.found, this.error})
+    : super('/tmp/test.db', readSchemaVersion: _noVersion);
+
+  static int? _noVersion(String _) => null;
+
+  InterruptedRestore? found;
+  final Object? error;
+  final List<String> calls = [];
+
+  @override
+  InterruptedRestore? findInterrupted() {
+    calls.add('find');
+    return found;
+  }
+
+  @override
+  Future<void> recover() async {
+    calls.add('recover');
+    if (error != null) throw error!;
+    found = null;
+  }
+
+  @override
+  Future<void> keepCurrent() async {
+    calls.add('keep');
+    if (error != null) throw error!;
+    found = null;
   }
 }
 
@@ -67,6 +204,23 @@ Widget _buildStartupWrapper({
     required BackupPreferences preferences,
   })?
   preMigrationBackupFactory,
+  PreDowngradeBackupService Function({
+    required String livePath,
+    required BackupPreferences preferences,
+  })?
+  preDowngradeBackupFactory,
+  int? Function(String path)? downgradeCandidateProbeOverride,
+  void Function()? enginePreflightOverride,
+  Future<void> Function(
+    String backupPath,
+    void Function(int currentStep, int totalSteps) onMigrationProgress,
+  )?
+  restoreOverride,
+  RestoreJournal Function(String dbPath)? restoreJournalFactory,
+  StartupRecoveryService? recoveryServiceOverride,
+  Future<String?> Function()? pickBackupFileOverride,
+  bool Function()? fileReachedOverride,
+  Future<void> Function()? closeDatabaseOverride,
 }) {
   return StartupWrapper(
     prefs: prefs,
@@ -76,6 +230,21 @@ Widget _buildStartupWrapper({
     schemaVersionProbeOverride: schemaVersionProbeOverride,
     closeAppOverride: closeAppOverride,
     preMigrationBackupFactory: preMigrationBackupFactory,
+    preDowngradeBackupFactory: preDowngradeBackupFactory,
+    downgradeCandidateProbeOverride: downgradeCandidateProbeOverride,
+    // Default to a no-op so widget tests never depend on the host runner's
+    // linked SQLite. Tests that WANT an engine failure pass their own.
+    enginePreflightOverride: enginePreflightOverride ?? () {},
+    restoreOverride: restoreOverride,
+    // Default to a journal that finds nothing, so widget tests never stat
+    // real files beside the fixture path. Tests of the recovery screen pass
+    // their own.
+    restoreJournalFactory:
+        restoreJournalFactory ?? (_) => _FakeRestoreJournal(),
+    recoveryServiceOverride: recoveryServiceOverride,
+    pickBackupFileOverride: pickBackupFileOverride,
+    fileReachedOverride: fileReachedOverride,
+    closeDatabaseOverride: closeDatabaseOverride,
   );
 }
 
@@ -93,6 +262,9 @@ Widget _buildSplashContent({
   ),
 }) {
   return MaterialApp(
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    locale: const Locale('en'),
     home: Scaffold(
       body: Center(
         child: SingleChildScrollView(
@@ -144,52 +316,27 @@ Widget _buildVersionMismatchError({
   required int dbVersion,
   required int appVersion,
   VoidCallback? onClose,
+  VoidCallback? onDownloadLatest,
+  VoidCallback? onOpenBetaBuilds,
 }) {
-  const textColor = Colors.black87;
-  const subtitleColor = Colors.black54;
-
+  // Renders the real production widget so these tests cannot drift from the
+  // screen users actually see (the previous inline replica did exactly that).
   return MaterialApp(
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    locale: const Locale('en'),
     home: Scaffold(
       key: const ValueKey('error'),
       body: SafeArea(
         child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.update, size: 64, color: Colors.orange),
-                const SizedBox(height: 24),
-                const Text(
-                  'Update Required',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: textColor,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Your dive data was saved by a newer version of '
-                  'Submersion (schema v$dbVersion). This version '
-                  'only supports up to schema v$appVersion.',
-                  style: const TextStyle(fontSize: 14, color: subtitleColor),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Please update Submersion to the latest version. '
-                  'Your data is safe and has not been modified.',
-                  style: TextStyle(fontSize: 14, color: subtitleColor),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: onClose ?? () {},
-                  child: const Text('Close'),
-                ),
-              ],
-            ),
+          child: VersionMismatchView(
+            databaseVersion: dbVersion,
+            appVersion: appVersion,
+            textColor: Colors.black87,
+            subtitleColor: Colors.black54,
+            onDownloadLatest: onDownloadLatest ?? () {},
+            onOpenBetaBuilds: onOpenBetaBuilds ?? () {},
+            onClose: onClose ?? () {},
           ),
         ),
       ),
@@ -197,53 +344,27 @@ Widget _buildVersionMismatchError({
   );
 }
 
+/// Hosts the REAL terminal failure widget rather than a copy of its layout,
+/// so these tests cannot drift from what StartupWrapper actually renders.
 Widget _buildGenericError({
   required String errorMessage,
   VoidCallback? onClose,
+  StartupFailureKind kind = StartupFailureKind.unknown,
 }) {
-  const textColor = Colors.black87;
-  const subtitleColor = Colors.black54;
-
   return MaterialApp(
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    locale: const Locale('en'),
     home: Scaffold(
       key: const ValueKey('error'),
       body: SafeArea(
         child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.error_outline, size: 64, color: Colors.red),
-                const SizedBox(height: 24),
-                const Text(
-                  'Database upgrade failed',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: textColor,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  errorMessage,
-                  style: const TextStyle(fontSize: 14, color: subtitleColor),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Try restarting the app. If this persists, '
-                  'reinstall or contact support.',
-                  style: TextStyle(fontSize: 14, color: subtitleColor),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: onClose ?? () {},
-                  child: const Text('Close'),
-                ),
-              ],
-            ),
+          child: StartupFailureView(
+            kind: kind,
+            details: errorMessage,
+            textColor: Colors.black87,
+            subtitleColor: Colors.black54,
+            onClose: onClose ?? () {},
           ),
         ),
       ),
@@ -252,6 +373,11 @@ Widget _buildGenericError({
 }
 
 void main() {
+  // Builds the theme presets before any widget test does. A widget test that
+  // is the first to build them strands their google_fonts loads, and a later
+  // file in the same CI isolate that waits on the loads then hangs.
+  setUpAll(warmUpThemePresets);
+
   // ===========================================================================
   // Isolated UI builder tests (no real services needed)
   // ===========================================================================
@@ -328,14 +454,19 @@ void main() {
   });
 
   group('Error UI - version mismatch', () {
-    testWidgets('shows update required with version numbers', (tester) async {
+    testWidgets('states the mismatch without demanding an update', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         _buildVersionMismatchError(dbVersion: 99, appVersion: 63),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Update Required'), findsOneWidget);
-      expect(find.byIcon(Icons.update), findsOneWidget);
+      // "Update Required" asserted a fix that usually does not exist: a beta
+      // build commonly wrote the file, and stable has no such release (#1588).
+      expect(find.text('Update Required'), findsNothing);
+      expect(find.text('Your Data Is Newer Than This App'), findsOneWidget);
+      expect(find.byIcon(Icons.sync_problem), findsOneWidget);
       expect(find.textContaining('schema v99'), findsOneWidget);
       expect(find.textContaining('schema v63'), findsOneWidget);
       expect(find.text('Close'), findsOneWidget);
@@ -348,7 +479,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('Your data is safe and has not been modified'),
+        find.textContaining('Your data has not been changed'),
         findsOneWidget,
       );
     });
@@ -364,6 +495,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.ensureVisible(find.text('Close'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Close'));
       expect(closeCalled, isTrue);
     });
@@ -376,6 +509,56 @@ void main() {
 
       expect(find.byKey(const ValueKey('error')), findsOneWidget);
     });
+
+    testWidgets('offers both the stable and the beta release pages', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildVersionMismatchError(dbVersion: 137, appVersion: 136),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Check for a Newer Stable Release'), findsOneWidget);
+      expect(find.text('Get the Beta Build'), findsOneWidget);
+    });
+
+    testWidgets('mentions the pre-upgrade backup conditionally', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildVersionMismatchError(dbVersion: 137, appVersion: 136),
+      );
+      await tester.pumpAndSettle();
+
+      // A newer-on-disk database means no pre-migration backup ran on this
+      // launch (PreMigrationBackupService returns early when stored >= target),
+      // and the database may have arrived from another device entirely. The
+      // copy must not promise a backup this device might never have taken:
+      // with no validated candidate there is no restore card and no pointer
+      // to a Backups folder that may hold nothing usable.
+      expect(find.text('Restore this backup'), findsNothing);
+      expect(find.textContaining('Backups folder'), findsNothing);
+      expect(find.textContaining('has not been changed'), findsOneWidget);
+    });
+
+    testWidgets('shows the release URL as a manual fallback', (tester) async {
+      await tester.pumpWidget(
+        _buildVersionMismatchError(dbVersion: 137, appVersion: 136),
+      );
+      await tester.pumpAndSettle();
+
+      // launchUrl can fail (headless Linux, sandboxed or kiosk builds); the
+      // visible URL is what keeps the button's failure path recoverable.
+      expect(
+        find.textContaining(VersionMismatchView.latestReleaseUrl),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(VersionMismatchView.betaReleasesUrl),
+        findsOneWidget,
+      );
+      expect(find.textContaining('open a browser'), findsOneWidget);
+    });
   });
 
   group('Error UI - generic error', () {
@@ -385,9 +568,32 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Database upgrade failed'), findsOneWidget);
+      expect(find.text('Submersion could not start'), findsOneWidget);
       expect(find.text('Migration step 42 failed'), findsOneWidget);
       expect(find.byIcon(Icons.error_outline), findsOneWidget);
+    });
+
+    testWidgets('an unclassified failure does not claim the upgrade failed', (
+      tester,
+    ) async {
+      // Issue #1134: the fixed title told divers their upgrade failed on
+      // every terminal failure, including ones where nothing was upgraded.
+      await tester.pumpWidget(_buildGenericError(errorMessage: 'Disk is full'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsNothing);
+    });
+
+    testWidgets('a genuine migration failure still says so', (tester) async {
+      await tester.pumpWidget(
+        _buildGenericError(
+          errorMessage: 'Migration step 42 failed',
+          kind: StartupFailureKind.migrationFailed,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsOneWidget);
     });
 
     testWidgets('shows restart guidance', (tester) async {
@@ -407,6 +613,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.ensureVisible(find.text('Close'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Close'));
       expect(closeCalled, isTrue);
     });
@@ -422,7 +630,7 @@ void main() {
       await tester.pumpWidget(_buildGenericError(errorMessage: ''));
       await tester.pumpAndSettle();
 
-      expect(find.text('Database upgrade failed'), findsOneWidget);
+      expect(find.text('Submersion could not start'), findsOneWidget);
       expect(find.text('Close'), findsOneWidget);
     });
   });
@@ -435,6 +643,9 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
           home: Scaffold(
             body: ValueListenableBuilder<MigrationProgress>(
               valueListenable: progressNotifier,
@@ -478,6 +689,9 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
           home: Scaffold(
             body: LinearProgressIndicator(value: progress.fraction),
           ),
@@ -563,6 +777,61 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
     });
 
+    testWidgets('splash renders dark when cached theme mode is dark', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({cachedThemeModeKey: 'dark'});
+      prefs = await SharedPreferences.getInstance();
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) => Completer<void>().future,
+        ),
+      );
+      await tester.pump();
+
+      final background = tester.widget<OceanBackground>(
+        find.byType(OceanBackground),
+      );
+      expect(background.brightness, Brightness.dark);
+
+      // Drain the 1-second splash delay timer to avoid pending timer errors.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('splash follows platform brightness when cache is absent', (
+      tester,
+    ) async {
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) => Completer<void>().future,
+        ),
+      );
+      await tester.pump();
+
+      final background = tester.widget<OceanBackground>(
+        find.byType(OceanBackground),
+      );
+      expect(background.brightness, Brightness.dark);
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
     testWidgets('shows migration progress when migration is needed', (
       tester,
     ) async {
@@ -621,8 +890,8 @@ void main() {
               (needsMigration: false, totalSteps: 0),
           initializerOverride: (_) async {
             throw const DatabaseVersionMismatchException(
-              databaseVersion: 99,
-              appVersion: 63,
+              storedSchemaVersion: 99,
+              supportedSchemaVersion: 63,
             );
           },
         ),
@@ -632,9 +901,11 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
 
-      // Should show version mismatch error UI
-      expect(find.text('Update Required'), findsOneWidget);
-      expect(find.byIcon(Icons.update), findsOneWidget);
+      // Should show version mismatch error UI. Deliberately NOT titled
+      // "Update Required": the build that wrote the file is often a beta,
+      // and no stable update exists to install (#1588).
+      expect(find.text('Your Data Is Newer Than This App'), findsOneWidget);
+      expect(find.byIcon(Icons.sync_problem), findsOneWidget);
       expect(find.textContaining('schema v99'), findsOneWidget);
       expect(find.textContaining('schema v63'), findsOneWidget);
       expect(find.byKey(const ValueKey('error')), findsOneWidget);
@@ -661,7 +932,9 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show generic error UI
-      expect(find.text('Database upgrade failed'), findsOneWidget);
+      // No migration was pending, so the failure must NOT be reported as one.
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.text('Database upgrade failed'), findsNothing);
       expect(find.byIcon(Icons.error_outline), findsOneWidget);
       expect(find.textContaining('Disk is full'), findsOneWidget);
       expect(find.byKey(const ValueKey('error')), findsOneWidget);
@@ -690,6 +963,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // Tap the Close button
+      await tester.ensureVisible(find.text('Close'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Close'));
       await tester.pump();
 
@@ -710,8 +985,8 @@ void main() {
                 (needsMigration: false, totalSteps: 0),
             initializerOverride: (_) async {
               throw const DatabaseVersionMismatchException(
-                databaseVersion: 70,
-                appVersion: 63,
+                storedSchemaVersion: 70,
+                supportedSchemaVersion: 63,
               );
             },
             closeAppOverride: () => closeCalled = true,
@@ -721,6 +996,8 @@ void main() {
         await tester.pump(const Duration(seconds: 2));
         await tester.pumpAndSettle();
 
+        await tester.ensureVisible(find.text('Close'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('Close'));
         await tester.pump();
 
@@ -866,6 +1143,53 @@ void main() {
       expect(find.byKey(const ValueKey('splash')), findsNothing);
     });
 
+    // The error and recovery screens painted a fixed 0xFF121212 / white
+    // palette while their restore card followed the diver's theme, so the two
+    // disagreed on every preset but the default.
+    testWidgets('the error screen paints in the diver theme', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        cachedThemeModeKey: 'dark',
+        cachedThemePresetKey: 'console',
+      });
+      prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            throw Exception('Test error');
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      final scheme = AppThemeRegistry.resolveTheme(
+        AppThemeRegistry.findById('console'),
+        Brightness.dark,
+      ).colorScheme;
+      final error = tester.widget<Scaffold>(
+        find.byKey(const ValueKey('error')),
+      );
+      expect(error.backgroundColor, scheme.surface);
+      final texts = tester
+          .widgetList<Text>(
+            find.descendant(
+              of: find.byKey(const ValueKey('error')),
+              matching: find.byType(Text),
+            ),
+          )
+          .map((t) => t.style?.color)
+          .whereType<Color>()
+          .toSet();
+      expect(texts, contains(scheme.onSurface));
+      expect(texts, isNot(contains(Colors.white)));
+    });
+
     testWidgets('generic error shows error message text', (tester) async {
       await tester.pumpWidget(
         _buildStartupWrapper(
@@ -899,8 +1223,8 @@ void main() {
               (needsMigration: false, totalSteps: 0),
           initializerOverride: (_) async {
             throw const DatabaseVersionMismatchException(
-              databaseVersion: 100,
-              appVersion: 50,
+              storedSchemaVersion: 100,
+              supportedSchemaVersion: 50,
             );
           },
         ),
@@ -911,7 +1235,146 @@ void main() {
 
       expect(find.textContaining('schema v100'), findsOneWidget);
       expect(find.textContaining('schema v50'), findsOneWidget);
-      expect(find.textContaining('Your data is safe'), findsOneWidget);
+      expect(find.textContaining('has not been changed'), findsOneWidget);
+    });
+
+    testWidgets('an interrupted restore is offered before the database is '
+        'probed or opened', (tester) async {
+      var probes = 0;
+      var inits = 0;
+      final journal = _FakeRestoreJournal(
+        found: const InterruptedRestore(startedAt: null, liveExists: true),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) {
+            probes++;
+            return (needsMigration: false, totalSteps: 0);
+          },
+          initializerOverride: (_) async {
+            inits++;
+          },
+          restoreJournalFactory: (_) => journal,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(InterruptedRestoreView), findsOneWidget);
+      expect(probes, 0, reason: 'nothing may touch the live file first');
+      expect(inits, 0, reason: 'opening would create an empty database');
+      expect(journal.calls, ['find']);
+    });
+
+    testWidgets('recovering settles the restore, then startup resumes from '
+        'the top', (tester) async {
+      var inits = 0;
+      final journal = _FakeRestoreJournal(
+        found: const InterruptedRestore(startedAt: null, liveExists: true),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) {
+            inits++;
+            return Completer<void>().future;
+          },
+          restoreJournalFactory: (_) => journal,
+        ),
+      );
+      await tester.pump();
+
+      final recover = find.byKey(const ValueKey('interruptedRestore_recover'));
+      await tester.ensureVisible(recover);
+      await tester.tap(recover);
+      await tester.pump();
+      await tester.pump();
+
+      expect(journal.calls, ['find', 'recover', 'find']);
+      expect(inits, 1);
+      expect(find.byType(InterruptedRestoreView), findsNothing);
+
+      // Drain the 1-second splash delay timer.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('keeping the current database settles the restore the same '
+        'way', (tester) async {
+      var inits = 0;
+      final journal = _FakeRestoreJournal(
+        found: const InterruptedRestore(startedAt: null, liveExists: true),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) {
+            inits++;
+            return Completer<void>().future;
+          },
+          restoreJournalFactory: (_) => journal,
+        ),
+      );
+      await tester.pump();
+
+      final keep = find.byKey(const ValueKey('interruptedRestore_keep'));
+      await tester.ensureVisible(keep);
+      await tester.tap(keep);
+      await tester.pump();
+      await tester.pump();
+
+      expect(journal.calls, ['find', 'keep', 'find']);
+      expect(inits, 1);
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a failed recovery stays on the screen with the error', (
+      tester,
+    ) async {
+      var inits = 0;
+      final journal = _FakeRestoreJournal(
+        found: const InterruptedRestore(startedAt: null, liveExists: true),
+        error: StateError('still locked'),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            inits++;
+          },
+          restoreJournalFactory: (_) => journal,
+        ),
+      );
+      await tester.pump();
+
+      final recover = find.byKey(const ValueKey('interruptedRestore_recover'));
+      await tester.ensureVisible(recover);
+      await tester.tap(recover);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(InterruptedRestoreView), findsOneWidget);
+      expect(find.textContaining('still locked'), findsOneWidget);
+      expect(journal.calls, ['find', 'recover']);
+      expect(inits, 0);
     });
   });
 
@@ -1170,6 +1633,2203 @@ void main() {
       expect(quitCalled, 1);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Hot-journal recovery flow
+  //
+  // Triggered when initialization raises a SqliteException in the
+  // SQLITE_READONLY family (primary code 8) — typically code 776
+  // (SQLITE_READONLY_ROLLBACK) left behind by a crashed or cancelled
+  // transaction. Rather than parroting "reinstall or contact support", the
+  // startup screen should offer a one-tap recovery path that reopens the
+  // database RW so SQLite can finish the rollback.
+  // ---------------------------------------------------------------------------
+  group('recovery flow', () {
+    late SharedPreferences prefs;
+    late LogFileService logFileService;
+    late DatabaseLocationService locationService;
+    late Directory tempDir;
+    void Function(FlutterErrorDetails)? originalOnError;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      logFileService = LogFileService(logDirectory: '/tmp/test-logs');
+      tempDir = Directory.systemTemp.createTempSync('startup_recovery_test_');
+      locationService = _CustomPathLocationService(
+        prefs,
+        p.join(tempDir.path, 'test.db'),
+      );
+      // Suppress splash Image.asset decode noise (same as the lifecycle group).
+      originalOnError = FlutterError.onError;
+      FlutterError.onError = (details) {
+        final message = details.toString();
+        if (message.contains('IMAGE RESOURCE SERVICE') ||
+            message.contains('resolving an image') ||
+            message.contains('Message corrupted')) {
+          return;
+        }
+        originalOnError?.call(details);
+      };
+    });
+
+    tearDown(() {
+      FlutterError.onError = originalOnError;
+      if (tempDir.existsSync()) {
+        tempDir.deleteSync(recursive: true);
+      }
+    });
+
+    testWidgets(
+      'SqliteException code 776 routes to recovery UI, not generic error',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildStartupWrapper(
+            prefs: prefs,
+            logFileService: logFileService,
+            locationService: locationService,
+            schemaVersionProbeOverride: (_) =>
+                (needsMigration: false, totalSteps: 0),
+            initializerOverride: (_) async {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'attempt to write a readonly database',
+              );
+            },
+          ),
+        );
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+
+        // Recovery UI, not "Database upgrade failed".
+        expect(find.text('Database needs recovery'), findsOneWidget);
+        expect(find.byIcon(Icons.build_circle_outlined), findsOneWidget);
+        expect(
+          find.widgetWithText(FilledButton, 'Recover database'),
+          findsOneWidget,
+        );
+        expect(
+          find.widgetWithText(TextButton, 'Close without recovering'),
+          findsOneWidget,
+        );
+        expect(find.text('Database upgrade failed'), findsNothing);
+        expect(find.byKey(const ValueKey('error')), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'recovery UI surfaces the SQLite extended result code for diagnostics',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildStartupWrapper(
+            prefs: prefs,
+            logFileService: logFileService,
+            locationService: locationService,
+            schemaVersionProbeOverride: (_) =>
+                (needsMigration: false, totalSteps: 0),
+            initializerOverride: (_) async {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'readonly',
+              );
+            },
+          ),
+        );
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('SQLite code 776'), findsOneWidget);
+      },
+    );
+
+    testWidgets('SQLITE_BUSY shows the lock screen, not the recovery flow', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            // SQLITE_BUSY — primary code 5; not in the READONLY family.
+            throw sqlite3.SqliteException(
+              extendedResultCode: 5,
+              message: 'database is locked',
+            );
+          },
+        ),
+      );
+
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      // A lock is not corruption: it must not offer recovery, and it must
+      // not be reported as the generic unclassified failure either -- the
+      // database was never written to, so the diver can be told so.
+      expect(find.textContaining('was busy'), findsOneWidget);
+      expect(find.byIcon(Icons.lock_clock), findsOneWidget);
+      expect(find.text('Submersion could not start'), findsNothing);
+      expect(find.text('Database needs recovery'), findsNothing);
+    });
+
+    testWidgets(
+      'Close without recovering invokes closeAppOverride exactly once',
+      (tester) async {
+        var closeCalled = 0;
+        await tester.pumpWidget(
+          _buildStartupWrapper(
+            prefs: prefs,
+            logFileService: logFileService,
+            locationService: locationService,
+            schemaVersionProbeOverride: (_) =>
+                (needsMigration: false, totalSteps: 0),
+            initializerOverride: (_) async {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'readonly',
+              );
+            },
+            closeAppOverride: () => closeCalled++,
+          ),
+        );
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.widgetWithText(TextButton, 'Close without recovering'),
+        );
+        await tester.pump();
+
+        expect(closeCalled, 1);
+      },
+    );
+
+    testWidgets(
+      'recoverHotJournal returning false sets a specific error message on '
+      'the recoveryFailed UI',
+      (tester) async {
+        // Write bytes that aren't a valid SQLite header at the db path.
+        // sqlite3.open in readWrite mode will still create a handle, but the
+        // subsequent PRAGMA user_version probe inside recoverHotJournal will
+        // throw SQLITE_NOTADB — which recoverHotJournal catches and reports
+        // as `false`, driving us into the `!recovered` branch of _runRecovery.
+        final dbPath = p.join(tempDir.path, 'corrupt.db');
+        File(dbPath).writeAsBytesSync(List<int>.filled(4096, 0xAB));
+        locationService = _CustomPathLocationService(prefs, dbPath);
+
+        await tester.pumpWidget(
+          _buildStartupWrapper(
+            prefs: prefs,
+            logFileService: logFileService,
+            locationService: locationService,
+            schemaVersionProbeOverride: (_) =>
+                (needsMigration: false, totalSteps: 0),
+            initializerOverride: (_) async {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'readonly',
+              );
+            },
+          ),
+        );
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+        expect(find.text('Database needs recovery'), findsOneWidget);
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Recover database'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('Recovery did not complete'), findsOneWidget);
+        // The specific message from the `!recovered` branch — NOT a stale
+        // SqliteException message and NOT an exception `.toString()`.
+        expect(
+          find.textContaining('could not reopen the database'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'recovery catch block routes to recoveryFailed UI when getDatabasePath '
+      'throws on the retry attempt',
+      (tester) async {
+        // First call → succeeds (lets the initializer throw 776 → recoveryRequired).
+        // Second call (inside _runRecovery) → throws → the `catch` block in
+        // _runRecovery fires, which is the only path that sets _errorMessage
+        // alongside _state = recoveryFailed.
+        final flaky = _FlakyLocationService(
+          prefs,
+          path: p.join(tempDir.path, 'test.db'),
+          failAfter: 1,
+        );
+        await tester.pumpWidget(
+          _buildStartupWrapper(
+            prefs: prefs,
+            logFileService: logFileService,
+            locationService: flaky,
+            schemaVersionProbeOverride: (_) =>
+                (needsMigration: false, totalSteps: 0),
+            initializerOverride: (_) async {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'readonly',
+              );
+            },
+          ),
+        );
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+
+        // We should now be in recoveryRequired.
+        expect(find.text('Database needs recovery'), findsOneWidget);
+
+        // Tap Recover → _runRecovery calls getDatabasePath, which throws.
+        await tester.tap(find.widgetWithText(FilledButton, 'Recover database'));
+        await tester.pump();
+        await tester.pump();
+
+        // The recoveryFailed UI is rendered with the error message.
+        expect(find.text('Recovery did not complete'), findsOneWidget);
+        expect(find.byIcon(Icons.error_outline), findsOneWidget);
+        expect(
+          find.textContaining('simulated location failure'),
+          findsOneWidget,
+        );
+        expect(
+          find.widgetWithText(OutlinedButton, 'Try again'),
+          findsOneWidget,
+        );
+        expect(find.widgetWithText(FilledButton, 'Close'), findsOneWidget);
+      },
+    );
+
+    testWidgets('Try again on recoveryFailed UI re-invokes _runRecovery', (
+      tester,
+    ) async {
+      final flaky = _FlakyLocationService(
+        prefs,
+        path: p.join(tempDir.path, 'test.db'),
+        failAfter: 1,
+      );
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: flaky,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            throw sqlite3.SqliteException(
+              extendedResultCode: 776,
+              message: 'readonly',
+            );
+          },
+        ),
+      );
+
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      // Drive into recoveryFailed.
+      await tester.tap(find.widgetWithText(FilledButton, 'Recover database'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Recovery did not complete'), findsOneWidget);
+
+      final callsBeforeRetry = flaky.calls;
+
+      // Tap Try again — should run _runRecovery once more, which again
+      // calls getDatabasePath (throws) and lands back on recoveryFailed.
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Try again'));
+      await tester.pump();
+      await tester.pump();
+
+      // The location service was hit once more, confirming re-invocation.
+      expect(flaky.calls, greaterThan(callsBeforeRetry));
+      expect(find.text('Recovery did not complete'), findsOneWidget);
+    });
+
+    testWidgets('Close on recoveryFailed UI invokes closeAppOverride', (
+      tester,
+    ) async {
+      var closeCalled = 0;
+      final flaky = _FlakyLocationService(
+        prefs,
+        path: p.join(tempDir.path, 'test.db'),
+        failAfter: 1,
+      );
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: flaky,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            throw sqlite3.SqliteException(
+              extendedResultCode: 776,
+              message: 'readonly',
+            );
+          },
+          closeAppOverride: () => closeCalled++,
+        ),
+      );
+
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Recover database'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Recovery did not complete'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Close'));
+      await tester.pump();
+
+      expect(closeCalled, 1);
+    });
+
+    testWidgets('tapping Recover database re-invokes the initializer and shows '
+        'recovering state while the second attempt is pending', (tester) async {
+      // First call throws the readonly-rollback exception that triggers
+      // recovery. The second call (the one that recovery re-runs) never
+      // completes, so the UI stays in the `recovering` state and we can
+      // assert it. Letting the second call succeed would mount the full
+      // app (which needs a real database) and fail the test harness.
+      var calls = 0;
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            calls++;
+            if (calls == 1) {
+              throw sqlite3.SqliteException(
+                extendedResultCode: 776,
+                message: 'readonly',
+              );
+            }
+            await Completer<void>().future;
+          },
+        ),
+      );
+
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database needs recovery'), findsOneWidget);
+      expect(calls, 1);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Recover database'));
+      // Drive the recovery microtasks: setState(recovering),
+      // getDatabasePath, recoverHotJournal (no-op for a nonexistent file),
+      // _runInitialization re-entry, probe, initializer (pends).
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(calls, 2);
+      expect(find.text('Recovering database...'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Database needs recovery'), findsNothing);
+
+      // Drain the 1-second splash-delay timer started by _runInitialization.
+      await tester.pump(const Duration(seconds: 2));
+    });
+  });
+
+  // =========================================================================
+  // Startup failure classification (issue #1134)
+  // =========================================================================
+
+  group('startup failure classification', () {
+    late SharedPreferences prefs;
+    late LogFileService logFileService;
+    late DatabaseLocationService locationService;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      logFileService = LogFileService(logDirectory: '/tmp/test-logs');
+      locationService = _FakeLocationService(prefs);
+    });
+
+    testWidgets('a failed engine preflight aborts before anything opens the '
+        'database', (tester) async {
+      var initializerCalls = 0;
+      var probeCalls = 0;
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          enginePreflightOverride: () {
+            throw const DatabaseEngineUnavailableException(
+              'The SQLite native library could not be loaded.',
+            );
+          },
+          schemaVersionProbeOverride: (_) {
+            probeCalls++;
+            return (needsMigration: false, totalSteps: 0);
+          },
+          initializerOverride: (_) async => initializerCalls++,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(probeCalls, 0, reason: 'the schema probe must not run');
+      expect(initializerCalls, 0, reason: 'services must not start');
+      expect(find.textContaining("build can't open"), findsOneWidget);
+      expect(find.text('Database upgrade failed'), findsNothing);
+    });
+
+    testWidgets('an engine failure offers no restore, even with a backup '
+        'sitting on disk', (tester) async {
+      final dir = Directory.systemTemp.createTempSync('startup-engine-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final backupFile = File(p.join(dir.path, 'backup.db'))
+        ..writeAsStringSync('not really a database');
+      await BackupPreferences(prefs).addRecord(
+        BackupRecord(
+          id: 'b1',
+          filename: 'backup.db',
+          timestamp: DateTime.utc(2026, 8, 17),
+          sizeBytes: 21,
+          location: BackupLocation.local,
+          localPath: backupFile.path,
+          type: BackupType.preMigration,
+          fromSchemaVersion: 141,
+          toSchemaVersion: 142,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          enginePreflightOverride: () {
+            throw const DatabaseEngineUnavailableException('no library');
+          },
+          initializerOverride: (_) async {},
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restore this backup'), findsNothing);
+      expect(find.textContaining('no data is at risk'), findsOneWidget);
+    });
+
+    testWidgets('a failure during the upgrade ladder IS reported as a failed '
+        'upgrade', (tester) async {
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: true, totalSteps: 3),
+          preMigrationBackupFactory: _noOpBackupFactory,
+          initializerOverride: (_) async {
+            throw Exception('migration step 2 blew up');
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsOneWidget);
+      // Item 4: the guided-downgrade route, offered only for this class.
+      expect(find.text('View previous releases'), findsOneWidget);
+    });
+
+    testWidgets('a service failure AFTER a successful upgrade is not '
+        'reported as a failed upgrade', (tester) async {
+      // The ladder reports after each completed step, so onProgress(3, 3)
+      // means the upgrade finished. Everything thrown past that point is
+      // ordinary service startup (notifications, tile cache, ...) and must
+      // not inherit the migration title, or #1134 is only half fixed.
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: true, totalSteps: 3),
+          preMigrationBackupFactory: _noOpBackupFactory,
+          initializerOverride: (onProgress) async {
+            onProgress(1, 3);
+            onProgress(2, 3);
+            onProgress(3, 3);
+            throw Exception('notifications blew up');
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsNothing);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.textContaining('notifications blew up'), findsOneWidget);
+      // The guided-downgrade route belongs to a failed upgrade only.
+      expect(find.text('View previous releases'), findsNothing);
+    });
+
+    testWidgets('a failure part way through the ladder still counts as a '
+        'failed upgrade', (tester) async {
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: true, totalSteps: 3),
+          preMigrationBackupFactory: _noOpBackupFactory,
+          initializerOverride: (onProgress) async {
+            onProgress(1, 3);
+            onProgress(2, 3);
+            throw Exception('migration step 3 blew up');
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsOneWidget);
+    });
+
+    testWidgets('a pre-migration backup on disk is surfaced with a restore '
+        'route, and restoring resumes startup', (tester) async {
+      final dir = Directory.systemTemp.createTempSync('startup-restore-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final backupFile = File(
+        p.join(dir.path, '20260817-120000000-v141-v142.db'),
+      )..writeAsStringSync('backup bytes');
+      await BackupPreferences(prefs).addRecord(
+        BackupRecord(
+          id: 'b1',
+          filename: p.basename(backupFile.path),
+          timestamp: DateTime.utc(2026, 8, 17, 12),
+          sizeBytes: 12,
+          location: BackupLocation.local,
+          localPath: backupFile.path,
+          isAutomatic: true,
+          type: BackupType.preMigration,
+          fromSchemaVersion: 141,
+          toSchemaVersion: 142,
+        ),
+      );
+
+      var initializerCalls = 0;
+      String? restoredFrom;
+      // The second attempt is left pending on purpose: letting startup reach
+      // `ready` would mount the real app against an uninitialized
+      // DatabaseService, which is not what this test is about.
+      final secondAttempt = Completer<void>();
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: true, totalSteps: 3),
+          preMigrationBackupFactory: _noOpBackupFactory,
+          initializerOverride: (_) async {
+            initializerCalls++;
+            if (initializerCalls == 1) throw Exception('ladder blew up');
+            await secondAttempt.future;
+          },
+          restoreOverride: (path, _) async => restoredFrom = path,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Database upgrade failed'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsOneWidget);
+      expect(find.textContaining('v141'), findsOneWidget);
+      // The folder holding the backup, offered because backup SETTINGS are
+      // unreachable before the router and database exist.
+      expect(find.textContaining(dir.path), findsOneWidget);
+
+      await tester.tap(find.text('Restore this backup'));
+      // Drive the restore microtasks: setState(running), restoreOverride,
+      // setState(initializing), _runInitialization re-entry, probe, backup,
+      // second initializer call (pends).
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(restoredFrom, backupFile.path);
+      // Recorded for the storage cleanup like any other restore: its cloud
+      // deletes wait for a sync after the restore.
+      expect(StorageGcStore(prefs).lastRestoreAt, isNotNull);
+      expect(StorageGcStore(prefs).postRestoreCloudPending, isTrue);
+      expect(initializerCalls, 2, reason: 'startup must resume after restore');
+      expect(find.text('Database upgrade failed'), findsNothing);
+      expect(find.byKey(const ValueKey('splash')), findsOneWidget);
+
+      // Drain the splash-delay timer started by the second _runInitialization.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a failed restore leaves the diver on the screen with a '
+        'retry', (tester) async {
+      final dir = Directory.systemTemp.createTempSync('startup-restore-x-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final backupFile = File(p.join(dir.path, 'backup.db'))
+        ..writeAsStringSync('backup bytes');
+      await BackupPreferences(prefs).addRecord(
+        BackupRecord(
+          id: 'b1',
+          filename: 'backup.db',
+          timestamp: DateTime.utc(2026, 8, 17, 12),
+          sizeBytes: 12,
+          location: BackupLocation.local,
+          localPath: backupFile.path,
+          type: BackupType.preMigration,
+          fromSchemaVersion: 141,
+          toSchemaVersion: 142,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: true, totalSteps: 3),
+          preMigrationBackupFactory: _noOpBackupFactory,
+          initializerOverride: (_) async {
+            throw Exception('ladder blew up');
+          },
+          restoreOverride: (_, _) async => throw Exception('swap failed'),
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Restore this backup'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('left exactly as it was'), findsOneWidget);
+      expect(find.textContaining('swap failed'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsOneWidget);
+    });
+
+    testWidgets('a cloud-only backup record is not offered as a restore', (
+      tester,
+    ) async {
+      // DatabaseService.restore performs a plain file copy, so a record with
+      // no reachable local file cannot be swapped in.
+      await BackupPreferences(prefs).addRecord(
+        BackupRecord(
+          id: 'b1',
+          filename: 'cloud.db',
+          timestamp: DateTime.utc(2026, 8, 17),
+          sizeBytes: 12,
+          location: BackupLocation.cloud,
+          cloudFileId: 'abc123',
+          type: BackupType.preMigration,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: (_) async {
+            throw Exception('Disk is full');
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restore this backup'), findsNothing);
+    });
+  });
+
+  group('Version mismatch - going back to the pre-upgrade copy', () {
+    late SharedPreferences prefs;
+    late LogFileService logFileService;
+    late DatabaseLocationService locationService;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      logFileService = LogFileService(logDirectory: '/tmp/test-logs');
+      locationService = _FakeLocationService(prefs);
+    });
+
+    /// Registers a pre-migration copy on disk, and returns its path.
+    Future<String> seedCopy(
+      Directory dir, {
+      required String id,
+      required int fromSchemaVersion,
+      required int toSchemaVersion,
+      required DateTime timestamp,
+    }) async {
+      final file = File(p.join(dir.path, '$id.db'))
+        ..writeAsStringSync('backup bytes');
+      await BackupPreferences(prefs).addRecord(
+        BackupRecord(
+          id: id,
+          filename: '$id.db',
+          timestamp: timestamp,
+          sizeBytes: 12,
+          location: BackupLocation.local,
+          localPath: file.path,
+          isAutomatic: true,
+          type: BackupType.preMigration,
+          fromSchemaVersion: fromSchemaVersion,
+          toSchemaVersion: toSchemaVersion,
+        ),
+      );
+      return file.path;
+    }
+
+    Widget wrapper({
+      required int storedSchemaVersion,
+      required int supportedSchemaVersion,
+      int? Function(String path)? probe,
+      PreDowngradeBackupService Function({
+        required String livePath,
+        required BackupPreferences preferences,
+      })?
+      preDowngradeBackupFactory,
+      Future<void> Function(
+        String backupPath,
+        void Function(int currentStep, int totalSteps) onMigrationProgress,
+      )?
+      restoreOverride,
+      ServiceInitializer? initializerOverride,
+    }) {
+      return _buildStartupWrapper(
+        prefs: prefs,
+        logFileService: logFileService,
+        locationService: locationService,
+        schemaVersionProbeOverride: (_) =>
+            (needsMigration: false, totalSteps: 0),
+        downgradeCandidateProbeOverride: probe,
+        preDowngradeBackupFactory: preDowngradeBackupFactory,
+        restoreOverride: restoreOverride,
+        initializerOverride:
+            initializerOverride ??
+            (_) async {
+              throw DatabaseVersionMismatchException(
+                storedSchemaVersion: storedSchemaVersion,
+                supportedSchemaVersion: supportedSchemaVersion,
+              );
+            },
+      );
+    }
+
+    testWidgets('offers the newest copy this build can still open', (
+      tester,
+    ) async {
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'old',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 8, 1, 9),
+      );
+      // Taken by the beta build, so its contents are at 191: unopenable here,
+      // and the newest record in the registry. Ordering alone would pick it.
+      await seedCopy(
+        dir,
+        id: 'beta',
+        fromSchemaVersion: 191,
+        toSchemaVersion: 195,
+        timestamp: DateTime.utc(2026, 9, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (path) => p.basename(path) == 'old.db' ? 170 : 191,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Your Data Is Newer Than This App'), findsOneWidget);
+      expect(find.text('Restore your pre-upgrade backup'), findsOneWidget);
+      expect(find.textContaining('v170'), findsOneWidget);
+    });
+
+    testWidgets('restore card stays readable in dark mode', (tester) async {
+      // The splash paints its own dark palette from the cached theme mode,
+      // but the Card behind the restore offer takes its surface from the
+      // theme. When the splash MaterialApp carried no theme, that surface
+      // came from Flutter's default LIGHT ThemeData while the text stayed
+      // white, and the whole offer washed out (#1595).
+      SharedPreferences.setMockInitialValues({cachedThemeModeKey: 'dark'});
+      prefs = await SharedPreferences.getInstance();
+      locationService = _FakeLocationService(prefs);
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-d-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'old',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 8, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (_) => 170,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(StartupRestoreCard), findsOneWidget);
+
+      // The colour the card actually paints, not the colour it was asked for.
+      final surface = tester
+          .widget<Material>(
+            find
+                .descendant(
+                  of: find.byType(StartupRestoreCard),
+                  matching: find.byType(Material),
+                )
+                .first,
+          )
+          .color;
+      expect(surface, isNotNull);
+      expect(
+        ThemeData.estimateBrightnessForColor(surface!),
+        Brightness.dark,
+        reason: 'white card text needs a dark surface behind it',
+      );
+    });
+
+    testWidgets('the splash wears the diver\'s cached theme preset', (
+      tester,
+    ) async {
+      // The preset lives in the unopened database, so the settings notifier
+      // mirrors it into SharedPreferences for exactly this screen.
+      SharedPreferences.setMockInitialValues({
+        cachedThemeModeKey: 'dark',
+        cachedThemePresetKey: 'console',
+      });
+      prefs = await SharedPreferences.getInstance();
+      locationService = _FakeLocationService(prefs);
+
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-p-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'old',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 8, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (_) => 170,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      final theme = Theme.of(tester.element(find.byType(StartupRestoreCard)));
+      final console = AppThemeRegistry.resolveTheme(
+        AppThemeRegistry.findById('console'),
+        Brightness.dark,
+      );
+      expect(theme.colorScheme.primary, console.colorScheme.primary);
+    });
+
+    testWidgets('shows no restore when every copy is itself too new', (
+      tester,
+    ) async {
+      // What retention leaves behind after a few beta launches (#1590). The
+      // screen must degrade to its old shape rather than offer a button that
+      // fails the same way the database just did.
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-x-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'beta',
+        fromSchemaVersion: 191,
+        toSchemaVersion: 195,
+        timestamp: DateTime.utc(2026, 9, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 195,
+          supportedSchemaVersion: 175,
+          probe: (_) => 191,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Your Data Is Newer Than This App'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsNothing);
+    });
+
+    testWidgets('shows no restore when the registry lies about the copy', (
+      tester,
+    ) async {
+      // The record claims v170, but the file will not open. Only opening it
+      // proves the claim, which is why the probe exists.
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-p-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'corrupt',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 9, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (_) => null,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restore this backup'), findsNothing);
+    });
+
+    testWidgets('shows no restore when the file disagrees with the registry', (
+      tester,
+    ) async {
+      // The card names the record's schema pair, so a file whose own
+      // user_version differs from the claim would have the screen promise to
+      // undo one upgrade while restoring a database from another. Openable is
+      // not the same question as "is this the copy we are describing".
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-m-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'mislabelled',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 9, 1, 9),
+      );
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          // Opens fine and is old enough to restore, but is not the v170 copy
+          // the registry claims it is.
+          probe: (_) => 168,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Your Data Is Newer Than This App'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsNothing);
+    });
+
+    testWidgets('preserves the newer database BEFORE swapping it away, then '
+        'resumes startup', (tester) async {
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-r-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final copyPath = await seedCopy(
+        dir,
+        id: 'old',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 8, 1, 9),
+      );
+
+      late _RecordingPreDowngradeService preserver;
+      final order = <String>[];
+      String? restoredFrom;
+      var initializerCalls = 0;
+      // Left pending on purpose: reaching `ready` would mount the real app
+      // against an uninitialized DatabaseService.
+      final secondAttempt = Completer<void>();
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (_) => 170,
+          preDowngradeBackupFactory:
+              ({required livePath, required preferences}) {
+                preserver = _RecordingPreDowngradeService(
+                  preferences: preferences,
+                  journal: order,
+                );
+                return preserver;
+              },
+          restoreOverride: (path, _) async {
+            order.add('restore');
+            restoredFrom = path;
+          },
+          initializerOverride: (_) async {
+            initializerCalls++;
+            if (initializerCalls == 1) {
+              throw const DatabaseVersionMismatchException(
+                storedSchemaVersion: 191,
+                supportedSchemaVersion: 175,
+              );
+            }
+            await secondAttempt.future;
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Restore this backup'));
+      await tester.tap(find.text('Restore this backup'));
+      // Drive the restore microtasks: setState(running), preserve, restore,
+      // setState(initializing), _runInitialization re-entry, probe, second
+      // initializer call (pends).
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(preserver.calls, 1);
+      expect(
+        preserver.preservedSchemaVersion,
+        191,
+        reason: 'the copy must record the schema the newer file holds',
+      );
+      expect(
+        order,
+        ['preserve', 'restore'],
+        reason:
+            'the newer database must be copied aside BEFORE the swap; '
+            'preserving afterwards would copy the file the swap replaced',
+      );
+      expect(restoredFrom, copyPath);
+      expect(initializerCalls, 2, reason: 'startup must resume after restore');
+      expect(find.text('Your Data Is Newer Than This App'), findsNothing);
+      expect(find.byKey(const ValueKey('splash')), findsOneWidget);
+
+      // Drain the splash-delay timer started by the second _runInitialization.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a failure to preserve the newer database aborts the swap', (
+      tester,
+    ) async {
+      // The newer file is the thing at risk here, so a restore that cannot
+      // save it first must not happen at all.
+      final dir = Directory.systemTemp.createTempSync('startup-downgrade-f-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await seedCopy(
+        dir,
+        id: 'old',
+        fromSchemaVersion: 170,
+        toSchemaVersion: 175,
+        timestamp: DateTime.utc(2026, 8, 1, 9),
+      );
+
+      var restoreCalls = 0;
+
+      await tester.pumpWidget(
+        wrapper(
+          storedSchemaVersion: 191,
+          supportedSchemaVersion: 175,
+          probe: (_) => 170,
+          preDowngradeBackupFactory:
+              ({required livePath, required preferences}) =>
+                  _RecordingPreDowngradeService(
+                    preferences: preferences,
+                    error: Exception('disk full'),
+                  ),
+          restoreOverride: (_, _) async => restoreCalls++,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Restore this backup'));
+      await tester.tap(find.text('Restore this backup'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(restoreCalls, 0, reason: 'nothing may be swapped');
+      expect(find.textContaining('left exactly as it was'), findsOneWidget);
+      expect(find.textContaining('disk full'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsOneWidget);
+    });
+  });
+
+  // Issue #2139: a fresh macOS install whose database was damaged. The backup
+  // registry was empty, so the screen offered an empty folder and a Close
+  // button that quits, while the dive log the diver actually uses sat in
+  // their iCloud Drive folder the whole time.
+  group('the other ways back in', () {
+    late SharedPreferences prefs;
+    late LogFileService logFileService;
+    late DatabaseLocationService locationService;
+    late Directory tempDir;
+    late String dbPath;
+    void Function(FlutterErrorDetails)? originalOnError;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      logFileService = LogFileService(logDirectory: '/tmp/test-logs');
+      tempDir = Directory.systemTemp.createTempSync('startup_ways_back_');
+      dbPath = p.join(tempDir.path, DatabaseLocationService.databaseFilename);
+      locationService = _CustomPathLocationService(prefs, dbPath);
+      originalOnError = FlutterError.onError;
+      FlutterError.onError = (details) {
+        final message = details.toString();
+        if (message.contains('IMAGE RESOURCE SERVICE') ||
+            message.contains('resolving an image') ||
+            message.contains('Message corrupted')) {
+          return;
+        }
+        originalOnError?.call(details);
+      };
+    });
+
+    tearDown(() {
+      FlutterError.onError = originalOnError;
+      if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    });
+
+    /// Pumps a launch that dies the way #2139 did, with no backup on record.
+    Future<void> pumpUnreadableDatabase(
+      WidgetTester tester, {
+      required ServiceInitializer initializer,
+      StartupRecoveryService? recoveryServiceOverride,
+      Future<String?> Function()? pickBackupFileOverride,
+      Future<void> Function(
+        String backupPath,
+        void Function(int currentStep, int totalSteps) onMigrationProgress,
+      )?
+      restoreOverride,
+    }) async {
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: initializer,
+          recoveryServiceOverride: recoveryServiceOverride,
+          pickBackupFileOverride: pickBackupFileOverride,
+          restoreOverride: restoreOverride,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a damaged dive log with no backup still offers three routes', (
+      tester,
+    ) async {
+      await pumpUnreadableDatabase(
+        tester,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+      expect(find.text('Restore this backup'), findsNothing);
+      expect(find.text('Use a dive log in another folder'), findsOneWidget);
+      expect(find.text('Restore from a backup file'), findsOneWidget);
+      expect(find.text('Start with an empty dive log'), findsOneWidget);
+    });
+
+    testWidgets('a picked backup file is validated, then restored', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService();
+      String? restoredFrom;
+      var initializerCalls = 0;
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        pickBackupFileOverride: () async => '/Volumes/iCloud/submersion.db',
+        restoreOverride: (path, _) async => restoredFrom = path,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) {
+            throw Exception('database disk image is malformed');
+          }
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from a backup file'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(recovery.classifiedPath, '/Volumes/iCloud/submersion.db');
+      expect(restoredFrom, '/Volumes/iCloud/submersion.db');
+      expect(initializerCalls, 2, reason: 'startup must resume after restore');
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    // restore() leaves a file that fails its reopen in place, so a file that
+    // does not validate must never reach the swap.
+    testWidgets('a picked file that is not a backup is never swapped in', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(
+        backupChoice: const UnusableBackupFile(
+          '/Downloads/holiday.zip',
+          'Invalid file extension ".zip"',
+        ),
+      );
+      var restoreCalls = 0;
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        pickBackupFileOverride: () async => '/Downloads/holiday.zip',
+        restoreOverride: (_, _) async => restoreCalls++,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+
+      // A BACKUP-specific message. The unusable-dive-log wording calls the
+      // path a dive log, which would point the diver at the wrong file.
+      expect(
+        find.textContaining('not a backup Submersion can restore'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('is damaged, or it is not'), findsNothing);
+      // The validator's own words, which name the problem better than any
+      // paraphrase of them could.
+      expect(find.textContaining('Invalid file extension'), findsOneWidget);
+
+      // Dismiss BEFORE asserting nothing was swapped. The report is a modal
+      // dialog, so an assertion taken while it is still up passes even if the
+      // handler goes on to swap the file the moment it closes.
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(restoreCalls, 0, reason: 'nothing may be swapped');
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+    });
+
+    // An encrypted backup is a VALID artifact that cannot be opened here.
+    // Calling it damaged would send a diver hunting a corruption that does
+    // not exist.
+    testWidgets('an encrypted backup is explained, not called damaged', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(
+        backupChoice: const EncryptedBackupFile(),
+      );
+      var restoreCalls = 0;
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        pickBackupFileOverride: () async => '/Downloads/backup.sbe',
+        restoreOverride: (_, _) async => restoreCalls++,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('That backup is encrypted'), findsOneWidget);
+      // Specifically NOT the unusable-file wording. ("damaged" on its own is
+      // no good here: the failure screen behind the dialog uses the word too.)
+      expect(
+        find.textContaining('is damaged, or it is not'),
+        findsNothing,
+        reason: 'an encrypted backup is valid, just not openable from here',
+      );
+
+      // Dismissed first, for the same reason as above: a modal dialog masks
+      // whatever the handler does after it closes.
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(restoreCalls, 0, reason: 'nothing may be swapped');
+    });
+
+    // The race the guard exists for: a restore leaves the failure screen on
+    // display the whole time it copies (it sets _restoreStatus, not _state),
+    // so without a guard the diver can set the database aside from under it.
+    testWidgets('a second route cannot start while a restore is copying', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService();
+      final neverFinishes = Completer<void>();
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        pickBackupFileOverride: () async => '/Volumes/iCloud/submersion.db',
+        restoreOverride: (_, _) => neverFinishes.future,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from a backup file'));
+      await tester.pump();
+      await tester.pump();
+
+      // The restore is now in flight and this screen is still up.
+      expect(recovery.classifiedPath, '/Volumes/iCloud/submersion.db');
+
+      await tester.tap(
+        find.text('Start with an empty dive log'),
+        warnIfMissed: false,
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        recovery.setAsideCalls,
+        0,
+        reason: 'starting fresh must not move the file being restored onto',
+      );
+      expect(find.text('Start fresh'), findsNothing);
+
+      // Now past the button, straight to the callback. The disabled button is
+      // the affordance; the guard inside the handler is the actual barrier,
+      // and it is what protects a tap that lands before the rebuild disables
+      // anything. Without it this call sets the database aside mid-restore.
+      final view = tester.widget<StartupFailureView>(
+        find.byType(StartupFailureView),
+      );
+      view.onStartFresh!();
+      await tester.pumpAndSettle();
+
+      expect(
+        recovery.setAsideCalls,
+        0,
+        reason: 'the handler guard must hold even when the callback is called',
+      );
+      expect(find.text('Start fresh'), findsNothing);
+    });
+
+    testWidgets('cancelling the backup-file picker changes nothing', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService();
+      var restoreCalls = 0;
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        pickBackupFileOverride: () async => null,
+        restoreOverride: (_, _) async => restoreCalls++,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore from a backup file'));
+      await tester.pumpAndSettle();
+
+      expect(recovery.classifiedPath, isNull);
+      expect(restoreCalls, 0);
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+    });
+
+    testWidgets('starting fresh sets the damaged log aside and relaunches', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(
+        setAsideResult: p.join(tempDir.path, 'unreadable-dive-log-20260919'),
+      );
+      var initializerCalls = 0;
+      // The second attempt is left pending on purpose: letting startup reach
+      // `ready` would mount the real app against an uninitialized
+      // DatabaseService, which is not what this test is about.
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) {
+            throw Exception('database disk image is malformed');
+          }
+          await secondAttempt.future;
+        },
+      );
+
+      // The routes sit below the fold on a short window, by design: the
+      // reassurance and the technical details come first.
+      await tester.ensureVisible(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start fresh'));
+      await tester.pumpAndSettle();
+
+      expect(recovery.setAsideCalls, 1);
+      // Where it went, said BEFORE the relaunch: once the app is up this
+      // screen is gone and it looks to the diver like every dive they ever
+      // logged has been deleted.
+      expect(find.textContaining(recovery.setAsideResult), findsOneWidget);
+
+      await tester.tap(find.text('OK'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(initializerCalls, 2, reason: 'startup must run again');
+      expect(find.text('Your dive log could not be read'), findsNothing);
+
+      // Drain the splash-delay timer started by the second _runInitialization.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a dive log in the picked folder is offered, then adopted', (
+      tester,
+    ) async {
+      locationService = _PickingLocationService(
+        prefs,
+        dbPath,
+        picks: '/Users/diver/Library/Mobile Documents/Submersion',
+      );
+      final recovery = _FakeStartupRecoveryService(
+        inspection: AdoptableDiveLog(
+          path:
+              '/Users/diver/Library/Mobile Documents/Submersion/'
+              '${DatabaseLocationService.databaseFilename}',
+          diveCount: 412,
+          siteCount: 87,
+          sizeBytes: 9 * 1024 * 1024,
+          lastModified: DateTime.utc(2026, 9, 18),
+        ),
+      );
+      var initializerCalls = 0;
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) {
+            throw Exception('database disk image is malformed');
+          }
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+
+      expect(
+        recovery.inspectedFolder,
+        '/Users/diver/Library/Mobile Documents/Submersion',
+      );
+      // The counts are what tell a diver they picked the right folder, and
+      // every candidate folder looks alike from the outside.
+      expect(find.text('412 dives, 87 dive sites'), findsOneWidget);
+      expect(
+        recovery.adoptCalls,
+        0,
+        reason: 'nothing before the diver says so',
+      );
+
+      await tester.tap(find.text('Use this dive log'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(recovery.adoptCalls, 1);
+      expect(initializerCalls, 2, reason: 'startup must run again');
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a folder with no dive log says so and changes nothing', (
+      tester,
+    ) async {
+      locationService = _PickingLocationService(
+        prefs,
+        dbPath,
+        picks: '/Users/diver/Library/Mobile Documents',
+      );
+      final recovery = _FakeStartupRecoveryService();
+      var initializerCalls = 0;
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+
+      // The WHOLE rendered sentence, not "both values appear somewhere":
+      // the two placeholders are interchangeable at the call site, and an
+      // assertion that only checks presence passes with them swapped, which
+      // renders "There is no <folder> in submersion.db".
+      expect(
+        find.text(
+          'There is no ${DatabaseLocationService.databaseFilename} in '
+          '/Users/diver/Library/Mobile Documents. Choose the folder that '
+          'holds the dive log file itself.',
+        ),
+        findsOneWidget,
+      );
+      expect(recovery.adoptCalls, 0);
+      expect(initializerCalls, 1, reason: 'nothing may relaunch');
+    });
+
+    testWidgets('cancelling the folder picker changes nothing', (tester) async {
+      locationService = _PickingLocationService(prefs, dbPath, picks: null);
+      final recovery = _FakeStartupRecoveryService();
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+
+      expect(recovery.inspectedFolder, isNull);
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+    });
+
+    testWidgets('backing out of starting fresh touches nothing', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(setAsideResult: '/aside');
+      var initializerCalls = 0;
+
+      await pumpUnreadableDatabase(
+        tester,
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      await tester.ensureVisible(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(recovery.setAsideCalls, 0);
+      expect(initializerCalls, 1, reason: 'nothing may relaunch');
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+    });
+  });
+
+  // Issue #2178. On macOS and iOS an unreachable custom folder used to reset
+  // the storage location during startup, silently, so this screen was never
+  // reached and the next launch opened an empty default database.
+  group('an unreachable dive log folder', () {
+    const folder = '/Users/diver/Library/Mobile Documents/Submersion';
+    late SharedPreferences prefs;
+    late LogFileService logFileService;
+    late Directory tempDir;
+    late String dbPath;
+
+    /// How a folder the sandbox no longer grants actually fails: the open,
+    /// with nothing in the error that names the folder.
+    final revokedAccess = FileSystemException(
+      'Cannot open file',
+      p.join(folder, DatabaseLocationService.databaseFilename),
+      const OSError('Operation not permitted', 1),
+    );
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      tempDir = Directory.systemTemp.createTempSync('startup_unreachable_');
+      logFileService = LogFileService(
+        logDirectory: p.join(tempDir.path, 'logs'),
+      );
+      dbPath = p.join(tempDir.path, DatabaseLocationService.databaseFilename);
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    });
+
+    Future<void> pumpUnreachable(
+      WidgetTester tester, {
+      required DatabaseLocationService locationService,
+      required ServiceInitializer initializer,
+      StartupRecoveryService? recoveryServiceOverride,
+      bool fileReached = false,
+      List<String>? journal,
+      Object? closeError,
+    }) async {
+      await tester.pumpWidget(
+        _buildStartupWrapper(
+          prefs: prefs,
+          logFileService: logFileService,
+          locationService: locationService,
+          schemaVersionProbeOverride: (_) =>
+              (needsMigration: false, totalSteps: 0),
+          initializerOverride: initializer,
+          recoveryServiceOverride: recoveryServiceOverride,
+          // Stated rather than read from the process-wide DatabaseService,
+          // so a connection another test left open cannot leak in here.
+          fileReachedOverride: () => fileReached,
+          closeDatabaseOverride: () async {
+            journal?.add('close');
+            if (closeError != null) throw closeError;
+          },
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('is reported as a folder problem, naming the folder', (
+      tester,
+    ) async {
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        initializer: (_) async => throw revokedAccess,
+      );
+
+      expect(find.text("Your dive log's folder can't be reached"), findsOne);
+      expect(find.text(folder), findsOneWidget);
+      expect(find.text('Submersion could not start'), findsNothing);
+      expect(find.text("Choose your dive log's folder"), findsOneWidget);
+      expect(find.text('Go back to the app default location'), findsOne);
+      expect(find.text('Start with an empty dive log'), findsNothing);
+      expect(find.text('Restore from a backup file'), findsNothing);
+    });
+
+    testWidgets('going back to the default location asks first, then '
+        'relaunches', (tester) async {
+      final recovery = _FakeStartupRecoveryService();
+      var initializerCalls = 0;
+      // Left pending: reaching `ready` would mount the real app against an
+      // uninitialized DatabaseService, which is not what this test is about.
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) throw revokedAccess;
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(
+        find.text('Go back to the app default location'),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Go back to the app default location'));
+      await tester.pumpAndSettle();
+
+      // Asked, not done: the dialog names the folder being left, so the diver
+      // knows where their dive log still is.
+      expect(find.text('Go back to the app default location?'), findsOne);
+      expect(find.textContaining('Nothing in $folder is moved'), findsOne);
+      expect(recovery.useDefaultCalls, 0);
+
+      await tester.tap(find.text('Use the default location'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(recovery.useDefaultCalls, 1);
+      expect(initializerCalls, 2, reason: 'startup must run again');
+      expect(
+        find.text("Your dive log's folder can't be reached"),
+        findsNothing,
+      );
+
+      // Drain the splash-delay timer started by the second _runInitialization.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('backing out of the default location changes nothing', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService();
+      var initializerCalls = 0;
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          throw revokedAccess;
+        },
+      );
+
+      await tester.ensureVisible(
+        find.text('Go back to the app default location'),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Go back to the app default location'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(recovery.useDefaultCalls, 0);
+      expect(initializerCalls, 1, reason: 'nothing may relaunch');
+      expect(find.text("Your dive log's folder can't be reached"), findsOne);
+    });
+
+    testWidgets('a return to the default location that fails is reported', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(
+        useDefaultError: StateError('prefs are read-only'),
+      );
+      var initializerCalls = 0;
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          throw revokedAccess;
+        },
+      );
+
+      await tester.ensureVisible(
+        find.text('Go back to the app default location'),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Go back to the app default location'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use the default location'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('That did not work'), findsOneWidget);
+      expect(find.textContaining('prefs are read-only'), findsOneWidget);
+
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(initializerCalls, 1, reason: 'nothing may relaunch');
+      expect(find.text("Your dive log's folder can't be reached"), findsOne);
+    });
+
+    // Picking the same folder again is what restores a sandboxed build's
+    // access, so the folder route has to lead to the same adoption flow.
+    testWidgets('choosing the folder again adopts it and relaunches', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService(
+        inspection: AdoptableDiveLog(
+          path: p.join(folder, DatabaseLocationService.databaseFilename),
+          diveCount: 412,
+          siteCount: 87,
+          sizeBytes: 9 * 1024 * 1024,
+          lastModified: DateTime.utc(2026, 9, 18),
+        ),
+      );
+      var initializerCalls = 0;
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+          picks: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) throw revokedAccess;
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(find.text("Choose your dive log's folder"));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text("Choose your dive log's folder"));
+      await tester.pumpAndSettle();
+
+      expect(recovery.inspectedFolder, folder);
+      await tester.tap(find.text('Use this dive log'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(recovery.adoptCalls, 1);
+      expect(initializerCalls, 2, reason: 'startup must run again');
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    // The probe runs on a screen the diver reached because something already
+    // went wrong. If it fails too, the original failure has to be what they
+    // see, not a second terminal state.
+    // Copilot on PR 2497: a service that fails AFTER the database opened
+    // reached the file. The folder may be gone now, but the file may have
+    // been written, and relaunching at the default location would reuse the
+    // connection that is still open.
+    testWidgets('a failure after the database opened keeps the data routes', (
+      tester,
+    ) async {
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        fileReached: true,
+        initializer: (_) async => throw revokedAccess,
+      );
+
+      expect(
+        find.text("Your dive log's folder can't be reached"),
+        findsNothing,
+      );
+      expect(find.text('Go back to the app default location'), findsNothing);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.text('Start with an empty dive log'), findsOneWidget);
+    });
+
+    // Copilot on PR 2497: the schema probe opens an EXISTING file
+    // read-write, which can roll back a hot journal, so a failure after it
+    // may have changed the file whatever the folder looks like now.
+    testWidgets('a file the schema probe reached is not blamed on the folder', (
+      tester,
+    ) async {
+      File(dbPath).writeAsStringSync('reached');
+      final location = _UnreachableLocationService(
+        prefs,
+        dbPath,
+        folder: folder,
+      );
+      await pumpUnreachable(
+        tester,
+        locationService: location,
+        initializer: (_) async => throw revokedAccess,
+      );
+
+      expect(location.probeCalls, 0);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.text('Go back to the app default location'), findsNothing);
+    });
+
+    // Copilot on PR 2497: a relaunch reuses whatever connection is still
+    // open (initialize() returns early), and setting aside moves the open
+    // file out from under it. So the connection goes first.
+    testWidgets('starting fresh closes the database before moving it', (
+      tester,
+    ) async {
+      final journal = <String>[];
+      final recovery = _FakeStartupRecoveryService(journal: journal);
+      var initializerCalls = 0;
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        fileReached: true,
+        journal: journal,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) throw Exception('notifications blew up');
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start fresh'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OK'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(journal.first, 'close');
+      expect(journal.indexOf('setAside'), greaterThan(0));
+      expect(initializerCalls, 2);
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('adopting another folder closes the database first', (
+      tester,
+    ) async {
+      final journal = <String>[];
+      final recovery = _FakeStartupRecoveryService(
+        journal: journal,
+        inspection: AdoptableDiveLog(
+          path: p.join(folder, DatabaseLocationService.databaseFilename),
+          diveCount: 1,
+          siteCount: 1,
+          sizeBytes: 4096,
+          lastModified: DateTime.utc(2026, 9, 18),
+        ),
+      );
+      var initializerCalls = 0;
+      final secondAttempt = Completer<void>();
+
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+          picks: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        fileReached: true,
+        journal: journal,
+        initializer: (_) async {
+          initializerCalls++;
+          if (initializerCalls == 1) throw Exception('notifications blew up');
+          await secondAttempt.future;
+        },
+      );
+
+      await tester.ensureVisible(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use a dive log in another folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use this dive log'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(journal, containsAllInOrder(['close', 'adopt']));
+      expect(initializerCalls, 2);
+
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    // Releasing the connection is housekeeping on the way to a screen the
+    // diver reached because something already failed. A close that fails too
+    // must leave that failure on screen, not replace it.
+    testWidgets('a connection that will not close leaves the failure shown', (
+      tester,
+    ) async {
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        fileReached: true,
+        closeError: StateError('connection is stuck'),
+        initializer: (_) async => throw Exception('notifications blew up'),
+      );
+
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.textContaining('notifications blew up'), findsOneWidget);
+      expect(find.textContaining('connection is stuck'), findsNothing);
+    });
+
+    // A dead network mount can leave every file call blocked for the whole
+    // network timeout. The failure screen must not wait that long: it falls
+    // back to the screen that keeps every route.
+    testWidgets('a probe that never answers gives way to the failure screen', (
+      tester,
+    ) async {
+      final location = _UnreachableLocationService(
+        prefs,
+        dbPath,
+        folder: folder,
+      )..hangs = true;
+      await pumpUnreachable(
+        tester,
+        locationService: location,
+        initializer: (_) async => throw revokedAccess,
+      );
+
+      expect(location.probeCalls, 1);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+      expect(find.text("Choose your dive log's folder"), findsNothing);
+    });
+
+    // Copilot on PR 2497: every route out moves or reopens the database, so
+    // one must not run while a connection still holds it. The close is
+    // retried first; only one that still fails stops the route.
+    testWidgets('a route does not run while the connection will not close', (
+      tester,
+    ) async {
+      final recovery = _FakeStartupRecoveryService();
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+        ),
+        recoveryServiceOverride: recovery,
+        fileReached: true,
+        closeError: StateError('connection is stuck'),
+        initializer: (_) async => throw Exception('notifications blew up'),
+      );
+
+      await tester.ensureVisible(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start with an empty dive log'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('That did not work'), findsOneWidget);
+      expect(find.textContaining('connection is stuck'), findsOneWidget);
+      expect(find.text('Start fresh'), findsNothing, reason: 'no confirm');
+
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      expect(recovery.setAsideCalls, 0);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+    });
+
+    // Its answer could not change the screen, and on a dead network mount
+    // each file call can block for the whole network timeout.
+    testWidgets('the folder is not probed when its answer cannot matter', (
+      tester,
+    ) async {
+      final location = _UnreachableLocationService(
+        prefs,
+        dbPath,
+        folder: folder,
+      );
+      await pumpUnreachable(
+        tester,
+        locationService: location,
+        fileReached: true,
+        initializer: (_) async => throw revokedAccess,
+      );
+
+      expect(location.probeCalls, 0);
+      expect(find.text('Submersion could not start'), findsOneWidget);
+    });
+
+    testWidgets('a probe that throws leaves the original failure on screen', (
+      tester,
+    ) async {
+      await pumpUnreachable(
+        tester,
+        locationService: _UnreachableLocationService(
+          prefs,
+          dbPath,
+          folder: folder,
+          probeError: StateError('prefs unavailable'),
+        ),
+        initializer: (_) async {
+          throw Exception('database disk image is malformed');
+        },
+      );
+
+      expect(find.text('Your dive log could not be read'), findsOneWidget);
+      expect(
+        find.text("Your dive log's folder can't be reached"),
+        findsNothing,
+      );
+    });
+  });
 }
 
 /// A backup service whose `backupIfMigrationPending` always throws.
@@ -1188,5 +3848,121 @@ class _ThrowingBackupService extends PreMigrationBackupService {
     required String appVersion,
   }) async {
     throw error;
+  }
+}
+
+/// A [StartupRecoveryService] that records calls instead of touching files.
+///
+/// Needed because a `dart:io` future started inside the fake-async widget-test
+/// zone never completes, so the real service can be driven only from a plain
+/// unit test (which is where the file moves are covered).
+class _FakeStartupRecoveryService implements StartupRecoveryService {
+  _FakeStartupRecoveryService({
+    this.setAsideResult = '/aside',
+    this.inspection = const NoDiveLogInFolder(),
+    this.backupChoice,
+    this.useDefaultError,
+    this.journal,
+  });
+
+  /// Shared with the page's close hook, so a test can assert ORDER.
+  final List<String>? journal;
+
+  final String setAsideResult;
+  final FolderInspection inspection;
+
+  final BackupFileChoice? backupChoice;
+
+  /// Thrown by [useDefaultLocation] when set.
+  final Object? useDefaultError;
+
+  int setAsideCalls = 0;
+  int adoptCalls = 0;
+  int useDefaultCalls = 0;
+  String? inspectedFolder;
+  String? classifiedPath;
+
+  @override
+  Future<void> useDefaultLocation() async {
+    useDefaultCalls++;
+    if (useDefaultError != null) throw useDefaultError!;
+  }
+
+  @override
+  Future<String> setAsideUnreadableDatabase() async {
+    setAsideCalls++;
+    journal?.add('setAside');
+    return setAsideResult;
+  }
+
+  @override
+  Future<FolderInspection> inspectFolder(String folderPath) async {
+    inspectedFolder = folderPath;
+    return inspection;
+  }
+
+  @override
+  Future<void> adopt(AdoptableDiveLog found) async {
+    adoptCalls++;
+    journal?.add('adopt');
+  }
+
+  @override
+  Future<BackupFileChoice> classifyBackupFile(
+    String path,
+    SharedPreferences prefs, {
+    Future<BackupValidationResult> Function(String path)? validate,
+  }) async {
+    classifiedPath = path;
+    return backupChoice ?? RestorableBackupFile(path);
+  }
+}
+
+/// A location service whose folder picker answers without a host picker.
+class _PickingLocationService extends _CustomPathLocationService {
+  _PickingLocationService(super.prefs, super.path, {required this.picks});
+
+  /// The folder the diver "chooses", or null when they cancel the picker.
+  final String? picks;
+
+  @override
+  Future<FolderPickResultWithBookmark?> pickCustomFolder({
+    Future<ExternalVolumeOption?> Function(List<ExternalVolumeOption>)? chooser,
+  }) async => picks == null ? null : FolderPickResultWithBookmark(path: picks!);
+}
+
+/// A location service whose custom folder cannot be reached.
+///
+/// Answers the probe directly: the real one is `dart:io`, and a `dart:io`
+/// future started inside the fake-async widget-test zone never completes. The
+/// probe itself is covered against real folders in
+/// `test/core/services/database_location_startup_check_test.dart`.
+class _UnreachableLocationService extends _PickingLocationService {
+  _UnreachableLocationService(
+    super.prefs,
+    super.path, {
+    required this.folder,
+    super.picks,
+    this.probeError,
+  });
+
+  final String folder;
+
+  /// Thrown by the probe when set, to prove a failed probe never replaces
+  /// the failure the diver actually hit.
+  final Object? probeError;
+
+  /// When set, the probe never answers, like a dead network mount.
+  bool hangs = false;
+
+  /// How many times the failure screen asked.
+  int probeCalls = 0;
+
+  @override
+  Future<String?> unreachableCustomFolder() async {
+    probeCalls++;
+    if (probeError != null) throw probeError!;
+    if (hangs) return Completer<String?>().future;
+    return folder;
   }
 }

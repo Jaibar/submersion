@@ -1,0 +1,576 @@
+import 'dart:ui' show Locale;
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_l10n.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_units.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+void main() {
+  final l10n = lookupAppLocalizations(const Locale('en'));
+  const units = UnitFormatter(AppSettings());
+  // Imperial formatter to prove the conversion arms are unit-aware, not
+  // hard-coded to the metric identity.
+  const imperial = UnitFormatter(
+    AppSettings(
+      depthUnit: DepthUnit.feet,
+      pressureUnit: PressureUnit.psi,
+      volumeUnit: VolumeUnit.cubicFeet,
+      weightUnit: WeightUnit.pounds,
+    ),
+  );
+
+  EquipmentAttribute thickness(String valueText) => EquipmentAttribute.curated(
+    equipmentId: 'e1',
+    key: EquipmentAttrKeys.thicknessMm,
+    valueText: valueText,
+    valueNum: parsePrimaryThickness(valueText),
+  );
+
+  final def = EquipmentAttributeCatalog.defFor(EquipmentAttrKeys.thicknessMm);
+
+  test('thickness value appends the unit exactly once', () {
+    // Multi-panel designation with no unit -> single " mm".
+    expect(
+      formatAttributeValue(thickness('5/4/3'), def, units, l10n),
+      '5/4/3 mm',
+    );
+    // Bare number -> single " mm".
+    expect(formatAttributeValue(thickness('5'), def, units, l10n), '5 mm');
+  });
+
+  test('legacy value that already carries the unit is not doubled', () {
+    // The v124 migration preserves "6mm" verbatim in valueText; the formatter
+    // must not render "6mm mm".
+    expect(formatAttributeValue(thickness('6mm'), def, units, l10n), '6 mm');
+    expect(formatAttributeValue(thickness('6 mm'), def, units, l10n), '6 mm');
+    expect(
+      formatAttributeValue(thickness('8/7/6mm'), def, units, l10n),
+      '8/7/6 mm',
+    );
+  });
+
+  test('number attribute renders value with its unit symbol', () {
+    final buoyancy = EquipmentAttribute.curated(
+      equipmentId: 'e1',
+      key: EquipmentAttrKeys.buoyancyKg,
+      valueNum: 2.5,
+    );
+    final buoyancyDef = EquipmentAttributeCatalog.defFor(
+      EquipmentAttrKeys.buoyancyKg,
+    );
+    expect(formatAttributeValue(buoyancy, buoyancyDef, units, l10n), '2.5 kg');
+  });
+
+  group('attributeDisplayFromMetric', () {
+    test('metric formatter is identity for every same-unit dimension', () {
+      // Every dimension whose canonical storage unit is also its metric
+      // display unit: kg, L, bar, m, mm. speedMps (stored m/s, shown m/min),
+      // durationH (stored hours, shown minutes) and shortLengthM (stored m,
+      // shown cm) are the deliberate exceptions and are asserted on their
+      // own below.
+      const rescaled = {
+        AttributeDimension.speedMps,
+        AttributeDimension.durationH,
+        AttributeDimension.shortLengthM,
+      };
+      for (final d in AttributeDimension.values) {
+        if (rescaled.contains(d)) continue;
+        expect(
+          attributeDisplayFromMetric(d, units, 10),
+          closeTo(10, 1e-9),
+          reason: 'metric $d should not scale',
+        );
+      }
+    });
+
+    test('speed converts out of canonical m/s in both unit systems', () {
+      // Stored in m/s, but a DPV is specced in distance per minute on every
+      // manufacturer's sheet: m/min metric, ft/min imperial (issue #1096).
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.speedMps, units, 1),
+        closeTo(60, 1e-6),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.speedMps, imperial, 1),
+        closeTo(196.85, 1e-2),
+      );
+    });
+
+    test('duration converts hours to minutes in both unit systems', () {
+      // Minutes are minutes in every market, so both formatters agree.
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.durationH, units, 1.5),
+        closeTo(90, 1e-9),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.durationH, imperial, 1.5),
+        closeTo(90, 1e-9),
+      );
+    });
+
+    test('short length converts metres to cm or inches (issue #1804)', () {
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.shortLengthM, units, 1),
+        closeTo(100, 1e-9),
+      );
+      expect(
+        attributeDisplayFromMetric(
+          AttributeDimension.shortLengthM,
+          imperial,
+          0.0254,
+        ),
+        closeTo(1, 1e-9),
+      );
+    });
+
+    test('imperial formatter converts each scaled dimension', () {
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.massKg, imperial, 1),
+        closeTo(2.20462, 1e-4),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.volumeL, imperial, 1),
+        closeTo(0.0353147, 1e-6),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.pressureBar, imperial, 1),
+        closeTo(14.5038, 1e-3),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.lengthM, imperial, 1),
+        closeTo(3.28084, 1e-4),
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.depthM, imperial, 1),
+        closeTo(3.28084, 1e-4),
+      );
+      // thicknessMm and none stay in mm regardless of the diver's units.
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.thicknessMm, imperial, 5),
+        5,
+      );
+      expect(
+        attributeDisplayFromMetric(AttributeDimension.none, imperial, 5),
+        5,
+      );
+    });
+  });
+
+  test('attributeMetricFromDisplay round-trips every dimension', () {
+    for (final d in AttributeDimension.values) {
+      final display = attributeDisplayFromMetric(d, imperial, 7);
+      expect(
+        attributeMetricFromDisplay(d, imperial, display),
+        closeTo(7, 1e-6),
+        reason: '$d display->metric should invert metric->display',
+      );
+    }
+  });
+
+  test('attributeUnitSymbol returns the diver-facing symbol per dimension', () {
+    expect(attributeUnitSymbol(AttributeDimension.massKg, imperial), 'lbs');
+    expect(attributeUnitSymbol(AttributeDimension.volumeL, imperial), 'cuft');
+    expect(
+      attributeUnitSymbol(AttributeDimension.pressureBar, imperial),
+      'psi',
+    );
+    expect(attributeUnitSymbol(AttributeDimension.lengthM, imperial), 'ft');
+    expect(attributeUnitSymbol(AttributeDimension.depthM, imperial), 'ft');
+    expect(attributeUnitSymbol(AttributeDimension.thicknessMm, imperial), 'mm');
+    expect(
+      attributeUnitSymbol(AttributeDimension.speedMps, imperial),
+      'ft/min',
+    );
+    expect(attributeUnitSymbol(AttributeDimension.speedMps, units), 'm/min');
+    expect(attributeUnitSymbol(AttributeDimension.durationH, imperial), 'min');
+    expect(attributeUnitSymbol(AttributeDimension.durationH, units), 'min');
+    expect(
+      attributeUnitSymbol(AttributeDimension.shortLengthM, imperial),
+      'in',
+    );
+    expect(attributeUnitSymbol(AttributeDimension.shortLengthM, units), 'cm');
+    expect(attributeUnitSymbol(AttributeDimension.none, imperial), '');
+  });
+
+  group('formatAttributeValue', () {
+    EquipmentAttribute attr({String? text, double? num}) => EquipmentAttribute(
+      id: 'a1',
+      equipmentId: 'e1',
+      key: 'k',
+      valueText: text,
+      valueNum: num,
+    );
+
+    test('null def falls back to text, then num, then empty', () {
+      expect(
+        formatAttributeValue(attr(text: 'freeform'), null, units, l10n),
+        'freeform',
+      );
+      expect(formatAttributeValue(attr(num: 3), null, units, l10n), '3.0');
+      expect(formatAttributeValue(attr(), null, units, l10n), '');
+    });
+
+    test('text kind returns the stored text (empty when unset)', () {
+      final def = EquipmentAttributeCatalog.defFor('tank_identifier');
+      expect(
+        formatAttributeValue(attr(text: 'DIN-42'), def, units, l10n),
+        'DIN-42',
+      );
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+    });
+
+    test('thickness kind is empty when unset or unit-only', () {
+      final def = EquipmentAttributeCatalog.defFor(
+        EquipmentAttrKeys.thicknessMm,
+      );
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+      // A stored value of just "mm" strips to an empty base -> empty string.
+      expect(formatAttributeValue(attr(text: 'mm'), def, units, l10n), '');
+    });
+
+    test('number kind: empty when unset, integers drop the decimal', () {
+      final def = EquipmentAttributeCatalog.defFor(
+        EquipmentAttrKeys.buoyancyKg,
+      );
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+      // 3.0 kg is a whole number -> "3 kg", not "3.0 kg".
+      expect(formatAttributeValue(attr(num: 3), def, units, l10n), '3 kg');
+    });
+
+    test('number kind with no dimension omits the symbol', () {
+      final def = EquipmentAttributeCatalog.defFor('lumens');
+      expect(def!.dimension, AttributeDimension.none);
+      expect(formatAttributeValue(attr(num: 800), def, units, l10n), '800');
+    });
+
+    test('formatAttributeNumberForEditing trims converted precision', () {
+      // Pinned: the regex below only matches a dot decimal separator.
+      final previousLocale = Intl.defaultLocale;
+      addTearDown(() => Intl.defaultLocale = previousLocale);
+      Intl.defaultLocale = 'en_US';
+
+      final def = EquipmentAttributeCatalog.defFor(
+        EquipmentAttrKeys.buoyancyKg,
+      );
+      // 2.5 kg -> pounds is a long decimal; the editable value must stay
+      // readable (mass allows up to two decimal places, no leaked precision).
+      final text = formatAttributeNumberForEditing(
+        def!.dimension,
+        imperial,
+        2.5,
+      );
+      expect(text, matches(r'^\d+(\.\d{1,2})?$'));
+      // A whole-number display drops the decimal entirely.
+      expect(formatAttributeNumberForEditing(def.dimension, units, 3.0), '3');
+    });
+
+    test('formatAttributeNumberForEditing rounds mass to two decimal places '
+        '(issue: dry weight rounded to one decimal loses precision)', () {
+      // Pinned: the assertions below check exact ASCII-decimal strings,
+      // which only holds under a dot-decimal locale (#1091's fix reads
+      // Intl.defaultLocale, a mutable process global other tests set).
+      final previousLocale = Intl.defaultLocale;
+      addTearDown(() => Intl.defaultLocale = previousLocale);
+      Intl.defaultLocale = 'en_US';
+
+      final def = EquipmentAttributeCatalog.defFor(
+        EquipmentAttrKeys.dryWeightKg,
+      );
+      // At one decimal place, 0.35 kg (350 g) rounds down to "0.3", losing
+      // the tens-of-grams digit rather than just formatting noise. Two
+      // decimals is still only 10 g resolution -- 0.351 kg rounds the same
+      // way one decimal rounds 0.35 -- but that is the precision the fix
+      // actually targets, not gram-exact.
+      expect(
+        formatAttributeNumberForEditing(def!.dimension, units, 0.35),
+        '0.35',
+      );
+      // A dimension without this carve-out still keeps its one decimal.
+      expect(
+        formatAttributeNumberForEditing(
+          AttributeDimension.volumeL,
+          units,
+          11.15,
+        ),
+        '11.2',
+      );
+      // A small cylinder keeps two (#4243): a 0.85 L argon bottle is not a
+      // 0.8 L one, the tank editor's rule.
+      expect(
+        formatAttributeNumberForEditing(
+          AttributeDimension.volumeL,
+          units,
+          0.85,
+        ),
+        '0.85',
+      );
+    });
+
+    test('a display value whole to one decimal drops the decimal', () {
+      // 100 minutes round-trips through hours as 1.6666...h, which multiplies
+      // back to 100.00000000000001 -- binary noise, not a real fraction. The
+      // edit field must show "100", never "100.0".
+      expect(
+        formatAttributeNumberForEditing(
+          AttributeDimension.durationH,
+          units,
+          100 / 60,
+        ),
+        '100',
+      );
+    });
+
+    group('dpv (issue #1096)', () {
+      test('burn time renders stored hours as minutes', () {
+        final def = EquipmentAttributeCatalog.defFor('burn_time_h');
+        // 1.5 stored hours is what a pre-#1096 diver entered under the
+        // "Burn time (h)" label; it must now read as 90 min, not 1.5.
+        expect(
+          formatAttributeValue(attr(num: 1.5), def, units, l10n),
+          '90 min',
+        );
+        expect(
+          formatAttributeValue(attr(num: 1.5), def, imperial, l10n),
+          '90 min',
+        );
+      });
+
+      test('top speed renders in distance per minute, not km/h', () {
+        final def = EquipmentAttributeCatalog.defFor('speed_mps');
+        // 55 m/min is a typical tow-behind scooter's rated speed.
+        final metricValue = attributeMetricFromDisplay(
+          def!.dimension,
+          units,
+          55,
+        );
+        expect(
+          formatAttributeValue(attr(num: metricValue), def, units, l10n),
+          '55 m/min',
+        );
+        expect(
+          formatAttributeValue(attr(num: metricValue), def, imperial, l10n),
+          '180.4 ft/min',
+        );
+      });
+    });
+
+    group('hose and SMB length (issue #1804)', () {
+      test('a hose typed in inches reads back in inches, not feet', () {
+        final def = EquipmentAttributeCatalog.defFor('hose_length_m')!;
+        // Hoses are sold by the inch: a 15" hose must not read as 1.3 ft.
+        final stored = attributeMetricFromDisplay(def.dimension, imperial, 15);
+        expect(
+          formatAttributeValue(attr(num: stored), def, imperial, l10n),
+          '15 in',
+        );
+        // Re-seeding the edit field must give back exactly what was typed.
+        expect(
+          formatAttributeNumberForEditing(def.dimension, imperial, stored),
+          '15',
+        );
+      });
+
+      test('a metric diver reads the same hose in centimetres', () {
+        final def = EquipmentAttributeCatalog.defFor('hose_length_m')!;
+        // 22" is 55.88 cm; one decimal place keeps the fraction visible.
+        expect(
+          formatAttributeValue(attr(num: 0.5588), def, units, l10n),
+          '55.9 cm',
+        );
+        expect(
+          formatAttributeValue(attr(num: 0.56), def, units, l10n),
+          '56 cm',
+        );
+      });
+
+      test('an SMB length shares the cm / in display', () {
+        final def = EquipmentAttributeCatalog.defFor('length_m')!;
+        expect(
+          formatAttributeValue(attr(num: 1.4), def, units, l10n),
+          '140 cm',
+        );
+        expect(
+          formatAttributeValue(attr(num: 1.4), def, imperial, l10n),
+          '55.1 in',
+        );
+      });
+    });
+
+    test('choice kind resolves the localized option label', () {
+      final def = EquipmentAttributeCatalog.defFor('suit_style');
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+      expect(
+        formatAttributeValue(attr(text: 'full'), def, units, l10n),
+        attributeChoiceLabel(l10n, 'suit_style', 'full'),
+      );
+    });
+
+    test('flag kind maps 1/0 to the yes/no labels, empty when unset', () {
+      final def = EquipmentAttributeCatalog.defFor('cold_water_rated');
+      expect(
+        formatAttributeValue(attr(num: 1), def, units, l10n),
+        l10n.attr_flagYes,
+      );
+      expect(
+        formatAttributeValue(attr(num: 0), def, units, l10n),
+        l10n.attr_flagNo,
+      );
+      // Unset renders empty rather than an explicit "No".
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+    });
+
+    test('date kind formats the stored epoch millis, empty when unset', () {
+      final def = EquipmentAttributeCatalog.defFor('last_hydro_test');
+      expect(formatAttributeValue(attr(), def, units, l10n), '');
+      final ms = DateTime(2026, 3, 14).millisecondsSinceEpoch.toDouble();
+      expect(
+        formatAttributeValue(attr(num: ms), def, units, l10n),
+        units.formatDate(DateTime(2026, 3, 14)),
+      );
+    });
+  });
+
+  group('color', () {
+    final def = EquipmentAttributeCatalog.defFor(EquipmentAttrKeys.color);
+    EquipmentAttribute withValue(String value) => EquipmentAttribute.curated(
+      equipmentId: 'e',
+      key: 'color',
+    ).copyWith(valueText: value);
+
+    test('a palette colour shows its name', () {
+      expect(
+        formatAttributeValue(withValue('#EF4444'), def, units, l10n),
+        'Red',
+      );
+    });
+
+    test('anything else shows nothing', () {
+      expect(formatAttributeValue(withValue('Red'), def, units, l10n), '');
+    });
+  });
+
+  group('focal length (#3050)', () {
+    final def = EquipmentAttributeCatalog.defFor('focal_length_mm');
+    EquipmentAttribute focal({String? text, double? num}) =>
+        EquipmentAttribute.curated(
+          equipmentId: 'e',
+          key: 'focal_length_mm',
+          valueText: text,
+          valueNum: num,
+        );
+
+    test('a zoom shows its range with the unit once', () {
+      expect(
+        formatAttributeValue(focal(text: '15-45', num: 15), def, units, l10n),
+        '15-45 mm',
+      );
+      expect(
+        formatAttributeValue(focal(text: '8-16mm', num: 8), def, units, l10n),
+        '8-16 mm',
+      );
+    });
+
+    test('a lens saved as a single number still shows it', () {
+      expect(formatAttributeValue(focal(num: 60), def, units, l10n), '60 mm');
+    });
+
+    test('is empty when unset', () {
+      expect(formatAttributeValue(focal(), def, units, l10n), '');
+    });
+  });
+
+  group('an item\'s own unit (issue #4534)', () {
+    EquipmentAttribute num(String key, double value, [String? unit]) =>
+        EquipmentAttribute.curated(
+          equipmentId: 'e1',
+          key: key,
+          valueNum: value,
+          valueUnit: unit,
+        );
+    EquipmentAttributeDef defOf(String key) =>
+        EquipmentAttributeCatalog.defFor(key)!;
+    final gauge = defOf('gauge_max_pressure_bar');
+    final volume = defOf(EquipmentAttrKeys.volumeL);
+
+    test('a psi gauge reads in psi for a metric diver', () {
+      expect(
+        formatAttributeValue(num(gauge.key, 275.79, 'psi'), gauge, units, l10n),
+        '4000 psi',
+      );
+    });
+
+    test('a bar gauge stays bar for an imperial diver', () {
+      expect(
+        formatAttributeValue(num(gauge.key, 300, 'bar'), gauge, imperial, l10n),
+        '300 bar',
+      );
+    });
+
+    test('an untouched field follows the diver', () {
+      expect(
+        formatAttributeValue(num(gauge.key, 300), gauge, imperial, l10n),
+        '4351.1 psi',
+      );
+    });
+
+    test('a dual-scale gauge shows the diver\'s unit first', () {
+      expect(
+        formatAttributeValue(num(gauge.key, 300, 'dual'), gauge, units, l10n),
+        '300 bar / 4351.1 psi',
+      );
+      expect(
+        formatAttributeValue(
+          num(gauge.key, 300, 'dual'),
+          gauge,
+          imperial,
+          l10n,
+        ),
+        '4351.1 psi / 300 bar',
+      );
+    });
+
+    test('cylinder cubic feet read as rated gas capacity', () {
+      expect(
+        formatAttributeValue(
+          num(volume.key, 11.1),
+          volume,
+          imperial,
+          l10n,
+          workingPressureBar: 206.843,
+        ),
+        '77 cuft',
+      );
+      expect(
+        formatAttributeValue(
+          num(volume.key, 11.1, 'cubicFeet'),
+          volume,
+          units,
+          l10n,
+          workingPressureBar: 206.843,
+        ),
+        '77 cuft',
+      );
+    });
+
+    test('with no working pressure cubic feet are a marked estimate', () {
+      expect(
+        formatAttributeValue(num(volume.key, 11.1), volume, imperial, l10n),
+        '~78 cuft',
+      );
+    });
+
+    test('a rebreather cylinder always reads litres', () {
+      final diluent = defOf('diluent_cylinder_l');
+      expect(
+        formatAttributeValue(num(diluent.key, 3), diluent, imperial, l10n),
+        '3 L',
+      );
+    });
+  });
+}

@@ -1,3 +1,6 @@
+import 'package:submersion/core/matching/match_scorer.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+
 /// Service for matching imported dives to existing dive log entries.
 ///
 /// Uses fuzzy matching based on time, depth, and duration to detect
@@ -5,6 +8,32 @@
 class DiveMatcher {
   /// Creates a [DiveMatcher] instance.
   const DiveMatcher();
+
+  /// Minutes apart at which the time score, and so the whole score, is zero.
+  static const _timeZeroMinutes = 15;
+
+  /// The gap between two dives' starts at which the score reaches zero, so a
+  /// pair this far apart or more is not worth scoring at all (see
+  /// [MatchScorer.gateOnZeroTime]).
+  static const candidateWindow = Duration(minutes: _timeZeroMinutes);
+
+  /// Weighted scorer for file imports: time 50%, depth 30%, duration 20%.
+  ///
+  /// Time is scored over 5-15 min (whole minutes), depth as a percentage
+  /// (10%-20%), and duration over 3-10 min; a zero time score gates the whole
+  /// match to 0.0 (see [MatchScorer.gateOnZeroTime]).
+  static const _scorer = MatchScorer(
+    timeWeight: 0.50,
+    depthWeight: 0.30,
+    durationWeight: 0.20,
+    timeFull: 5, // minutes
+    timeZero: _timeZeroMinutes * 1.0,
+    depthFull: 0.10, // fraction
+    depthZero: 0.20,
+    durationFull: 3, // minutes
+    durationZero: 10,
+    gateOnZeroTime: true,
+  );
 
   /// Calculate a match score between an imported dive and an existing dive.
   ///
@@ -22,66 +51,25 @@ class DiveMatcher {
     required double existingMaxDepth,
     required int existingDurationSeconds,
   }) {
-    final timeScore = _calculateTimeScore(wearableStartTime, existingStartTime);
-    final depthScore = _calculateDepthScore(wearableMaxDepth, existingMaxDepth);
-    final durationScore = _calculateDurationScore(
-      wearableDurationSeconds,
-      existingDurationSeconds,
+    final timeMinutes = wearableStartTime
+        .difference(existingStartTime)
+        .abs()
+        .inMinutes
+        .toDouble();
+    // Percent depth difference. A non-positive existing depth is treated as
+    // maximally different (infinity -> depth score 0), preserving the previous
+    // zero/negative-depth guard.
+    final depthValue = existingMaxDepth <= 0
+        ? double.infinity
+        : (wearableMaxDepth - existingMaxDepth).abs() / existingMaxDepth;
+    final durationMinutes =
+        (wearableDurationSeconds - existingDurationSeconds).abs() / 60.0;
+
+    return _scorer.score(
+      timeValue: timeMinutes,
+      depthValue: depthValue,
+      durationValue: durationMinutes,
     );
-
-    // Weighted composite score
-    return (timeScore * 0.50) + (depthScore * 0.30) + (durationScore * 0.20);
-  }
-
-  /// Calculate time score: within 5 min = 100%, 15 min = 0%
-  double _calculateTimeScore(DateTime wearableTime, DateTime existingTime) {
-    final timeDiff = wearableTime.difference(existingTime).abs();
-    final timeMinutes = timeDiff.inMinutes;
-
-    if (timeMinutes <= 5) {
-      return 1.0;
-    } else if (timeMinutes >= 15) {
-      return 0.0;
-    } else {
-      return 1.0 - ((timeMinutes - 5) / 10);
-    }
-  }
-
-  /// Calculate depth score: within 10% = 100%, 20%+ diff = 0%
-  double _calculateDepthScore(double wearableDepth, double existingDepth) {
-    if (existingDepth <= 0) {
-      // Handle edge case of zero or negative depth
-      return 0.0;
-    }
-
-    final depthDiff = (wearableDepth - existingDepth).abs();
-    final depthPercent = depthDiff / existingDepth;
-
-    if (depthPercent <= 0.10) {
-      return 1.0;
-    } else if (depthPercent >= 0.20) {
-      return 0.0;
-    } else {
-      return 1.0 - ((depthPercent - 0.10) / 0.10);
-    }
-  }
-
-  /// Calculate duration score: within 3 min = 100%, 10 min = 0%
-  double _calculateDurationScore(
-    int wearableDurationSeconds,
-    int existingDurationSeconds,
-  ) {
-    final durationDiff = (wearableDurationSeconds - existingDurationSeconds)
-        .abs();
-    final durationDiffMinutes = durationDiff / 60;
-
-    if (durationDiffMinutes <= 3) {
-      return 1.0;
-    } else if (durationDiffMinutes >= 10) {
-      return 0.0;
-    } else {
-      return 1.0 - ((durationDiffMinutes - 3) / 7);
-    }
   }
 
   /// Check if the score indicates a probable duplicate (high confidence).
@@ -94,6 +82,30 @@ class DiveMatcher {
   /// A score >= 0.5 indicates the dives might be the same dive and
   /// should be reviewed by the user.
   bool isPossibleDuplicate(double score) => score >= 0.5;
+}
+
+/// Which kind of dive waiting for its readings a download fills.
+enum FillTargetKind { plan, draft }
+
+/// The plan or draft a download fills (issue #637).
+class FillTarget {
+  const FillTarget({required this.diveId, required this.kind});
+
+  /// The target for [dive]'s flags: a dive with both reads as the draft.
+  factory FillTarget.of(Dive dive) => FillTarget(
+    diveId: dive.id,
+    kind: dive.isDraft ? FillTargetKind.draft : FillTargetKind.plan,
+  );
+
+  final String diveId;
+  final FillTargetKind kind;
+
+  @override
+  bool operator ==(Object other) =>
+      other is FillTarget && other.diveId == diveId && other.kind == kind;
+
+  @override
+  int get hashCode => Object.hash(diveId, kind);
 }
 
 /// Result of matching an imported dive against an existing dive.
@@ -116,6 +128,53 @@ class DiveMatchResult {
   /// Site name of the matched existing dive (for display in review UI).
   final String? siteName;
 
+  /// The matched existing dive's `computerId`, when known.
+  ///
+  /// Used by the import wizard to auto-suggest consolidation only for
+  /// cross-computer matches (a re-download from the SAME computer should
+  /// never be auto-suggested for consolidation — that's a plain duplicate).
+  final String? matchedComputerId;
+
+  /// True when [diveId] is confidently the SAME data the diver already has,
+  /// not a fuzzy score match: either an exact hit against one of the
+  /// matched dive's EXISTING `dive_data_sources` keys (fingerprint or
+  /// source UUID) — see `DiveRepository.getSourceKeysByDiveId` — or, for a
+  /// live dive-computer download, a contained-segment match (timestamp
+  /// containment plus depth-curve agreement showing the download natively
+  /// re-records part of a dive already stored; see
+  /// `DiveImportService._detectContainedSegment`).
+  ///
+  /// This means the downloaded dive's data is ALREADY present on [diveId]
+  /// as a source (primary or previously-consolidated secondary); it is a
+  /// re-download, not a new source. The import wizard must default this to
+  /// [DuplicateAction.skip] and must never auto-default (or offer as a
+  /// bulk/manual consolidate target) [DuplicateAction.consolidate] for such
+  /// a match, regardless of [matchedComputerId] or [score].
+  final bool matchedExistingSource;
+
+  /// When non-null, this match is against ANOTHER DIVE IN THE SAME IMPORT
+  /// BATCH (the dive at this payload index), not an existing database dive.
+  /// [diveId] is empty for such matches. In-batch duplicates default to
+  /// skip and are never eligible for consolidation (there is no existing
+  /// dive to fold into).
+  final int? inBatchIndex;
+
+  /// When non-null, [diveId] is a dive waiting for its readings that this
+  /// download fills: a plan on the download's local day or the day before
+  /// (issues #2002 and #4003), or a draft whose taps the download overlaps
+  /// (issue #637). The wizard defaults such a row to
+  /// [DuplicateAction.fillPlanned]: the target keeps its human-entered facts
+  /// and the download supplies the measured ones. Never set together with
+  /// [matchedExistingSource] or [inBatchIndex]; the fill pass runs only for
+  /// otherwise unmatched downloads.
+  final FillTarget? fillTarget;
+
+  /// The drafts this download could fill when it fits more than one, or one
+  /// that another download fits too (issue #637). None is chosen: the row
+  /// waits for the diver, who picks one, imports as new or skips. [diveId]
+  /// is the first, for the comparison card. Empty for every other match.
+  final List<String> fillCandidates;
+
   const DiveMatchResult({
     required this.diveId,
     required this.score,
@@ -123,7 +182,39 @@ class DiveMatchResult {
     this.depthDifferenceMeters,
     this.durationDifferenceSeconds,
     this.siteName,
+    this.matchedComputerId,
+    this.matchedExistingSource = false,
+    this.inBatchIndex,
+    this.fillTarget,
+    this.fillCandidates = const [],
   });
+
+  /// True when this row fills a plan or draft rather than matching a logged
+  /// dive.
+  bool get isFill => fillTarget != null;
+
+  /// Point the fill at another plan or draft. [diveId] follows the target so
+  /// the comparison card and the wizard's existing-dive lookups need no
+  /// extra plumbing.
+  ///
+  /// There is deliberately no way to clear the target here: an empty
+  /// [diveId] already means "duplicate of another dive in this batch" to the
+  /// comparison card, so a fill row that loses its target stops being a
+  /// match at all (see ImportWizardNotifier.setFillTarget).
+  DiveMatchResult withFillTarget(FillTarget target) {
+    return DiveMatchResult(
+      diveId: target.diveId,
+      score: score,
+      timeDifferenceMs: timeDifferenceMs,
+      depthDifferenceMeters: depthDifferenceMeters,
+      durationDifferenceSeconds: durationDifferenceSeconds,
+      siteName: siteName,
+      matchedComputerId: matchedComputerId,
+      matchedExistingSource: matchedExistingSource,
+      inBatchIndex: inBatchIndex,
+      fillTarget: target,
+    );
+  }
 
   /// Returns true if this is a probable duplicate (score >= 0.7).
   bool get isProbable => score >= 0.7;

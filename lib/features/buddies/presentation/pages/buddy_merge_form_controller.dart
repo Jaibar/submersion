@@ -1,6 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 
 /// Data loaded for a buddy merge operation.
@@ -23,37 +23,56 @@ class MergeFieldCandidate<T> {
 
 /// Manages merge candidate state and field cycling for the buddy merge form.
 ///
-/// Extracted from BuddyEditPage to keep file sizes under the 800-line limit.
-/// Holds candidate lists and indices but does not own widget state directly;
-/// mutation methods return new values for the caller to apply via setState.
+/// Kept apart from the merge page to keep file sizes under the 800-line
+/// limit. Holds candidate lists and indices but does not own widget state
+/// directly; mutation methods return new values for the caller to apply via
+/// setState.
 class BuddyMergeFormController {
   final Map<String, List<MergeFieldCandidate<String>>> textCandidates = {};
   final Map<String, int> fieldIndices = {};
-  List<MergeFieldCandidate<CertificationLevel?>> certLevelCandidates = [];
-  List<MergeFieldCandidate<CertificationAgency?>> certAgencyCandidates = [];
   List<MergeFieldCandidate<String?>> photoCandidates = [];
   String? mergedPhotoPath;
+
+  /// Candidates for the profile photo BLOB, which supersedes photoPath.
+  /// Kept alongside rather than replacing it so a database written before
+  /// v181 still surfaces whatever it had.
+  List<MergeFieldCandidate<Uint8List?>> photoBytesCandidates = [];
+  Uint8List? mergedPhoto;
+
+  /// The profile link the survivor keeps: the first non-null link across the
+  /// candidates (issue #2002). Not cycled, since a buddy is at most one
+  /// profile; two different links make the repository refuse the merge.
+  String? mergedLinkedDiverId;
+
+  /// Whether the survivor starts excluded from the rankings (issue #3624):
+  /// only when every candidate is. Merging a placeholder into a real person
+  /// should put that person in the rankings.
+  bool mergedExcludedFromRankings = false;
   bool isInitialized = false;
 
-  /// Initialize merge candidate state from loaded buddies.
-  ///
-  /// Sets text controller values and returns initial cert level/agency values
-  /// for the caller to apply to its own state.
-  ({CertificationLevel? certLevel, CertificationAgency? certAgency})
-  initialize({
+  /// Initialize merge candidate state from loaded buddies. Sets the text
+  /// controller values and the merged photo path. Certifications are NOT
+  /// cycled here (issue #553): the survivor inherits the union of certs at the
+  /// repository level, so the merge page offers no certifications to choose
+  /// between.
+  void initialize({
     required List<Buddy> buddies,
     required TextEditingController nameController,
     required TextEditingController emailController,
     required TextEditingController phoneController,
+    required TextEditingController countryController,
     required TextEditingController notesController,
   }) {
-    if (isInitialized) {
-      return (
-        certLevel: certLevelCandidates[fieldIndices['certLevel'] ?? 0].value,
-        certAgency: certAgencyCandidates[fieldIndices['certAgency'] ?? 0].value,
-      );
-    }
+    if (isInitialized) return;
     isInitialized = true;
+
+    mergedLinkedDiverId = buddies
+        .map((buddy) => buddy.linkedDiverId)
+        .whereType<String>()
+        .firstOrNull;
+    mergedExcludedFromRankings = buddies.every(
+      (buddy) => buddy.excludedFromRankings,
+    );
 
     _initializeTextField(
       key: 'name',
@@ -77,35 +96,19 @@ class BuddyMergeFormController {
       isMeaningful: (value) => value.trim().isNotEmpty,
     );
     _initializeTextField(
+      key: 'country',
+      controller: countryController,
+      buddies: buddies,
+      getValue: (buddy) => buddy.country ?? '',
+      isMeaningful: (value) => value.trim().isNotEmpty,
+    );
+    _initializeTextField(
       key: 'notes',
       controller: notesController,
       buddies: buddies,
       getValue: (buddy) => buddy.notes,
       isMeaningful: (value) => value.trim().isNotEmpty,
     );
-
-    certLevelCandidates = _buildDistinctCandidates<CertificationLevel?>(
-      buddies,
-      (buddy) => buddy.certificationLevel,
-      equals: (a, b) => a == b,
-    );
-    fieldIndices['certLevel'] = _firstMeaningfulIndex(
-      certLevelCandidates,
-      (value) => value != null,
-    );
-    final certLevel = certLevelCandidates[fieldIndices['certLevel'] ?? 0].value;
-
-    certAgencyCandidates = _buildDistinctCandidates<CertificationAgency?>(
-      buddies,
-      (buddy) => buddy.certificationAgency,
-      equals: (a, b) => a == b,
-    );
-    fieldIndices['certAgency'] = _firstMeaningfulIndex(
-      certAgencyCandidates,
-      (value) => value != null,
-    );
-    final certAgency =
-        certAgencyCandidates[fieldIndices['certAgency'] ?? 0].value;
 
     photoCandidates = _buildDistinctCandidates<String?>(
       buddies,
@@ -118,7 +121,22 @@ class BuddyMergeFormController {
     );
     mergedPhotoPath = photoCandidates[fieldIndices['photo'] ?? 0].value;
 
-    return (certLevel: certLevel, certAgency: certAgency);
+    // Uint8List equality is by identity, so distinctness has to compare
+    // contents or two buddies holding the same image would offer two
+    // indistinguishable candidates.
+    photoBytesCandidates = _buildDistinctCandidates<Uint8List?>(
+      buddies,
+      (buddy) => buddy.photo,
+      equals: (a, b) {
+        if (a == null || b == null) return a == b;
+        return listEquals(a, b);
+      },
+    );
+    fieldIndices['photoBytes'] = _firstMeaningfulIndex(
+      photoBytesCandidates,
+      (value) => value != null && value.isNotEmpty,
+    );
+    mergedPhoto = photoBytesCandidates[fieldIndices['photoBytes'] ?? 0].value;
   }
 
   void _initializeTextField({
@@ -190,25 +208,5 @@ class BuddyMergeFormController {
     if (candidates == null || candidates.length < 2) return;
     final nextIndex = ((fieldIndices[key] ?? 0) + 1) % candidates.length;
     selectTextFieldCandidate(key, nextIndex, controller: controller);
-  }
-
-  /// Cycle to the next certification level candidate.
-  /// Returns the new value for the caller to apply via setState.
-  CertificationLevel? cycleCertLevel() {
-    if (certLevelCandidates.length < 2) return null;
-    final nextIndex =
-        ((fieldIndices['certLevel'] ?? 0) + 1) % certLevelCandidates.length;
-    fieldIndices['certLevel'] = nextIndex;
-    return certLevelCandidates[nextIndex].value;
-  }
-
-  /// Cycle to the next certification agency candidate.
-  /// Returns the new value for the caller to apply via setState.
-  CertificationAgency? cycleCertAgency() {
-    if (certAgencyCandidates.length < 2) return null;
-    final nextIndex =
-        ((fieldIndices['certAgency'] ?? 0) + 1) % certAgencyCandidates.length;
-    fieldIndices['certAgency'] = nextIndex;
-    return certAgencyCandidates[nextIndex].value;
   }
 }

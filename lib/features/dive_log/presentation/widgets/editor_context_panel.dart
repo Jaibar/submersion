@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/features/dive_log/presentation/providers/profile_editor_provider.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Context-sensitive control panel for the profile editor.
 ///
 /// Renders different controls based on the current [EditorMode]:
 /// - Select: range shift/delete/smooth operations
 /// - Smooth: window size selection and apply buttons
-/// - Outlier: detect and remove outlier controls
+/// - Cleanup: detect and remove outlier controls, trim, and profile deletion
 /// - Draw: waypoint management and profile generation
 class EditorContextPanel extends StatefulWidget {
   final EditorMode mode;
@@ -15,6 +16,8 @@ class EditorContextPanel extends StatefulWidget {
   final int? outlierCount;
   final ({int start, int end})? selectedRange;
   final bool hasWaypoints;
+  final VoidCallback? onDeleteProfile;
+  final bool canDeleteProfile;
 
   const EditorContextPanel({
     super.key,
@@ -23,6 +26,8 @@ class EditorContextPanel extends StatefulWidget {
     this.outlierCount,
     this.selectedRange,
     this.hasWaypoints = false,
+    this.onDeleteProfile,
+    this.canDeleteProfile = false,
   });
 
   @override
@@ -31,6 +36,27 @@ class EditorContextPanel extends StatefulWidget {
 
 class _EditorContextPanelState extends State<EditorContextPanel> {
   int _smoothWindowSize = 5;
+
+  void _showRefusal(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _shiftTime(int timeDelta) {
+    if (widget.notifier.shiftSegmentTime(timeDelta)) return;
+    _showRefusal(context.l10n.diveLog_profileEditor_timeShiftBlocked);
+  }
+
+  void _deleteSelection() {
+    if (widget.notifier.deleteSegment(interpolateGap: true)) return;
+    _showRefusal(context.l10n.diveLog_profileEditor_deleteAllBlocked);
+  }
+
+  void _smoothSelection({int windowSize = 5}) {
+    if (widget.notifier.applySmoothingToRange(windowSize: windowSize)) return;
+    _showRefusal(context.l10n.diveLog_profileEditor_smoothTooFewBlocked);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -49,6 +75,18 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
     );
   }
 
+  Widget _buildRangeHint(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Text(
+        context.l10n.diveLog_profileEditor_selectRangeHint,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
   Widget _buildSelectPanel(BuildContext context) {
     final hasRange = widget.selectedRange != null;
 
@@ -56,17 +94,11 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text('Range Operations', style: Theme.of(context).textTheme.titleSmall),
-        if (!hasRange)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              'Select a range on the chart to enable operations',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
+        Text(
+          context.l10n.diveLog_profileEditor_rangeOperations,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        if (!hasRange) _buildRangeHint(context),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
@@ -77,42 +109,40 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
                   ? () => widget.notifier.shiftSegmentDepth(1.0)
                   : null,
               icon: const Icon(Icons.arrow_upward, size: 18),
-              label: const Text('Depth +1m'),
+              label: Text(context.l10n.diveLog_profileEditor_depthPlusOneMeter),
             ),
             FilledButton.tonalIcon(
               onPressed: hasRange
                   ? () => widget.notifier.shiftSegmentDepth(-1.0)
                   : null,
               icon: const Icon(Icons.arrow_downward, size: 18),
-              label: const Text('Depth -1m'),
+              label: Text(
+                context.l10n.diveLog_profileEditor_depthMinusOneMeter,
+              ),
             ),
             FilledButton.tonalIcon(
-              onPressed: hasRange
-                  ? () => widget.notifier.shiftSegmentTime(5)
-                  : null,
+              onPressed: hasRange ? () => _shiftTime(5) : null,
               icon: const Icon(Icons.arrow_forward, size: 18),
-              label: const Text('Time +5s'),
+              label: Text(
+                context.l10n.diveLog_profileEditor_timePlusFiveSeconds,
+              ),
             ),
             FilledButton.tonalIcon(
-              onPressed: hasRange
-                  ? () => widget.notifier.shiftSegmentTime(-5)
-                  : null,
+              onPressed: hasRange ? () => _shiftTime(-5) : null,
               icon: const Icon(Icons.arrow_back, size: 18),
-              label: const Text('Time -5s'),
+              label: Text(
+                context.l10n.diveLog_profileEditor_timeMinusFiveSeconds,
+              ),
             ),
             FilledButton.tonalIcon(
-              onPressed: hasRange
-                  ? () => widget.notifier.deleteSegment(interpolateGap: true)
-                  : null,
+              onPressed: hasRange ? _deleteSelection : null,
               icon: const Icon(Icons.delete_outline, size: 18),
-              label: const Text('Delete'),
+              label: Text(context.l10n.common_action_delete),
             ),
             FilledButton.tonalIcon(
-              onPressed: hasRange
-                  ? () => widget.notifier.applySmoothingToRange()
-                  : null,
+              onPressed: hasRange ? _smoothSelection : null,
               icon: const Icon(Icons.auto_fix_high, size: 18),
-              label: const Text('Smooth'),
+              label: Text(context.l10n.diveLog_profileEditor_mode_smooth),
             ),
           ],
         ),
@@ -125,13 +155,26 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text('Smoothing', style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          context.l10n.diveLog_profileEditor_smoothing,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        if (widget.selectedRange == null) _buildRangeHint(context),
         const SizedBox(height: 12),
         SegmentedButton<int>(
-          segments: const [
-            ButtonSegment(value: 3, label: Text('Light')),
-            ButtonSegment(value: 5, label: Text('Medium')),
-            ButtonSegment(value: 7, label: Text('Heavy')),
+          segments: [
+            ButtonSegment(
+              value: 3,
+              label: Text(context.l10n.diveLog_profileEditor_smoothLight),
+            ),
+            ButtonSegment(
+              value: 5,
+              label: Text(context.l10n.diveLog_profileEditor_smoothMedium),
+            ),
+            ButtonSegment(
+              value: 7,
+              label: Text(context.l10n.diveLog_profileEditor_smoothHeavy),
+            ),
           ],
           selected: {_smoothWindowSize},
           onSelectionChanged: (selected) {
@@ -145,17 +188,15 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
               onPressed: () =>
                   widget.notifier.applySmoothing(windowSize: _smoothWindowSize),
               icon: const Icon(Icons.done_all, size: 18),
-              label: const Text('Apply to All'),
+              label: Text(context.l10n.diveLog_profileEditor_applyToAll),
             ),
             const SizedBox(width: 8),
             FilledButton.tonalIcon(
               onPressed: widget.selectedRange != null
-                  ? () => widget.notifier.applySmoothingToRange(
-                      windowSize: _smoothWindowSize,
-                    )
+                  ? () => _smoothSelection(windowSize: _smoothWindowSize)
                   : null,
               icon: const Icon(Icons.done, size: 18),
-              label: const Text('Apply to Selection'),
+              label: Text(context.l10n.diveLog_profileEditor_applyToSelection),
             ),
           ],
         ),
@@ -173,7 +214,7 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
         Row(
           children: [
             Text(
-              'Outlier Detection',
+              context.l10n.diveLog_profileEditor_cleanup,
               style: Theme.of(context).textTheme.titleSmall,
             ),
             if (count > 0) ...[
@@ -186,20 +227,40 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
           ],
         ),
         const SizedBox(height: 12),
-        Row(
+        // Four buttons do not fit one line on a phone, so they wrap.
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
           children: [
             FilledButton.tonalIcon(
               onPressed: () => widget.notifier.detectOutliers(),
               icon: const Icon(Icons.search, size: 18),
-              label: const Text('Detect'),
+              label: Text(context.l10n.diveLog_profileEditor_detectOutliers),
             ),
-            const SizedBox(width: 8),
             FilledButton.icon(
               onPressed: count > 0
                   ? () => widget.notifier.removeAllOutliers()
                   : null,
               icon: const Icon(Icons.cleaning_services, size: 18),
-              label: const Text('Remove All'),
+              label: Text(context.l10n.diveLog_profileEditor_removeOutliers),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () => widget.notifier.trimEndZeros(),
+              icon: const Icon(Icons.content_cut, size: 18),
+              label: Text(context.l10n.diveLog_profileEditor_trimEnd),
+            ),
+            FilledButton.icon(
+              onPressed: widget.canDeleteProfile
+                  ? widget.onDeleteProfile
+                  : null,
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: Text(
+                context.l10n.diveLog_profileEditor_deleteProfile_title,
+              ),
             ),
           ],
         ),
@@ -207,7 +268,7 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(
-              '$count potential outlier${count == 1 ? '' : 's'} detected',
+              context.l10n.diveLog_profileEditor_outliersDetected(count),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
@@ -222,10 +283,13 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text('Manual Drawing', style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          context.l10n.diveLog_profileEditor_manualDrawing,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
         const SizedBox(height: 8),
         Text(
-          'Tap on the chart to place waypoints',
+          context.l10n.diveLog_profileEditor_drawHint,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
@@ -238,7 +302,7 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
                   ? () => widget.notifier.clearWaypoints()
                   : null,
               icon: const Icon(Icons.clear, size: 18),
-              label: const Text('Clear'),
+              label: Text(context.l10n.diveLog_profileEditor_clearWaypoints),
             ),
             const SizedBox(width: 8),
             FilledButton.icon(
@@ -246,7 +310,7 @@ class _EditorContextPanelState extends State<EditorContextPanel> {
                   ? () => widget.notifier.generateProfileFromWaypoints()
                   : null,
               icon: const Icon(Icons.auto_graph, size: 18),
-              label: const Text('Generate Profile'),
+              label: Text(context.l10n.diveLog_profileEditor_generateProfile),
             ),
           ],
         ),

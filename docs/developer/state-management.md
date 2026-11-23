@@ -267,6 +267,24 @@ final depthUnitProvider = Provider<DepthUnit>((ref) {
 ```text
 Avoids rebuilds when other settings change.
 
+Nothing outside the pages that edit the settings watches the whole of
+`AppSettings` (`test/architecture/settings_whole_watch_test.dart`). Watch
+`unitFormatterProvider` for a `UnitFormatter`, which keeps one instance until
+something it can read changes. For several other fields, select a record, which
+compares field by field:
+
+```dart
+final units = ref.watch(unitFormatterProvider);
+final settings = ref.watch(
+  settingsProvider.select(
+    (s) => (enabled: s.safetyReviewEnabled, rules: s.safetyReviewDisabledRules),
+  ),
+);
+```
+
+A field read through a formatter's `settings` has to be on
+`UnitFormatterSettings`, or the formatter would go stale for it.
+
 ## Async Operations
 
 ### In StateNotifier
@@ -307,6 +325,25 @@ testWidgets('shows dives', (tester) async {
       ],
       child: const MyApp(),
     ),
+  );
+});
+```
+
+## Provider Dependencies
+
+A provider that derives from others watches them, so it recomputes when
+any of them changes. `filteredDivesProvider`
+(`lib/features/dive_log/presentation/providers/dive_providers.dart`)
+narrows the loaded dive list to the ids the active filter keeps, which the
+repository computes in SQL:
+
+```dart
+final filteredDivesProvider = Provider<AsyncValue<List<domain.Dive>>>((ref) {
+  final divesAsync = ref.watch(diveListNotifierProvider);
+  final filter = ref.watch(diveFilterProvider);
+  return narrowDivesByIds(
+    divesAsync,
+    ref.watch(queryFilteredDiveIdsProvider(filter)),
   );
 });
 ```

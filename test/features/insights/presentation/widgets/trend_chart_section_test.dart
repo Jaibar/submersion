@@ -1,0 +1,244 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/insights/domain/trend_aggregation.dart';
+import 'package:submersion/features/insights/domain/trend_range.dart';
+import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
+import 'package:submersion/features/insights/presentation/widgets/dive_trend_chart.dart';
+import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
+import 'package:submersion/features/insights/presentation/widgets/trend_control_strip.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+
+List<TrendDataPoint> series(int n) => List.generate(
+  n,
+  (i) => TrendDataPoint(
+    date: DateTime.utc(2024, 1, 1).add(Duration(days: i * 7)),
+    value: 10.0 + i,
+  ),
+);
+
+/// Four years of weekly dives from Monday 2022-01-03.
+List<TrendDataPoint> fourYears() => List.generate(
+  209,
+  (i) => TrendDataPoint(
+    date: DateTime.utc(2022, 1, 3).add(Duration(days: i * 7)),
+    value: 10.0 + i % 7,
+  ),
+);
+
+Widget host(
+  AsyncValue<List<TrendDataPoint>> value, {
+  List<TrendSeries> secondarySeries = const [],
+}) {
+  return ProviderScope(
+    child: MaterialApp(
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: TrendChartSection(
+            chartId: TrendChartIds.depth,
+            title: 'Maximum Depth Progression',
+            subtitle: 'Depth per dive in range',
+            pointsAsync: value,
+            secondarySeries: secondarySeries,
+            errorMessage: 'Failed to load depth progression',
+            lineColor: Colors.indigo,
+            valueFormatter: (v) => '${v.toStringAsFixed(1)}m',
+            rateFormatter: (v) => '${v.toStringAsFixed(1)}m',
+            infoSummary: 'The maximum depth of each dive over time.',
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+void main() {
+  testWidgets('renders the title, the chart and the control strip', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Maximum Depth Progression'), findsOneWidget);
+    expect(find.byType(DiveTrendChart), findsOneWidget);
+    expect(find.byType(TrendControlStrip), findsOneWidget);
+  });
+
+  testWidgets('starts in per-dive mode with the rolling mean on', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Every dive'), findsOneWidget);
+    final chart = tester.widget<DiveTrendChart>(find.byType(DiveTrendChart));
+    expect(chart.aggregation, TrendAggregation.none);
+    expect(chart.showRollingMean, isTrue);
+    expect(chart.showLinearFit, isFalse);
+  });
+
+  testWidgets('choosing monthly re-renders the chart aggregated', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('trend-aggregation-${TrendChartIds.depth}')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Monthly average').last);
+    await tester.pumpAndSettle();
+
+    final chart = tester.widget<DiveTrendChart>(find.byType(DiveTrendChart));
+    expect(chart.aggregation, TrendAggregation.monthly);
+  });
+
+  testWidgets('tapping the rate legend turns the linear fit on', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('trend-legend-rate-${TrendChartIds.depth}')),
+    );
+    await tester.pumpAndSettle();
+
+    final chart = tester.widget<DiveTrendChart>(find.byType(DiveTrendChart));
+    expect(chart.showLinearFit, isTrue);
+  });
+
+  testWidgets('shows the fitted rate once the fit is on', (tester) async {
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('trend-legend-rate-${TrendChartIds.depth}')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('/yr'), findsOneWidget);
+  });
+
+  testWidgets('shows the error message on failure', (tester) async {
+    await tester.pumpWidget(
+      host(const AsyncValue.error('boom', StackTrace.empty)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Failed to load depth progression'), findsOneWidget);
+  });
+
+  testWidgets('hides the control strip while loading', (tester) async {
+    await tester.pumpWidget(host(const AsyncValue.loading()));
+    await tester.pump();
+
+    expect(find.byType(TrendControlStrip), findsNothing);
+  });
+
+  testWidgets('the rolling mean is drawn in a different colour to the data', (
+    tester,
+  ) async {
+    // Same colour for both makes the smoother indistinguishable from the
+    // series it smooths, and the legend swatch stops identifying anything.
+    await tester.pumpWidget(host(AsyncValue.data(series(20))));
+    await tester.pumpAndSettle();
+
+    final chart = tester.widget<DiveTrendChart>(find.byType(DiveTrendChart));
+
+    expect(chart.rollingColor, isNotNull);
+    expect(chart.rollingColor, isNot(chart.pointColor));
+    expect(chart.rateColor, isNot(chart.pointColor));
+    expect(chart.rateColor, isNot(chart.rollingColor));
+  });
+
+  testWidgets('picking a preset narrows the chart and stores the range', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(fourYears())));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth-year1')));
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(TrendChartSection)),
+    );
+    expect(
+      container.read(trendChartSettingsProvider(TrendChartIds.depth)).range,
+      const TrendRange.preset(TrendRangePreset.year1),
+    );
+    expect(find.text('Last year'), findsOneWidget);
+  });
+
+  testWidgets('Custom range... spans a secondary series too', (tester) async {
+    await tester.pumpWidget(
+      host(
+        AsyncValue.data(fourYears()),
+        secondarySeries: [
+          TrendSeries(
+            label: 'Earlier',
+            color: Colors.green,
+            points: [TrendDataPoint(date: DateTime.utc(2021, 6, 1), value: 12)],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth-custom')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(TrendChartSection)),
+    );
+    final range = container
+        .read(trendChartSettingsProvider(TrendChartIds.depth))
+        .range;
+    expect(range.start, DateTime.utc(2021, 6, 1));
+  });
+
+  testWidgets('Custom range... stores the picked days', (tester) async {
+    await tester.pumpWidget(host(AsyncValue.data(fourYears())));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('trend-range-depth-custom')));
+    await tester.pumpAndSettle();
+    expect(find.byType(DateRangePickerDialog), findsOneWidget);
+    // The picker opens on the data's whole span; saving keeps it.
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(TrendChartSection)),
+    );
+    final range = container
+        .read(trendChartSettingsProvider(TrendChartIds.depth))
+        .range;
+    expect(range.preset, TrendRangePreset.custom);
+    expect(range.start, DateTime.utc(2022, 1, 3));
+    expect(find.text('Custom'), findsOneWidget);
+  });
+
+  testWidgets('the info icon lists the overlays the controls have on', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(AsyncValue.data(fourYears())));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(InfoButton));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Rolling average'), findsWidgets);
+    expect(find.textContaining('Range band'), findsNothing);
+  });
+}

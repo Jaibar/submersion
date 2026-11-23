@@ -3,16 +3,20 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/models/log_entry.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/media/presentation/providers/media_health_providers.dart';
 import 'package:submersion/features/settings/presentation/pages/debug_log_viewer_page.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_mode_provider.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/widgets/log_entry_tile.dart';
 import 'package:submersion/features/settings/presentation/widgets/log_filter_bar.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 void main() {
   late Directory tempDir;
@@ -38,9 +42,15 @@ void main() {
     return ProviderScope(
       overrides: [
         logFileServiceProvider.overrideWithValue(service),
+        mediaReportBuilderProvider.overrideWithValue(() async => null),
         sharedPreferencesProvider.overrideWithValue(prefs),
       ],
-      child: const MaterialApp(home: DebugLogViewerPage()),
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: Locale('en'),
+        home: DebugLogViewerPage(),
+      ),
     );
   }
 
@@ -91,12 +101,18 @@ void main() {
         ProviderScope(
           overrides: [
             logFileServiceProvider.overrideWithValue(service),
+            mediaReportBuilderProvider.overrideWithValue(() async => null),
             sharedPreferencesProvider.overrideWithValue(prefs),
             filteredLogEntriesProvider.overrideWithValue(
               const AsyncValue.loading(),
             ),
           ],
-          child: const MaterialApp(home: DebugLogViewerPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: Locale('en'),
+            home: DebugLogViewerPage(),
+          ),
         ),
       );
       await tester.pump();
@@ -127,10 +143,16 @@ void main() {
         ProviderScope(
           overrides: [
             logFileServiceProvider.overrideWithValue(service),
+            mediaReportBuilderProvider.overrideWithValue(() async => null),
             sharedPreferencesProvider.overrideWithValue(prefs),
             logEntriesProvider.overrideWith((ref) async => entries),
           ],
-          child: const MaterialApp(home: DebugLogViewerPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: Locale('en'),
+            home: DebugLogViewerPage(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -201,12 +223,18 @@ void main() {
         ProviderScope(
           overrides: [
             logFileServiceProvider.overrideWithValue(service),
+            mediaReportBuilderProvider.overrideWithValue(() async => null),
             sharedPreferencesProvider.overrideWithValue(prefs),
             logEntriesProvider.overrideWith(
               (ref) async => cleared ? <LogEntry>[] : entries,
             ),
           ],
-          child: const MaterialApp(home: DebugLogViewerPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: Locale('en'),
+            home: DebugLogViewerPage(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -254,10 +282,35 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(DebugLogViewerPage)),
       );
-      container.read(debugModeNotifierProvider.notifier).disable();
+      // disable() keeps the static logger attached to this test's file at
+      // warning level (#1826); detach it so later tests do not write into a
+      // deleted directory.
+      addTearDown(() {
+        LoggerService.setFileService(null);
+        LoggerService.setMinimumFileLevel(LogLevel.debug);
+      });
+      await container.read(debugModeNotifierProvider.notifier).disable();
 
       // SharedPreferences value should have been updated to false.
       expect(prefs.getBool('debug_mode_enabled'), isFalse);
+    });
+
+    testWidgets('omits "Disable Debug Mode" when debug mode is off (#1826)', (
+      tester,
+    ) async {
+      // The viewer is now reachable from Settings > About > Diagnostics with
+      // debug mode off, where offering to disable it would make no sense.
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(buildTestWidget());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Disable Debug Mode'), findsNothing);
+      expect(find.text('Clear Logs'), findsOneWidget);
     });
 
     testWidgets('shows error message when loading fails', (tester) async {
@@ -265,12 +318,18 @@ void main() {
         ProviderScope(
           overrides: [
             logFileServiceProvider.overrideWithValue(service),
+            mediaReportBuilderProvider.overrideWithValue(() async => null),
             sharedPreferencesProvider.overrideWithValue(prefs),
             filteredLogEntriesProvider.overrideWithValue(
               AsyncValue.error('Test error', StackTrace.current),
             ),
           ],
-          child: const MaterialApp(home: DebugLogViewerPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: Locale('en'),
+            home: DebugLogViewerPage(),
+          ),
         ),
       );
       await tester.pump();
@@ -331,13 +390,32 @@ void main() {
         ProviderScope(
           overrides: [
             logFileServiceProvider.overrideWithValue(service),
+            mediaReportBuilderProvider.overrideWithValue(() async => null),
             sharedPreferencesProvider.overrideWithValue(prefs),
             logEntriesProvider.overrideWith((ref) async => entries),
           ],
-          child: const MaterialApp(home: DebugLogViewerPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: Locale('en'),
+            home: DebugLogViewerPage(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
+
+      // copyFilteredLogs prefixes the export header, which reads the app
+      // version (issue #1246). PackageInfo.fromPlatform NEVER completes under
+      // testWidgets, so without this mock the handler stays suspended and the
+      // snackbar is never scheduled. Production is covered by the timeout in
+      // LogEnvironment.capture; here the normal path is what we want to test.
+      PackageInfo.setMockInitialValues(
+        appName: 'Submersion',
+        packageName: 'app.submersion',
+        version: '1.7.6',
+        buildNumber: '123',
+        buildSignature: '',
+      );
 
       // Tap the Copy button
       await tester.tap(find.text('Copy'));

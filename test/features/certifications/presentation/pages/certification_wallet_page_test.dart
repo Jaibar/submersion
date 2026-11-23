@@ -1,0 +1,461 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_agency.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_level.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
+import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_wallet_page.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_grouping_providers.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/certifications/presentation/utils/certification_grouping.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_ecard_grid.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_ecard.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_share_sheet.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+/// Serves the wallet's read with no database and no ticks.
+class _FakeCertificationRepository extends CertificationRepository {
+  final List<Certification> certifications;
+
+  _FakeCertificationRepository(this.certifications);
+
+  @override
+  Stream<void> watchCertificationsChanges() => const Stream<void>.empty();
+
+  @override
+  Future<List<Certification>> getAllCertifications({String? diverId}) async =>
+      certifications;
+}
+
+final _now = DateTime(2026, 8, 9);
+
+Certification _makeCert({
+  String id = 'cert-1',
+  String name = 'Open Water Diver',
+  String agency = 'padi',
+}) {
+  return Certification(
+    id: id,
+    name: name,
+    agency: agency,
+    createdAt: _now,
+    updatedAt: _now,
+  );
+}
+
+final _diver = Diver(
+  id: 'diver-1',
+  name: 'Eric Griffin',
+  createdAt: _now,
+  updatedAt: _now,
+);
+
+// ---------------------------------------------------------------------------
+// Test widget harness
+// ---------------------------------------------------------------------------
+
+Widget _buildTestWidget({required List<Override> overrides}) {
+  final router = GoRouter(
+    initialLocation: '/certifications/wallet',
+    routes: [
+      GoRoute(
+        path: '/certifications/wallet',
+        builder: (context, state) => const CertificationWalletPage(),
+      ),
+      GoRoute(
+        path: '/certifications/new',
+        builder: (context, state) => const Scaffold(body: Text('new')),
+      ),
+      GoRoute(
+        path: '/certifications/:id',
+        builder: (context, state) => Scaffold(
+          body: Text(
+            state.uri.queryParameters['mode'] == 'edit'
+                ? 'unlocked-${state.pathParameters['id']}'
+                : 'detail-${state.pathParameters['id']}',
+          ),
+        ),
+      ),
+    ],
+  );
+
+  return ProviderScope(
+    overrides: overrides,
+    child: MaterialApp.router(
+      routerConfig: router,
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+    ),
+  );
+}
+
+void main() {
+  group('CertificationWalletPage', () {
+    late SharedPreferences prefs;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+    });
+
+    List<Override> baseOverrides({List<Certification>? certifications}) {
+      return [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        currentDiverProvider.overrideWith((ref) async => _diver),
+        walletCertificationsProvider.overrideWith(
+          (ref) async => certifications ?? [_makeCert()],
+        ),
+      ];
+    }
+
+    testWidgets('renders the certification cards in a grid', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: baseOverrides(
+            certifications: [
+              _makeCert(id: 'cert-1'),
+              _makeCert(id: 'cert-2', agency: CertificationAgency.ssi.name),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CertificationEcardGrid), findsOneWidget);
+      expect(find.byType(CertificationEcard), findsNWidgets(2));
+    });
+
+    // The list notifier carries no card images (issue #3848), so the wallet
+    // reads its own provider: the scans must still reach the card faces.
+    testWidgets('hands the cards their scans', (tester) async {
+      final front = Uint8List.fromList([1, 2, 3]);
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: baseOverrides(
+            certifications: [_makeCert().copyWith(photoFront: front)],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final card = tester.widget<CertificationEcard>(
+        find.byType(CertificationEcard),
+      );
+      expect(card.certification.photoFront, front);
+    });
+
+    // Stubbed a layer below the provider, so the real auto-disposed body runs:
+    // a pushed route pauses it, and the cards must survive the trip back.
+    testWidgets('keeps its cards across a pushed route', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            currentDiverProvider.overrideWith((ref) async => _diver),
+            validatedCurrentDiverIdProvider.overrideWith(
+              (ref) async => _diver.id,
+            ),
+            certificationRepositoryProvider.overrideWithValue(
+              _FakeCertificationRepository([_makeCert()]),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(CertificationEcard), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Add certification'));
+      await tester.pumpAndSettle();
+      expect(find.text('new'), findsOneWidget);
+
+      GoRouter.of(tester.element(find.text('new'))).pop();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CertificationEcard), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('shows the empty state when there are no certifications', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(overrides: baseOverrides(certifications: const [])),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('No certifications yet'), findsOneWidget);
+    });
+
+    testWidgets('tapping the share icon on a card opens the share sheet', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Share certification'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CertificationShareSheet), findsOneWidget);
+    });
+
+    testWidgets('tapping the more-options icon opens the options sheet with '
+        'share, view details and edit', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Share'), findsOneWidget);
+      expect(find.text('View Details'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
+    });
+
+    testWidgets('the options sheet\'s "View Details" navigates to the '
+        'certification detail route', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: baseOverrides(certifications: [_makeCert(id: 'cert-1')]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('View Details'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('detail-cert-1'), findsOneWidget);
+    });
+
+    // A card has no lock to tap, so its Edit opens the certification
+    // unlocked (issue #4527, plan 12, Question 3).
+    testWidgets('the options sheet\'s "Edit" opens the certification '
+        'unlocked', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: baseOverrides(certifications: [_makeCert(id: 'cert-1')]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('unlocked-cert-1'), findsOneWidget);
+    });
+
+    testWidgets('long-pressing a card opens the same options sheet', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(CertificationEcard));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Share'), findsOneWidget);
+      expect(find.text('View Details'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
+    });
+
+    testWidgets('the add button navigates to the new-certification route', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Add certification'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('new'), findsOneWidget);
+    });
+
+    // #3359: the wallet gets its own entry point into the shared sort sheet,
+    // which here (unlike the list's phone/compact bars) also carries the
+    // grouping control.
+    testWidgets('the sort button opens the sort sheet with grouping and the '
+        'view switch', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Sort'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Group by'), findsOneWidget);
+      expect(find.text('List'), findsOneWidget);
+      // Appears twice: the AppBar title and the view switch's own radio
+      // label share the same English string.
+      expect(find.text('Certification Wallet'), findsNWidgets(2));
+    });
+
+    // #3359: today the wallet ignores sort/grouping entirely; this is the
+    // behavior change the issue's Part 2 asks for.
+    testWidgets('orders cards by the shared sort state, not insertion order', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: [
+            ...baseOverrides(
+              certifications: [
+                _makeCert(id: 'b', name: 'Bbb Cert'),
+                _makeCert(id: 'a', name: 'Aaa Cert'),
+              ],
+            ),
+            certificationSortProvider.overrideWith(
+              (ref) => const SortState(
+                field: CertificationSortField.name,
+                direction: SortDirection.descending,
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final titles = tester
+          .widgetList<CertificationEcard>(find.byType(CertificationEcard))
+          .map((card) => card.certification.id)
+          .toList();
+      expect(titles, ['a', 'b']);
+    });
+
+    // #3359: grouping must reach the wallet too (card order only -- no
+    // group headers in the grid, a stretch goal left for later).
+    testWidgets('orders cards by the shared grouping state', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: [
+            ...baseOverrides(
+              certifications: [
+                _makeCert(id: 'ssi', agency: CertificationAgency.ssi.name),
+                _makeCert(id: 'padi', agency: CertificationAgency.padi.name),
+              ],
+            ),
+            certificationGroupByProvider.overrideWith(
+              (ref) => CertificationGroupBy.agency,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final ids = tester
+          .widgetList<CertificationEcard>(find.byType(CertificationEcard))
+          .map((card) => card.certification.id)
+          .toList();
+      // PADI sorts alphabetically before SSI.
+      expect(ids, ['padi', 'ssi']);
+    });
+
+    testWidgets('shows the error state with a retry button', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            currentDiverProvider.overrideWith((ref) async => _diver),
+            walletCertificationsProvider.overrideWith(
+              (ref) async => throw Exception('Boom'),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Failed to load certifications'), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+    });
+
+    // Issue #690: the catalog loads after the page's first frame, and the
+    // action-row title must pick up a custom level's name once it does.
+    testWidgets('the action-row title updates when the catalog loads', (
+      tester,
+    ) async {
+      final catalog = Completer<CertificationCatalog>();
+      final t = DateTime(2026);
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: [
+            ...baseOverrides(
+              certifications: [
+                Certification(
+                  id: 'c1',
+                  name: '',
+                  agency: 'club-id',
+                  level: 'club-diver-id',
+                  createdAt: t,
+                  updatedAt: t,
+                ),
+              ],
+            ),
+            certificationCatalogProvider.overrideWith((ref) => catalog.future),
+          ],
+        ),
+      );
+      await tester.pump();
+      catalog.complete(
+        CertificationCatalog(
+          agencies: [
+            CustomCertificationAgency(
+              id: 'club-id',
+              diverId: 'diver-1',
+              name: 'Lakeshore Dive Club',
+              colorArgb: 0xFF0EA5E9,
+              createdAt: t,
+              updatedAt: t,
+            ),
+          ],
+          levels: [
+            CustomCertificationLevel(
+              id: 'club-diver-id',
+              diverId: 'diver-1',
+              agencyId: 'club-id',
+              name: 'Club Diver',
+              isProgression: true,
+              createdAt: t,
+              updatedAt: t,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final title = tester.widget<Text>(
+        find.byKey(const ValueKey('actionRowTitle')),
+      );
+      expect(title.data, 'Club Diver');
+    });
+  });
+}

@@ -2,15 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/buddies/presentation/widgets/dense_buddy_list_tile.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 import '../../../../helpers/test_app.dart';
+import '../../helpers/fake_buddy_list_notifier.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
 
 Buddy _makeBuddy({
   String id = 'test-id',
   String name = 'Alice Smith',
-  CertificationLevel? certificationLevel = CertificationLevel.openWater,
-  CertificationAgency? certificationAgency,
+  String? certificationLevel = 'openWater',
+  String? certificationAgency,
 }) {
   final now = DateTime(2024, 1, 1);
   return Buddy(
@@ -41,7 +45,7 @@ void main() {
         testApp(
           child: DenseBuddyListTile(
             buddy: _makeBuddy(
-              certificationLevel: CertificationLevel.advancedOpenWater,
+              certificationLevel: CertificationLevel.advancedOpenWater.name,
             ),
           ),
         ),
@@ -125,8 +129,68 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byType(InkWell));
+      // The favorite star's own IconButton also builds an InkWell, so the
+      // row's is disambiguated by position: it wraps the whole tile and is
+      // therefore built first.
+      await tester.tap(find.byType(InkWell).first);
       expect(tapped, isTrue);
     });
+
+    group('favorite star (issue #1336)', () {
+      testWidgets('shows a filled star for a favorite buddy', (tester) async {
+        await tester.pumpWidget(
+          testApp(
+            child: DenseBuddyListTile(
+              buddy: _makeBuddy().copyWith(isFavorite: true),
+            ),
+          ),
+        );
+
+        expect(find.byIcon(Icons.star), findsOneWidget);
+        expect(find.byIcon(Icons.star_border), findsNothing);
+      });
+
+      testWidgets('tapping the star writes nothing and opens the buddy', (
+        tester,
+      ) async {
+        final notifier = FakeBuddyListNotifier();
+        var tapped = false;
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              buddyListNotifierProvider.overrideWith((ref) => notifier),
+            ],
+            child: DenseBuddyListTile(
+              buddy: _makeBuddy(id: 'dense-1'),
+              onTap: () => tapped = true,
+            ),
+          ),
+        );
+
+        await tester.tap(find.byIcon(Icons.star_border));
+        await tester.pump();
+
+        // The star only shows the favourite (issue #4527, plan 12): a
+        // tap on it is the row's.
+        expect(notifier.calls, isEmpty);
+        expect(tapped, isTrue);
+      });
+    });
+  });
+
+  testWidgets('chevron ends one row padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        child: DenseBuddyListTile(buddy: _makeBuddy(name: 'Bob Jones')),
+      ),
+    );
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: tester.getRect(find.byType(DenseBuddyListTile)),
+      padding: kRecordRowDenseHorizontalPadding,
+    );
   });
 }

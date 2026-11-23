@@ -1,0 +1,916 @@
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:image/image.dart' as img;
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/pages/diver_profile_hub_page.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/safety/domain/entities/incident.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+class _MockDiverListNotifier extends StateNotifier<AsyncValue<List<Diver>>>
+    implements DiverListNotifier {
+  _MockDiverListNotifier(List<Diver> divers) : super(AsyncValue.data(divers));
+
+  DeleteDiverResult deleteResult = const DeleteDiverResult(
+    reassignedTripsCount: 0,
+    reassignedSitesCount: 0,
+  );
+
+  int deleteCalls = 0;
+
+  @override
+  Future<void> refresh() async {}
+
+  @override
+  Future<Diver> addDiver(Diver diver) async => diver;
+
+  @override
+  Future<void> updateDiver(Diver diver) async {}
+
+  @override
+  Future<DeleteDiverResult> deleteDiver(String id) async {
+    deleteCalls++;
+    return deleteResult;
+  }
+
+  @override
+  Future<void> setAsDefault(String id) async {}
+}
+
+/// Reports kept gear for the delete confirmation (issue #2852).
+class _KeptGearDiverRepository extends DiverRepository {
+  @override
+  Future<int> keptEquipmentCount(String diverId) async => 3;
+}
+
+/// Cannot count kept gear, as when the database read fails (issue #2852).
+class _FailingCountDiverRepository extends DiverRepository {
+  @override
+  Future<int> keptEquipmentCount(String diverId) async =>
+      throw StateError('count failed');
+}
+
+/// Records updateDiver so the remove-photo path can be asserted end to end.
+class _RecordingDiverRepository extends DiverRepository {
+  final List<Diver> updated = [];
+
+  @override
+  Future<void> updateDiver(Diver diver) async {
+    updated.add(diver);
+  }
+}
+
+Uint8List _jpeg() {
+  final image = img.Image(width: 32, height: 32);
+  img.fill(image, color: img.ColorRgb8(10, 20, 30));
+  return Uint8List.fromList(img.encodeJpg(image, quality: 80));
+}
+
+void main() {
+  final now = DateTime.now();
+
+  Diver makeDiver({
+    String id = 'diver-1',
+    String name = 'Alice Alpha',
+    String? email,
+    String? phone,
+    String? bloodType,
+    DiverInsurance insurance = const DiverInsurance(),
+    String notes = '',
+    EmergencyContact emergency = const EmergencyContact(),
+    int? priorDiveCount,
+    DateTime? divingSince,
+    Uint8List? photo,
+  }) {
+    return Diver(
+      photo: photo,
+      id: id,
+      name: name,
+      email: email,
+      phone: phone,
+      bloodType: bloodType,
+      emergencyContact: emergency,
+      insurance: insurance,
+      notes: notes,
+      createdAt: now,
+      updatedAt: now,
+      priorDiveCount: priorDiveCount,
+      divingSince: divingSince,
+    );
+  }
+
+  group('DiverProfileHubPage loading/error/no-diver states', () {
+    testWidgets('shows loading indicator while current diver is loading', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith(
+              (_) => Future.delayed(const Duration(seconds: 10), () => null),
+            ),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      await tester.pump(const Duration(seconds: 11));
+    });
+
+    testWidgets('shows error state when current diver load fails', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith(
+              (_) => Future.error(Exception('hub-boom')),
+            ),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Error'), findsWidgets);
+    });
+
+    testWidgets('shows no-diver state with add button when diver is null', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => null),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.person_add), findsOneWidget);
+      expect(find.byType(FilledButton), findsOneWidget);
+    });
+  });
+
+  group('DiverProfileHubPage with active diver', () {
+    testWidgets('renders active diver card, section tiles, and management', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(
+        email: 'a@b.com',
+        phone: '+1111',
+        bloodType: 'O+',
+        notes: 'Loves diving',
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Active diver card.
+      expect(find.text('Alice Alpha'), findsWidgets);
+      expect(find.text('Active Diver'), findsOneWidget);
+      // Section tiles present (scroll to find them).
+      await tester.scrollUntilVisible(
+        find.byIcon(Icons.swap_horiz),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.byIcon(Icons.person), findsOneWidget);
+      expect(find.byIcon(Icons.contact_phone), findsOneWidget);
+      expect(find.byIcon(Icons.medical_information), findsOneWidget);
+      expect(find.byIcon(Icons.health_and_safety), findsOneWidget);
+      expect(find.byIcon(Icons.notes), findsOneWidget);
+      // Management tiles.
+      expect(find.byIcon(Icons.swap_horiz), findsOneWidget);
+      expect(find.byIcon(Icons.person_add), findsOneWidget);
+      // Subtitle for personal info = email.
+      expect(find.text('a@b.com'), findsOneWidget);
+      // Subtitle for medical info = blood type.
+      expect(find.text('O+'), findsOneWidget);
+      // Subtitle for notes = first line of notes.
+      expect(find.text('Loves diving'), findsOneWidget);
+    });
+
+    testWidgets('shows delete option when multiple divers exist', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final d1 = makeDiver(id: 'd1', name: 'Diver One');
+      final d2 = makeDiver(id: 'd2', name: 'Diver Two');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => d1),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([d1, d2]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(PopupMenuButton<String>), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete Diver'), findsOneWidget);
+    });
+
+    testWidgets('delete says which gear is kept and who got it', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final d1 = makeDiver(id: 'd1', name: 'Diver One');
+      final d2 = makeDiver(id: 'd2', name: 'Diver Two');
+      final notifier = _MockDiverListNotifier([d1, d2])
+        ..deleteResult = const DeleteDiverResult(
+          reassignedTripsCount: 0,
+          reassignedSitesCount: 0,
+          keptEquipmentCount: 3,
+          keptEquipmentHeirNames: ['Diver Two'],
+        );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => d1),
+            diverListNotifierProvider.overrideWith((_) => notifier),
+            diverRepositoryProvider.overrideWithValue(
+              _KeptGearDiverRepository(),
+            ),
+          ],
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete Diver'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          '3 pieces of gear in use by other profiles will be kept and '
+          'handed to them.',
+        ),
+        findsOneWidget,
+      );
+      await tester.enterText(find.byType(TextField), 'Delete Diver One');
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(notifier.deleteCalls, 1);
+      expect(
+        find.text('Diver deleted. 3 pieces of gear handed to Diver Two.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a failed kept-gear count still opens the delete dialog', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final d1 = makeDiver(id: 'd1', name: 'Diver One');
+      final d2 = makeDiver(id: 'd2', name: 'Diver Two');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => d1),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([d1, d2]),
+            ),
+            diverRepositoryProvider.overrideWithValue(
+              _FailingCountDiverRepository(),
+            ),
+          ],
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete Diver'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.textContaining('pieces of gear'), findsNothing);
+    });
+
+    testWidgets('hides delete option when only one diver exists', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(PopupMenuButton<String>), findsNothing);
+    });
+
+    testWidgets('renders phone subtitle when email is missing', (tester) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(phone: '+5555');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('+5555'), findsOneWidget);
+    });
+
+    testWidgets('renders name subtitle when no email/phone', (tester) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(name: 'Solo Diver');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Name appears in both card and subtitle.
+      expect(find.text('Solo Diver'), findsWidgets);
+    });
+
+    testWidgets('renders insurance subtitle when provider set', (tester) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(
+        insurance: DiverInsurance(
+          provider: 'DAN',
+          expiryDate: DateTime.now().add(const Duration(days: 180)),
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('DAN'), findsOneWidget);
+    });
+
+    testWidgets('renders expired insurance subtitle', (tester) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(
+        insurance: DiverInsurance(
+          provider: 'DAN',
+          expiryDate: DateTime.now().subtract(const Duration(days: 30)),
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Expired'), findsOneWidget);
+    });
+
+    testWidgets('renders prior-experience tile with dive-count subtitle', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver(priorDiveCount: 150);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.history), findsOneWidget);
+      expect(find.textContaining('150'), findsOneWidget);
+    });
+  });
+
+  group('DiverProfileHubPage navigation', () {
+    testWidgets('tapping Personal Info tile navigates to route', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver();
+      final router = GoRouter(
+        initialLocation: '/hub',
+        routes: [
+          GoRoute(
+            path: '/hub',
+            builder: (context, state) => const DiverProfileHubPage(),
+          ),
+          GoRoute(
+            path: '/settings/diver-profile/personal',
+            builder: (context, state) =>
+                const Scaffold(body: Text('PERSONAL_PAGE')),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.person));
+      await tester.pumpAndSettle();
+      expect(find.text('PERSONAL_PAGE'), findsOneWidget);
+    });
+
+    Future<void> pumpHubRouter(
+      WidgetTester tester, {
+      List<Document> personalDocuments = const [],
+      List<Incident> incidents = const [],
+    }) async {
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final overrides = await getBaseOverrides(
+        ownerDocuments: personalDocuments,
+        incidents: incidents,
+      );
+      final diver = makeDiver();
+      final router = GoRouter(
+        initialLocation: '/hub',
+        routes: [
+          GoRoute(
+            path: '/hub',
+            builder: (context, state) => const DiverProfileHubPage(),
+          ),
+          GoRoute(
+            path: '/documents',
+            builder: (context, state) =>
+                Scaffold(body: Text('DOCUMENTS ${state.uri.query}')),
+          ),
+          GoRoute(
+            path: '/incidents',
+            builder: (context, state) =>
+                const Scaffold(body: Text('INCIDENTS_PAGE')),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the Insurance tile opens insurance documents (#2613)', (
+      tester,
+    ) async {
+      await pumpHubRouter(tester);
+      await tester.tap(find.byIcon(Icons.health_and_safety));
+      await tester.pumpAndSettle();
+      expect(find.text('DOCUMENTS type=insurance'), findsOneWidget);
+    });
+
+    testWidgets('the Documents tile counts personal documents and opens them', (
+      tester,
+    ) async {
+      await pumpHubRouter(
+        tester,
+        personalDocuments: [
+          for (final id in ['a', 'b'])
+            Document(
+              id: id,
+              diverId: 'diver-1',
+              owner: const DocumentOwner.personal(),
+              type: DocumentType.permit,
+              createdAt: DateTime(2026),
+              updatedAt: DateTime(2026),
+            ),
+        ],
+      );
+      expect(find.text('2 documents'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.folder_copy_outlined));
+      await tester.pumpAndSettle();
+      expect(find.text('DOCUMENTS owner=personal'), findsOneWidget);
+    });
+
+    Incident makeIncident(String id) => Incident(
+      id: id,
+      diverId: 'diver-1',
+      occurredAt: DateTime(2026, 5, 1),
+      category: IncidentCategory.buoyancy,
+      severity: IncidentSeverity.minor,
+      narrative: 'Rapid ascent from 18 m',
+      createdAt: DateTime(2026, 5, 1),
+      updatedAt: DateTime(2026, 5, 1),
+    );
+
+    // The near-miss log moved here from Settings > Manage (issue #3061):
+    // incidents are the active diver's own safety records.
+    testWidgets('the Near-miss log tile says None yet with no entries', (
+      tester,
+    ) async {
+      await pumpHubRouter(tester);
+      expect(find.text('Near-miss log'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'Near-miss log'),
+          matching: find.text('None yet'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the Near-miss log tile counts a single entry', (tester) async {
+      await pumpHubRouter(tester, incidents: [makeIncident('i1')]);
+      expect(find.text('1 entry'), findsOneWidget);
+    });
+
+    testWidgets('the Near-miss log tile counts entries and opens the log', (
+      tester,
+    ) async {
+      await pumpHubRouter(
+        tester,
+        incidents: [
+          for (final id in ['i1', 'i2', 'i3']) makeIncident(id),
+        ],
+      );
+      expect(find.text('3 entries'), findsOneWidget);
+      await tester.tap(find.text('Near-miss log'));
+      await tester.pumpAndSettle();
+      expect(find.text('INCIDENTS_PAGE'), findsOneWidget);
+    });
+
+    testWidgets('tapping Prior Experience tile navigates to route', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final overrides = await getBaseOverrides();
+      final diver = makeDiver();
+      final router = GoRouter(
+        initialLocation: '/hub',
+        routes: [
+          GoRoute(
+            path: '/hub',
+            builder: (context, state) => const DiverProfileHubPage(),
+          ),
+          GoRoute(
+            path: '/settings/diver-profile/prior',
+            builder: (context, state) =>
+                const Scaffold(body: Text('PRIOR_PAGE')),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.history));
+      await tester.pumpAndSettle();
+      expect(find.text('PRIOR_PAGE'), findsOneWidget);
+    });
+
+    testWidgets('tapping Switch Diver opens bottom sheet', (tester) async {
+      final overrides = await getBaseOverrides();
+      final d1 = makeDiver(id: 'd1', name: 'Diver One');
+      final d2 = makeDiver(id: 'd2', name: 'Diver Two');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => d1),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([d1, d2]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byIcon(Icons.swap_horiz),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.byIcon(Icons.swap_horiz));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.swap_horiz));
+      await tester.pumpAndSettle();
+      // Switcher shows both divers.
+      expect(find.textContaining('Switch'), findsWidgets);
+      // Both diver names should show in sheet.
+      expect(find.text('Diver One'), findsWidgets);
+      expect(find.text('Diver Two'), findsOneWidget);
+    });
+
+    testWidgets('tapping inactive diver in switcher triggers switch', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final d1 = makeDiver(id: 'd1', name: 'Diver One');
+      final d2 = makeDiver(id: 'd2', name: 'Diver Two');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => d1),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([d1, d2]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byIcon(Icons.swap_horiz),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.byIcon(Icons.swap_horiz));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.swap_horiz));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Diver Two'));
+      await tester.pumpAndSettle();
+      // Sheet closed.
+      expect(find.text('Diver Two'), findsNothing);
+    });
+  });
+
+  group('DiverProfileHubPage profile photo', () {
+    Future<void> pumpHub(WidgetTester tester, Diver diver) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the active diver card renders a stored photo', (tester) async {
+      await pumpHub(tester, makeDiver(photo: _jpeg()));
+
+      final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
+      expect(avatar.photo, isNotNull);
+      expect(avatar.radius, 40);
+    });
+
+    testWidgets('the card falls back to initials without a photo', (
+      tester,
+    ) async {
+      await pumpHub(tester, makeDiver());
+
+      final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
+      expect(avatar.photo, isNull);
+      expect(find.text('AA'), findsOneWidget);
+    });
+
+    testWidgets('the avatar carries a camera badge and is tappable', (
+      tester,
+    ) async {
+      await pumpHub(tester, makeDiver());
+
+      expect(find.byIcon(Icons.camera_alt), findsOneWidget);
+      final detector = tester.widget<GestureDetector>(
+        find
+            .ancestor(
+              of: find.byType(ProfileAvatar),
+              matching: find.byType(GestureDetector),
+            )
+            .first,
+      );
+      expect(detector.onTap, isNotNull);
+    });
+
+    testWidgets('tapping the avatar and choosing Remove clears the photo', (
+      tester,
+    ) async {
+      // Exercises the whole handler without a platform plugin: the source
+      // sheet opens in-process, and Remove short-circuits before any picker.
+      final repo = _RecordingDiverRepository();
+      final diver = makeDiver(photo: _jpeg());
+      final overrides = await getBaseOverrides();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            currentDiverProvider.overrideWith((_) async => diver),
+            diverListNotifierProvider.overrideWith(
+              (_) => _MockDiverListNotifier([diver]),
+            ),
+            diverRepositoryProvider.overrideWithValue(repo),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiverProfileHubPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(ProfileAvatar));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('Remove Photo'), findsOneWidget);
+      // Contacts holds buddies, not the diver using the app.
+      expect(find.text('Choose from Contacts'), findsNothing);
+
+      await tester.tap(find.text('Remove Photo'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(repo.updated, hasLength(1));
+      expect(repo.updated.single.photo, isNull);
+      expect(repo.updated.single.id, diver.id);
+    });
+  });
+}

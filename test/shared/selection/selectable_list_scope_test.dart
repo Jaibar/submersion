@@ -1,0 +1,254 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/shared/selection/selectable_list_scope.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+
+void main() {
+  late SelectionController controller;
+
+  setUp(() => controller = SelectionController());
+  tearDown(() => controller.dispose());
+
+  Widget host({VoidCallback? onEscapeAbove}) {
+    return MaterialApp(
+      home: Scaffold(
+        // Whatever listens for Escape around the list, as the shell's
+        // editing keys do (issue #4527).
+        body: Focus(
+          onKeyEvent: (_, event) {
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.escape) {
+              onEscapeAbove?.call();
+            }
+            return KeyEventResult.ignored;
+          },
+          child: SelectableListScope(
+            controller: controller,
+            selectableIds: const ['a', 'b', 'c'],
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  group('SelectableListScope', () {
+    testWidgets('the scope answers keys but is never a Tab stop of its own', (
+      tester,
+    ) async {
+      // Its focus node exists only to hear Escape and Ctrl/Cmd-A. As a Tab
+      // stop it was a blank one spanning the whole list (or, around the
+      // Media header's toolbar, the whole row of controls), which reads as
+      // focus lost (#4777).
+      final before = FocusNode();
+      final after = FocusNode();
+      addTearDown(before.dispose);
+      addTearDown(after.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                TextField(focusNode: before),
+                Expanded(
+                  child: SelectableListScope(
+                    controller: controller,
+                    selectableIds: const ['a', 'b', 'c'],
+                    child: const SizedBox.expand(key: Key('inside')),
+                  ),
+                ),
+                TextField(focusNode: after),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final scopeNode = Focus.of(
+        tester.element(find.byKey(const Key('inside'))),
+      );
+      // Still the autofocused node that answers the keys.
+      expect(scopeNode.hasPrimaryFocus, isTrue);
+      controller.enterImplicit('a');
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(controller.value.isActive, isFalse);
+
+      // Tab from the field before the list goes straight to the one after.
+      before.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(scopeNode.hasPrimaryFocus, isFalse);
+      expect(after.hasPrimaryFocus, isTrue);
+    });
+
+    testWidgets('Escape exits selection mode', (tester) async {
+      controller.enterImplicit('a');
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(controller.value.isActive, isFalse);
+    });
+
+    testWidgets('Escape when not in selection mode is left to what is '
+        'around the list', (tester) async {
+      var above = 0;
+      await tester.pumpWidget(host(onEscapeAbove: () => above++));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(controller.value.isActive, isFalse);
+      expect(above, 1);
+    });
+
+    testWidgets('Escape that leaves selection mode goes no further', (
+      tester,
+    ) async {
+      var above = 0;
+      controller.enterImplicit('a');
+      await tester.pumpWidget(host(onEscapeAbove: () => above++));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(controller.value.isActive, isFalse);
+      expect(above, 0);
+    });
+
+    // Copilot's review of PR #4670 asked for this press to go on to the
+    // pane as well. Select with no row checked still shows the selection
+    // bar: one Escape closes it, and a second is needed to cancel the
+    // pane's sitting, so its changes are never dropped as a side effect.
+    testWidgets('Escape in selection mode with no row checked closes the '
+        'mode and goes no further', (tester) async {
+      var above = 0;
+      controller.enterExplicit();
+      await tester.pumpWidget(host(onEscapeAbove: () => above++));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(controller.value.isActive, isFalse);
+      expect(above, 0);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(above, 1);
+    });
+
+    testWidgets('Ctrl-A selects all and enters the mode', (tester) async {
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(controller.value.isActive, isTrue);
+      expect(controller.value.checkedIds, {'a', 'b', 'c'});
+    });
+
+    testWidgets('Ctrl-A keeps the checks while rows are loading', (
+      tester,
+    ) async {
+      controller
+        ..selectAll(const ['a'])
+        ..pruneToSettled(const AsyncLoading<List<String>>(), (rows) => rows);
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(controller.value.checkedIds, {'a'});
+    });
+
+    // PopScope is generic, so find.byType(PopScope) matches nothing. A
+    // predicate finder is the reliable way to reach it.
+    final popScopeFinder = find.byWidgetPredicate((w) => w is PopScope);
+
+    testWidgets('blocks the route pop while selection mode is active', (
+      tester,
+    ) async {
+      controller.enterImplicit('a');
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      final scope = tester.widget(popScopeFinder) as PopScope;
+      expect(scope.canPop, isFalse);
+    });
+
+    testWidgets('allows the route pop when not selecting', (tester) async {
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      final scope = tester.widget(popScopeFinder) as PopScope;
+      expect(scope.canPop, isTrue);
+    });
+
+    testWidgets('back exits selection mode instead of popping', (tester) async {
+      controller.enterImplicit('a');
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      expect(controller.value.isActive, isFalse);
+    });
+  });
+
+  group('SelectableListScope modifier detection', () {
+    testWidgets('isShiftPressed reflects the hardware keyboard', (
+      tester,
+    ) async {
+      await tester.pumpWidget(host());
+      expect(SelectableListScope.isShiftPressed(), isFalse);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      expect(SelectableListScope.isShiftPressed(), isTrue);
+
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      expect(SelectableListScope.isShiftPressed(), isFalse);
+    });
+
+    // The platform override must be cleared inside the test body: the
+    // framework's foundation-debug-vars invariant runs before addTearDown,
+    // so deferring the reset fails the test even when the logic is correct.
+    testWidgets('isModifierPressed uses Control off macOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        await tester.pumpWidget(host());
+        expect(SelectableListScope.isModifierPressed(), isFalse);
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        expect(SelectableListScope.isModifierPressed(), isTrue);
+
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        expect(SelectableListScope.isModifierPressed(), isFalse);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('isModifierPressed uses Meta on macOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        await tester.pumpWidget(host());
+        expect(SelectableListScope.isModifierPressed(), isFalse);
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+        expect(SelectableListScope.isModifierPressed(), isTrue);
+
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+        expect(SelectableListScope.isModifierPressed(), isFalse);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  });
+}

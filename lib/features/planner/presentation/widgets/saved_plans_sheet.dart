@@ -1,0 +1,495 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/core/utils/share_anchor.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/planner/data/services/plan_file_codec.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart';
+import 'package:submersion/features/planner/domain/utils/saved_plan_rows.dart';
+import 'package:submersion/features/planner/presentation/plan_link_actions.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_repository_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_series_store.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_export_actions.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_export_files.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_name_dialog.dart';
+import 'package:submersion/features/planner/presentation/widgets/saved_series_dive_lines.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/sheet_messenger_scope.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+
+/// Present the saved-plans picker as a modal bottom sheet.
+Future<void> showSavedPlansSheet(BuildContext context) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    // The sheet's own snackbar host, so export confirmations and import
+    // errors show on the sheet rather than on the page underneath it.
+    builder: (_) =>
+        const SheetMessengerScope(shrinkWrap: true, child: SavedPlansSheet()),
+  );
+}
+
+/// Lists saved plans (newest first) with open, duplicate, share, delete,
+/// import, and a multi-select compare mode. A saved series is one row with a
+/// line for each dive (issue #3565).
+class SavedPlansSheet extends ConsumerStatefulWidget {
+  const SavedPlansSheet({super.key});
+
+  @override
+  ConsumerState<SavedPlansSheet> createState() => _SavedPlansSheetState();
+}
+
+class _SavedPlansSheetState extends ConsumerState<SavedPlansSheet> {
+  bool _selecting = false;
+  final _selected = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final summaries = ref.watch(divePlanSummariesProvider);
+    final theme = Theme.of(context);
+    final units = ref.watch(unitFormatterProvider);
+
+    // Render stale data during a reload rather than flashing a spinner.
+    final rows = summaries.valueOrNull == null
+        ? null
+        : collapseSeries(summaries.valueOrNull!);
+    // Comparing works on single plans: a series' later dives depend on the
+    // dives before them, which a side-by-side of plans would not carry in.
+    final comparable = rows?.where((row) => !row.isSeries).length ?? 0;
+    final plans = _selecting
+        ? rows?.where((row) => !row.isSeries).toList()
+        : rows;
+
+    // The compare-mode toggle only renders with >=2 plans. If the count drops
+    // below that while the sheet is open, actually leave compare mode (not
+    // merely hide it) so the sheet can't silently re-enter it when the count
+    // later climbs back to >=2 (e.g. via Import while the sheet is open).
+    ref.listen(divePlanSummariesProvider, (_, next) {
+      final comparable = collapseSeries(
+        next.valueOrNull ?? const [],
+      ).where((row) => !row.isSeries).length;
+      if (_selecting && comparable < 2) {
+        setState(() {
+          _selecting = false;
+          _selected.clear();
+        });
+      }
+    });
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    context.l10n.plannerCanvas_saved_title,
+                    style: theme.textTheme.titleMedium,
+                  ),
+                ),
+                if (comparable >= 2)
+                  TextButton.icon(
+                    icon: Icon(
+                      _selecting ? Icons.close : Icons.compare_arrows,
+                      size: 18,
+                    ),
+                    label: Text(
+                      _selecting
+                          ? context.l10n.common_action_cancel
+                          : context.l10n.plannerCanvas_compare_action,
+                    ),
+                    onPressed: () => setState(() {
+                      _selecting = !_selecting;
+                      _selected.clear();
+                    }),
+                  ),
+                TextButton.icon(
+                  icon: const Icon(Icons.file_open, size: 18),
+                  label: Text(context.l10n.plannerCanvas_share_import),
+                  onPressed: () => _importPlan(context, ref),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (plans == null && summaries.isLoading)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (plans == null || plans.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Text(
+                  context.l10n.plannerCanvas_saved_empty,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.outline,
+                  ),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: plans.length,
+                  itemBuilder: (context, i) => _selecting
+                      ? CheckboxListTile(
+                          contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          title: Text(plans[i].plan.name),
+                          value: _selected.contains(plans[i].plan.id),
+                          onChanged: (checked) => setState(() {
+                            if (checked ?? false) {
+                              if (_selected.length < 3) {
+                                _selected.add(plans[i].plan.id);
+                              }
+                            } else {
+                              _selected.remove(plans[i].plan.id);
+                            }
+                          }),
+                          // No per-row trash while selecting: a destructive
+                          // one-tap action does not belong beside a checkbox
+                          // whose whole purpose is to gather rows for a
+                          // different action. Delete stays on the normal row.
+                        )
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _PlanTile(row: plans[i], units: units),
+                            if (plans[i].showsDives)
+                              SavedSeriesDiveLines(
+                                row: plans[i],
+                                units: units,
+                                linkActions: true,
+                                onOpen: (id) {
+                                  context.pop();
+                                  context.push('/planning/dive-planner/$id');
+                                },
+                                onOpenInLog: (id) {
+                                  context.pop();
+                                  context.push('/dives/$id');
+                                },
+                              ),
+                          ],
+                        ),
+                ),
+              ),
+            if (_selecting)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: FilledButton(
+                  onPressed: _selected.length >= 2
+                      ? () {
+                          final ids = _selected.join(',');
+                          Navigator.of(context).pop();
+                          GoRouter.of(
+                            context,
+                          ).push('/planning/dive-planner/compare?ids=$ids');
+                        }
+                      : null,
+                  child: Text(
+                    '${context.l10n.plannerCanvas_compare_action}'
+                    ' (${_selected.length})',
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _importPlan(BuildContext context, WidgetRef ref) async {
+    if (!demoSealGuard(context, DemoSealedFeature.fileImport)) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = context.l10n;
+    final router = GoRouter.of(context);
+    final navigator = Navigator.of(context);
+
+    final result = await FilePicker.pickFile(type: FileType.any);
+    final path = result?.path;
+    if (path == null) return;
+
+    try {
+      final source = await File(path).readAsString();
+      // A version 4 file can hold a whole series (issue #3565).
+      final series = seriesFromSubplanJson(source);
+      final String planId;
+      if (series != null) {
+        // The file leaves the sender's diver out; an imported series is a
+        // first save, so it belongs to the diver importing it.
+        final stored = await ref
+            .read(divePlanSeriesRepositoryProvider)
+            .saveSeries(
+              series.copyWith(diverId: ref.read(currentDiverIdProvider)),
+            );
+        planId = stored.dives.first.plan.id;
+      } else {
+        final plan = subplanFromJson(source);
+        await ref.read(divePlanRepositoryProvider).savePlan(plan);
+        planId = plan.id;
+      }
+      navigator.pop();
+      // PUSH (not go): keep the canvas poppable so system back does not
+      // close the app (#647).
+      router.push('/planning/dive-planner/$planId');
+    } on FormatException catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.plannerCanvas_share_importFailed(e.message)),
+        ),
+      );
+    } on FileSystemException catch (e) {
+      // An unreadable/missing file should surface the same friendly error
+      // rather than escaping and tearing down the sheet.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.plannerCanvas_share_importFailed(e.message)),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.plannerCanvas_share_importFailed(e.toString())),
+        ),
+      );
+    }
+  }
+}
+
+class _PlanTile extends ConsumerWidget {
+  const _PlanTile({required this.row, required this.units});
+
+  final SavedPlanRow row;
+  final UnitFormatter units;
+
+  DivePlanSummary get summary => row.plan;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final date = units.formatDate(summary.updatedAt);
+    final subtitleParts = <String>[
+      date,
+      savedPlanRowSubtitle(context, row, units),
+    ].where((part) => part.isNotEmpty);
+    // A series shows each dive's link on that dive's line.
+    final links = !row.showsDives;
+    final badge = links ? planLinkBadge(context.l10n, summary, units) : null;
+    final seriesId = summary.seriesId;
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(summary.name),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(subtitleParts.join(' · ')),
+          if (badge != null)
+            PlanLinkBadge(
+              label: badge,
+              onOpen: switch (summary.linkedDiveId) {
+                final id? => () {
+                  context.pop();
+                  context.push('/dives/$id');
+                },
+                null => null,
+              },
+            ),
+        ],
+      ),
+      onTap: () {
+        context.pop();
+        context.push('/planning/dive-planner/${summary.id}');
+      },
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            color: Theme.of(context).colorScheme.error,
+            tooltip: context.l10n.common_action_delete,
+            onPressed: () => _confirmAndDeletePlan(
+              context,
+              ref,
+              summary.id,
+              summary.name,
+              seriesId: seriesId,
+            ),
+          ),
+          // A Builder so the share anchor resolves to the overflow button
+          // rather than the whole row: it contributes no render object, so
+          // findRenderObject descends to the PopupMenuButton below it.
+          Builder(
+            builder: (menuContext) => PopupMenuButton<String>(
+              onSelected: (value) async {
+                final repository = ref.read(divePlanRepositoryProvider);
+                // Read now: the sheet can be gone once a write returns.
+                final container = ref.container;
+                if (value == 'rename' && seriesId != null) {
+                  final entered = await showPlanNameDialog(
+                    context,
+                    initialName: summary.name,
+                    title: context.l10n.divePlanner_action_renamePlan,
+                  );
+                  if (entered == null || !context.mounted) return;
+                  await ref
+                      .read(divePlanSeriesRepositoryProvider)
+                      .renameSeries(seriesId, entered);
+                  // The planner may have this series open: keep its name.
+                  adoptRenameInPlanner(container, summary, entered);
+                } else if (value == 'rename') {
+                  final plan = await repository.getPlan(summary.id);
+                  if (plan == null || !context.mounted) return;
+                  final entered = await showPlanNameDialog(
+                    context,
+                    initialName: plan.name,
+                    title: context.l10n.divePlanner_action_renamePlan,
+                  );
+                  if (entered == null) return;
+                  // No summary is passed, so the denormalized depth/runtime
+                  // columns stay absent in the companion and the upsert
+                  // preserves them along with the tile's subtitle.
+                  await repository.savePlan(plan.copyWith(name: entered));
+                  adoptRenameInPlanner(container, summary, entered);
+                } else if (value == 'duplicate' && seriesId != null) {
+                  await ref
+                      .read(divePlanSeriesRepositoryProvider)
+                      .duplicateSeries(seriesId);
+                } else if (value == 'duplicate') {
+                  await repository.duplicatePlan(summary.id);
+                } else if (value == 'share') {
+                  // Resolved before the await: the popover anchor has to be
+                  // read while the button is certainly mounted and at its
+                  // current position, not after a database round trip.
+                  final anchor = shareAnchorFrom(menuContext);
+                  // The menu drops this callback's future, so a failure needs
+                  // a listener to be logged against this tile.
+                  logFailure(
+                    deliverPlanExport(
+                      context,
+                      title: context.l10n.plannerCanvas_share_menu,
+                      savedMessage: context.l10n.plannerCanvas_share_saved,
+                      shareAnchor: anchor,
+                      build: () async {
+                        // One dive saved as a series is shared as the plan
+                        // it is; several go together, with what they carry.
+                        if (row.showsDives) {
+                          final series = await ref
+                              .read(divePlanSeriesRepositoryProvider)
+                              .getSeries(seriesId!);
+                          return series == null ? null : seriesExport(series);
+                        }
+                        final plan = await repository.getPlan(summary.id);
+                        return plan == null ? null : subplanExport(plan);
+                      },
+                    ),
+                    _PlanTile,
+                    'export plan file',
+                  );
+                } else if (value == 'link') {
+                  logFailure(
+                    pickDiveAndLink(context, ref, planId: summary.id),
+                    _PlanTile,
+                    'link plan to dive',
+                  );
+                } else if (value == 'unlink') {
+                  logFailure(
+                    unlinkPlanWithConfirm(context, ref, planId: summary.id),
+                    _PlanTile,
+                    'unlink plan',
+                  );
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'rename',
+                  child: Text(context.l10n.divePlanner_action_renamePlan),
+                ),
+                // On a series these act on every dive: one dive alone would
+                // lose what the dives before it carry in.
+                PopupMenuItem(
+                  value: 'duplicate',
+                  child: Text(context.l10n.plannerCanvas_saved_duplicate),
+                ),
+                PopupMenuItem(
+                  value: 'share',
+                  child: Text(context.l10n.plannerCanvas_share_menu),
+                ),
+                if (links) ...[
+                  PopupMenuItem(
+                    value: 'link',
+                    child: Text(
+                      summary.linkedDiveId == null
+                          ? context.l10n.plannerCanvas_link_action
+                          : context.l10n.plannerCanvas_link_changeAction,
+                    ),
+                  ),
+                  if (summary.linkedDiveId != null)
+                    PopupMenuItem(
+                      value: 'unlink',
+                      child: Text(context.l10n.plannerCanvas_unlink_action),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Confirms deletion of the plan named [name], then removes plan [id], or
+/// the whole series [seriesId] when the row is one.
+///
+/// Shared by the normal row's trash button and the compare-mode row's trash
+/// button so both modes delete through a single confirmation path. The
+/// repository is read before the dialog await to avoid using [ref] across an
+/// async gap.
+Future<void> _confirmAndDeletePlan(
+  BuildContext context,
+  WidgetRef ref,
+  String id,
+  String name, {
+  String? seriesId,
+}) async {
+  final repository = ref.read(divePlanRepositoryProvider);
+  final seriesRepository = ref.read(divePlanSeriesRepositoryProvider);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(context.l10n.plannerCanvas_saved_deleteConfirmTitle),
+      content: Text(context.l10n.plannerCanvas_saved_deleteConfirmBody(name)),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: Text(context.l10n.common_action_cancel),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: Text(context.l10n.common_action_delete),
+        ),
+      ],
+    ),
+  );
+  if (!(confirmed ?? false)) return;
+  if (seriesId != null) {
+    await seriesRepository.deleteSeries(seriesId);
+  } else {
+    await repository.deletePlan(id);
+  }
+}

@@ -8,6 +8,18 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>Submersion Buddy Card</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>app.submersion.buddy-card</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>UDDF Dive Log</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
@@ -43,6 +55,18 @@
 				<string>com.garmin.fit</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>DAN DL7 Dive Log</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>app.submersion.dl7</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
@@ -56,6 +80,39 @@
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.submersion.lightroom</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>adobe+66776bfb6c08aeff345bb6435bf88a06f406d90d</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>app.submersion.googlesignin</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.433819313354-8sn10bh15pij7hsqbld4tunccrsgi4bf</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>app.submersion.passport</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>submersion</string>
+			</array>
+		</dict>
+	</array>
+	<key>GIDClientID</key>
+	<string>433819313354-8sn10bh15pij7hsqbld4tunccrsgi4bf.apps.googleusercontent.com</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleVersion</key>
@@ -74,8 +131,17 @@
 	<string>NSApplication</string>
 	<key>FLTEnableMergedPlatformUIThread</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Submersion uses the camera to scan cylinder labels.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Submersion finds nearby divers on the swap screen to exchange buddy cards.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_subm-card._tcp</string>
+		<string>_subm-card._udp</string>
+	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Submersion uses Bluetooth to connect to dive computers and import dive data.</string>
+	<string>Submersion uses Bluetooth to connect to dive computers and to sync with your other devices nearby.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Submersion uses your location to automatically record GPS coordinates when you create or edit dive sites, so you can remember exactly where you dived. Location data is stored locally on your device and is never sent to external servers.</string>
 	<key>NSHealthShareUsageDescription</key>
@@ -84,6 +150,26 @@
 	<string>Submersion can record dive activities to your Health app.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Submersion accesses your photo library to attach images to dive logs.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Submersion Buddy Card</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.submersion.buddy-card</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>subbuddy</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -119,6 +205,24 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>fit</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>DAN DL7 Dive Log</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.submersion.dl7</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>zxu</string>
+					<string>zxl</string>
 				</array>
 			</dict>
 		</dict>

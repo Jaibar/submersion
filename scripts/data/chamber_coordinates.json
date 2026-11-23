@@ -1,0 +1,146 @@
+{
+  "au-fionastanley": {
+    "lat": -32.0716,
+    "lon": 115.8347
+  },
+  "au-townsville": {
+    "lat": -19.3204,
+    "lon": 146.7626
+  },
+  "be-aalst": {
+    "lat": 50.943852,
+    "lon": 4.05409
+  },
+  "be-antwerpen": {
+    "lat": 51.15697,
+    "lon": 4.412095
+  },
+  "be-brugge": {
+    "lat": 51.220664,
+    "lon": 3.19325
+  },
+  "be-brussels": {
+    "lat": 50.907414,
+    "lon": 4.391251
+  },
+  "be-genk": {
+    "lat": 50.957775,
+    "lon": 5.517608
+  },
+  "bq-bonaire": {
+    "lat": 12.15,
+    "lon": -68.276
+  },
+  "eg-sharm": {
+    "lat": 27.8617,
+    "lon": 34.2988
+  },
+  "gb-ddrc": {
+    "lat": 50.4169,
+    "lon": -4.1097
+  },
+  "id-bali": {
+    "lat": -8.6705,
+    "lon": 115.2126
+  },
+  "lu-esch": {
+    "lat": 49.502148,
+    "lon": 5.982596
+  },
+  "mt-gozo": {
+    "lat": 36.0443,
+    "lon": 14.2419
+  },
+  "mv-bandos": {
+    "lat": 4.2762,
+    "lon": 73.4903
+  },
+  "mv-kuredu": {
+    "lat": 5.554,
+    "lon": 73.47
+  },
+  "mx-cozumel": {
+    "lat": 20.5083,
+    "lon": -86.9458
+  },
+  "nl-amersfoort": {
+    "lat": 52.170998,
+    "lon": 5.369193
+  },
+  "nl-amsterdam": {
+    "lat": 52.292463,
+    "lon": 4.956577
+  },
+  "nl-denhelder": {
+    "lat": 52.957868,
+    "lon": 4.780941
+  },
+  "nl-geldrop": {
+    "lat": 51.422867,
+    "lon": 5.554157
+  },
+  "nl-goes": {
+    "lat": 51.484722,
+    "lon": 3.906709
+  },
+  "nl-hoogeveen": {
+    "lat": 52.726522,
+    "lon": 6.457733
+  },
+  "nl-rijswijk": {
+    "lat": 52.043581,
+    "lon": 4.333081
+  },
+  "nl-rotterdam": {
+    "lat": 51.89578,
+    "lon": 4.486063
+  },
+  "nl-sneek": {
+    "lat": 53.03504,
+    "lon": 5.642497
+  },
+  "nl-waalwijk": {
+    "lat": 51.680334,
+    "lon": 5.047429
+  },
+  "nz-slark": {
+    "lat": -36.7796,
+    "lon": 174.7559
+  },
+  "pf-chpf": {
+    "lat": -17.5334,
+    "lon": -149.5533
+  },
+  "ph-batangas": {
+    "lat": 13.7565,
+    "lon": 121.0583
+  },
+  "pr-isabela": {
+    "lat": 18.5,
+    "lon": -67.0244
+  },
+  "pr-san-juan": {
+    "lat": 18.398,
+    "lon": -66.064
+  },
+  "th-samui": {
+    "lat": 9.5357,
+    "lon": 100.0629
+  },
+  "us-catalina": {
+    "lat": 33.4456,
+    "lon": -118.4849
+  },
+  "us-duke": {
+    "lat": 36.0076,
+    "lon": -78.9382
+  },
+  "vi-st-thomas": {
+    "lat": 18.3419,
+    "lon": -64.9236
+  },
+  "za-capetown": {
+    "lat": -33.9096,
+    "lon": 18.6089
+  }
+}

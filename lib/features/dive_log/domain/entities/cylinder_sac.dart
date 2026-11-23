@@ -1,7 +1,10 @@
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/gas_model.dart';
+import 'package:submersion/core/utils/gas_compressibility.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/tank_usage_range.dart';
 
 /// SAC calculation result for a single cylinder/tank.
 ///
@@ -22,15 +25,26 @@ class CylinderSac extends Equatable {
   /// Role of this tank (back gas, stage, deco, etc.)
   final TankRole role;
 
-  /// Tank volume in liters (required for L/min SAC conversion)
+  /// Tank volume in liters (required for the per-cylinder RMV, [rmv])
   final double? tankVolume;
 
   /// SAC rate in bar/min at surface
   final double? sacRate;
 
-  /// SAC rate in L/min at surface (computed if tankVolume available)
-  double? get sacVolume =>
+  /// RMV for this cylinder in L/min at surface (computed if tankVolume
+  /// available).
+  ///
+  /// [sacRate] is bar/min against a 1 bar reference, so scaling it by the
+  /// cylinder's size is the whole conversion. Dividing by the standard
+  /// atmosphere as well shaved 1.3% off this readout while the dive's
+  /// headline value used a different reference (issue #828).
+  double? get rmv =>
       sacRate != null && tankVolume != null ? sacRate! * tankVolume! : null;
+
+  /// Surface liters per minute of loop time on a CCR dive, with no depth
+  /// correction: O2 and diluent use do not scale with ambient pressure the way
+  /// open-circuit breathing does (issue #4082). Null off the loop.
+  final double? loopRate;
 
   /// Start pressure in bar
   final double? startPressure;
@@ -38,15 +52,25 @@ class CylinderSac extends Equatable {
   /// End pressure in bar
   final double? endPressure;
 
-  /// Total gas used in bar
-  double? get gasUsedBar => startPressure != null && endPressure != null
-      ? startPressure! - endPressure!
-      : null;
+  /// Equation of state behind [gasUsedLiters], the one the rates here used.
+  final GasModel gasModel;
 
-  /// Total gas used in liters (if tankVolume known)
-  double? get gasUsedLiters => gasUsedBar != null && tankVolume != null
-      ? gasUsedBar! * tankVolume!
-      : null;
+  /// Total gas used in liters (if tankVolume known), under [gasModel], so it
+  /// agrees with [loopRate] and [rmv] (issue #828).
+  double? get gasUsedLiters {
+    final start = startPressure;
+    final end = endPressure;
+    final volume = tankVolume;
+    if (start == null || end == null || volume == null) return null;
+    return gasVolumeBetween(
+      tankSizeLiters: volume,
+      startBar: start,
+      endBar: end,
+      o2Percent: gasMix.o2,
+      hePercent: gasMix.he,
+      model: gasModel,
+    );
+  }
 
   /// Duration this tank was actively used
   final Duration? usageDuration;
@@ -60,6 +84,28 @@ class CylinderSac extends Equatable {
   /// Order of this tank in the dive (for display)
   final int order;
 
+  /// The stretches of the dive [sacRate] covers, in seconds: the cylinder's
+  /// breathing windows, the whole dive when [usageFromRecordedDuration], or
+  /// its bailout windows on a CCR dive. The per-role statistics merge these
+  /// across a role's cylinders (issue #771).
+  final List<TankUsageWindow> usageWindows;
+
+  /// Whether [usageDuration] came from the duration the source log recorded
+  /// (issue #1496) because no gas switch said when the cylinder was breathed.
+  /// It then says how long, but not at what depth.
+  final bool usageFromRecordedDuration;
+
+  /// The ambient pressure, in bar, [sacRate] was divided by. Null when there
+  /// is no [sacRate].
+  final double? rateAmbientBar;
+
+  /// Seconds of [usageDuration] the diver entered for breathing this cylinder
+  /// at the surface after the computer stopped logging (issue #2930): counted
+  /// at 0 m when the rate comes from pressures read off the gauge, which
+  /// include that gas; 0 on a cylinder a transmitter logged, whose readings
+  /// end before it (see `DiveTank.hasPressureSeries`).
+  final int surfaceSeconds;
+
   const CylinderSac({
     required this.tankId,
     this.tankName,
@@ -67,12 +113,18 @@ class CylinderSac extends Equatable {
     required this.role,
     this.tankVolume,
     this.sacRate,
+    this.loopRate,
     this.startPressure,
     this.endPressure,
+    this.gasModel = GasModel.ideal,
     this.usageDuration,
     this.avgDepthDuringUse,
     this.hasTimeSeriesData = false,
     this.order = 0,
+    this.usageWindows = const [],
+    this.usageFromRecordedDuration = false,
+    this.rateAmbientBar,
+    this.surfaceSeconds = 0,
   });
 
   /// Whether we have enough data to calculate SAC
@@ -101,12 +153,18 @@ class CylinderSac extends Equatable {
     TankRole? role,
     double? tankVolume,
     double? sacRate,
+    double? loopRate,
     double? startPressure,
     double? endPressure,
+    GasModel? gasModel,
     Duration? usageDuration,
     double? avgDepthDuringUse,
     bool? hasTimeSeriesData,
     int? order,
+    List<TankUsageWindow>? usageWindows,
+    bool? usageFromRecordedDuration,
+    double? rateAmbientBar,
+    int? surfaceSeconds,
   }) {
     return CylinderSac(
       tankId: tankId ?? this.tankId,
@@ -115,12 +173,19 @@ class CylinderSac extends Equatable {
       role: role ?? this.role,
       tankVolume: tankVolume ?? this.tankVolume,
       sacRate: sacRate ?? this.sacRate,
+      loopRate: loopRate ?? this.loopRate,
       startPressure: startPressure ?? this.startPressure,
       endPressure: endPressure ?? this.endPressure,
+      gasModel: gasModel ?? this.gasModel,
       usageDuration: usageDuration ?? this.usageDuration,
       avgDepthDuringUse: avgDepthDuringUse ?? this.avgDepthDuringUse,
       hasTimeSeriesData: hasTimeSeriesData ?? this.hasTimeSeriesData,
       order: order ?? this.order,
+      usageWindows: usageWindows ?? this.usageWindows,
+      usageFromRecordedDuration:
+          usageFromRecordedDuration ?? this.usageFromRecordedDuration,
+      rateAmbientBar: rateAmbientBar ?? this.rateAmbientBar,
+      surfaceSeconds: surfaceSeconds ?? this.surfaceSeconds,
     );
   }
 
@@ -132,11 +197,17 @@ class CylinderSac extends Equatable {
     role,
     tankVolume,
     sacRate,
+    loopRate,
     startPressure,
     endPressure,
+    gasModel,
     usageDuration,
     avgDepthDuringUse,
     hasTimeSeriesData,
     order,
+    usageWindows,
+    usageFromRecordedDuration,
+    rateAmbientBar,
+    surfaceSeconds,
   ];
 }

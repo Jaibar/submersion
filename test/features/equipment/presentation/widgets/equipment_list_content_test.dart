@@ -1,19 +1,68 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_location.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_location_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_location_group_header.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/features/cylinder_passports/presentation/widgets/passport_scan_sheet.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_filter_state.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_share_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_share_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_field.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_type_order.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/features/equipment/domain/services/equipment_arranger.dart';
+import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_arrangement_provider.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_query_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/dense_equipment_list_tile.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_type_fold_header.dart';
+import 'package:submersion/features/settings/domain/list_arrangements.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_list_content.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_header_bar.dart';
+import 'package:submersion/features/equipment/data/services/equipment_transfer_service.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_transfer_providers.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 
+import '../../../../helpers/equipment_query_fakes.dart';
+import '../../../../helpers/list_create_router.dart';
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 import '../../../../helpers/test_app.dart';
+import '../../../../helpers/bulk_delete_contract.dart';
+import '../../../../helpers/keyboard_navigation_contract.dart';
+import '../../../../helpers/selection_contract.dart';
+
+part 'equipment_list_content_folds.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,6 +95,7 @@ EquipmentItem _makeEquipment({
   String? brand,
   String? model,
   EquipmentStatus status = EquipmentStatus.active,
+  bool isActive = true,
 }) {
   return EquipmentItem(
     id: id,
@@ -54,11 +104,42 @@ EquipmentItem _makeEquipment({
     brand: brand,
     model: model,
     status: status,
+    isActive: isActive,
   );
+}
+
+/// Records the bulk transfer the list starts (issue #2852).
+class _RecordingTransferService extends EquipmentTransferService {
+  final transferred = <(List<String>, String)>[];
+
+  @override
+  Future<EquipmentTransferPreview> preview({
+    required List<String> equipmentIds,
+    required String actingDiverId,
+    String? toDiverId,
+  }) async => EquipmentTransferPreview(
+    unitIds: equipmentIds,
+    skippedNotOwned: 0,
+    computers: const [],
+    transmitters: const [],
+  );
+
+  @override
+  Future<EquipmentTransferResult> transfer({
+    required List<String> equipmentIds,
+    required String toDiverId,
+    required String actingDiverId,
+    bool keepAccess = true,
+    bool moveRegistry = true,
+  }) async {
+    transferred.add((equipmentIds, toDiverId));
+    return EquipmentTransferResult(itemsMoved: equipmentIds.length);
+  }
 }
 
 Future<List<Override>> _buildOverrides({
   required List<EquipmentItem> equipment,
+  EntityTableViewConfig<EquipmentField>? config,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
@@ -70,26 +151,50 @@ Future<List<Override>> _buildOverrides({
     // The equipment list content watches equipmentByStatusProvider(null) for
     // all equipment when no filter is selected, so we override that.
     equipmentByStatusProvider.overrideWith((ref, status) => equipment),
+    activeEquipmentProvider.overrideWith((ref) async => equipment),
+    allEquipmentProvider.overrideWith((ref) async => equipment),
+    fakeEquipmentQueryIds(),
     equipmentListViewModeProvider.overrideWith((ref) => ListViewMode.table),
     equipmentTableConfigProvider.overrideWith(
-      (ref) => _TestEquipTableConfigNotifier(_testConfig),
+      (ref) => _TestEquipTableConfigNotifier(config ?? _testConfig),
     ),
   ];
 }
 
+/// Mutable source for the contract test's filter step.
+final _visibleEquipmentProvider = StateProvider<List<EquipmentItem>>(
+  (ref) => const [],
+);
+
+/// [items] is the default view; [all] (every status, #2590) defaults to it.
 Future<List<Override>> _buildPhoneOverrides({
   required List<EquipmentItem> items,
+  List<EquipmentItem>? all,
+  List<EquipmentItem> serviceDue = const [],
   ListViewMode viewMode = ListViewMode.detailed,
   String? highlightedEquipmentId,
+  EquipmentArrangement? arrangement,
+  SortState<EquipmentSortField>? sort,
+  List<Diver> divers = const [],
+  String? activeDiverId,
+  EquipmentFilterState? filter,
+  MockSettingsNotifier? settings,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
 
   return [
     sharedPreferencesProvider.overrideWithValue(prefs),
-    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    allDiversProvider.overrideWith((ref) async => divers),
+    validatedCurrentDiverIdProvider.overrideWith((ref) async => activeDiverId),
+    if (filter != null) equipmentFilterProvider.overrideWith((ref) => filter),
+    settingsProvider.overrideWith((ref) => settings ?? MockSettingsNotifier()),
     currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
     equipmentByStatusProvider.overrideWith((ref, status) => items),
+    activeEquipmentProvider.overrideWith((ref) async => items),
+    allEquipmentProvider.overrideWith((ref) async => all ?? items),
+    serviceDueEquipmentProvider.overrideWith((ref, _) async => serviceDue),
+    fakeEquipmentQueryIds(),
     equipmentListViewModeProvider.overrideWith((ref) => viewMode),
     equipmentTableConfigProvider.overrideWith(
       (ref) => _TestEquipTableConfigNotifier(_testConfig),
@@ -97,10 +202,1093 @@ Future<List<Override>> _buildPhoneOverrides({
     highlightedEquipmentIdProvider.overrideWith(
       (ref) => highlightedEquipmentId,
     ),
+    if (arrangement != null)
+      equipmentArrangementProvider.overrideWithValue(arrangement),
+    if (sort != null) equipmentSortProvider.overrideWith((ref) => sort),
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Filter panel helpers
+//
+// The status and category filters live behind the top-bar icon (PR #1435
+// review), so every filtering test drives them through the panel.
+// ---------------------------------------------------------------------------
+
+final Finder _filterButton = find.byKey(
+  const ValueKey('equipment_filter_button'),
+);
+
+String _typeChipKey(EquipmentType? type) =>
+    'equipment_filter_type_${type?.name ?? 'all'}';
+
+String _statusChipKey(EquipmentStatus? status) =>
+    'equipment_filter_status_${status?.name ?? 'all'}';
+
+Finder _typeChip(EquipmentType? type) =>
+    find.byKey(ValueKey(_typeChipKey(type)));
+
+Future<void> _openFilterPanel(WidgetTester tester) async {
+  await tester.tap(_filterButton);
+  await tester.pumpAndSettle();
+}
+
+/// Tap a chip in the panel, scrolling it into view first: the sheet is short
+/// enough that the lower sections start off screen.
+/// The open filter sheet's list: the last VERTICAL Scrollable (the query
+/// editor's text field scrolls horizontally, #2365).
+Finder _sheetList() => find
+    .byWidgetPredicate(
+      (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+    )
+    .last;
+
+Future<void> _tapPanelChip(WidgetTester tester, String key) async {
+  final finder = find.byKey(ValueKey(key));
+  // The panel body is a lazy ListView; a chip past the cache extent is not
+  // built yet, so ensureVisible alone throws "No element". Scroll it in via
+  // the sheet's list: the last VERTICAL Scrollable once the panel is open
+  // (the query editor's text field scrolls horizontally, #2365).
+  if (finder.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(finder, 120, scrollable: _sheetList());
+  }
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
+  await tester.tap(finder);
+  await tester.pumpAndSettle();
+}
+
+Future<void> _applyPanel(WidgetTester tester) async {
+  await tester.tap(find.byKey(const ValueKey('equipment_filter_apply')));
+  await tester.pumpAndSettle();
+}
+
+/// Open the panel, tap [chipKeys] in order, and apply.
+Future<void> _filterVia(WidgetTester tester, List<String> chipKeys) async {
+  await _openFilterPanel(tester);
+  for (final key in chipKeys) {
+    await _tapPanelChip(tester, key);
+  }
+  await _applyPanel(tester);
+}
+
+bool _badgeIsVisible(WidgetTester tester) {
+  final badge = tester.widget<Badge>(
+    find.descendant(of: _filterButton, matching: find.byType(Badge)),
+  );
+  return badge.isLabelVisible;
+}
+
 void main() {
+  // A list built again after the diver left it comes back to the record they
+  // last opened (#3301).
+  testWidgets('scrolls to the highlighted equipment item when built', (
+    tester,
+  ) async {
+    final overrides = await _buildPhoneOverrides(
+      items: [
+        for (var i = 0; i < 60; i++)
+          _makeEquipment(
+            id: 'r$i',
+            name: 'Gear ${i.toString().padLeft(2, '0')}',
+          ),
+      ],
+      highlightedEquipmentId: 'r50',
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const EquipmentListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Gear 50'), findsOneWidget);
+  });
+
+  // Once the diver scrolls, a regrouping no longer pulls the list back to
+  // the item it was restored to (#3301).
+  testWidgets('a scroll by the diver drops the restore target', (tester) async {
+    final items = [
+      for (var i = 0; i < 60; i++)
+        _makeEquipment(id: 'r$i', name: 'Gear ${i.toString().padLeft(2, '0')}'),
+    ];
+    final arrangement = StateProvider<EquipmentArrangement>(
+      (ref) => EquipmentArrangement.defaults,
+    );
+    final overrides = [
+      ...await _buildPhoneOverrides(
+        items: items,
+        highlightedEquipmentId: 'r50',
+      ),
+      equipmentArrangementProvider.overrideWith(
+        (ref) => ref.watch(arrangement),
+      ),
+    ];
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const EquipmentListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Gear 50'), findsOneWidget);
+
+    await tester.fling(
+      find.byType(Scrollable).first,
+      const Offset(0, 8000),
+      4000,
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(EquipmentListContent)),
+    );
+    container.read(arrangement.notifier).state = EquipmentArrangement.defaults
+        .copyWith(typeOrder: EquipmentTypeOrder.none);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Gear 00'), findsOneWidget);
+  });
+
+  // A remembered item the list did not show when it was built is given up,
+  // not jumped to whenever a later filter brings it into view (#3301).
+  testWidgets('a highlighted item missing when built is not jumped to later', (
+    tester,
+  ) async {
+    final items = [
+      for (var i = 0; i < 60; i++)
+        _makeEquipment(id: 'r$i', name: 'Gear ${i.toString().padLeft(2, '0')}'),
+    ];
+    final shown = StateProvider<AsyncValue<List<EquipmentItem>>>(
+      (ref) => AsyncData(items),
+    );
+    final overrides = [
+      ...await _buildPhoneOverrides(
+        items: items,
+        highlightedEquipmentId: 'late',
+      ),
+      filteredEquipmentProvider.overrideWith((ref) => ref.watch(shown)),
+    ];
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const EquipmentListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(EquipmentListContent)),
+    );
+    container.read(shown.notifier).state = AsyncData([
+      ...items,
+      _makeEquipment(id: 'late', name: 'Gear 99'),
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Gear 00'), findsOneWidget);
+  });
+
+  // The title's subtitle counts the list (#2669), under the plain title on a
+  // standalone app bar and under the Equipment / Sets toggle in the pane.
+  group('entry count subtitle', () {
+    final items = [
+      _makeEquipment(id: 'e1', name: 'Primary Reg'),
+      _makeEquipment(id: 'e2', name: 'Wing', type: EquipmentType.bcd),
+    ];
+
+    Future<void> pump(
+      WidgetTester tester, {
+      EquipmentFilterState? filter,
+      bool showAppBar = true,
+      EquipmentHeaderToggleBuilder? toggleBuilder,
+      ListViewMode viewMode = ListViewMode.detailed,
+      SelectionController? selectionController,
+    }) async {
+      final overrides = await _buildPhoneOverrides(
+        items: items,
+        filter: filter,
+        viewMode: viewMode,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: EquipmentListContent(
+            showAppBar: showAppBar,
+            toggleBuilder: toggleBuilder,
+            selectionController: selectionController,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('app bar counts the list', (tester) async {
+      await pump(tester);
+
+      expect(
+        find.descendant(
+          of: find.byType(FeatureAppBarTitle),
+          matching: find.text('2 items'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('app bar counts a filtered list against the default view', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        filter: const EquipmentFilterState(type: EquipmentType.bcd),
+      );
+
+      expect(find.text('1 of 2 items'), findsOneWidget);
+    });
+
+    // All Equipment (#2590) lists retired and sold gear the default view
+    // hides; the total counts them too, or it would read "3 of 2 items".
+    testWidgets('All Equipment shows every status and counts against it', (
+      tester,
+    ) async {
+      final retired = _makeEquipment(
+        id: 'e3',
+        name: 'Old Reg',
+        status: EquipmentStatus.retired,
+      );
+      final sold = _makeEquipment(
+        id: 'e4',
+        name: 'Sold Fins',
+        type: EquipmentType.fins,
+        status: EquipmentStatus.sold,
+      );
+      final overrides = await _buildPhoneOverrides(
+        items: items,
+        all: [...items, retired, sold],
+        filter: const EquipmentFilterState(allStatuses: true),
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Old Reg'), findsOneWidget);
+      expect(find.text('Sold Fins'), findsOneWidget);
+      expect(find.text('4 of 4 items'), findsOneWidget);
+
+      final chip = find.widgetWithText(InputChip, 'All Equipment');
+      expect(chip, findsOneWidget);
+      tester.widget<InputChip>(chip).onDeleted!();
+      await tester.pumpAndSettle();
+
+      expect(chip, findsNothing);
+      expect(find.text('Old Reg'), findsNothing);
+      expect(find.text('Sold Fins'), findsNothing);
+      expect(find.text('2 items'), findsOneWidget);
+    });
+
+    // Table view keeps the count while selecting, as every list's table
+    // mode does: it describes the list, the selection bar the selection.
+    testWidgets('table view keeps the count under the toggle while selecting', (
+      tester,
+    ) async {
+      // Table mode has no menu inside the list (issue #2775): the page's
+      // header enters selection through the controller it passes in.
+      final controller = SelectionController();
+      addTearDown(controller.dispose);
+      await pump(
+        tester,
+        showAppBar: false,
+        viewMode: ListViewMode.table,
+        toggleBuilder: (_) => const Text('Equipment | Sets'),
+        selectionController: controller,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(EquipmentHeaderBar),
+          matching: find.text('2 items'),
+        ),
+        findsOneWidget,
+      );
+
+      controller.enterExplicit();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(EquipmentHeaderBar),
+          matching: find.text('2 items'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the pane header counts under the section toggle', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        showAppBar: false,
+        toggleBuilder: (_) => const Text('Equipment | Sets'),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(EquipmentHeaderBar),
+          matching: find.text('2 items'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester.getRect(find.text('2 items')).top,
+        greaterThanOrEqualTo(
+          tester.getRect(find.text('Equipment | Sets')).bottom,
+        ),
+      );
+    });
+  });
+  group('bulk actions', () {
+    late _CapturingEquipmentNotifier notifier;
+
+    Future<Widget> host(
+      List<EquipmentItem> items, {
+      bool showAppBar = true,
+      List<Diver> divers = const [],
+      String? activeDiverId,
+      List<dynamic> extraOverrides = const [],
+    }) async {
+      notifier = _CapturingEquipmentNotifier();
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      return testApp(
+        locale: const Locale('en'),
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          currentDiverIdProvider.overrideWith(
+            (ref) => MockCurrentDiverIdNotifier(),
+          ),
+          equipmentListNotifierProvider.overrideWith((ref) => notifier),
+          allDiversProvider.overrideWith((ref) async => divers),
+          validatedCurrentDiverIdProvider.overrideWith(
+            (ref) async => activeDiverId,
+          ),
+          equipmentByStatusProvider.overrideWith((ref, status) => items),
+          activeEquipmentProvider.overrideWith((ref) async => items),
+          allEquipmentProvider.overrideWith((ref) async => items),
+          fakeEquipmentQueryIds(),
+          equipmentListViewModeProvider.overrideWith(
+            (ref) => ListViewMode.detailed,
+          ),
+          equipmentTableConfigProvider.overrideWith(
+            (ref) => _TestEquipTableConfigNotifier(_testConfig),
+          ),
+          highlightedEquipmentIdProvider.overrideWith((ref) => null),
+          ...extraOverrides,
+        ],
+        child: EquipmentListContent(showAppBar: showAppBar),
+      );
+    }
+
+    testWidgets('deletes every checked item and reports the count', (
+      tester,
+    ) async {
+      final widget = await host([
+        _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+        _makeEquipment(id: 'e2', name: 'Bbb BCD'),
+      ]);
+
+      await verifyBulkDelete(
+        tester,
+        build: () => widget,
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        expectedDeletedCount: 2,
+      );
+
+      expect(notifier.deleted, ['e1', 'e2']);
+      expect(find.text('2 deleted'), findsOneWidget);
+    });
+
+    group('shared gear (issue #2046)', () {
+      final t = DateTime(2026);
+      final divers = [
+        Diver(id: 'owner', name: 'Bill', createdAt: t, updatedAt: t),
+        Diver(id: 'wife', name: 'Anna', createdAt: t, updatedAt: t),
+      ];
+      const own = EquipmentItem(
+        id: 'mine',
+        diverId: 'owner',
+        name: 'Aaa BCD',
+        type: EquipmentType.bcd,
+      );
+      const hers = EquipmentItem(
+        id: 'hers',
+        diverId: 'wife',
+        name: 'Bbb Reg',
+        type: EquipmentType.regulator,
+      );
+
+      Future<bool> shareEnabled(WidgetTester tester) async {
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        final item = tester.widget<PopupMenuItem<String>>(
+          find.byKey(const ValueKey('selection_menu_share')),
+        );
+        await tester.tapAt(Offset.zero);
+        await tester.pumpAndSettle();
+        return item.enabled;
+      }
+
+      testWidgets('Share with is enabled only for a selection you own', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          await host(const [own, hers], divers: divers, activeDiverId: 'owner'),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('Aaa BCD'));
+        await tester.pumpAndSettle();
+        expect(await shareEnabled(tester), isTrue);
+
+        await tester.tap(find.text('Bbb Reg'));
+        await tester.pumpAndSettle();
+        expect(await shareEnabled(tester), isFalse);
+      });
+
+      Future<PopupMenuItem<String>?> transferItem(WidgetTester tester) async {
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        final finder = find.byKey(const ValueKey('selection_menu_transfer'));
+        final item = finder.evaluate().isEmpty
+            ? null
+            : tester.widget<PopupMenuItem<String>>(finder);
+        await tester.tapAt(Offset.zero);
+        await tester.pumpAndSettle();
+        return item;
+      }
+
+      testWidgets('Transfer to is enabled only for a selection you own', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          await host(const [own, hers], divers: divers, activeDiverId: 'owner'),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('Aaa BCD'));
+        await tester.pumpAndSettle();
+        expect((await transferItem(tester))?.enabled, isTrue);
+
+        await tester.tap(find.text('Bbb Reg'));
+        await tester.pumpAndSettle();
+        expect((await transferItem(tester))?.enabled, isFalse);
+      });
+
+      testWidgets('Transfer to transfers the selection and ends it', (
+        tester,
+      ) async {
+        final service = _RecordingTransferService();
+        await tester.pumpWidget(
+          await host(
+            const [own, hers],
+            divers: divers,
+            activeDiverId: 'owner',
+            extraOverrides: [
+              equipmentTransferServiceProvider.overrideWithValue(service),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('Aaa BCD'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_menu_transfer')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.text('Anna'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Transfer'));
+        await tester.pumpAndSettle();
+        expect(service.transferred, hasLength(1));
+        expect(service.transferred.single.$1, ['mine']);
+        expect(service.transferred.single.$2, 'wife');
+        expect(find.text('Transferred 1 item to Anna'), findsOneWidget);
+        expect(find.byKey(const ValueKey('selection_overflow')), findsNothing);
+      });
+
+      testWidgets('Transfer to is absent with one profile', (tester) async {
+        await tester.pumpWidget(
+          await host(
+            const [own],
+            divers: [divers.first],
+            activeDiverId: 'owner',
+          ),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('Aaa BCD'));
+        await tester.pumpAndSettle();
+        expect(await transferItem(tester), isNull);
+      });
+
+      testWidgets('bulk delete keeps shared gear and says so', (tester) async {
+        final widget = await host(
+          const [own, hers],
+          divers: divers,
+          activeDiverId: 'owner',
+        );
+        notifier.refused.add('hers');
+        await tester.pumpWidget(widget);
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_delete')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'Deleted 1 item. 1 shared item was kept: only its owner can '
+            'delete it',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('Share with shares the selection and reports it', (
+        tester,
+      ) async {
+        final shares = _RecordingShareRepository();
+        await tester.pumpWidget(
+          await host(
+            const [own, hers],
+            divers: divers,
+            activeDiverId: 'owner',
+            extraOverrides: [
+              equipmentShareRepositoryProvider.overrideWithValue(shares),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('Aaa BCD'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_menu_share')));
+        await tester.pumpAndSettle();
+
+        // Only the other profiles are offered.
+        expect(find.widgetWithText(CheckboxListTile, 'Bill'), findsNothing);
+        await tester.tap(find.widgetWithText(CheckboxListTile, 'Anna'));
+        await tester.pump();
+        await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+        await tester.pumpAndSettle();
+
+        // Records holding lists compare by identity, so check each field.
+        expect(shares.calls, hasLength(1));
+        expect(shares.calls.single.equipmentIds, ['mine']);
+        expect(shares.calls.single.diverIds, ['wife']);
+        expect(shares.calls.single.actingDiverId, 'owner');
+        expect(find.text('Shared 1 item'), findsOneWidget);
+      });
+
+      testWidgets('no Share with action with a single profile', (tester) async {
+        await tester.pumpWidget(
+          await host(const [own], divers: divers.take(1).toList()),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('selection_action_share')),
+          findsNothing,
+        );
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('selection_menu_share')),
+          findsNothing,
+        );
+      });
+    });
+
+    testWidgets('retire acts on a uniformly active selection', (tester) async {
+      final widget = await host([
+        _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+        _makeEquipment(id: 'e2', name: 'Bbb BCD'),
+      ]);
+      await tester.pumpWidget(widget);
+      await tester.pumpAndSettle();
+
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      final retire = find.byKey(const ValueKey('selection_action_retire'));
+      expect(tester.widget<IconButton>(retire).onPressed, isNotNull);
+
+      // Reactivate is meaningless on an all-active selection, so the
+      // isEnabled predicate must refuse it.
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_action_reactivate')),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      await tester.tap(retire);
+      await tester.pumpAndSettle();
+
+      expect(notifier.retired, ['e1', 'e2']);
+      expect(notifier.reactivated, isEmpty);
+    });
+
+    testWidgets('reactivate is not offered for wishlist gear (#2025)', (
+      tester,
+    ) async {
+      final widget = await host([
+        _makeEquipment(
+          id: 'w1',
+          name: 'Dream Wing',
+          status: EquipmentStatus.wanted,
+          isActive: false,
+        ),
+      ]);
+      await tester.pumpWidget(widget);
+      await tester.pumpAndSettle();
+
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      // Buying it is not reactivating it: Mark as purchased does that.
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_action_reactivate')),
+            )
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('retire is not offered for wishlist gear left active (#2025)', (
+      tester,
+    ) async {
+      final widget = await host([
+        _makeEquipment(
+          id: 'w2',
+          name: 'Imported Wish',
+          status: EquipmentStatus.wanted,
+        ),
+      ]);
+      await tester.pumpWidget(widget);
+      await tester.pumpAndSettle();
+
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_action_retire')),
+            )
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('cancelling deletes nothing and keeps the selection', (
+      tester,
+    ) async {
+      final widget = await host([_makeEquipment(id: 'e1', name: 'Aaa Reg')]);
+
+      await verifyBulkDeleteCancels(
+        tester,
+        build: () => widget,
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+      );
+
+      expect(notifier.deleted, isEmpty);
+    });
+
+    // Issue #1942.
+    testWidgets('edit tags sits beside retire and reactivate', (tester) async {
+      final widget = await host(const [
+        EquipmentItem(id: 'e1', name: 'Aaa Reg', type: EquipmentType.regulator),
+        EquipmentItem(
+          id: 'e2',
+          name: 'Bbb BCD',
+          type: EquipmentType.bcd,
+          isActive: false,
+        ),
+      ]);
+      await tester.pumpWidget(widget);
+      await tester.pumpAndSettle();
+
+      await enterSelectionViaMenu(tester);
+
+      final editTags = find.byKey(const ValueKey('selection_action_editTags'));
+      // Nothing checked yet.
+      expect(tester.widget<IconButton>(editTags).onPressed, isNull);
+
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      // A mixed selection turns retire and reactivate off; tags apply to any
+      // selection.
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_action_retire')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(tester.widget<IconButton>(editTags).onPressed, isNotNull);
+      expect(tester.widget<IconButton>(editTags).tooltip, 'Edit tags');
+      expect(
+        tester
+            .widget<Icon>(
+              find.descendant(of: editTags, matching: find.byType(Icon)),
+            )
+            .icon,
+        Icons.sell,
+      );
+    });
+
+    testWidgets('in the pane, edit tags is in the overflow menu', (
+      tester,
+    ) async {
+      final widget = await host([
+        _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+      ], showAppBar: false);
+      await tester.pumpWidget(widget);
+      await tester.pumpAndSettle();
+
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('selection_action_editTags')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      final entry = find.byKey(const ValueKey('selection_menu_editTags'));
+      expect(entry, findsOneWidget);
+      expect(tester.widget<PopupMenuItem<String>>(entry).enabled, isTrue);
+    });
+
+    // Issues #2334, #2652: labels print for any gear the diver owns.
+    Future<PopupMenuItem<String>> printEntry(
+      WidgetTester tester,
+      List<EquipmentItem> items,
+    ) async {
+      await tester.pumpWidget(await host(items));
+      await tester.pumpAndSettle();
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      final entry = find.byKey(const ValueKey('selection_menu_printLabels'));
+      expect(entry, findsOneWidget);
+      return tester.widget<PopupMenuItem<String>>(entry);
+    }
+
+    testWidgets('print labels is offered for a cylinders-only selection', (
+      tester,
+    ) async {
+      final entry = await printEntry(tester, const [
+        EquipmentItem(id: 't1', name: 'Faber 12', type: EquipmentType.tank),
+        EquipmentItem(id: 't2', name: 'AL80', type: EquipmentType.tank),
+      ]);
+      expect(entry.enabled, isTrue);
+    });
+
+    testWidgets('a label failure says so instead of failing silently', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await host(
+          const [
+            EquipmentItem(id: 't1', name: 'Faber 12', type: EquipmentType.tank),
+          ],
+          extraOverrides: [
+            equipmentRepositoryProvider.overrideWithValue(
+              _BrokenEquipmentRepository(),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('selection_menu_printLabels')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(EquipmentListContent)),
+      );
+      expect(find.text(l10n.passport_tag_printFailed), findsOneWidget);
+    });
+
+    testWidgets('print labels is offered for any gear (issue #2652)', (
+      tester,
+    ) async {
+      final entry = await printEntry(tester, const [
+        EquipmentItem(id: 't1', name: 'Faber 12', type: EquipmentType.tank),
+        EquipmentItem(id: 'r1', name: 'Apeks', type: EquipmentType.regulator),
+      ]);
+      expect(entry.enabled, isTrue);
+    });
+
+    testWidgets('print labels is refused when a wanted item is checked', (
+      tester,
+    ) async {
+      final entry = await printEntry(tester, const [
+        EquipmentItem(id: 't1', name: 'Faber 12', type: EquipmentType.tank),
+        EquipmentItem(
+          id: 'r1',
+          name: 'Apeks',
+          type: EquipmentType.regulator,
+          status: EquipmentStatus.wanted,
+        ),
+      ]);
+      expect(entry.enabled, isFalse);
+    });
+
+    for (final showAppBar in [true, false]) {
+      testWidgets('scan a cylinder tag is in the menu (appBar: $showAppBar)', (
+        tester,
+      ) async {
+        var launched = 0;
+        await tester.pumpWidget(
+          await host(
+            [_makeEquipment(id: 'e1', name: 'Aaa Reg')],
+            showAppBar: showAppBar,
+            extraOverrides: [
+              passportScanLauncherProvider.overrideWithValue((context) async {
+                launched++;
+                return null;
+              }),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.more_vert).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('equipment_menu_scanTag')));
+        await tester.pumpAndSettle();
+        expect(launched, 1);
+      });
+
+      // Issue #2775: the header shows no Select icon of its own; the entry
+      // follows the tag scanner and precedes the view modes.
+      testWidgets('Select items sits in the menu after scan a cylinder tag '
+          '(appBar: $showAppBar)', (tester) async {
+        await tester.pumpWidget(
+          await host([
+            _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+          ], showAppBar: showAppBar),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byIcon(Icons.checklist), findsNothing);
+
+        await tester.tap(overflowMenuButton);
+        await tester.pumpAndSettle();
+        double top(Finder f) => tester.getTopLeft(f).dy;
+        final select = find.byKey(selectItemsMenuKey);
+        expect(
+          top(find.byKey(const ValueKey('equipment_menu_scanTag'))),
+          lessThan(top(select)),
+        );
+        expect(top(select), lessThan(top(find.text('Detailed'))));
+
+        await tester.tap(select);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+      });
+    }
+  });
+
+  group('selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      final all = <EquipmentItem>[
+        _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+        _makeEquipment(id: 'e2', name: 'Bbb BCD'),
+        _makeEquipment(id: 'e3', name: 'Ccc Fins'),
+      ];
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        _visibleEquipmentProvider.overrideWith((ref) => all),
+        equipmentByStatusProvider.overrideWith((ref, status) => all),
+        activeEquipmentProvider.overrideWith(
+          (ref) async => ref.watch(_visibleEquipmentProvider),
+        ),
+        allEquipmentProvider.overrideWith(
+          (ref) async => ref.watch(_visibleEquipmentProvider),
+        ),
+        fakeEquipmentQueryIds(),
+        equipmentListViewModeProvider.overrideWith(
+          (ref) => ListViewMode.detailed,
+        ),
+        equipmentTableConfigProvider.overrideWith(
+          (ref) => _TestEquipTableConfigNotifier(_testConfig),
+        ),
+        highlightedEquipmentIdProvider.overrideWith((ref) => null),
+      ];
+
+      await verifySelectionContract(
+        tester,
+        build: () => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const EquipmentListContent(showAppBar: true),
+        ),
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        rowRoot: find.ancestor(
+          of: find.text('Aaa Reg'),
+          matching: find.byType(EquipmentListTile),
+        ),
+        firstRow: find.text('Aaa Reg'),
+        applyFilter: (tester) async {
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(EquipmentListContent)),
+          );
+          container.read(_visibleEquipmentProvider.notifier).state = [
+            all.first,
+          ];
+        },
+        visibleAfterFilter: 1,
+      );
+
+      // The contract walks a flat list: grouped, Home lands on the first
+      // type heading, a fold stop of its own (issue #4184), which the
+      // foldable groups tests cover.
+      await verifyKeyboardNavigationContract(
+        tester,
+        build: (onItemSelected) => testApp(
+          overrides: [
+            ...overrides,
+            equipmentArrangementProvider.overrideWithValue(
+              EquipmentArrangement.defaults.copyWith(groupByType: false),
+            ),
+          ],
+          locale: const Locale('en'),
+          child: EquipmentListContent(
+            showAppBar: true,
+            onItemSelected: onItemSelected,
+          ),
+        ),
+        firstRow: find.text('Aaa Reg'),
+      );
+    });
+  });
+
+  group('a new filter', () {
+    for (final mode in [ListViewMode.detailed, ListViewMode.table]) {
+      testWidgets('keeps the checks that stay on screen (${mode.name})', (
+        tester,
+      ) async {
+        // Table mode has no menu inside the list (issue #2775), so both
+        // modes enter through the controller a page would pass in.
+        final controller = SelectionController();
+        addTearDown(controller.dispose);
+        final all = <EquipmentItem>[
+          _makeEquipment(id: 'e1', name: 'Aaa Reg'),
+          _makeEquipment(id: 'e2', name: 'Bbb Reg'),
+        ];
+
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              allEquipmentProvider.overrideWith((ref) async => all),
+              // A real id set takes a query's time, so the list has a
+              // loading frame.
+              queryFilteredEquipmentIdsProvider.overrideWith(
+                (ref, key) => Future.delayed(
+                  const Duration(milliseconds: 50),
+                  () => const {'e1', 'e2'},
+                ),
+              ),
+              equipmentListViewModeProvider.overrideWith((ref) => mode),
+              equipmentTableConfigProvider.overrideWith(
+                (ref) => _TestEquipTableConfigNotifier(_testConfig),
+              ),
+              highlightedEquipmentIdProvider.overrideWith((ref) => null),
+            ],
+            locale: const Locale('en'),
+            child: EquipmentListContent(
+              showAppBar: true,
+              selectionController: controller,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        controller.enterExplicit();
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+
+        // The new filter's id set loads first; the selection must survive
+        // that.
+        ProviderScope.containerOf(
+              tester.element(find.byType(EquipmentListContent)),
+            ).read(equipmentFilterProvider.notifier).state =
+            const EquipmentFilterState(type: EquipmentType.regulator);
+        // One frame at once, as the app draws it, before the query answers.
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+      });
+    }
+  });
+
   group('EquipmentListContent in table mode', () {
     testWidgets('renders table with column headers', (tester) async {
       final equipment = [
@@ -159,6 +1347,53 @@ void main() {
       expect(find.text('Wetsuit 5mm'), findsOneWidget);
     });
 
+    testWidgets('the Location column names each item\'s place (#3625)', (
+      tester,
+    ) async {
+      final equipment = [
+        _makeEquipment(id: 'e1', name: 'Primary Reg'),
+        _makeEquipment(id: 'e2', name: 'Travel BCD'),
+      ];
+      final overrides = await _buildOverrides(
+        equipment: equipment,
+        config: EntityTableViewConfig<EquipmentField>(
+          columns: [
+            EntityTableColumnConfig(
+              field: EquipmentField.itemName,
+              isPinned: true,
+            ),
+            EntityTableColumnConfig(field: EquipmentField.location),
+          ],
+        ),
+      );
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...overrides,
+            currentEquipmentLocationsProvider.overrideWith(
+              (ref) async => {
+                'e1': EquipmentLocation(
+                  id: 'shop',
+                  name: "Joe's Scuba",
+                  kind: EquipmentLocationKind.serviceShop,
+                  createdAt: DateTime(2026),
+                  updatedAt: DateTime(2026),
+                ),
+              },
+            ),
+          ],
+          child: const EquipmentListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Location'), findsOneWidget);
+      expect(find.text("Joe's Scuba"), findsOneWidget);
+      // Travel BCD has no recorded place.
+      expect(find.text('--'), findsOneWidget);
+    });
+
     testWidgets('shows empty state when no equipment', (tester) async {
       final overrides = await _buildOverrides(equipment: []);
 
@@ -195,7 +1430,12 @@ void main() {
     // Vertical divider was part of the standalone table app bar, now removed.
     // Column settings and divider are in TableModeLayout.
 
-    testWidgets('table shows filter chips area', (tester) async {
+    testWidgets('table content carries no filter row of its own', (
+      tester,
+    ) async {
+      // Table mode's filter icon lives in TableModeLayout's app bar actions
+      // (see EquipmentListPage); the table itself spends no rows on filters
+      // until one is active.
       final overrides = await _buildOverrides(
         equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
       );
@@ -208,8 +1448,8 @@ void main() {
       );
       await tester.pump();
 
-      // Filter chips area should render with filter icon
-      expect(find.byIcon(Icons.filter_list), findsOneWidget);
+      expect(find.byIcon(Icons.filter_list), findsNothing);
+      expect(find.byType(InputChip), findsNothing);
     });
 
     testWidgets('table renders equipment data in cells', (tester) async {
@@ -362,6 +1602,160 @@ void main() {
     });
   });
 
+  group('EquipmentListTile avatar (clocks only)', () {
+    // Under the unified model the avatar reads overdue only from the ledger.
+    // A legacy item whose only signal is the old single interval has no ledger
+    // clock, so it must render as NOT overdue -- the legacy isServiceDue is
+    // ignored.
+    final legacyDueItem = EquipmentItem(
+      id: 'legacy1',
+      name: 'Old Reg',
+      type: EquipmentType.regulator,
+      lastServiceDate: DateTime(2020, 1, 1),
+      serviceIntervalDays: 365,
+    );
+
+    Widget buildTile(
+      EquipmentItem item,
+      ColorScheme scheme, {
+      Map<String, RollupClock> rollup = const {},
+    }) {
+      return ProviderScope(
+        overrides: [
+          // Ledger map resolved but empty -> worstClock is null for this item.
+          equipmentRollupClockProvider.overrideWith((ref) async => rollup),
+          equipmentComponentsIndexProvider.overrideWith(
+            (ref) async => ComponentsIndex.empty,
+          ),
+          // The tile reads the color-accent toggle, so settings must be
+          // stubbed: the real notifier reaches for SharedPreferences.
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          theme: ThemeData(colorScheme: scheme),
+          home: Scaffold(body: EquipmentListTile(item: item)),
+        ),
+      );
+    }
+
+    testWidgets('legacy overdue item renders non-overdue without a clock', (
+      tester,
+    ) async {
+      expect(legacyDueItem.isServiceDue, isTrue); // legacy getter still true
+      final scheme = ColorScheme.fromSeed(seedColor: Colors.blue);
+
+      await tester.pumpWidget(buildTile(legacyDueItem, scheme));
+      await tester.pumpAndSettle();
+
+      final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+      expect(avatar.backgroundColor, scheme.tertiaryContainer);
+      expect(avatar.backgroundColor, isNot(scheme.errorContainer));
+      expect(find.text('Service Due'), findsNothing);
+    });
+
+    RollupClock clock(EquipmentItem item, ServiceClockSeverity severity) {
+      final t0 = DateTime(2026, 1, 1);
+      return (
+        ownerId: item.id,
+        ownerName: item.name,
+        status: ServiceClockStatus(
+          schedule: ServiceSchedule(
+            id: 's-${item.id}',
+            equipmentId: item.id,
+            serviceKindId: 'annual',
+            createdAt: t0,
+            updatedAt: t0,
+          ),
+          kind: ServiceKind(
+            id: 'annual',
+            name: 'Annual service',
+            createdAt: t0,
+            updatedAt: t0,
+          ),
+          anchor: t0,
+          dueDate: DateTime.now().add(const Duration(days: 5)),
+          severity: severity,
+          now: DateTime.now(),
+        ),
+      );
+    }
+
+    const reg = EquipmentItem(
+      id: 'reg1',
+      name: 'Reg',
+      type: EquipmentType.regulator,
+    );
+
+    testWidgets('an overdue clock paints the avatar and label as alerts', (
+      tester,
+    ) async {
+      final scheme = ColorScheme.fromSeed(seedColor: Colors.blue);
+      await tester.pumpWidget(
+        buildTile(
+          reg,
+          scheme,
+          rollup: {reg.id: clock(reg, ServiceClockSeverity.overdue)},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+      expect(avatar.backgroundColor, StatusColors.light.alert.container);
+      final glyph = tester.widget<Icon>(
+        find.descendant(
+          of: find.byType(CircleAvatar),
+          matching: find.byType(Icon),
+        ),
+      );
+      expect(glyph.color, StatusColors.light.alert.onContainer);
+      final label = tester.widget<Text>(find.textContaining('Annual service'));
+      expect(label.style?.color, StatusColors.light.alert.accent);
+    });
+
+    testWidgets('a due-soon clock labels in warn and keeps the plain avatar', (
+      tester,
+    ) async {
+      final scheme = ColorScheme.fromSeed(seedColor: Colors.blue);
+      await tester.pumpWidget(
+        buildTile(
+          reg,
+          scheme,
+          rollup: {reg.id: clock(reg, ServiceClockSeverity.dueSoon)},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+      expect(avatar.backgroundColor, scheme.tertiaryContainer);
+      // Due soon now carries its relative trigger as well as the kind
+      // name (#2260), so match on the kind; this test is about the colour.
+      final label = tester.widget<Text>(find.textContaining('Annual service'));
+      expect(label.style?.color, StatusColors.light.warn.accent);
+    });
+
+    testWidgets('renders non-overdue avatar when nothing is due', (
+      tester,
+    ) async {
+      final upToDate = EquipmentItem(
+        id: 'ok1',
+        name: 'Fresh Reg',
+        type: EquipmentType.regulator,
+        lastServiceDate: DateTime.now(),
+        serviceIntervalDays: 365,
+      );
+      final scheme = ColorScheme.fromSeed(seedColor: Colors.blue);
+
+      await tester.pumpWidget(buildTile(upToDate, scheme));
+      await tester.pumpAndSettle();
+
+      final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+      expect(avatar.backgroundColor, scheme.tertiaryContainer);
+    });
+  });
+
   group('phone-mode highlight', () {
     testWidgets(
       'phone detailed view highlights equipment when highlightedEquipmentIdProvider is set',
@@ -430,4 +1824,1769 @@ void main() {
       },
     );
   });
+
+  group('telling identical items apart (#1549)', () {
+    testWidgets('two identical items gain the serial number that differs', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      EquipmentItem pouch(String id, String serial) => EquipmentItem(
+        id: id,
+        name: 'Pouches',
+        type: EquipmentType.other,
+        brand: 'Palantic',
+        model: 'Drop-Bottom',
+        serialNumber: serial,
+      );
+      // Descending serial order, so input order cannot produce the result.
+      final overrides = await _buildPhoneOverrides(
+        items: [pouch('b', 'X2'), pouch('a', 'X1')],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Palantic Drop-Bottom · S/N X1'), findsOneWidget);
+      expect(find.text('Palantic Drop-Bottom · S/N X2'), findsOneWidget);
+    });
+  });
+
+  group('group by location (Equipment page only)', () {
+    EquipmentLocation place(
+      String id,
+      String name,
+      EquipmentLocationKind kind, {
+      bool archived = false,
+    }) => EquipmentLocation(
+      id: id,
+      name: name,
+      kind: kind,
+      isArchived: archived,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    final garage = place('garage', 'Garage', EquipmentLocationKind.storage);
+    final shop = place(
+      'shop',
+      "Joe's Scuba",
+      EquipmentLocationKind.serviceShop,
+    );
+    final items = [
+      _makeEquipment(
+        id: 'e1',
+        name: 'Alpha Reg',
+        type: EquipmentType.regulator,
+      ),
+      _makeEquipment(id: 'e2', name: 'Bravo BCD', type: EquipmentType.bcd),
+      _makeEquipment(
+        id: 'e3',
+        name: 'Charlie Reg',
+        type: EquipmentType.regulator,
+      ),
+      _makeEquipment(id: 'e4', name: 'Delta Suit', type: EquipmentType.wetsuit),
+    ];
+
+    Future<void> pumpList(
+      WidgetTester tester, {
+      required bool groupByLocation,
+      EquipmentArrangement arrangement = EquipmentArrangement.defaults,
+      List<EquipmentItem>? gear,
+      Map<String, EquipmentLocation>? places,
+    }) async {
+      tester.view.physicalSize = const Size(800, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final overrides = await _buildPhoneOverrides(
+        items: gear ?? items,
+        arrangement: arrangement,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            ...overrides,
+            equipmentGroupByLocationProvider.overrideWith(
+              (ref) async => groupByLocation,
+            ),
+            currentEquipmentLocationsProvider.overrideWith(
+              (ref) async => places ?? {'e1': shop, 'e2': garage, 'e3': garage},
+            ),
+          ],
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    List<String?> placeHeadings(WidgetTester tester) => tester
+        .widgetList<EquipmentLocationGroupHeader>(
+          find.byType(EquipmentLocationGroupHeader),
+        )
+        .map((h) => h.location?.name)
+        .toList();
+
+    List<String> rowNames(WidgetTester tester) => tester
+        .widgetList<EquipmentListTile>(find.byType(EquipmentListTile))
+        .map((t) => t.item.name)
+        .toList();
+
+    testWidgets('one heading per place, storage first, no location last, '
+        'with type sub-headings inside', (tester) async {
+      await pumpList(tester, groupByLocation: true);
+      expect(placeHeadings(tester), ['Garage', "Joe's Scuba", null]);
+      expect(rowNames(tester), [
+        'Bravo BCD',
+        'Charlie Reg',
+        'Alpha Reg',
+        'Delta Suit',
+      ]);
+      // Regulators head a run under both the garage and the shop.
+      expect(find.byType(EquipmentTypeFoldHeader), findsNWidgets(4));
+      expect(find.text('2 items'), findsOneWidget);
+    });
+
+    testWidgets('type grouping off leaves only the place headings', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        groupByLocation: true,
+        arrangement: EquipmentArrangement.defaults.copyWith(groupByType: false),
+      );
+      expect(placeHeadings(tester), ['Garage', "Joe's Scuba", null]);
+      expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+    });
+
+    testWidgets('switched off, the list is grouped by type as before', (
+      tester,
+    ) async {
+      await pumpList(tester, groupByLocation: false);
+      expect(find.byType(EquipmentLocationGroupHeader), findsNothing);
+      expect(find.byType(EquipmentTypeFoldHeader), findsNWidgets(3));
+    });
+
+    Map<String, String?> tilePlaces(WidgetTester tester) => {
+      for (final tile in tester.widgetList<EquipmentListTile>(
+        find.byType(EquipmentListTile),
+      ))
+        tile.item.name: tile.location?.name,
+    };
+
+    testWidgets('ungrouped, each card names its place (#3625)', (tester) async {
+      await pumpList(tester, groupByLocation: false);
+      expect(tilePlaces(tester), {
+        'Alpha Reg': "Joe's Scuba",
+        'Bravo BCD': 'Garage',
+        'Charlie Reg': 'Garage',
+        'Delta Suit': null,
+      });
+      expect(find.text("Joe's Scuba"), findsOneWidget);
+      expect(find.text('Garage'), findsNWidgets(2));
+    });
+
+    testWidgets('grouped by place, the heading names it and the cards '
+        'leave it off (#3625)', (tester) async {
+      await pumpList(tester, groupByLocation: true);
+      expect(tilePlaces(tester).values, everyElement(isNull));
+    });
+  });
+
+  group('group by type (shared gear arrangement)', () {
+    final items = [
+      _makeEquipment(
+        id: 'e1',
+        name: 'Alpha Reg',
+        type: EquipmentType.regulator,
+      ),
+      _makeEquipment(id: 'e2', name: 'Bravo BCD', type: EquipmentType.bcd),
+      _makeEquipment(id: 'e3', name: 'Charlie BCD', type: EquipmentType.bcd),
+      _makeEquipment(id: 'e4', name: 'Delta Suit', type: EquipmentType.wetsuit),
+    ];
+
+    Future<void> pumpList(
+      WidgetTester tester, {
+      EquipmentArrangement arrangement = EquipmentArrangement.defaults,
+      SortState<EquipmentSortField>? sort,
+      ListViewMode viewMode = ListViewMode.detailed,
+    }) async {
+      // Tall enough that every heading and row is built at once.
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final overrides = await _buildPhoneOverrides(
+        items: items,
+        viewMode: viewMode,
+        arrangement: arrangement,
+        sort: sort,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    List<String> rowNames(WidgetTester tester) => tester
+        .widgetList<EquipmentListTile>(find.byType(EquipmentListTile))
+        .map((t) => t.item.name)
+        .toList();
+
+    List<EquipmentType> headings(WidgetTester tester) => tester
+        .widgetList<EquipmentTypeFoldHeader>(
+          find.byType(EquipmentTypeFoldHeader),
+        )
+        .map((h) => h.type)
+        .toList();
+
+    double top(WidgetTester tester, Finder finder) =>
+        tester.getTopLeft(finder).dy;
+
+    testWidgets('draws a heading per type, gear under its own heading', (
+      tester,
+    ) async {
+      await pumpList(tester);
+
+      expect(headings(tester), [
+        EquipmentType.bcd,
+        EquipmentType.regulator,
+        EquipmentType.wetsuit,
+      ]);
+      expect(rowNames(tester), [
+        'Bravo BCD',
+        'Charlie BCD',
+        'Alpha Reg',
+        'Delta Suit',
+      ]);
+
+      final bcdHeading = find.byKey(
+        const ValueKey('equipment-type-fold-type:bcd'),
+      );
+      final regHeading = find.byKey(
+        const ValueKey('equipment-type-fold-type:regulator'),
+      );
+      expect(
+        top(tester, bcdHeading),
+        lessThan(top(tester, find.text('Bravo BCD'))),
+      );
+      expect(
+        top(tester, find.text('Charlie BCD')),
+        lessThan(top(tester, regHeading)),
+      );
+      expect(
+        top(tester, regHeading),
+        lessThan(top(tester, find.text('Alpha Reg'))),
+      );
+    });
+
+    testWidgets('the type order comes from the shared arrangement', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        arrangement: EquipmentArrangement.defaults.copyWith(
+          typeOrderDescending: true,
+        ),
+      );
+
+      expect(headings(tester), [
+        EquipmentType.wetsuit,
+        EquipmentType.regulator,
+        EquipmentType.bcd,
+      ]);
+    });
+
+    testWidgets('gear inside each heading follows the page sort', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        sort: const SortState(
+          field: EquipmentSortField.name,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(rowNames(tester), [
+        'Charlie BCD',
+        'Bravo BCD',
+        'Alpha Reg',
+        'Delta Suit',
+      ]);
+    });
+
+    testWidgets('grouping off draws no headings but still orders by type', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        arrangement: EquipmentArrangement.defaults.copyWith(groupByType: false),
+      );
+
+      expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+      expect(rowNames(tester), [
+        'Bravo BCD',
+        'Charlie BCD',
+        'Alpha Reg',
+        'Delta Suit',
+      ]);
+    });
+
+    testWidgets('with no type order the page sort alone orders the list', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        arrangement: EquipmentArrangement.defaults.copyWith(
+          typeOrder: EquipmentTypeOrder.none,
+        ),
+      );
+
+      expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+      expect(rowNames(tester), [
+        'Alpha Reg',
+        'Bravo BCD',
+        'Charlie BCD',
+        'Delta Suit',
+      ]);
+    });
+
+    testWidgets('compact mode groups too', (tester) async {
+      await pumpList(tester, viewMode: ListViewMode.compact);
+
+      expect(headings(tester), hasLength(3));
+    });
+
+    testWidgets('dense mode stays flat on the page sort, like the table', (
+      tester,
+    ) async {
+      // Dense is a single-row flat layout (not offered for gear, but a stored
+      // value from an older build can still select it). Only Detailed and
+      // Compact honour the arrangement.
+      await pumpList(tester, viewMode: ListViewMode.dense);
+
+      expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+      final names = tester
+          .widgetList<DenseEquipmentListTile>(
+            find.byType(DenseEquipmentListTile),
+          )
+          .map((t) => t.item.name)
+          .toList();
+      expect(names, ['Alpha Reg', 'Bravo BCD', 'Charlie BCD', 'Delta Suit']);
+
+      await tester.tap(find.byTooltip('Sort'));
+      await tester.pumpAndSettle();
+      expect(find.text('Group by type'), findsNothing);
+    });
+
+    testWidgets('table mode stays flat', (tester) async {
+      // The table has its own column sort, so headings there would fight it.
+      await pumpList(tester, viewMode: ListViewMode.table);
+
+      expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+    });
+
+    testWidgets('headings order by the localized type name', (tester) async {
+      // In German the three types are Tarierjacket (BCD), Flasche (tank) and
+      // Atemregler (regulator), so the German alphabetical order reverses the
+      // English one. A list that ordered by the English displayName would
+      // draw BCD first here.
+      final gear = [
+        _makeEquipment(id: 'b', name: 'Zeagle', type: EquipmentType.bcd),
+        _makeEquipment(id: 't', name: 'Faber', type: EquipmentType.tank),
+        _makeEquipment(id: 'r', name: 'Apeks', type: EquipmentType.regulator),
+      ];
+      final overrides = await _buildPhoneOverrides(
+        items: gear,
+        arrangement: EquipmentArrangement.defaults,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('de'),
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(headings(tester), [
+        EquipmentType.regulator, // Atemregler
+        EquipmentType.tank, // Flasche
+        EquipmentType.bcd, // Tarierjacket
+      ]);
+    });
+
+    testWidgets(
+      'flipping "Group by type" in the sort sheet regroups the list',
+      (tester) async {
+        // End to end through the real notifier: the sheet writes the shared
+        // arrangement and the list, which reads it, redraws flat.
+        tester.view.physicalSize = const Size(800, 1600);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final overrides = await _buildPhoneOverrides(items: items);
+        await tester.pumpWidget(
+          testApp(
+            locale: const Locale('en'),
+            overrides: [
+              ...overrides,
+              appSettingsRepositoryProvider.overrideWithValue(
+                _FakeArrangementRepository(),
+              ),
+            ],
+            child: const EquipmentListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(headings(tester), hasLength(3));
+
+        await tester.tap(find.byTooltip('Sort'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Group by type'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Close'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(EquipmentTypeFoldHeader), findsNothing);
+      },
+    );
+
+    testWidgets('the selected gear is scrolled to again once the stored '
+        'arrangement loads', (tester) async {
+      // The arrangement starts at the defaults and adopts the stored one when
+      // its read lands. Scrolling on the first frame therefore positions the
+      // row for the DEFAULT order; if that counted as done, a stored order
+      // that moves the row would leave it off screen.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      // Near the top in the default order, near the bottom once the stored
+      // arrangement reverses the headings.
+      final target = arrangeEquipment(
+        gear,
+        EquipmentArrangement.defaults,
+        typeLabel: (t) => t.displayName,
+      )[3].items.single;
+      final repository = _FakeArrangementRepository()
+        ..heldRead = Completer<EquipmentArrangement?>();
+
+      final overrides = await _buildPhoneOverrides(items: gear);
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            ...overrides,
+            appSettingsRepositoryProvider.overrideWithValue(repository),
+          ],
+          child: EquipmentListContent(showAppBar: false, selectedId: target.id),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(target.name), findsOneWidget);
+
+      repository.heldRead!.complete(
+        EquipmentArrangement.defaults.copyWith(typeOrderDescending: true),
+      );
+      await tester.pumpAndSettle();
+
+      final row = find.text(target.name);
+      expect(row, findsOneWidget);
+      final list = tester.getRect(find.byType(ListView));
+      final rect = tester.getRect(row);
+      expect(
+        rect.top,
+        greaterThanOrEqualTo(list.top),
+        reason: '$rect in $list',
+      );
+      expect(rect.bottom, lessThanOrEqualTo(list.bottom), reason: '$rect');
+    });
+
+    testWidgets('switching language re-scrolls to the selected gear', (
+      tester,
+    ) async {
+      // Alphabetical headings sort by the translated type name, so a new
+      // language reorders them without any arrangement change. The selected
+      // row must be brought back into view after the reorder.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      List<EquipmentType> orderIn(Locale locale) {
+        final l10n = lookupAppLocalizations(locale);
+        return [
+          for (final group in arrangeEquipment(
+            gear,
+            EquipmentArrangement.defaults,
+            typeLabel: (t) => t.localizedName(l10n),
+          ))
+            group.type!,
+        ];
+      }
+
+      final english = orderIn(const Locale('en'));
+      final german = orderIn(const Locale('de'));
+      // A type the switch moves several rows, so the viewport (about five
+      // rows) no longer shows it, while it stays near the top in both
+      // languages: this checks that the list re-scrolls, not how far the
+      // row-height estimate drifts deep into a long list.
+      int shift(EquipmentType t) =>
+          (german.indexOf(t) - english.indexOf(t)).abs();
+      final candidates = english.where(
+        (t) => english.indexOf(t) <= 14 && german.indexOf(t) <= 14,
+      );
+      final type = candidates.reduce((a, b) => shift(a) >= shift(b) ? a : b);
+      expect(
+        shift(type),
+        greaterThanOrEqualTo(5),
+        reason: 'the switch must move the row off screen to prove anything',
+      );
+      final target = gear.firstWhere((e) => e.type == type);
+
+      final locale = ValueNotifier(const Locale('en'));
+      addTearDown(locale.dispose);
+      final overrides = await _buildPhoneOverrides(
+        items: gear,
+        arrangement: EquipmentArrangement.defaults,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: ValueListenableBuilder<Locale>(
+            valueListenable: locale,
+            builder: (context, value, _) => MaterialApp(
+              locale: value,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: EquipmentListContent(
+                  showAppBar: false,
+                  selectedId: target.id,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(target.name), findsOneWidget);
+
+      locale.value = const Locale('de');
+      await tester.pumpAndSettle();
+
+      final row = find.text(target.name);
+      expect(row, findsOneWidget);
+      final list = tester.getRect(find.byType(ListView));
+      final rect = tester.getRect(row);
+      expect(
+        rect.top,
+        greaterThanOrEqualTo(list.top),
+        reason: '$rect in $list',
+      );
+      expect(rect.bottom, lessThanOrEqualTo(list.bottom), reason: '$rect');
+    });
+
+    testWidgets('switching language under a fixed type order does not jump', (
+      tester,
+    ) async {
+      // Only alphabetical ordering reads the translated labels; head to toe
+      // is a curated table, so a new language moves no row and must not
+      // yank the diver back to the selected one.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      final headToToe = EquipmentArrangement.defaults.copyWith(
+        typeOrder: EquipmentTypeOrder.headToToe,
+      );
+      final target = arrangeEquipment(
+        gear,
+        headToToe,
+        typeLabel: (t) => t.displayName,
+      )[8].items.single;
+
+      final locale = ValueNotifier(const Locale('en'));
+      addTearDown(locale.dispose);
+      final overrides = await _buildPhoneOverrides(
+        items: gear,
+        arrangement: headToToe,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: ValueListenableBuilder<Locale>(
+            valueListenable: locale,
+            builder: (context, value, _) => MaterialApp(
+              locale: value,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: EquipmentListContent(
+                  showAppBar: false,
+                  selectedId: target.id,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      ScrollPosition position() =>
+          tester.state<ScrollableState>(find.byType(Scrollable).first).position;
+      expect(position().pixels, greaterThan(0), reason: 'scrolled to the row');
+
+      position().jumpTo(0);
+      await tester.pumpAndSettle();
+      locale.value = const Locale('de');
+      await tester.pumpAndSettle();
+
+      expect(position().pixels, 0);
+    });
+
+    testWidgets('tapping a row in the list does not scroll the list', (
+      tester,
+    ) async {
+      // In master-detail a row tap selects that row, which the list already
+      // shows; the list must stay where the diver scrolled it rather than
+      // treat the new selection as one to scroll to.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      final selected = ValueNotifier<String?>(null);
+      addTearDown(selected.dispose);
+      final overrides = await _buildPhoneOverrides(
+        items: gear,
+        arrangement: EquipmentArrangement.defaults,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: ValueListenableBuilder<String?>(
+            valueListenable: selected,
+            builder: (context, id, _) => EquipmentListContent(
+              showAppBar: false,
+              selectedId: id,
+              onItemSelected: (next) => selected.value = next,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      position.jumpTo(600);
+      await tester.pumpAndSettle();
+
+      final visibleRow = find.byType(EquipmentListTile).first;
+      await tester.tap(visibleRow);
+      await tester.pumpAndSettle();
+
+      expect(selected.value, isNotNull, reason: 'the tap selected the row');
+      expect(position.pixels, 600);
+    });
+
+    testWidgets('with no type order, flags it ignores do not jump the list', (
+      tester,
+    ) async {
+      // "Do not order by type" ignores the grouping switch and the type
+      // direction, so a synced change to either moves no row.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      final noTypeOrder = EquipmentArrangement.defaults.copyWith(
+        typeOrder: EquipmentTypeOrder.none,
+      );
+      final target = arrangeEquipment(
+        gear,
+        noTypeOrder,
+        typeLabel: (t) => t.displayName,
+      ).single.items[12];
+      final source = StateProvider<EquipmentArrangement>((ref) => noTypeOrder);
+
+      final overrides = await _buildPhoneOverrides(items: gear);
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            ...overrides,
+            equipmentArrangementProvider.overrideWith(
+              (ref) => ref.watch(source),
+            ),
+          ],
+          child: EquipmentListContent(showAppBar: false, selectedId: target.id),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(position.pixels, greaterThan(0), reason: 'scrolled to the row');
+
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(EquipmentListContent)),
+      );
+      container.read(source.notifier).state = noTypeOrder.copyWith(
+        groupByType: false,
+        typeOrderDescending: true,
+      );
+      await tester.pumpAndSettle();
+
+      expect(position.pixels, 0);
+    });
+
+    testWidgets('a change to only the dive item sort does not jump the list', (
+      tester,
+    ) async {
+      // The page orders gear by its own sort, so the arrangement's item sort
+      // moves no row here. Re-scrolling to the selected row on such a change
+      // would yank the diver back from wherever they had scrolled.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      final target = arrangeEquipment(
+        gear,
+        EquipmentArrangement.defaults,
+        typeLabel: (t) => t.displayName,
+      )[8].items.single;
+      final source = StateProvider<EquipmentArrangement>(
+        (ref) => EquipmentArrangement.defaults,
+      );
+
+      final overrides = await _buildPhoneOverrides(items: gear);
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            ...overrides,
+            equipmentArrangementProvider.overrideWith(
+              (ref) => ref.watch(source),
+            ),
+          ],
+          child: EquipmentListContent(showAppBar: false, selectedId: target.id),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(position.pixels, greaterThan(0), reason: 'scrolled to the row');
+
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(EquipmentListContent)),
+      );
+      container.read(source.notifier).state = EquipmentArrangement.defaults
+          .copyWith(
+            itemSortField: EquipmentItemSortField.purchaseDate,
+            itemSortDirection: SortDirection.descending,
+          );
+      await tester.pumpAndSettle();
+
+      expect(position.pixels, 0);
+    });
+
+    testWidgets('scrolling to the selected gear allows for the headings', (
+      tester,
+    ) async {
+      // Each type gets its own heading, so a row deep in the list has almost
+      // as many headings above it as items. Sizing a heading like an item row
+      // overshoots by the difference per heading, and the row the diver
+      // opened ends up scrolled past the top of the list.
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final gear = [
+        for (final type in EquipmentType.values)
+          _makeEquipment(id: type.name, name: 'Item ${type.name}', type: type),
+      ];
+      final groups = arrangeEquipment(
+        gear,
+        EquipmentArrangement.defaults,
+        typeLabel: (t) => t.displayName,
+      );
+      // Mid-list on purpose: near the end the clamp to the maximum scroll
+      // extent hides the overshoot.
+      final target = groups[8].items.single;
+
+      final overrides = await _buildPhoneOverrides(
+        items: gear,
+        arrangement: EquipmentArrangement.defaults,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: EquipmentListContent(showAppBar: false, selectedId: target.id),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final row = find.text(target.name);
+      expect(row, findsOneWidget);
+      final list = tester.getRect(find.byType(ListView));
+      final rect = tester.getRect(row);
+      expect(
+        rect.top,
+        greaterThanOrEqualTo(list.top),
+        reason: '$rect in $list',
+      );
+      expect(rect.bottom, lessThanOrEqualTo(list.bottom), reason: '$rect');
+    });
+  });
+
+  _foldableGroupTests();
+
+  group('filter panel (#1274, PR #1435 review)', () {
+    final items = [
+      _makeEquipment(
+        id: 'e1',
+        name: 'Alpha Reg',
+        type: EquipmentType.regulator,
+      ),
+      _makeEquipment(id: 'e2', name: 'Bravo BCD', type: EquipmentType.bcd),
+      _makeEquipment(id: 'e3', name: 'Charlie BCD', type: EquipmentType.bcd),
+      _makeEquipment(id: 'e4', name: 'Delta Suit', type: EquipmentType.wetsuit),
+    ];
+
+    Future<void> pumpPhoneList(
+      WidgetTester tester, {
+      List<EquipmentItem>? equipment,
+    }) async {
+      final overrides = await _buildPhoneOverrides(
+        items: equipment ?? items,
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a hose type chip narrows the list and shows in the bar', (
+      tester,
+    ) async {
+      EquipmentItem hose(String id, String name, String kind) => EquipmentItem(
+        id: id,
+        name: name,
+        type: EquipmentType.hose,
+        attributes: [
+          EquipmentAttribute.curated(
+            equipmentId: id,
+            key: 'hose_type',
+            valueText: kind,
+          ),
+        ],
+      );
+      await pumpPhoneList(
+        tester,
+        equipment: [
+          ...items,
+          hose('h1', 'Gauge Hose', 'hp'),
+          hose('h2', 'Reg Hose', 'lp'),
+        ],
+      );
+
+      await _filterVia(tester, [
+        _typeChipKey(EquipmentType.hose),
+        'equipment_filter_attr_hose_type_hp',
+      ]);
+
+      expect(find.text('Gauge Hose'), findsOneWidget);
+      expect(find.text('Reg Hose'), findsNothing);
+      final chip = find.widgetWithText(
+        InputChip,
+        'Hose type: HP (high pressure)',
+      );
+      expect(chip, findsOneWidget);
+
+      tester.widget<InputChip>(chip).onDeleted!();
+      await tester.pumpAndSettle();
+      expect(chip, findsNothing);
+      expect(find.text('Reg Hose'), findsOneWidget);
+    });
+
+    /// Pump a list whose source lists are driven by [source], so a test can
+    /// shrink the gear out from under an active filter.
+    Future<void> pumpLiveList(
+      WidgetTester tester,
+      StateProvider<List<EquipmentItem>> source, {
+      List<EquipmentItem> Function(List<EquipmentItem> all)? byStatus,
+    }) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            equipmentByStatusProvider.overrideWith(
+              (ref, status) =>
+                  byStatus?.call(ref.watch(source)) ?? ref.watch(source),
+            ),
+            activeEquipmentProvider.overrideWith(
+              (ref) async => ref.watch(source),
+            ),
+            allEquipmentProvider.overrideWith((ref) async => ref.watch(source)),
+            serviceDueEquipmentProvider.overrideWith(
+              (ref, _) async => const <EquipmentItem>[],
+            ),
+            fakeEquipmentQueryIds(),
+            equipmentListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.detailed,
+            ),
+            equipmentTableConfigProvider.overrideWith(
+              (ref) => _TestEquipTableConfigNotifier(_testConfig),
+            ),
+            highlightedEquipmentIdProvider.overrideWith((ref) => null),
+          ],
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the list shows no filter row until a filter is applied', (
+      tester,
+    ) async {
+      // The point of the panel: nothing but the top-bar icon costs screen
+      // real estate while the list is unfiltered.
+      await pumpPhoneList(tester);
+
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.byType(InputChip), findsNothing);
+      expect(_filterButton, findsOneWidget);
+    });
+
+    testWidgets('the panel offers one chip per owned type plus All Types', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+      await _openFilterPanel(tester);
+      // The category section starts below the fold; scroll it in so its
+      // chips are built before we count them.
+      await tester.scrollUntilVisible(
+        _typeChip(EquipmentType.bcd),
+        120,
+        scrollable: _sheetList(),
+      );
+
+      expect(_typeChip(null), findsOneWidget);
+      expect(_typeChip(EquipmentType.regulator), findsOneWidget);
+      expect(_typeChip(EquipmentType.bcd), findsOneWidget);
+      expect(_typeChip(EquipmentType.wetsuit), findsOneWidget);
+      // No fins in the fixture, so no fins chip.
+      expect(_typeChip(EquipmentType.fins), findsNothing);
+    });
+
+    testWidgets('picking a type narrows the list to that type', (tester) async {
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.bcd)]);
+
+      expect(find.text('Bravo BCD'), findsOneWidget);
+      expect(find.text('Charlie BCD'), findsOneWidget);
+      expect(find.text('Alpha Reg'), findsNothing);
+      expect(find.text('Delta Suit'), findsNothing);
+    });
+
+    testWidgets('the panel edits a draft: nothing moves until Apply', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+
+      await _openFilterPanel(tester);
+      await _tapPanelChip(tester, _typeChipKey(EquipmentType.bcd));
+      // Still the full list behind the sheet.
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+
+      await _applyPanel(tester);
+      expect(find.byType(EquipmentListTile), findsNWidgets(2));
+    });
+
+    testWidgets('cancelling the panel leaves the filter alone', (tester) async {
+      await pumpPhoneList(tester);
+
+      await _openFilterPanel(tester);
+      await _tapPanelChip(tester, _typeChipKey(EquipmentType.bcd));
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+      expect(_badgeIsVisible(tester), isFalse);
+    });
+
+    testWidgets('the All Types chip restores the full list', (tester) async {
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.wetsuit)]);
+      expect(find.byType(EquipmentListTile), findsOneWidget);
+
+      await _filterVia(tester, [_typeChipKey(null)]);
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+    });
+
+    testWidgets('re-tapping the selected type chip clears the filter', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.bcd)]);
+      expect(find.byType(EquipmentListTile), findsNWidgets(2));
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.bcd)]);
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+    });
+
+    testWidgets('type filter composes with the status filter (AND)', (
+      tester,
+    ) async {
+      // The status provider is overridden to return the full fixture list, so
+      // after picking a status the type chip must still narrow client-side.
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [
+        _statusChipKey(EquipmentStatus.retired),
+        _typeChipKey(EquipmentType.regulator),
+      ]);
+
+      expect(find.text('Alpha Reg'), findsOneWidget);
+      expect(find.byType(EquipmentListTile), findsOneWidget);
+    });
+
+    testWidgets('the status axis is a single choice', (tester) async {
+      // Service Due and a concrete status cannot both be on: the list reads
+      // one provider, and EquipmentFilterState asserts it.
+      await pumpPhoneList(tester);
+
+      await _openFilterPanel(tester);
+      await _tapPanelChip(tester, _statusChipKey(EquipmentStatus.retired));
+      await _tapPanelChip(tester, 'equipment_filter_status_serviceDue');
+      await _applyPanel(tester);
+
+      expect(tester.takeException(), isNull);
+      // Service Due won, and its (empty) provider is what the list shows.
+      expect(find.byType(EquipmentListTile), findsNothing);
+      expect(find.text('Service Due'), findsOneWidget);
+      expect(find.text(EquipmentStatus.retired.displayName), findsNothing);
+    });
+
+    testWidgets('the top-bar icon is badged only while a filter is active', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+      expect(_badgeIsVisible(tester), isFalse);
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.bcd)]);
+      expect(_badgeIsVisible(tester), isTrue);
+
+      await _filterVia(tester, [_typeChipKey(null)]);
+      expect(_badgeIsVisible(tester), isFalse);
+    });
+
+    testWidgets('the active-filter bar names each axis and removes it', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [
+        _statusChipKey(EquipmentStatus.retired),
+        _typeChipKey(EquipmentType.bcd),
+      ]);
+
+      final statusChip = find.widgetWithText(
+        InputChip,
+        EquipmentStatus.retired.displayName,
+      );
+      final typeChip = find.widgetWithText(
+        InputChip,
+        EquipmentType.bcd.displayName,
+      );
+      expect(statusChip, findsOneWidget);
+      expect(typeChip, findsOneWidget);
+
+      // Dropping the category leaves the status filter in place. The delete
+      // affordance is invoked through the chip's own callback so the test
+      // does not depend on which glyph Material picks for it.
+      tester.widget<InputChip>(typeChip).onDeleted!();
+      await tester.pumpAndSettle();
+      expect(typeChip, findsNothing);
+      expect(statusChip, findsOneWidget);
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+    });
+
+    testWidgets('clear all in the active-filter bar drops every axis', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester);
+
+      await _filterVia(tester, [
+        _statusChipKey(EquipmentStatus.retired),
+        _typeChipKey(EquipmentType.bcd),
+      ]);
+      expect(find.byType(InputChip), findsNWidgets(2));
+
+      await tester.tap(
+        find.byKey(const ValueKey('equipment_activeFilter_clearAll')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(InputChip), findsNothing);
+      expect(_badgeIsVisible(tester), isFalse);
+      expect(find.byType(EquipmentListTile), findsNWidgets(4));
+    });
+
+    testWidgets('empty type match shows the category empty state', (
+      tester,
+    ) async {
+      // Select a type, then shrink the source list so nothing matches; the
+      // filter must stay clearable and the empty state must name the category.
+      final source = StateProvider<List<EquipmentItem>>((ref) => items);
+      await pumpLiveList(tester, source);
+
+      await _filterVia(tester, [_typeChipKey(EquipmentType.wetsuit)]);
+      expect(find.text('Delta Suit'), findsOneWidget);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(EquipmentListContent)),
+      );
+      container.read(source.notifier).state = [items.first];
+      await tester.pumpAndSettle();
+
+      expect(find.byType(EquipmentListTile), findsNothing);
+      // The active-filter bar stays on screen so the filter can be cleared.
+      expect(
+        find.widgetWithText(InputChip, EquipmentType.wetsuit.displayName),
+        findsOneWidget,
+      );
+      expect(find.text('No equipment in this category'), findsOneWidget);
+      // A category filter is active, so the add-first-equipment CTA (which
+      // implies there is no gear at all) must not appear.
+      expect(find.text('Add Your First Equipment'), findsNothing);
+    });
+
+    testWidgets(
+      'add-first-equipment CTA stays hidden when a type is selected and the '
+      'underlying list becomes empty (#1435)',
+      (tester) async {
+        // Regression: the CTA visibility used to key off blameCategory,
+        // which is false once the pre-filter source is empty -- letting the
+        // "add your first equipment" button reappear while a category filter
+        // was still active.
+        final source = StateProvider<List<EquipmentItem>>((ref) => items);
+        await pumpLiveList(tester, source);
+
+        await _filterVia(tester, [_typeChipKey(EquipmentType.wetsuit)]);
+        expect(find.text('Delta Suit'), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(EquipmentListContent)),
+        );
+        container.read(source.notifier).state = const <EquipmentItem>[];
+        await tester.pumpAndSettle();
+
+        expect(find.byType(EquipmentListTile), findsNothing);
+        expect(
+          find.widgetWithText(InputChip, EquipmentType.wetsuit.displayName),
+          findsOneWidget,
+        );
+        expect(find.text('Add Your First Equipment'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a category survives an empty status list and the empty state blames '
+      'the status, not the category',
+      (tester) async {
+        // No item carries any non-active status, so every status filter comes
+        // back empty while the default view has gear.
+        final source = StateProvider<List<EquipmentItem>>((ref) => items);
+        await pumpLiveList(
+          tester,
+          source,
+          byStatus: (_) => const <EquipmentItem>[],
+        );
+
+        await _filterVia(tester, [_typeChipKey(EquipmentType.wetsuit)]);
+        expect(find.text('Delta Suit'), findsOneWidget);
+
+        await _filterVia(tester, [_statusChipKey(EquipmentStatus.retired)]);
+
+        expect(find.byType(EquipmentListTile), findsNothing);
+        // The status list was empty before the category narrowed anything,
+        // so the category is not to blame.
+        expect(find.text('No equipment in this category'), findsNothing);
+        expect(find.text('No equipment with this status'), findsOneWidget);
+
+        // Both filters are still listed, and clearing them restores the list.
+        expect(find.byType(InputChip), findsNWidgets(2));
+        await tester.tap(
+          find.byKey(const ValueKey('equipment_activeFilter_clearAll')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(EquipmentListTile), findsNWidgets(4));
+      },
+    );
+  });
+
+  group('filter selection and refresh target the right provider (#636)', () {
+    Future<void> pumpPhoneList(
+      WidgetTester tester,
+      List<EquipmentItem> items,
+    ) async {
+      final overrides = await _buildPhoneOverrides(
+        items: items,
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('selecting a status filter switches to the status provider', (
+      tester,
+    ) async {
+      await pumpPhoneList(tester, [
+        _makeEquipment(id: 'e1', name: 'Alpha Reg'),
+        _makeEquipment(
+          id: 'e2',
+          name: 'Old BCD',
+          status: EquipmentStatus.retired,
+        ),
+      ]);
+
+      await _filterVia(tester, [_statusChipKey(EquipmentStatus.retired)]);
+
+      // The status branch of build() is now live; both fixtures come back
+      // because the status provider is overridden to return the full list.
+      expect(find.byType(EquipmentListTile), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
+    });
+
+    /// Drives the RefreshIndicator directly: the list is short, so its
+    /// default physics do not permit the overscroll a drag would need.
+    Future<void> pullToRefresh(WidgetTester tester) async {
+      final state = tester.state<RefreshIndicatorState>(
+        find.byType(RefreshIndicator),
+      );
+      unawaited(state.show());
+      await tester.pumpAndSettle();
+    }
+
+    /// Pumps the list with a counting all-equipment source, the one list
+    /// every view narrows (#2365).
+    Future<int Function()> pumpCounting(
+      WidgetTester tester,
+      List<EquipmentItem> items,
+    ) async {
+      var allBuilds = 0;
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            activeEquipmentProvider.overrideWith((ref) async => items),
+            equipmentByStatusProvider.overrideWith((ref, status) => items),
+            allEquipmentProvider.overrideWith((ref) async {
+              allBuilds++;
+              return items;
+            }),
+            fakeEquipmentQueryIds(),
+            equipmentListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.detailed,
+            ),
+            equipmentTableConfigProvider.overrideWith(
+              (ref) => _TestEquipTableConfigNotifier(_testConfig),
+            ),
+          ],
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return () => allBuilds;
+    }
+
+    testWidgets('refreshing the default view rebuilds the list source', (
+      tester,
+    ) async {
+      final builds = await pumpCounting(tester, [
+        _makeEquipment(id: 'e1', name: 'Alpha Reg'),
+      ]);
+      final before = builds();
+
+      await pullToRefresh(tester);
+
+      expect(
+        builds(),
+        greaterThan(before),
+        reason:
+            'every view narrows allEquipmentProvider, so refresh must '
+            'invalidate it or the list stays stale (#636)',
+      );
+    });
+
+    testWidgets('refreshing under a status filter rebuilds the list source', (
+      tester,
+    ) async {
+      final builds = await pumpCounting(tester, [
+        _makeEquipment(
+          id: 'e2',
+          name: 'Old BCD',
+          status: EquipmentStatus.retired,
+        ),
+      ]);
+      await _filterVia(tester, [_statusChipKey(EquipmentStatus.retired)]);
+      final before = builds();
+
+      await pullToRefresh(tester);
+
+      expect(builds(), greaterThan(before));
+    });
+  });
+
+  group('query chips (#2365)', () {
+    testWidgets('a list with rows never runs the empty-state status probe', (
+      tester,
+    ) async {
+      // The probe is a second id-set query only the empty state reads.
+      final overrides = await _buildPhoneOverrides(
+        items: [_makeEquipment(id: 'e1', name: 'Alpha Reg')],
+        filter: const EquipmentFilterState(type: EquipmentType.regulator),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Alpha Reg'), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(EquipmentListContent)),
+      );
+      expect(container.exists(equipmentStatusViewHasItemsProvider), isFalse);
+    });
+
+    testWidgets('a query that keeps nothing blames the query, not the gear', (
+      tester,
+    ) async {
+      // The fake id set ignores the query, so an empty source stands in for
+      // a query that matched none of the diver's items.
+      final overrides = await _buildPhoneOverrides(
+        items: const [],
+        filter: EquipmentFilterState(
+          query: ConditionNode(
+            FieldPath(['type']),
+            QueryOp.eq,
+            const EnumValue('drysuit'),
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('No equipment matches this query'), findsOneWidget);
+      expect(
+        find.text('Add your diving equipment to track usage and service'),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'each top-level query condition is a chip that removes itself',
+      (tester) async {
+        final overrides = await _buildPhoneOverrides(
+          items: [_makeEquipment(id: 'e1', name: 'Alpha Reg')],
+          filter: EquipmentFilterState(
+            query: AndNode([
+              ConditionNode(
+                FieldPath(['type']),
+                QueryOp.eq,
+                const EnumValue('regulator'),
+              ),
+              ConditionNode(
+                FieldPath(['serviceDue']),
+                QueryOp.eq,
+                const EnumValue('overdue'),
+              ),
+            ]),
+          ),
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const EquipmentListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('type = regulator'), findsOneWidget);
+        expect(find.text('serviceDue = overdue'), findsOneWidget);
+
+        tester
+            .widget<InputChip>(
+              find.ancestor(
+                of: find.text('type = regulator'),
+                matching: find.byType(InputChip),
+              ),
+            )
+            .onDeleted!();
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(EquipmentListContent)),
+        );
+        expect(
+          container.read(equipmentFilterProvider).query,
+          ConditionNode(
+            FieldPath(['serviceDue']),
+            QueryOp.eq,
+            const EnumValue('overdue'),
+          ),
+        );
+      },
+    );
+  });
+
+  group('owner chip on rows (issue #2046)', () {
+    final t = DateTime(2026);
+    final divers = [
+      Diver(id: 'owner', name: 'Bill', createdAt: t, updatedAt: t),
+      Diver(id: 'wife', name: 'Anna', createdAt: t, updatedAt: t),
+    ];
+    const own = EquipmentItem(
+      id: 'mine',
+      diverId: 'owner',
+      name: 'My BCD',
+      type: EquipmentType.bcd,
+    );
+    const hers = EquipmentItem(
+      id: 'hers',
+      diverId: 'wife',
+      name: 'Her Reg',
+      type: EquipmentType.regulator,
+    );
+
+    Future<void> pump(WidgetTester tester, List<Diver> ds) async {
+      final overrides = await _buildPhoneOverrides(
+        items: [own, hers],
+        divers: ds,
+        activeDiverId: 'owner',
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a shared row names its owner; an own row does not', (
+      tester,
+    ) async {
+      await pump(tester, divers);
+      expect(
+        find.byKey(const ValueKey('equipment-owner-chip-wife')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('equipment-owner-chip-owner')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the Owner filter default chip reads All', (tester) async {
+      await pump(tester, divers);
+      await _openFilterPanel(tester);
+      final chip = find.byKey(const ValueKey('equipment_filter_owner_all'));
+      if (chip.evaluate().isEmpty) {
+        await tester.scrollUntilVisible(chip, 120, scrollable: _sheetList());
+      }
+      expect(
+        find.descendant(of: chip, matching: find.text('All')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the Owner filter narrows to gear shared with me', (
+      tester,
+    ) async {
+      await pump(tester, divers);
+      await _filterVia(tester, ['equipment_filter_owner_sharedWithMe']);
+      expect(find.text('Her Reg'), findsOneWidget);
+      expect(find.text('My BCD'), findsNothing);
+      expect(_badgeIsVisible(tester), isTrue);
+
+      await _filterVia(tester, ['equipment_filter_owner_mine']);
+      expect(find.text('My BCD'), findsOneWidget);
+      expect(find.text('Her Reg'), findsNothing);
+    });
+
+    testWidgets('a leftover Owner filter is ignored with one profile', (
+      tester,
+    ) async {
+      // Its chips are hidden with one profile, so it must not narrow the
+      // list (or light the badge) where it cannot be cleared.
+      final overrides = await _buildPhoneOverrides(
+        items: [own, hers],
+        divers: divers.take(1).toList(),
+        activeDiverId: 'owner',
+        filter: const EquipmentFilterState(
+          owner: EquipmentOwnerFilter.sharedWithMe,
+        ),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const EquipmentListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('My BCD'), findsOneWidget);
+      expect(find.text('Her Reg'), findsOneWidget);
+      expect(_badgeIsVisible(tester), isFalse);
+    });
+
+    testWidgets('no chips with a single profile', (tester) async {
+      await pump(tester, divers.take(1).toList());
+      expect(
+        find.byKey(const ValueKey('equipment-owner-chip-wife')),
+        findsNothing,
+      );
+    });
+  });
+
+  group('empty state beside an open form (issue #3192)', () {
+    Future<GoRouter> pumpEmptyInRouter(
+      WidgetTester tester, {
+      required double width,
+    }) async {
+      final overrides = await _buildOverrides(equipment: []);
+      return pumpListInCreateRouter(
+        tester,
+        overrides: overrides,
+        content: const EquipmentListContent(showAppBar: true),
+        listPath: '/equipment',
+        width: width,
+      );
+    }
+
+    testWidgets('the create button opens the full-page form when narrow', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 900);
+
+      await tester.tap(find.text('Add Your First Equipment'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/equipment/new');
+      expect(find.text(kFullPageCreateForm), findsOneWidget);
+    });
+
+    testWidgets('the create button opens the pane form beside a detail pane', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 1400);
+
+      await tester.tap(find.text('Add Your First Equipment'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/equipment?mode=new');
+    });
+
+    Future<void> pumpEmpty(
+      WidgetTester tester, {
+      required bool isFormOpen,
+    }) async {
+      final overrides = await _buildOverrides(equipment: []);
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          // The assertions match English button labels.
+          locale: const Locale('en'),
+          child: MasterDetailFormScope(
+            isFormOpen: isFormOpen,
+            child: const EquipmentListContent(showAppBar: true),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('offers the create button when no form is open', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: false);
+
+      expect(find.text('Add Your First Equipment'), findsOneWidget);
+    });
+
+    testWidgets('hides the create button while a form is open beside it', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: true);
+
+      // Beside an open form it reads as the form's submit button, but it only
+      // reopens the create form, so nothing gets saved (issue #3192).
+      expect(find.text('Add Your First Equipment'), findsNothing);
+    });
+  });
+}
+
+/// Records which ids each bulk action reached the notifier with.
+class _CapturingEquipmentNotifier
+    extends StateNotifier<AsyncValue<List<EquipmentItem>>>
+    implements EquipmentListNotifier {
+  _CapturingEquipmentNotifier() : super(const AsyncValue.data([]));
+
+  final deleted = <String>[];
+
+  /// Ids whose delete is refused, as for a shared item (issue #2046).
+  final refused = <String>{};
+  final retired = <String>[];
+  final reactivated = <String>[];
+
+  @override
+  Future<bool> deleteEquipment(String id) async {
+    if (refused.contains(id)) return false;
+    deleted.add(id);
+    return true;
+  }
+
+  @override
+  Future<void> retireEquipment(String id) async => retired.add(id);
+
+  @override
+  Future<void> reactivateEquipment(String id) async => reactivated.add(id);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+/// Serves the gear arrangement from memory so a test can drive the real
+/// arrangement notifier through the sort sheet.
+class _FakeArrangementRepository extends AppSettingsRepository {
+  _FakeArrangementRepository() {
+    addTearDown(_ticks.close);
+  }
+
+  final StreamController<void> _ticks = StreamController<void>();
+  EquipmentArrangement? _stored;
+
+  /// When set, the read waits on this, so a test can land the stored
+  /// arrangement after the first frame, as a slow launch read would.
+  Completer<EquipmentArrangement?>? heldRead;
+
+  @override
+  Future<EquipmentArrangement?> getEquipmentArrangement() async =>
+      heldRead != null ? heldRead!.future : _stored;
+
+  @override
+  Future<void> setEquipmentArrangement(EquipmentArrangement arrangement) async {
+    _stored = arrangement;
+  }
+
+  @override
+  Stream<void> watchSettingsChanges() => _ticks.stream;
+}
+
+class _BrokenEquipmentRepository extends EquipmentRepository {
+  @override
+  Future<List<EquipmentItem>> getEquipmentByIds(List<String> ids) async =>
+      throw StateError('database is locked');
+}
+
+/// Records bulk shares instead of writing them (issue #2046).
+class _RecordingShareRepository extends EquipmentShareRepository {
+  final calls =
+      <
+        ({
+          List<String> equipmentIds,
+          List<String> diverIds,
+          String actingDiverId,
+        })
+      >[];
+
+  @override
+  Future<EquipmentShareResult> shareMany({
+    required List<String> equipmentIds,
+    required List<String> diverIds,
+    required String actingDiverId,
+  }) async {
+    calls.add((
+      equipmentIds: equipmentIds,
+      diverIds: diverIds,
+      actingDiverId: actingDiverId,
+    ));
+    return const EquipmentShareResult(added: 1, itemsChanged: 1);
+  }
 }

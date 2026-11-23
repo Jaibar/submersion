@@ -1,0 +1,638 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart'
+    hide Dive, DiveTank, Diver;
+import 'package:submersion/features/dive_computer/data/services/planned_dive_fill_service.dart';
+import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository dives;
+  late PlannedDiveFillService service;
+  late String eric;
+  const computerId = 'computer-1';
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    dives = DiveRepository();
+    service = PlannedDiveFillService();
+    eric = (await DiverRepository().createDiver(
+      Diver(
+        id: '',
+        name: 'Eric',
+        isDefault: true,
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      ),
+    )).id;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db
+        .into(db.diveComputers)
+        .insert(
+          DiveComputersCompanion(
+            id: const Value(computerId),
+            name: const Value('Perdix'),
+            manufacturer: const Value('Shearwater'),
+            model: const Value('Perdix'),
+            serialNumber: const Value('SN-1'),
+            createdAt: Value(now),
+            updatedAt: Value(now),
+          ),
+        );
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  DownloadedDive download({
+    List<DownloadedTank>? tanks,
+    ComputerTissueSnapshot? computerTissue,
+    bool reportsDecoSettings = true,
+    DateTime? startTime,
+    double? surfacePressure,
+  }) => DownloadedDive(
+    startTime: startTime ?? DateTime(2026, 6, 1, 9, 3),
+    durationSeconds: 2700,
+    maxDepth: 18.4,
+    avgDepth: 11.2,
+    minTemperature: 17,
+    surfacePressure: surfacePressure,
+    profile: [
+      for (var t = 0; t <= 2700; t += 30)
+        ProfileSample(timeSeconds: t, depth: t < 2400 ? 15 : 3),
+    ],
+    tanks:
+        tanks ??
+        const [
+          DownloadedTank(
+            index: 0,
+            o2Percent: 32,
+            startPressure: 200,
+            endPressure: 60,
+            volumeLiters: 12,
+          ),
+        ],
+    events: const [],
+    rawFingerprint: Uint8List.fromList([9, 9]),
+    gfLow: reportsDecoSettings ? 40 : null,
+    gfHigh: reportsDecoSettings ? 85 : null,
+    decoAlgorithm: reportsDecoSettings ? 'Buhlmann ZHL-16C' : null,
+    computerTissue: computerTissue,
+  );
+
+  Future<Dive> plannedDive({DateTime? dateTime}) => dives.createPlannedDive(
+    Dive(
+      id: '',
+      diverId: eric,
+      dateTime: dateTime ?? DateTime(2026, 6, 1, 9),
+      surfacePressure: 0.9,
+      name: 'Blue Hole plan',
+      notes: 'bring the camera',
+      rating: 4,
+      maxDepth: 20,
+      waterTemp: 20,
+      tanks: const [DiveTank(id: '', gasMix: GasMix(o2: 32), volume: 12)],
+      profile: const [
+        DiveProfilePoint(timestamp: 0, depth: 0),
+        DiveProfilePoint(timestamp: 600, depth: 20),
+      ],
+    ),
+  );
+
+  test(
+    'fill keeps human facts, takes measured facts, promotes and numbers',
+    () async {
+      await dives.createDive(
+        Dive(
+          id: '',
+          diverId: eric,
+          dateTime: DateTime(2026, 5, 1),
+          diveNumber: 41,
+        ),
+      );
+      final planned = await plannedDive();
+
+      final outcome = await service.fill(
+        targetDiveId: planned.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      final filled = await dives.getDiveById(planned.id);
+      expect(filled?.isPlanned, isFalse);
+      expect(filled?.diveNumber, 42);
+      expect(outcome.assignedDiveNumber, 42);
+      // human
+      expect(filled?.notes, 'bring the camera');
+      expect(filled?.rating, 4);
+      expect(filled?.name, 'Blue Hole plan');
+      // measured
+      expect(filled?.maxDepth, closeTo(18.4, 0.01));
+      expect(
+        filled?.entryTime?.millisecondsSinceEpoch,
+        DateTime(2026, 6, 1, 9, 3).millisecondsSinceEpoch,
+      );
+      expect(filled?.waterTemp, 17);
+      expect(filled?.gradientFactorLow, 40);
+      expect(filled?.computerId, computerId);
+      expect(filled?.profile.length, greaterThan(50));
+    },
+  );
+
+  // Marks the diver made on the plan (issue #4909): the download replaces
+  // the measured values, so their marks go; a value it leaves stays marked.
+  test('fill clears the marks of the values it measured', () async {
+    final planned = await plannedDive();
+    await db.customStatement(
+      'UPDATE dives SET gradient_factor_low = 30, hand_set_fields = '
+      "'[\"gradientFactorLow\",\"heartRate\",\"maxDepth\",\"waterTemp\"]' "
+      'WHERE id = ?',
+      [planned.id],
+    );
+
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(reportsDecoSettings: false),
+      computerId: computerId,
+    );
+
+    final row = await (db.select(
+      db.dives,
+    )..where((t) => t.id.equals(planned.id))).getSingle();
+    expect(row.handSetFields, '["gradientFactorLow","heartRate"]');
+    expect(row.gradientFactorLow, 30);
+  });
+
+  test(
+    'fill takes the surface pressure the computer measured (#4208)',
+    () async {
+      final planned = await plannedDive();
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(surfacePressure: 0.961),
+        computerId: computerId,
+      );
+
+      expect((await dives.getDiveById(planned.id))?.surfacePressure, 0.961);
+    },
+  );
+
+  test(
+    'fill keeps the planned surface pressure when the computer has none',
+    () async {
+      final planned = await plannedDive();
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      expect((await dives.getDiveById(planned.id))?.surfacePressure, 0.9);
+    },
+  );
+
+  // Dive times are the wall clock flagged UTC, in the app and so here: a local
+  // DateTime reads back as another day in a zone far from UTC.
+  group('the date of a fill', () {
+    final plannedAt = DateTime.utc(2026, 6, 1, 9);
+
+    test('a same-day fill keeps the date as planned', () async {
+      final planned = await plannedDive(dateTime: plannedAt);
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(startTime: DateTime.utc(2026, 6, 1, 9, 3)),
+        computerId: computerId,
+      );
+
+      final filled = await dives.getDiveById(planned.id);
+      expect(
+        filled?.dateTime.millisecondsSinceEpoch,
+        plannedAt.millisecondsSinceEpoch,
+      );
+    });
+
+    test('a next-day fill moves the dive to the day it was dived', () async {
+      final planned = await plannedDive(dateTime: plannedAt);
+      final nextDay = DateTime.utc(2026, 6, 2, 0, 30);
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(startTime: nextDay),
+        computerId: computerId,
+      );
+
+      final filled = await dives.getDiveById(planned.id);
+      expect(
+        filled?.dateTime.millisecondsSinceEpoch,
+        nextDay.millisecondsSinceEpoch,
+      );
+    });
+
+    test('undoing a next-day fill puts the date back', () async {
+      final planned = await plannedDive(dateTime: plannedAt);
+
+      final outcome = await service.fill(
+        targetDiveId: planned.id,
+        dive: download(startTime: DateTime.utc(2026, 6, 2, 0, 30)),
+        computerId: computerId,
+      );
+      await service.undo(outcome);
+
+      final restored = await dives.getDiveById(planned.id);
+      expect(restored?.isPlanned, isTrue);
+      expect(
+        restored?.dateTime.millisecondsSinceEpoch,
+        plannedAt.millisecondsSinceEpoch,
+      );
+    });
+  });
+
+  test('fill takes the tissue state the computer reported', () async {
+    const tissue = ComputerTissueSnapshot(
+      end: ComputerTissueState(gf99Percent: 62, surfaceGfPercent: 48),
+    );
+    final planned = await plannedDive();
+
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(computerTissue: tissue),
+      computerId: computerId,
+    );
+
+    final filled = await dives.getDiveById(planned.id);
+    expect(filled?.computerTissue, tissue);
+  });
+
+  test(
+    'fill keeps the planned tissue state a computer does not report',
+    () async {
+      const tissue = ComputerTissueSnapshot(
+        end: ComputerTissueState(gf99Percent: 55, surfaceGfPercent: 40),
+      );
+      final planned = await dives.createPlannedDive(
+        Dive(
+          id: '',
+          diverId: eric,
+          dateTime: DateTime(2026, 6, 1, 9),
+          maxDepth: 20,
+          computerTissue: tissue,
+          tanks: const [DiveTank(id: '', gasMix: GasMix(o2: 32), volume: 12)],
+        ),
+      );
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      final filled = await dives.getDiveById(planned.id);
+      expect(filled?.computerTissue, tissue);
+    },
+  );
+
+  test(
+    'fill keeps the planned deco settings a computer does not report',
+    () async {
+      final planned = await dives.createPlannedDive(
+        Dive(
+          id: '',
+          diverId: eric,
+          dateTime: DateTime(2026, 6, 1, 9),
+          maxDepth: 20,
+          gradientFactorLow: 30,
+          gradientFactorHigh: 70,
+          decoAlgorithm: 'buhlmann',
+          decoConservatism: 2,
+          tanks: const [DiveTank(id: '', gasMix: GasMix(o2: 32), volume: 12)],
+        ),
+      );
+
+      await service.fill(
+        targetDiveId: planned.id,
+        dive: download(reportsDecoSettings: false),
+        computerId: computerId,
+      );
+
+      final filled = await dives.getDiveById(planned.id);
+      expect(filled?.gradientFactorLow, 30);
+      expect(filled?.gradientFactorHigh, 70);
+      expect(filled?.decoAlgorithm, 'buhlmann');
+      expect(filled?.decoConservatism, 2);
+    },
+  );
+
+  test('the sketched profile is replaced, not merged', () async {
+    final planned = await plannedDive();
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(),
+      computerId: computerId,
+    );
+    final series = await ProfileSeriesRepository().getRowsForDives([
+      planned.id,
+    ]);
+    expect(series, hasLength(1));
+    expect(series.single.computerId, computerId);
+  });
+
+  group('a planned gas switch', () {
+    Future<Dive> withSwitch() async {
+      final planned = await plannedDive();
+      final stored = await dives.getDiveById(planned.id);
+      await dives.insertGasSwitches([
+        GasSwitch(
+          id: '',
+          diveId: planned.id,
+          timestamp: 300,
+          tankId: stored!.tanks.single.id,
+          depth: 6,
+          createdAt: DateTime(2026),
+        ),
+      ]);
+      return planned;
+    }
+
+    test(
+      "goes with the plan's profile when a download fills the dive",
+      () async {
+        final planned = await withSwitch();
+
+        await service.fill(
+          targetDiveId: planned.id,
+          dive: download(),
+          computerId: computerId,
+        );
+
+        final switches = await dives.getGasSwitchesForDive(planned.id);
+        expect(switches.where((s) => s.gasSwitch.timestamp == 300), isEmpty);
+      },
+    );
+
+    test('comes back when the download is undone', () async {
+      final planned = await withSwitch();
+      final outcome = await service.fill(
+        targetDiveId: planned.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      await service.undo(outcome);
+
+      final switches = await dives.getGasSwitchesForDive(planned.id);
+      expect(switches.map((s) => s.gasSwitch.timestamp), [300]);
+    });
+  });
+
+  test('planned tanks are matched by gas mix and receive pressures', () async {
+    final planned = await plannedDive();
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(),
+      computerId: computerId,
+    );
+    final filled = await dives.getDiveById(planned.id);
+    expect(filled?.tanks, hasLength(1));
+    expect(filled?.tanks.single.startPressure, 200);
+    expect(filled?.tanks.single.endPressure, 60);
+    expect(filled?.tanks.single.volume, 12);
+  });
+
+  test('an unmatched downloaded tank is added', () async {
+    final planned = await plannedDive();
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(
+        tanks: const [
+          DownloadedTank(index: 0, o2Percent: 32, startPressure: 200),
+          DownloadedTank(index: 1, o2Percent: 50, startPressure: 180),
+        ],
+      ),
+      computerId: computerId,
+    );
+    final filled = await dives.getDiveById(planned.id);
+    expect(filled?.tanks, hasLength(2));
+    expect(filled?.tanks.map((t) => t.gasMix.o2), containsAll([32.0, 50.0]));
+  });
+
+  test('an unmatched downloaded tank keeps its role and where it came '
+      'from (#2595)', () async {
+    final planned = await plannedDive();
+    final outcome = await service.fill(
+      targetDiveId: planned.id,
+      dive: download(
+        tanks: const [
+          DownloadedTank(index: 0, o2Percent: 32, startPressure: 200),
+          DownloadedTank(
+            index: 1,
+            o2Percent: 100,
+            startPressure: 180,
+            role: 'oxygenSupply',
+            roleSource: TankRoleSource.transmitterName,
+            transmitterSerial: '180777',
+          ),
+        ],
+      ),
+      computerId: computerId,
+    );
+    // The import summary reads this to explain the role (Copilot on #2749).
+    expect(outcome.nameDerivedRoleTanks, 1);
+    final filled = await dives.getDiveById(planned.id);
+    final oxygen = filled!.tanks.singleWhere((t) => t.gasMix.o2 == 100);
+    expect(oxygen.role, TankRole.oxygenSupply);
+    expect(oxygen.roleSource, TankRoleSource.transmitterName);
+    final planned32 = filled.tanks.singleWhere((t) => t.gasMix.o2 == 32);
+    expect(planned32.role, TankRole.backGas, reason: 'the plan keeps its own');
+  });
+
+  test('a data source with the fingerprint exists after the fill', () async {
+    final planned = await plannedDive();
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(),
+      computerId: computerId,
+    );
+    final keys = await dives.getSourceKeysByDiveId();
+    expect(keys[planned.id], contains('0909'));
+  });
+
+  test('a sibling dive at the same minute is never touched', () async {
+    // Another profile's dive at 09:03 would win the time match; the fill
+    // names its target, so it must not.
+    final sibling = await dives.createDive(
+      Dive(
+        id: '',
+        dateTime: DateTime(2026, 6, 1, 9, 3),
+        diveNumber: 5,
+        notes: 'sibling',
+      ),
+    );
+    final planned = await plannedDive();
+    await service.fill(
+      targetDiveId: planned.id,
+      dive: download(),
+      computerId: computerId,
+    );
+    expect((await dives.getDiveById(sibling.id))?.profile, isEmpty);
+    expect((await dives.getDiveById(planned.id))?.profile, isNotEmpty);
+  });
+
+  test('undo restores the planned dive', () async {
+    final planned = await plannedDive();
+    final before = await dives.getDiveById(planned.id);
+    final outcome = await service.fill(
+      targetDiveId: planned.id,
+      dive: download(),
+      computerId: computerId,
+    );
+
+    await service.undo(outcome);
+
+    final after = await dives.getDiveById(planned.id);
+    expect(after?.isPlanned, isTrue);
+    expect(after?.diveNumber, isNull);
+    expect(after?.maxDepth, before?.maxDepth);
+    expect(after?.profile.length, before?.profile.length);
+    expect(after?.tanks.single.startPressure, isNull);
+    final sources = await (db.select(
+      db.diveDataSources,
+    )..where((t) => t.diveId.equals(planned.id))).get();
+    expect(sources, isEmpty);
+  });
+
+  test('refuses a dive that is not planned', () async {
+    final logged = await dives.createDive(
+      Dive(id: '', diverId: eric, dateTime: DateTime(2026, 6, 1, 9)),
+    );
+    await expectLater(
+      service.fill(
+        targetDiveId: logged.id,
+        dive: download(),
+        computerId: computerId,
+      ),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test(
+    "a planned dive's courses survive a fill and its undo (#2515)",
+    () async {
+      for (final (id, start) in [('c1', 1), ('c2', 2)]) {
+        await db
+            .into(db.courses)
+            .insert(
+              CoursesCompanion(
+                id: Value(id),
+                diverId: Value(eric),
+                name: Value(id),
+                agency: const Value('tdi'),
+                startDate: Value(start),
+                createdAt: const Value(0),
+                updatedAt: const Value(0),
+              ),
+            );
+      }
+      final planned = await dives.createPlannedDive(
+        Dive(
+          id: '',
+          diverId: eric,
+          dateTime: DateTime(2026, 6, 1, 9),
+          courseIds: const ['c1', 'c2'],
+        ),
+      );
+      Future<Set<String>> junction() async => {
+        for (final r in await (db.select(
+          db.diveCourses,
+        )..where((t) => t.diveId.equals(planned.id))).get())
+          r.courseId,
+      };
+
+      final outcome = await service.fill(
+        targetDiveId: planned.id,
+        dive: download(),
+        computerId: computerId,
+      );
+      expect(await junction(), {'c1', 'c2'});
+
+      await service.undo(outcome);
+      expect(await junction(), {'c1', 'c2'});
+    },
+  );
+
+  group('a draft (#637)', () {
+    Future<Dive> draftDive() => dives.createDive(
+      Dive(
+        id: '',
+        diverId: eric,
+        dateTime: DateTime(2026, 6, 1, 9),
+        entryTime: DateTime(2026, 6, 1, 9),
+        exitTime: DateTime(2026, 6, 1, 9, 50),
+        entryLocation: const GeoPoint(27.9, 34.3),
+        exitLocation: const GeoPoint(27.91, 34.31),
+        notes: 'turtle at the wall',
+        isDraft: true,
+      ),
+    );
+
+    test('fill keeps what the diver typed and the tap positions, takes the '
+        'readings, and numbers it', () async {
+      await dives.createDive(
+        Dive(
+          id: '',
+          diverId: eric,
+          dateTime: DateTime(2026, 5, 1),
+          diveNumber: 41,
+        ),
+      );
+      final draft = await draftDive();
+
+      await service.fill(
+        targetDiveId: draft.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      final filled = (await dives.getDiveById(draft.id))!;
+      expect(filled.isDraft, isFalse);
+      expect(filled.isPlanned, isFalse);
+      expect(filled.diveNumber, 42);
+      expect(filled.notes, 'turtle at the wall');
+      expect(filled.entryLocation, const GeoPoint(27.9, 34.3));
+      expect(filled.exitLocation, const GeoPoint(27.91, 34.31));
+      expect(filled.maxDepth, 18.4);
+      expect(filled.runtime, const Duration(seconds: 2700));
+      expect(filled.computerId, computerId);
+    });
+
+    test('undo puts the draft back', () async {
+      final draft = await draftDive();
+      final outcome = await service.fill(
+        targetDiveId: draft.id,
+        dive: download(),
+        computerId: computerId,
+      );
+
+      await service.undo(outcome);
+
+      final restored = (await dives.getDiveById(draft.id))!;
+      expect(restored.isDraft, isTrue);
+      expect(restored.diveNumber, isNull);
+      expect(restored.maxDepth, isNull);
+    });
+  });
+}

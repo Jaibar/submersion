@@ -1,0 +1,333 @@
+import 'package:drift/drift.dart' hide isNull;
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/core/services/sync/sync_service.dart';
+
+import '../../../helpers/test_database.dart';
+
+/// Guards `SyncService.parentRefs` against the live schema. The merge applies
+/// remote records inside a deferred-FK transaction; if a synced child has a
+/// foreign key to a deletable parent that is NOT listed in `parentRefs`, a
+/// peer's live child of a locally-deleted parent dangles its FK and the whole
+/// sync fails at COMMIT (SqliteException 787). This test fails the moment such
+/// an FK exists without a guard, or with the wrong nullability (skip vs.
+/// clear-the-reference).
+void main() {
+  // SQL table name -> sync entityType, for every entity the merge applies
+  // (mirrors SyncService's mergeOrder). `diveProfiles` / `tankPressureProfiles`
+  // are deliberately absent: their tables (`dive_profiles` /
+  // `tank_pressure_profiles`) were dropped in v183, so there is no live FK
+  // for this test to check; SyncService.parentRefs has no entry for either
+  // any more (an inbound row now stages in a per-connection TEMP table with
+  // no declared FK, and the packer's own orphan check does the equivalent
+  // guard at pack time).
+  const syncedTables = <String, String>{
+    'divers': 'divers',
+    'dives': 'dives',
+    'diver_settings': 'diverSettings',
+    'buddies': 'buddies',
+    'dive_centers': 'diveCenters',
+    'dive_center_gear_notes': 'diveCenterGearNotes',
+    'trips': 'trips',
+    'liveaboard_detail_records': 'liveaboardDetails',
+    'trip_itinerary_days': 'itineraryDays',
+    'trip_day_weather': 'tripDayWeather',
+    'trip_cylinders': 'tripCylinders',
+    'trip_cylinder_events': 'tripCylinderEvents',
+    'checklist_templates': 'checklistTemplates',
+    'checklist_template_sections': 'checklistTemplateSections',
+    'checklist_template_items': 'checklistTemplateItems',
+    'trip_checklists': 'tripChecklists',
+    'trip_checklist_sections': 'tripChecklistSections',
+    'trip_checklist_items': 'tripChecklistItems',
+    'equipment': 'equipment',
+    'equipment_sets': 'equipmentSets',
+    'equipment_set_items': 'equipmentSetItems',
+    'equipment_set_includes': 'equipmentSetIncludes',
+    'equipment_set_weight_presets': 'equipmentSetWeightPresets',
+    'equipment_set_cylinder_configs': 'equipmentSetCylinderConfigs',
+    'equipment_set_geofences': 'equipmentSetGeofences',
+    'cylinder_configs': 'cylinderConfigs',
+    'cylinder_config_items': 'cylinderConfigItems',
+    'quality_findings': 'qualityFindings',
+    'dive_types': 'diveTypes',
+    'custom_certification_agencies': 'customCertificationAgencies',
+    'custom_certification_levels': 'customCertificationLevels',
+    'tank_presets': 'tankPresets',
+    'weight_presets': 'weightPresets',
+    'weight_preset_entries': 'weightPresetEntries',
+    'transmitters': 'transmitters',
+    'cylinder_fills': 'cylinderFills',
+    'connection_maps': 'connectionMaps',
+    'saved_queries': 'savedQueries',
+    'rules': 'rules',
+    'rule_runs': 'ruleRuns',
+    'rule_run_changes': 'ruleRunChanges',
+    'insight_observation_dismissals': 'insightObservationDismissals',
+    'dive_computers': 'diveComputers',
+    'dive_computer_connections': 'diveComputerConnections',
+    'shared_library_memberships': 'sharedLibraryMemberships',
+    'library_site_notes': 'librarySiteNotes',
+    'species': 'species',
+    'tags': 'tags',
+    'courses': 'courses',
+    'dive_sites': 'diveSites',
+    'dive_tanks': 'diveTanks',
+    'dive_weights': 'diveWeights',
+    'dive_equipment': 'diveEquipment',
+    'dive_tags': 'diveTags',
+    'dive_buddies': 'diveBuddies',
+    'dive_profile_events': 'diveProfileEvents',
+    'gas_switches': 'gasSwitches',
+    'dive_custom_fields': 'diveCustomFields',
+    'imported_files': 'importedFiles',
+    'dive_data_sources': 'diveDataSources',
+    'site_species': 'siteSpecies',
+    'media_species': 'mediaSpecies',
+    'media_people': 'mediaPeople',
+    'media_identification_runs': 'mediaIdentificationRuns',
+    'media_identifications': 'mediaIdentifications',
+    'media_identification_crops': 'mediaIdentificationCrops',
+    'site_features': 'siteFeatures',
+    'csv_presets': 'csvPresets',
+    'view_configs': 'viewConfigs',
+    'field_presets': 'fieldPresets',
+    'tide_records': 'tideRecords',
+    'dive_health_records': 'diveHealthRecords',
+    'sightings': 'sightings',
+    'incidents': 'incidents',
+    'certifications': 'certifications',
+    'documents': 'documents',
+    'document_pages': 'documentPages',
+    'service_records': 'serviceRecords',
+    'settings': 'settings',
+    'media': 'media',
+    'media_enrichment': 'mediaEnrichment',
+    'media_smart_albums': 'mediaSmartAlbums',
+    'course_requirements': 'courseRequirements',
+    'course_requirement_dives': 'courseRequirementDives',
+    'emergency_chambers': 'emergencyChambers',
+    'media_stores': 'mediaStores',
+    'connected_accounts': 'connectedAccounts',
+    'media_subscriptions': 'mediaSubscriptions',
+    'service_kinds': 'serviceKinds',
+    'service_schedules': 'serviceSchedules',
+    'certification_currency_rules': 'certificationCurrencyRules',
+    'certification_currency_prefs': 'certificationCurrencyPrefs',
+    'certification_currency_events': 'certificationCurrencyEvents',
+    'gps_tracks': 'gpsTracks',
+    'nav_tracks': 'navTracks',
+    'diver_weight_entries': 'diverWeightEntries',
+    'dive_roles': 'diveRoles',
+    'equipment_attributes': 'equipmentAttributes',
+    'equipment_components': 'equipmentComponents',
+    'cylinder_pairings': 'cylinderPairings',
+    'equipment_observations': 'equipmentObservations',
+    'equipment_findings': 'equipmentFindings',
+    'dive_dive_types': 'diveDiveTypes',
+    'dive_courses': 'diveCourses',
+    'site_types': 'siteTypes',
+    'site_site_types': 'siteSiteTypes',
+    'dive_diver_roles': 'diveDiverRoles',
+    'dive_buddy_roles': 'diveBuddyRoles',
+    'site_tags': 'siteTags',
+    'equipment_tags': 'equipmentTags',
+    'media_tags': 'mediaTags',
+    'document_tags': 'documentTags',
+    'equipment_shares': 'equipmentShares',
+    'trip_equipment': 'tripEquipment',
+    'trip_hides': 'tripHides',
+    'site_hides': 'siteHides',
+    'trip_shares': 'tripShares',
+    'site_shares': 'siteShares',
+    'equipment_ownership_events': 'equipmentOwnershipEvents',
+    'equipment_locations': 'equipmentLocations',
+    'equipment_location_moves': 'equipmentLocationMoves',
+    'dive_safety_reviews': 'diveSafetyReviews',
+    'dive_safety_findings': 'diveSafetyFindings',
+    'dive_plan_series': 'divePlanSeries',
+    'dive_plans': 'divePlans',
+    'dive_plan_tanks': 'divePlanTanks',
+    'dive_plan_segments': 'divePlanSegments',
+    'dive_plan_missions': 'divePlanMissions',
+    'dive_plan_mission_legs': 'divePlanMissionLegs',
+    'dive_plan_mission_members': 'divePlanMissionMembers',
+    'dive_plan_equipment': 'divePlanEquipment',
+    'dive_scenarios': 'diveScenarios',
+    'pre_dive_checklist_templates': 'preDiveChecklistTemplates',
+    'pre_dive_checklist_template_sections': 'preDiveChecklistTemplateSections',
+    'pre_dive_checklist_template_items': 'preDiveChecklistTemplateItems',
+    'pre_dive_sessions': 'preDiveSessions',
+    'pre_dive_session_sections': 'preDiveSessionSections',
+    'pre_dive_session_items': 'preDiveSessionItems',
+    'dive_profile_series': 'diveProfileSeries',
+    'tank_pressure_series': 'tankPressureSeries',
+  };
+
+  // Parent table -> entityType for parents a user can delete (and thus
+  // tombstone). Divers are excluded: each of a deleted diver's rows carries
+  // its own fate instead. DiverRepository.deleteDiverWithReassignment
+  // tombstones every row it deletes and stamps the ones it reassigns, and
+  // DiverMergeRepository repoints them;
+  // SyncDataSerializer.repairDanglingForeignKeys clears a diverId that still
+  // dangles.
+  const deletableParents = <String, String>{
+    'dives': 'dives',
+    'dive_sites': 'diveSites',
+    'trips': 'trips',
+    'trip_cylinders': 'tripCylinders',
+    'courses': 'courses',
+    'equipment': 'equipment',
+    'equipment_sets': 'equipmentSets',
+    'equipment_locations': 'equipmentLocations',
+    'buddies': 'buddies',
+    'tags': 'tags',
+    'dive_types': 'diveTypes',
+    'site_types': 'siteTypes',
+    'tank_presets': 'tankPresets',
+    'weight_presets': 'weightPresets',
+    'cylinder_configs': 'cylinderConfigs',
+    'transmitters': 'transmitters',
+    'cylinder_fills': 'cylinderFills',
+    'dive_centers': 'diveCenters',
+    'species': 'species',
+    'dive_computers': 'diveComputers',
+    'checklist_templates': 'checklistTemplates',
+    'media': 'media',
+    'rule_runs': 'ruleRuns',
+    'dive_plan_series': 'divePlanSeries',
+    // Checklist sections (issue #3360): a section is deletable (its items
+    // fall back to no section, ON DELETE SET NULL), so this FK direction
+    // needs checking too. Deliberately not also adding
+    // pre_dive_checklist_templates or pre_dive_sessions here: they were not
+    // in this map before this change, and adding them is a broader,
+    // unrelated completeness fix this plan does not cover.
+    // Checklists (issue #3356): a checklist is deletable (its sections and
+    // items are deleted explicitly alongside it, never via SQL cascade;
+    // see TripChecklistsRepository.deleteChecklist), so this FK direction
+    // needs checking too.
+    'trip_checklists': 'tripChecklists',
+    'trip_checklist_sections': 'tripChecklistSections',
+    'checklist_template_sections': 'checklistTemplateSections',
+    'pre_dive_checklist_template_sections': 'preDiveChecklistTemplateSections',
+    'pre_dive_session_sections': 'preDiveSessionSections',
+  };
+
+  String camel(String snake) {
+    final parts = snake.split('_');
+    return parts.first +
+        parts
+            .skip(1)
+            .map((p) => p.isEmpty ? p : p[0].toUpperCase() + p.substring(1))
+            .join();
+  }
+
+  test('parentRefs covers every synced FK to a deletable parent', () async {
+    final db = await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    final missing = <String>[];
+    final wrongNullable = <String>[];
+
+    for (final entry in syncedTables.entries) {
+      final table = entry.key;
+      final childEntity = entry.value;
+
+      final cols = await db
+          .customSelect(
+            'SELECT * FROM pragma_table_info(?)',
+            variables: [Variable.withString(table)],
+          )
+          .get();
+      expect(
+        cols,
+        isNotEmpty,
+        reason: 'synced table "$table" does not exist (typo in this test?)',
+      );
+      final notNull = {
+        for (final c in cols)
+          c.read<String>('name'): (c.data['notnull'] as int? ?? 0) == 1,
+      };
+
+      final fks = await db
+          .customSelect(
+            'SELECT * FROM pragma_foreign_key_list(?)',
+            variables: [Variable.withString(table)],
+          )
+          .get();
+
+      for (final fk in fks) {
+        final parentTable = fk.read<String>('table');
+        final parentEntity = deletableParents[parentTable];
+        if (parentEntity == null) continue; // parent not user-deletable
+
+        final field = camel(fk.read<String>('from'));
+        final nullable = !(notNull[fk.read<String>('from')] ?? false);
+
+        final refs = SyncService.parentRefs[childEntity] ?? const [];
+        final match = refs
+            .where((r) => r.field == field && r.parent == parentEntity)
+            .toList();
+
+        if (match.isEmpty) {
+          missing.add(
+            '$childEntity.$field -> $parentEntity (nullable=$nullable)',
+          );
+        } else if (match.first.nullable != nullable) {
+          wrongNullable.add(
+            '$childEntity.$field -> $parentEntity: parentRefs says '
+            'nullable=${match.first.nullable}, schema says $nullable',
+          );
+        }
+      }
+    }
+
+    expect(
+      missing,
+      isEmpty,
+      reason:
+          'SyncService.parentRefs is missing FK guards. A deleted parent would '
+          'dangle these children and fail the deferred-FK COMMIT:\n'
+          '${missing.join('\n')}',
+    );
+    expect(
+      wrongNullable,
+      isEmpty,
+      reason:
+          'Nullability mismatch (decides skip vs. clear-the-reference):\n'
+          '${wrongNullable.join('\n')}',
+    );
+  });
+
+  test('syncedTables covers every merge-applied entity (no silent drift)', () {
+    // The FK guard above only checks tables listed in syncedTables. If a new
+    // synced entity is added to SyncService.entityHasUpdatedAt but not here,
+    // its FKs would go unverified -- so keep this map complete.
+    final covered = syncedTables.values.toSet();
+    final missing = SyncService.entityHasUpdatedAt.keys
+        .where((e) => !covered.contains(e))
+        .toList();
+    expect(
+      missing,
+      isEmpty,
+      reason:
+          'These merge-applied entities are missing from syncedTables, so '
+          'their FK guards are unverified:\n${missing.join('\n')}',
+    );
+  });
+
+  test('alsoClearedWithParent only names declared set-null references', () {
+    // A key that matches no nullable parentRefs entry would never be read,
+    // silently leaving its fields set after the parent is tombstoned.
+    for (final entity in SyncService.alsoClearedWithParent.entries) {
+      final refs = SyncService.parentRefs[entity.key] ?? const [];
+      for (final field in entity.value.keys) {
+        expect(
+          refs.any((r) => r.field == field && r.nullable),
+          isTrue,
+          reason: '${entity.key}.$field is not a nullable parentRefs entry',
+        );
+      }
+    }
+  });
+}

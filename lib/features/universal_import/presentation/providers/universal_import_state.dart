@@ -1,13 +1,17 @@
 import 'dart:typed_data';
 
 import 'package:submersion/features/universal_import/data/models/detection_result.dart';
+import 'package:submersion/features/universal_import/data/models/diver_target.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_options.dart';
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/domain/services/import_media_resolver.dart';
+import 'package:submersion/features/universal_import/data/models/picked_import_file.dart';
 import 'package:submersion/features/universal_import/data/csv/models/parsed_csv.dart';
 import 'package:submersion/features/universal_import/data/csv/presets/csv_preset.dart';
-import 'package:submersion/features/universal_import/data/services/import_duplicate_checker.dart';
+import 'package:submersion/features/universal_import/data/models/garmin_import_progress.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_device_importer.dart';
 
 // ============================================================================
 // Wizard Steps
@@ -35,11 +39,23 @@ class UniversalImportState {
     this.isLoading = false,
     this.isImporting = false,
     this.error,
-    this.fileBytes,
-    this.fileName,
+    this.files = const [],
+    this.photoPathsByBaseName = const {},
+    this.unmatchedPhotoCount = 0,
+    this.photoFolderPath,
+    this.bundledPhotoFolderPath,
+    this.photoResolution,
+    this.photosSkipped = false,
+    this.remotePhotoCount = 0,
+    this.zipTempDirPaths = const [],
     this.additionalFileBytes,
     this.additionalFileName,
     this.detectionResult,
+    this.parseCurrent = 0,
+    this.parseTotal = 0,
+    this.garminProgress,
+    this.garminNothingNew = false,
+    this.garminPendingMarker,
     this.pendingSourceOverride,
     this.pendingFormatOverride,
     this.detectedCsvPreset,
@@ -47,9 +63,9 @@ class UniversalImportState {
     this.options,
     this.fieldMapping,
     this.payload,
-    this.duplicateResult,
+    this.sourcePayload,
+    this.diverMapping = const {},
     this.selections = const {},
-    this.diveResolutions = const {},
     this.importCounts = const {},
     this.importPhase = '',
     this.importCurrent = 0,
@@ -62,9 +78,86 @@ class UniversalImportState {
   final bool isImporting;
   final String? error;
 
-  /// Raw file bytes (kept for re-parsing if field mapping changes).
-  final Uint8List? fileBytes;
-  final String? fileName;
+  /// The selected files. One element for classic single-file imports;
+  /// multiple for a bulk batch. Path-backed entries drop their bytes after
+  /// detection and re-read them lazily at parse time.
+  final List<PickedImportFile> files;
+
+  /// Photos extracted from an imported ZIP, keyed by the dive file's
+  /// basename (without extension) they belong to. Consumed post-commit by
+  /// the adapter to attach photos to the created dives.
+  final Map<String, List<String>> photoPathsByBaseName;
+
+  /// Photos in an imported ZIP that matched no dive file (surfaced as an
+  /// import warning count).
+  final int unmatchedPhotoCount;
+
+  /// Folder the user picked to resolve a logbook's referenced photos against.
+  /// Null until the Photos step runs, and on mobile where it cannot be picked.
+  final String? photoFolderPath;
+
+  /// Outcome of resolving the payload's media entries against
+  /// [photoFolderPath]. Null when no folder has been picked.
+  final ImportMediaResolution? photoResolution;
+
+  /// Folder the user chose for photos bundled in an imported archive
+  /// ([photoPathsByBaseName]). They are copied out of the archive's temp
+  /// folder into this one and linked from there, so they live somewhere the
+  /// user manages rather than inside the app. Null until chosen.
+  final String? bundledPhotoFolderPath;
+
+  /// True once the user has explicitly chosen to import without photos.
+  /// Distinct from a null [photoResolution], which only means undecided.
+  final bool photosSkipped;
+
+  /// Photos a remote source (divelogs.de) listed for the payload's dives.
+  /// They are downloaded at import time into [bundledPhotoFolderPath], so a
+  /// non-zero count puts the Photos step in front of the user exactly as
+  /// ZIP-bundled photos do.
+  final int remotePhotoCount;
+
+  /// Temp directories holding files extracted from imported ZIP archives.
+  /// The notifier deletes these on reset or when superseded by a new import,
+  /// so extracted dive data and photos do not accumulate on disk.
+  final List<String> zipTempDirPaths;
+
+  /// Batch parse progress (files parsed so far / files pending).
+  final int parseCurrent;
+  final int parseTotal;
+
+  /// Where an import from a connected Garmin watch has got to (issue
+  /// #4223). Null when none is running.
+  final GarminImportProgress? garminProgress;
+
+  /// True after a Garmin download found nothing after the watch's marker,
+  /// so the Import page offers to read every activity again.
+  final bool garminNothingNew;
+
+  /// Saved on the Garmin's computer once the import of its dives completes,
+  /// so the next download starts after them.
+  final GarminPendingMarker? garminPendingMarker;
+
+  /// Raw file bytes for the classic single-file flow (kept for re-parsing if
+  /// field mapping changes). Null for batches: batch parsing re-reads bytes
+  /// per file from [PickedImportFile.path].
+  Uint8List? get fileBytes => files.length == 1 ? files.first.bytes : null;
+
+  /// The single selected file's name; null when nothing is selected or a
+  /// batch is active. Batch UIs render a localized count from
+  /// [selectedFileCount] instead of a hardcoded English label.
+  String? get fileName => files.length == 1 ? files.first.name : null;
+
+  /// Number of files currently selected.
+  int get selectedFileCount => files.length;
+
+  /// True when more than one file was selected (batch import path).
+  bool get isBatch => files.length > 1;
+
+  /// Files awaiting batch parse.
+  List<PickedImportFile> get pendingFiles => [
+    for (final f in files)
+      if (f.status == ImportFileStatus.pending) f,
+  ];
 
   /// Profile CSV bytes for multi-file presets (e.g. Subsurface).
   final Uint8List? additionalFileBytes;
@@ -97,17 +190,19 @@ class UniversalImportState {
   /// Parsed import data (set after parsing).
   final ImportPayload? payload;
 
-  /// Duplicate check results (set before review step).
-  final ImportDuplicateResult? duplicateResult;
+  /// The payload as parsed, kept once the Divers step has split [payload]
+  /// across profiles (issue #1893). Every re-expansion starts from here, so
+  /// walking Back through the step never expands an expansion.
+  final ImportPayload? sourcePayload;
+
+  /// The Divers step's choice per source diver key (issue #1893).
+  final Map<String, DiverTarget> diverMapping;
+
+  /// The parsed payload, whether or not it has been split across profiles.
+  ImportPayload? get parsedPayload => sourcePayload ?? payload;
 
   /// Selected indices per entity type.
   final Map<ImportEntityType, Set<int>> selections;
-
-  /// Per-dive duplicate resolution choices (keyed by dive index).
-  ///
-  /// Only present for dives that were flagged as potential duplicates.
-  /// Absent entries default to [DiveDuplicateResolution.skip].
-  final Map<int, DiveDuplicateResolution> diveResolutions;
 
   /// Import result counts per entity type.
   final Map<ImportEntityType, int> importCounts;
@@ -128,21 +223,41 @@ class UniversalImportState {
     bool? isImporting,
     String? error,
     bool clearError = false,
-    Uint8List? fileBytes,
-    String? fileName,
+    List<PickedImportFile>? files,
+    bool clearFiles = false,
+    Map<String, List<String>>? photoPathsByBaseName,
+    int? unmatchedPhotoCount,
+    String? photoFolderPath,
+    bool clearPhotoFolderPath = false,
+    String? bundledPhotoFolderPath,
+    bool clearBundledPhotoFolderPath = false,
+    ImportMediaResolution? photoResolution,
+    bool clearPhotoResolution = false,
+    bool? photosSkipped,
+    int? remotePhotoCount,
+    List<String>? zipTempDirPaths,
+    int? parseCurrent,
+    int? parseTotal,
+    GarminImportProgress? garminProgress,
+    bool clearGarminProgress = false,
+    bool? garminNothingNew,
+    GarminPendingMarker? garminPendingMarker,
+    bool clearGarminPendingMarker = false,
     Uint8List? additionalFileBytes,
     bool clearAdditionalFileBytes = false,
     String? additionalFileName,
     bool clearAdditionalFileName = false,
     DetectionResult? detectionResult,
+    bool clearDetectionResult = false,
     ImportOptions? options,
     FieldMapping? fieldMapping,
     bool clearFieldMapping = false,
     ImportPayload? payload,
     bool clearPayload = false,
-    ImportDuplicateResult? duplicateResult,
+    ImportPayload? sourcePayload,
+    Map<String, DiverTarget>? diverMapping,
+    bool clearDiverMapping = false,
     Map<ImportEntityType, Set<int>>? selections,
-    Map<int, DiveDuplicateResolution>? diveResolutions,
     Map<ImportEntityType, int>? importCounts,
     String? importPhase,
     int? importCurrent,
@@ -162,15 +277,39 @@ class UniversalImportState {
       isLoading: isLoading ?? this.isLoading,
       isImporting: isImporting ?? this.isImporting,
       error: clearError ? null : (error ?? this.error),
-      fileBytes: fileBytes ?? this.fileBytes,
-      fileName: fileName ?? this.fileName,
+      files: clearFiles ? const [] : (files ?? this.files),
+      photoPathsByBaseName: photoPathsByBaseName ?? this.photoPathsByBaseName,
+      unmatchedPhotoCount: unmatchedPhotoCount ?? this.unmatchedPhotoCount,
+      photoFolderPath: clearPhotoFolderPath
+          ? null
+          : (photoFolderPath ?? this.photoFolderPath),
+      photoResolution: clearPhotoResolution
+          ? null
+          : (photoResolution ?? this.photoResolution),
+      bundledPhotoFolderPath: clearBundledPhotoFolderPath
+          ? null
+          : (bundledPhotoFolderPath ?? this.bundledPhotoFolderPath),
+      photosSkipped: photosSkipped ?? this.photosSkipped,
+      remotePhotoCount: remotePhotoCount ?? this.remotePhotoCount,
+      zipTempDirPaths: zipTempDirPaths ?? this.zipTempDirPaths,
+      parseCurrent: parseCurrent ?? this.parseCurrent,
+      parseTotal: parseTotal ?? this.parseTotal,
+      garminProgress: clearGarminProgress
+          ? null
+          : (garminProgress ?? this.garminProgress),
+      garminNothingNew: garminNothingNew ?? this.garminNothingNew,
+      garminPendingMarker: clearGarminPendingMarker
+          ? null
+          : (garminPendingMarker ?? this.garminPendingMarker),
       additionalFileBytes: clearAdditionalFileBytes
           ? null
           : (additionalFileBytes ?? this.additionalFileBytes),
       additionalFileName: clearAdditionalFileName
           ? null
           : (additionalFileName ?? this.additionalFileName),
-      detectionResult: detectionResult ?? this.detectionResult,
+      detectionResult: clearDetectionResult
+          ? null
+          : (detectionResult ?? this.detectionResult),
       pendingSourceOverride: clearPendingSourceOverride
           ? null
           : (pendingSourceOverride ?? this.pendingSourceOverride),
@@ -186,9 +325,15 @@ class UniversalImportState {
           ? null
           : (fieldMapping ?? this.fieldMapping),
       payload: clearPayload ? null : (payload ?? this.payload),
-      duplicateResult: duplicateResult ?? this.duplicateResult,
+      // A payload cleared or replaced by a new parse takes the diver state
+      // that was derived from it along.
+      sourcePayload: clearPayload || clearDiverMapping
+          ? null
+          : (sourcePayload ?? this.sourcePayload),
+      diverMapping: clearPayload || clearDiverMapping
+          ? const {}
+          : (diverMapping ?? this.diverMapping),
       selections: selections ?? this.selections,
-      diveResolutions: diveResolutions ?? this.diveResolutions,
       importCounts: importCounts ?? this.importCounts,
       importPhase: importPhase ?? this.importPhase,
       importCurrent: importCurrent ?? this.importCurrent,
@@ -215,7 +360,7 @@ class UniversalImportState {
   List<ImportEntityType> get availableTypes => payload?.availableTypes ?? [];
 
   /// Whether the format requires a field mapping step.
-  bool get needsFieldMapping => detectionResult?.format == ImportFormat.csv;
+  bool get needsFieldMapping => detectionResult?.format.mapsColumns ?? false;
 
   /// Summary of import results.
   String get importSummary {

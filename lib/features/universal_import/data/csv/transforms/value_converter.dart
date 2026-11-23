@@ -1,7 +1,10 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:intl/intl.dart';
 
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/universal_import/data/csv/transforms/dive_type_mapper.dart';
 import 'package:submersion/features/universal_import/data/csv/transforms/unit_detector.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
 
@@ -84,6 +87,89 @@ class ValueConverter {
   }
 
   // ---------------------------------------------------------------------------
+  /// Parse a duration however a dive log or spreadsheet wrote it (#1809).
+  ///
+  /// - Clock style: M:SS or H:MM:SS, with optional fractional seconds and an
+  ///   optional trailing minute word ("45:00 min").
+  /// - Unit style: number-unit parts, largest unit first, such as "45 min",
+  ///   "45'30\"", "1h 5m" or "1h05". A part without a unit is minutes when it
+  ///   comes first, and otherwise takes the next unit down from the part
+  ///   before it, which must have one ("1h05" but not "45 30").
+  /// - A decimal comma reads as a decimal point ("45,5" is 45.5 minutes).
+  ///
+  /// The result is rounded to whole seconds. Returns null when [raw] is null,
+  /// blank, negative, or not a duration.
+  Duration? parseFlexibleDuration(String? raw) {
+    if (raw == null) return null;
+    final s = raw.trim().toLowerCase();
+    if (s.isEmpty) return null;
+    final seconds = s.contains(':')
+        ? _clockDurationSeconds(s)
+        : _unitDurationSeconds(s);
+    // A cell too large to hold is unreadable: round() throws on infinity,
+    // and nothing above the transformer catches.
+    if (seconds == null || !seconds.isFinite) return null;
+    if (seconds > _maxDurationSeconds) return null;
+    return Duration(seconds: seconds.round());
+  }
+
+  /// Larger than any real dive by far, and well inside an int.
+  static const _maxDurationSeconds = 1e9;
+
+  static final _wholeNumber = RegExp(r'^\d+$');
+  static final _decimalNumber = RegExp(r'^\d+(?:[.,]\d+)?$');
+  static final _trailingMinuteWord = RegExp(r'\s*(?:minutes?|mins?)$');
+
+  double? _clockDurationSeconds(String s) {
+    final parts = s.replaceFirst(_trailingMinuteWord, '').split(':');
+    if (parts.length < 2 || parts.length > 3) return null;
+    final leading = parts.sublist(0, parts.length - 1);
+    if (!leading.every(_wholeNumber.hasMatch)) return null;
+    if (!_decimalNumber.hasMatch(parts.last)) return null;
+    // Doubles, not ints: int.parse throws past 64 bits.
+    final minutes = leading.fold(
+      0.0,
+      (sum, part) => sum * 60 + double.parse(part),
+    );
+    return minutes * 60 + double.parse(parts.last.replaceAll(',', '.'));
+  }
+
+  static final _unitPart = RegExp(
+    r"""(\d+(?:[.,]\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|'|seconds?|secs?|s|")?\s*""",
+  );
+
+  /// Seconds in an hour, a minute and a second, indexed by unit rank.
+  static const _secondsPerUnit = [3600, 60, 1];
+
+  double? _unitDurationSeconds(String s) {
+    var index = 0;
+    var total = 0.0;
+    int? previousRank;
+    var previousHadUnit = true;
+    while (index < s.length) {
+      final part = _unitPart.matchAsPrefix(s, index);
+      if (part == null) return null;
+      final unit = part[2];
+      if (unit == null && !previousHadUnit) return null;
+      final rank = switch (unit?[0]) {
+        null => previousRank == null ? 1 : previousRank + 1,
+        'h' => 0,
+        's' || '"' => 2,
+        _ => 1,
+      };
+      if (rank > 2 || (previousRank != null && rank <= previousRank)) {
+        return null;
+      }
+      final value = double.parse(part[1]!.replaceAll(',', '.'));
+      total += value * _secondsPerUnit[rank];
+      previousRank = rank;
+      previousHadUnit = unit != null;
+      index = part.end;
+    }
+    return total;
+  }
+
+  // ---------------------------------------------------------------------------
   /// Map a visibility string to a canonical identifier.
   ///
   /// Accepted identifiers: 'excellent', 'good', 'moderate', 'poor', 'unknown'.
@@ -154,52 +240,132 @@ class ValueConverter {
   }
 
   // ---------------------------------------------------------------------------
-  /// Map a free-text dive type string to a canonical identifier.
+  /// Map a free-text dive type string to a dive type id.
   ///
-  /// Known mappings (case-insensitive, matched by keyword):
-  /// - training / student / course → 'training'
-  /// - night → 'night'
-  /// - deep → 'deep'
-  /// - wreck → 'wreck'
-  /// - drift → 'drift'
-  /// - cave / cavern → 'cave'
-  /// - technical / tec → 'technical'
-  /// - freedive / free dive / apnea → 'freedive'
-  /// - ice → 'ice'
-  /// - altitude → 'altitude'
-  /// - shore / beach → 'shore'
-  /// - boat → 'boat'
-  /// - liveaboard → 'liveaboard'
+  /// Delegates to the shared [mapDiveType] ladder, which every importer that
+  /// reads a single free-text dive type cell uses. See that function for the
+  /// keyword list, the orderings that are load-bearing, and why an
+  /// unrecognised value is preserved rather than recorded as 'recreational'.
+  String parseDiveType(String? raw) => mapDiveType(raw);
+
+  // ---------------------------------------------------------------------------
+  /// Parse a dive's types from Submersion's CSV: the [names] cell ("Night;
+  /// Search & Recovery") and, in exports since #1834, the [ids] cell listing
+  /// their ids in the same order. Returns each type's id with its name, or a
+  /// null name when the cells do not give one, in order and without repeats.
   ///
-  /// Returns 'recreational' for null, empty, or unrecognised input.
-  String parseDiveType(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return 'recreational';
-    final s = raw.trim().toLowerCase();
-
-    if (s.contains('training') ||
-        s.contains('student') ||
-        s.contains('course')) {
-      return 'training';
+  /// With [ids], those are the types, verbatim: a name cannot be turned back
+  /// into its id, since slugging drops characters like `&` and a colliding
+  /// custom type's id carries a suffix. Names pair with ids by position. A
+  /// name containing ';' splits into more parts than there are ids (or an
+  /// empty part), so then a lone id takes the whole cell and several ids
+  /// pair with no name.
+  ///
+  /// Without [ids] (an older export, or a hand-made file), each name's slug
+  /// ([DiveTypeEntity.generateSlug]) is its id. That inverts the
+  /// `Dive.diveTypeDisplayName` form older exports wrote.
+  List<(String, String?)> parseDiveTypes({String? names, String? ids}) {
+    final nameParts = names == null ? const <String>[] : _listCell(names);
+    final types = <(String, String?)>[];
+    void add(String id, String? name) {
+      if (id.isNotEmpty && !types.any((t) => t.$1 == id)) types.add((id, name));
     }
-    if (s.contains('night')) return 'night';
-    if (s.contains('deep')) return 'deep';
-    if (s.contains('wreck')) return 'wreck';
-    if (s.contains('drift')) return 'drift';
-    if (s.contains('cavern') || s.contains('cave')) return 'cave';
-    if (s.contains('technical') || s.contains('tec')) return 'technical';
-    if (s.contains('freedive') ||
-        s.contains('free dive') ||
-        s.contains('apnea')) {
-      return 'freedive';
-    }
-    if (s.contains('ice')) return 'ice';
-    if (s.contains('altitude')) return 'altitude';
-    if (s.contains('shore') || s.contains('beach')) return 'shore';
-    if (s.contains('boat')) return 'boat';
-    if (s.contains('liveaboard')) return 'liveaboard';
 
-    return 'recreational';
+    if (ids == null) {
+      for (final name in nameParts) {
+        add(DiveTypeEntity.generateSlug(name), name);
+      }
+      return types;
+    }
+
+    final idParts = _listCell(ids);
+    // Every segment, empty ones included: 'Rec;' then 'Night' joins to
+    // 'Rec;; Night', whose non-empty parts would pair as 'Rec' and 'Night'.
+    final segments = names?.split(';').map((s) => s.trim()).toList();
+    final List<String?> pairedNames;
+    if (idParts.length > 1 &&
+        segments != null &&
+        segments.length == idParts.length &&
+        segments.every((s) => s.isNotEmpty)) {
+      pairedNames = segments;
+    } else if (idParts.length == 1 && nameParts.isNotEmpty) {
+      pairedNames = [names!.trim()];
+    } else {
+      pairedNames = List<String?>.filled(idParts.length, null);
+    }
+    for (var i = 0; i < idParts.length; i++) {
+      add(idParts[i], pairedNames[i]);
+    }
+    return types;
   }
+
+  /// The trimmed, non-blank entries of a ';'-separated list cell.
+  static List<String> _listCell(String raw) => [
+    for (final part in raw.split(';'))
+      if (part.trim().isNotEmpty) part.trim(),
+  ];
+
+  // ---------------------------------------------------------------------------
+  /// Match [raw] against [values] by enum name or by [displayName], ignoring
+  /// case, and return the matching enum's name.
+  ///
+  /// The importer stores enums by name, while Submersion's CSV export writes
+  /// display names ("North-East", "Partly Cloudy"). Returns null when nothing
+  /// matches.
+  String? parseEnumName<T extends Enum>(
+    String raw,
+    List<T> values,
+    String Function(T value) displayName,
+  ) {
+    final s = raw.trim().toLowerCase();
+    if (s.isEmpty) return null;
+    for (final value in values) {
+      if (value.name.toLowerCase() == s ||
+          displayName(value).toLowerCase() == s) {
+        return value.name;
+      }
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  /// Parse the JSON list of `{key, value}` objects in Submersion's
+  /// "Custom Fields" column, keeping order and empty values.
+  ///
+  /// Entries without a string key are skipped; a missing or non-string
+  /// value reads as empty. Returns null when [raw] is not a JSON list.
+  List<Map<String, String>>? parseCustomFieldsJson(String raw) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      return null;
+    }
+    if (decoded is! List) return null;
+    return [
+      for (final entry in decoded)
+        if (entry is Map && entry['key'] is String)
+          {
+            'key': entry['key'] as String,
+            'value': entry['value'] is String ? entry['value'] as String : '',
+          },
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  /// Undo the CSV-injection guard Submersion's export applies to free text:
+  /// a leading `'` in front of `=`, `+`, `-`, `@`, `|` or another `'` is
+  /// dropped.
+  ///
+  /// Mirrors `CsvExportService.sanitizeCsvField`, which also quotes a value
+  /// that starts with `'`, so the text `'=1` exports as `''=1` and comes
+  /// back intact. Any other value is returned unchanged.
+  String unescapeCsvInjectionGuard(String value) {
+    if (value.length < 2 || value[0] != "'") return value;
+    return _guardedLeadChars.contains(value[1]) ? value.substring(1) : value;
+  }
+
+  static const _guardedLeadChars = {'=', '+', '-', '@', '|', '\t', '\r', "'"};
 
   // ---------------------------------------------------------------------------
   /// Parse [raw] as a [double], stripping commas and trailing non-numeric
@@ -217,6 +383,39 @@ class ValueConverter {
     if (cleaned.isEmpty) return null;
     return double.tryParse(cleaned);
   }
+
+  // ---------------------------------------------------------------------------
+  /// Parse [raw] as a number that may name its unit, such as `35 ft`, `82°F`
+  /// or my.divessi.com's `35 ft (11 m)` (#3629), for a field holding
+  /// [unitType].
+  ///
+  /// Only the leading number and the unit written right after it are read,
+  /// so the bracketed metres of `35 ft (11 m)` are not run into the feet.
+  /// The unit is null when the value names none, or names a unit of another
+  /// kind (`28 ft` for a temperature); the value is then read whole by
+  /// [parseDouble], as before. Returns null when no number can be read.
+  ({double value, DetectedUnit? unit})? parseMeasurement(
+    String? raw,
+    UnitType? unitType,
+  ) {
+    if (raw == null) return null;
+    final match = unitType == null ? null : _leadingMeasurement.firstMatch(raw);
+    if (match != null) {
+      final unit = UnitDetector.resolveUnitToken(match.group(2)!.toLowerCase());
+      final value = parseDouble(match.group(1));
+      if (unit != null && unit.$2 == unitType && value != null) {
+        return (value: value, unit: unit.$1);
+      }
+    }
+    final value = parseDouble(raw);
+    return value == null ? null : (value: value, unit: null);
+  }
+
+  /// A leading number (thousands commas allowed) and the unit word after it,
+  /// with an optional degree sign: `35 ft`, `3,000 psi`, `82°F`.
+  static final _leadingMeasurement = RegExp(
+    r'^\s*(-?\d[\d,]*(?:\.\d+)?)\s*°?\s*([A-Za-z]+)\b',
+  );
 
   // ---------------------------------------------------------------------------
   /// Parse [raw] as an integer via [parseDouble] then rounding.
@@ -259,6 +458,7 @@ class ValueTransformService {
       ValueTransform.hmsToSeconds => hmsToSeconds(value),
       ValueTransform.visibilityScale => parseVisibilityScale(value),
       ValueTransform.diveTypeMap => parseDiveType(value),
+      ValueTransform.diveModeMap => mapCsvDiveType(value),
       ValueTransform.ratingScale => normalizeRating(value),
     };
   }
@@ -293,33 +493,19 @@ class ValueTransformService {
     return _roundTo(cuft * 28.3168, 1);
   }
 
-  /// Convert minutes string to Duration. Returns null if input is not valid.
-  Duration? minutesToSeconds(String value) {
-    final minutes = _parseDouble(value);
-    if (minutes == null) return null;
-    return Duration(seconds: (minutes * 60).round());
-  }
+  /// Convert a minutes string to Duration. Returns null if input is not valid.
+  ///
+  /// Reads the value with [ValueConverter.parseFlexibleDuration], so a cell
+  /// written as "00:45:00" is 45 minutes, not 4500 (#1809).
+  Duration? minutesToSeconds(String value) =>
+      const ValueConverter().parseFlexibleDuration(value);
 
-  /// Convert H:M:S or M:S string to Duration.
-  Duration? hmsToSeconds(String value) {
-    final parts = value.split(':');
-    if (parts.length == 3) {
-      final h = int.tryParse(parts[0]);
-      final m = int.tryParse(parts[1]);
-      final s = int.tryParse(parts[2]);
-      if (h != null && m != null && s != null) {
-        return Duration(hours: h, minutes: m, seconds: s);
-      }
-    }
-    if (parts.length == 2) {
-      final m = int.tryParse(parts[0]);
-      final s = int.tryParse(parts[1]);
-      if (m != null && s != null) {
-        return Duration(minutes: m, seconds: s);
-      }
-    }
-    return null;
-  }
+  /// Convert an H:M:S or M:S string to Duration.
+  ///
+  /// Reads the value with [ValueConverter.parseFlexibleDuration], so a bare
+  /// number such as "42" is 42 minutes rather than unreadable (#1809).
+  Duration? hmsToSeconds(String value) =>
+      const ValueConverter().parseFlexibleDuration(value);
 
   // ======================== Scale Conversions ========================
 
@@ -365,25 +551,10 @@ class ValueTransformService {
   }
 
   /// Map dive type text to Submersion's dive type identifiers.
-  String parseDiveType(String value) {
-    final lower = value.toLowerCase().trim();
-    if (lower.contains('training') || lower.contains('course')) {
-      return 'training';
-    }
-    if (lower.contains('night')) return 'night';
-    if (lower.contains('deep')) return 'deep';
-    if (lower.contains('wreck')) return 'wreck';
-    if (lower.contains('drift')) return 'drift';
-    if (lower.contains('cave') || lower.contains('cavern')) return 'cave';
-    if (lower.contains('tech')) return 'technical';
-    if (lower.contains('free')) return 'freedive';
-    if (lower.contains('ice')) return 'ice';
-    if (lower.contains('altitude')) return 'altitude';
-    if (lower.contains('shore')) return 'shore';
-    if (lower.contains('boat')) return 'boat';
-    if (lower.contains('liveaboard')) return 'liveaboard';
-    return 'recreational';
-  }
+  ///
+  /// Delegates to the shared [mapDiveType] ladder; see [ValueConverter
+  /// .parseDiveType].
+  String parseDiveType(String value) => mapDiveType(value);
 
   /// Normalize rating from various scales to 1-5.
   int? normalizeRating(String value) {

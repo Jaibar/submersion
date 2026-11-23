@@ -1,0 +1,207 @@
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/domain/visibility/visibility_range.dart';
+import 'package:submersion/core/domain/visibility/visibility_scale.dart';
+import 'package:submersion/core/utils/number_display.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
+
+/// On-screen rendering of a dive's visibility.
+///
+/// Two shapes exist because two kinds of data exist. A dive logged from v144
+/// carries a measured distance, so it can be shown as a distance plus the
+/// adjective the diver's calibration assigns. A dive logged earlier carries
+/// only a coarse bucket, so it can only be shown as the range that bucket
+/// covers.
+///
+/// The enum `displayName` values remain the locale-independent strings used
+/// for data interchange; everything here honours the active locale and the
+/// diver's unit settings.
+
+/// Parses a visibility entry field into meters, or null when the text is
+/// empty, unparseable, or negative.
+///
+/// Never coerces a bad value to zero. Text that fails to parse (stray
+/// characters) means visibility is unknown, not that the diver measured zero
+/// visibility; persisting 0 would record a measurement nobody took and bin the
+/// dive into the worst band.
+///
+/// A decimal comma is read, not rejected: it is what the diver's own locale
+/// displays, and treating "12,5" as unknown discarded the entry (#1091).
+///
+/// The edit form's validator stops a save while the text is unreadable, so
+/// the null for unreadable text only reaches the live caption, never storage.
+double? parseVisibilityInput(String text, UnitFormatter units) {
+  final parsed = switch (readNumber(text)) {
+    NumberValue(:final value) => value,
+    NumberBlank() || NumberInvalid() => null,
+  };
+  if (parsed == null || parsed < 0) return null;
+  return units.depthToMeters(parsed);
+}
+
+/// Localized name for a coarse pre-v144 visibility bucket, e.g.
+/// "Moderate (5-15m / 15-50ft)". Mirrors [Visibility.displayName] but honours
+/// the active locale.
+String visibilityName(Visibility visibility, AppLocalizations l10n) =>
+    switch (visibility) {
+      Visibility.excellent => l10n.enum_visibility_excellent,
+      Visibility.good => l10n.enum_visibility_good,
+      Visibility.moderate => l10n.enum_visibility_moderate,
+      Visibility.poor => l10n.enum_visibility_poor,
+      Visibility.unknown => l10n.enum_visibility_unknown,
+    };
+
+/// Localized name for a calibrated band.
+String visibilityBandName(VisibilityBand band, AppLocalizations l10n) =>
+    switch (band) {
+      VisibilityBand.excellent => l10n.enum_visibilityBand_excellent,
+      VisibilityBand.good => l10n.enum_visibilityBand_good,
+      VisibilityBand.moderate => l10n.enum_visibilityBand_moderate,
+      VisibilityBand.poor => l10n.enum_visibilityBand_poor,
+    };
+
+/// Renders a measured distance together with the adjective [scale] assigns it,
+/// for example "20ft · Excellent".
+///
+/// [meters] is the stored metric value; [units] converts it for display. The
+/// band is always decided on the metric value, so switching units never
+/// changes the adjective.
+String formatMeasuredVisibility(
+  double meters,
+  VisibilityScale scale,
+  AppLocalizations l10n,
+  UnitFormatter units,
+) {
+  final distance = units.formatDistance(meters);
+  final band = visibilityBandName(scale.bandFor(meters), l10n);
+  return '$distance · $band';
+}
+
+/// A visibility range as text in the diver's depth unit: "6-12 m",
+/// "under 2 m" or "12 m+" (issue #3226). Whole units, like a measured
+/// distance; the band is always decided on the unrounded meters.
+String formatVisibilityRange(
+  VisibilityRange range,
+  AppLocalizations l10n,
+  UnitFormatter units,
+) {
+  String value(double meters) =>
+      formatFixedForDisplay(units.convertDepth(meters), 0);
+  final unit = units.depthSymbol;
+  final min = range.minM;
+  final max = range.maxM;
+  if (min == null) return l10n.visibility_range_under(value(max!), unit);
+  if (max == null) return l10n.visibility_range_atLeast(value(min), unit);
+  return l10n.visibility_range_between(value(min), value(max), unit);
+}
+
+/// A range plus the adjective [scale] gives it when the whole range sits in
+/// one band ("6-12 m · Good"), or just the range when it spans bands.
+String formatRangeVisibility(
+  VisibilityRange range,
+  VisibilityScale scale,
+  AppLocalizations l10n,
+  UnitFormatter units,
+) {
+  final text = formatVisibilityRange(range, l10n, units);
+  final band = scale.bandForRange(range);
+  return band == null ? text : '$text · ${visibilityBandName(band, l10n)}';
+}
+
+/// A dive's visibility as one line of text, or null when it has none.
+///
+/// Precedence is the measured distance ([meters]), then a band-picked
+/// [range] (issue #3226), then the pre-v144 bucket ([legacy]). The order
+/// matters: the repository clears the bucket once a distance or range is
+/// stored, so a display that reads only [legacy] shows nothing for every
+/// dive logged or edited since v144 (#2055). A measurement wins over a range
+/// on the same dive, which only an older device's sync can produce.
+String? formatDiveVisibility({
+  required double? meters,
+  required VisibilityRange? range,
+  required Visibility? legacy,
+  required VisibilityScale scale,
+  required AppLocalizations l10n,
+  required UnitFormatter units,
+}) {
+  if (meters != null) {
+    return formatMeasuredVisibility(meters, scale, l10n, units);
+  }
+  if (range != null) return formatRangeVisibility(range, scale, l10n, units);
+  if (legacy != null) return visibilityName(legacy, l10n);
+  return null;
+}
+
+/// A dive's visibility without an adjective, for the surfaces that never
+/// show one (the PDF logbook pages). Same precedence as
+/// [formatDiveVisibility].
+String? formatDiveVisibilityPlain({
+  required double? meters,
+  required VisibilityRange? range,
+  required Visibility? legacy,
+  required AppLocalizations l10n,
+  required UnitFormatter units,
+}) {
+  if (meters != null) return units.formatDistance(meters);
+  if (range != null) return formatVisibilityRange(range, l10n, units);
+  if (legacy != null) return visibilityName(legacy, l10n);
+  return null;
+}
+
+/// Turns a statistics distribution key into display text.
+///
+/// The repository emits stable keys rather than display text: a calibrated
+/// band yields its [VisibilityBand] name, a range crossing a band edge yields
+/// [visibilityRangeSpanningKey] (issue #3226), and a pre-v144 dive yields
+/// `legacy_<bucket>`. A legacy key renders as the range that bucket covers,
+/// marked as pre-measurement, so it is never mistaken for a calibrated
+/// reading.
+///
+/// An unrecognized key can only come from a repository bug, so it is surfaced
+/// verbatim. Falling back to a real band would label unknown data as a
+/// legitimate result and hide the defect.
+String visibilityDistributionLabel(
+  String key,
+  AppLocalizations l10n,
+  UnitFormatter units,
+) {
+  const legacyPrefix = 'legacy_';
+  if (key.startsWith(legacyPrefix)) {
+    final name = key.substring(legacyPrefix.length);
+    final bucket = Visibility.values.where((v) => v.name == name).firstOrNull;
+    final band = bucket == null
+        ? null
+        : formatLegacyVisibilityBand(bucket, l10n, units);
+    return l10n.insights_conditions_visibility_legacySuffix(band ?? name);
+  }
+  if (key == visibilityRangeSpanningKey) {
+    return l10n.insights_conditions_visibility_spansBands;
+  }
+  final band = VisibilityBand.values.where((b) => b.name == key).firstOrNull;
+  return band == null ? key : visibilityBandName(band, l10n);
+}
+
+/// Renders a pre-v144 bucket as the distance range it actually means, for
+/// example "5-15m".
+///
+/// Deliberately never returns an adjective. The stored bucket only tells us
+/// the dive fell somewhere in this range, so applying the diver's calibration
+/// would assert something we cannot know. Returns null for
+/// [Visibility.unknown], which carries no range at all.
+String? formatLegacyVisibilityBand(
+  Visibility legacy,
+  AppLocalizations l10n,
+  UnitFormatter units,
+) {
+  final min = legacy.bandMinM;
+  final max = legacy.bandMaxM;
+  if (min == null && max == null) return null;
+
+  final unit = units.depthSymbol;
+  String value(double meters) => units.convertDepth(meters).toStringAsFixed(0);
+
+  if (min == null) return l10n.visibility_range_under(value(max!), unit);
+  if (max == null) return l10n.visibility_range_over(value(min), unit);
+  return l10n.visibility_range_between(value(min), value(max), unit);
+}

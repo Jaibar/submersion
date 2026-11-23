@@ -1,8 +1,12 @@
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
+import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 /// Repository provider
 final speciesRepositoryProvider = Provider<SpeciesRepository>((ref) {
@@ -12,16 +16,28 @@ final speciesRepositoryProvider = Provider<SpeciesRepository>((ref) {
 /// All species provider
 final allSpeciesProvider = FutureProvider<List<Species>>((ref) async {
   final repository = ref.watch(speciesRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSpeciesChanges());
   return repository.getAllSpecies();
 });
 
 /// Species by category provider
+/// Sighting counts per species, so a list can tell which species the
+/// repository will refuse to delete without running one query per row.
+final speciesSightingCountsProvider = FutureProvider<Map<String, int>>((
+  ref,
+) async {
+  final repository = ref.watch(speciesRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSightingChanges());
+  return repository.sightingCountsBySpecies();
+});
+
 final speciesByCategoryProvider =
     FutureProvider.family<List<Species>, SpeciesCategory>((
       ref,
       category,
     ) async {
       final repository = ref.watch(speciesRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchSpeciesChanges());
       return repository.getSpeciesByCategory(category);
     });
 
@@ -34,6 +50,7 @@ final speciesSearchProvider = FutureProvider.family<List<Species>, String>((
     return ref.watch(allSpeciesProvider).value ?? [];
   }
   final repository = ref.watch(speciesRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSpeciesChanges());
   return repository.searchSpecies(query);
 });
 
@@ -43,6 +60,7 @@ final speciesProvider = FutureProvider.family<Species?, String>((
   id,
 ) async {
   final repository = ref.watch(speciesRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSpeciesChanges());
   return repository.getSpeciesById(id);
 });
 
@@ -52,6 +70,9 @@ final diveSightingsProvider = FutureProvider.family<List<Sighting>, String>((
   diveId,
 ) async {
   final repository = ref.watch(speciesRepositoryProvider);
+  ref.invalidateSelfWhen(
+    ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+  );
   return repository.getSightingsForDive(diveId);
 });
 
@@ -62,7 +83,7 @@ class SightingsNotifier extends StateNotifier<List<Sighting>> {
 
   SightingsNotifier(this._repository, this._diveId) : super([]) {
     if (_diveId != null) {
-      _loadSightings();
+      logFailure(_loadSightings(), SightingsNotifier, 'load sightings');
     }
   }
 
@@ -76,6 +97,7 @@ class SightingsNotifier extends StateNotifier<List<Sighting>> {
     required String speciesId,
     required String speciesName,
     SpeciesCategory? speciesCategory,
+    SightingAbundance abundance = SightingAbundance.seen,
     int count = 1,
     String notes = '',
   }) async {
@@ -88,6 +110,7 @@ class SightingsNotifier extends StateNotifier<List<Sighting>> {
         speciesId: speciesId,
         speciesName: speciesName,
         speciesCategory: speciesCategory,
+        abundance: abundance,
         count: count,
         notes: notes,
       );
@@ -97,6 +120,7 @@ class SightingsNotifier extends StateNotifier<List<Sighting>> {
       final sighting = await _repository.addSighting(
         diveId: _diveId,
         speciesId: speciesId,
+        abundance: abundance,
         count: count,
         notes: notes,
       );
@@ -128,6 +152,7 @@ class SightingsNotifier extends StateNotifier<List<Sighting>> {
       await _repository.addSighting(
         diveId: diveId,
         speciesId: sighting.speciesId,
+        abundance: sighting.abundance,
         count: sighting.count,
         notes: sighting.notes,
       );
@@ -146,6 +171,9 @@ final sightingsNotifierProvider =
     });
 
 /// Initialize species database with built-in species from bundled JSON asset
+// no-tick: a one-shot seeding ACTION, not a cached read. It returns void, so
+// there is no stale value to render, and ticking it on the species table would
+// make the seed re-run every time it wrote a row.
 final seedSpeciesProvider = FutureProvider<void>((ref) async {
   final repository = ref.watch(speciesRepositoryProvider);
   await repository.seedBuiltInSpecies();
@@ -163,14 +191,28 @@ class SpeciesListNotifier extends StateNotifier<AsyncValue<List<Species>>> {
   SpeciesListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
     _loadSpecies();
+
+    // Reload when the `species` table changes (e.g. a sync writes rows
+    // directly), not just on local mutations. _loadSpecies() updates in place
+    // without a loading flash, so it doubles as the silent reload.
+    //
+    // The same tick refreshes allSpeciesProvider, speciesByCategoryProvider
+    // and speciesSearchProvider through their own invalidateSelfWhen, so the
+    // mutations below invalidate nothing by hand. A manual invalidate here
+    // would touch this Ref after an await, which throws once this autoDispose
+    // provider has been disposed mid-write.
+    final tableChangeSub = _repository.watchSpeciesChanges().listen(
+      (_) => _loadSpecies(),
+    );
+    _ref.onDispose(tableChangeSub.cancel);
   }
 
   Future<void> _loadSpecies() async {
     try {
       final species = await _repository.getAllSpecies();
-      state = AsyncValue.data(species);
+      if (mounted) state = AsyncValue.data(species);
     } catch (e, st) {
-      state = AsyncValue.error(e, st);
+      if (mounted) state = AsyncValue.error(e, st);
     }
   }
 
@@ -189,20 +231,17 @@ class SpeciesListNotifier extends StateNotifier<AsyncValue<List<Species>>> {
       description: description,
     );
     await _loadSpecies();
-    _invalidateRelatedProviders();
     return species;
   }
 
   Future<void> updateSpecies(Species species) async {
     await _repository.updateSpecies(species);
     await _loadSpecies();
-    _invalidateRelatedProviders();
   }
 
   Future<void> deleteSpecies(String id) async {
     await _repository.deleteSpecies(id);
     await _loadSpecies();
-    _invalidateRelatedProviders();
   }
 
   Future<bool> isSpeciesInUse(String id) async {
@@ -212,13 +251,6 @@ class SpeciesListNotifier extends StateNotifier<AsyncValue<List<Species>>> {
   Future<void> resetBuiltInSpecies() async {
     await _repository.resetBuiltInSpecies();
     await _loadSpecies();
-    _invalidateRelatedProviders();
-  }
-
-  void _invalidateRelatedProviders() {
-    _ref.invalidate(allSpeciesProvider);
-    _ref.invalidate(speciesByCategoryProvider);
-    _ref.invalidate(speciesSearchProvider);
   }
 }
 
@@ -243,6 +275,13 @@ final siteSpottedSpeciesProvider =
       siteId,
     ) async {
       final repository = ref.watch(speciesRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchSpeciesChanges());
+      // Derived from dive sightings, so it also goes stale when a dive is
+      // merged away or a sync applies remote sightings -- neither of which
+      // writes the species table.
+      ref.invalidateSelfWhen(
+        ref.read(diveRepositoryProvider).watchDiveDetailChanges(),
+      );
       return repository.getSpeciesSpottedAtSite(siteId);
     });
 
@@ -250,7 +289,46 @@ final siteSpottedSpeciesProvider =
 final siteExpectedSpeciesProvider =
     FutureProvider.family<List<SiteSpeciesEntry>, String>((ref, siteId) async {
       final repository = ref.watch(speciesRepositoryProvider);
+      // Reads site_species JOIN species, so it goes stale on a write to
+      // either. Curating the list only ever touches site_species, so watching
+      // species alone left the list unchanged after an add.
+      ref.invalidateSelfWhen(repository.watchSiteSpeciesChanges());
+      ref.invalidateSelfWhen(repository.watchSpeciesChanges());
       return repository.getExpectedSpeciesForSite(siteId);
+    });
+
+/// What the dive editor suggests for a site (issue #4383): the species other
+/// dives there logged, with [excludeDiveId]'s own sightings left out, and the
+/// site's expected list. Merged and ordered by `buildSiteSpeciesSuggestions`,
+/// which needs the diver's language for alphabetical order.
+///
+/// Every logged dive counts, including one kept out of the statistics: it
+/// still saw what it logged.
+final siteSpeciesSuggestionSourcesProvider = FutureProvider.autoDispose
+    .family<
+      ({List<SiteSpeciesSummary> spotted, List<SiteSpeciesEntry> expected}),
+      ({String siteId, String? excludeDiveId})
+    >((ref, key) async {
+      final repository = ref.watch(speciesRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchSpeciesChanges());
+      // Sightings are dive detail: a merge or a sync that applies remote
+      // sightings writes them without touching the species table.
+      ref.invalidateSelfWhen(
+        ref.read(diveRepositoryProvider).watchDiveDetailChanges(),
+      );
+      // The expected list keeps its own refresh rules (#1156); reuse them.
+      final expectedFuture = ref.watch(
+        siteExpectedSpeciesProvider(key.siteId).future,
+      );
+      final (spotted, expected) = await (
+        repository.getSpeciesSpottedAtSite(
+          key.siteId,
+          excludeDiveId: key.excludeDiveId,
+          statsScope: false,
+        ),
+        expectedFuture,
+      ).wait;
+      return (spotted: spotted, expected: expected);
     });
 
 /// Notifier for managing expected species at a site
@@ -259,8 +337,21 @@ class SiteExpectedSpeciesNotifier
   final SpeciesRepository _repository;
   final String _siteId;
 
-  SiteExpectedSpeciesNotifier(this._repository, this._siteId) : super([]) {
-    _loadExpectedSpecies();
+  /// The active profile, whose role on a shared library site decides what
+  /// it may change there (issue #2567).
+  final Future<String?> Function() _actingDiverId;
+
+  SiteExpectedSpeciesNotifier(
+    this._repository,
+    this._siteId, {
+    Future<String?> Function()? actingDiverId,
+  }) : _actingDiverId = actingDiverId ?? (() async => null),
+       super([]) {
+    logFailure(
+      _loadExpectedSpecies(),
+      SiteExpectedSpeciesNotifier,
+      'load expected species',
+    );
   }
 
   Future<void> _loadExpectedSpecies() async {
@@ -268,20 +359,44 @@ class SiteExpectedSpeciesNotifier
     state = entries;
   }
 
+  /// Species with an insert in flight. `site_species` has no uniqueness
+  /// constraint, and `state` only gains the entry once the write returns, so
+  /// two calls that start together would both find the species absent.
+  /// Claiming the id here is what makes the check hold: nothing else runs
+  /// between reading `state` and adding to this set.
+  final Set<String> _adding = {};
+
   Future<void> addSpecies(String speciesId) async {
-    final entry = await _repository.addExpectedSpecies(
-      siteId: _siteId,
-      speciesId: speciesId,
-    );
-    state = [...state, entry];
+    if (state.any((e) => e.speciesId == speciesId)) return;
+    if (!_adding.add(speciesId)) return;
+    try {
+      final entry = await _repository.addExpectedSpecies(
+        siteId: _siteId,
+        speciesId: speciesId,
+        actingDiverId: await _actingDiverId(),
+      );
+      state = [...state, entry];
+    } finally {
+      _adding.remove(speciesId);
+    }
   }
 
   Future<void> removeSpecies(String speciesId) async {
-    await _repository.removeExpectedSpecies(_siteId, speciesId);
+    await _repository.removeExpectedSpecies(
+      _siteId,
+      speciesId,
+      actingDiverId: await _actingDiverId(),
+    );
     state = state.where((e) => e.speciesId != speciesId).toList();
   }
 
   Future<void> setSpecies(List<String> speciesIds) async {
+    final diverId = await _actingDiverId();
+    // A shared library site this profile only reads keeps its list: removed
+    // here, nothing could be added back.
+    if (!await _repository.mayEditSite(_siteId, actingDiverId: diverId)) {
+      return;
+    }
     // Remove all existing
     await _repository.removeAllExpectedSpeciesForSite(_siteId);
 
@@ -291,6 +406,7 @@ class SiteExpectedSpeciesNotifier
       final entry = await _repository.addExpectedSpecies(
         siteId: _siteId,
         speciesId: speciesId,
+        actingDiverId: diverId,
       );
       entries.add(entry);
     }
@@ -299,7 +415,11 @@ class SiteExpectedSpeciesNotifier
   }
 
   void refresh() {
-    _loadExpectedSpecies();
+    logFailure(
+      _loadExpectedSpecies(),
+      SiteExpectedSpeciesNotifier,
+      'load expected species',
+    );
   }
 }
 
@@ -311,5 +431,9 @@ final siteExpectedSpeciesNotifierProvider =
       String
     >((ref, siteId) {
       final repository = ref.watch(speciesRepositoryProvider);
-      return SiteExpectedSpeciesNotifier(repository, siteId);
+      return SiteExpectedSpeciesNotifier(
+        repository,
+        siteId,
+        actingDiverId: () => ref.read(validatedCurrentDiverIdProvider.future),
+      );
     });

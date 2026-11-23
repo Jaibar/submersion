@@ -1,34 +1,43 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_country_flags.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Single-row flat tile for the trip list (maximum density).
 ///
 /// Row: Trip name (expanded) | Abbreviated date range (~100px) | Dive count (~40px) | Chevron
-class DenseTripListTile extends StatelessWidget {
+class DenseTripListTile extends ConsumerWidget {
   final TripWithStats tripWithStats;
   final bool isSelected;
   final VoidCallback? onTap;
+  final bool showSharedBadge;
+  final bool isSelectionMode;
+  final bool isChecked;
+  final ValueChanged<bool>? onCheckChanged;
+
+  /// How the trip nests (issue #3658): its side trip count, or the larger
+  /// trip it is part of when that trip is not listed.
+  final String? nestingNote;
 
   const DenseTripListTile({
     super.key,
     required this.tripWithStats,
+    this.nestingNote,
     this.isSelected = false,
     this.onTap,
+    this.showSharedBadge = false,
+    this.isSelectionMode = false,
+    this.isChecked = false,
+    this.onCheckChanged,
   });
 
-  /// Formats a date as "MMM d", adding the year if it is not the current year.
-  String _formatAbbreviated(DateTime date) {
-    final now = DateTime.now();
-    if (date.year != now.year) {
-      return DateFormat('MMM d, yyyy').format(date);
-    }
-    return DateFormat('MMM d').format(date);
-  }
-
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final trip = tripWithStats.trip;
     final colorScheme = Theme.of(context).colorScheme;
     final rowColor = isSelected
@@ -36,8 +45,11 @@ class DenseTripListTile extends StatelessWidget {
         : null;
     final secondaryTextColor = colorScheme.onSurfaceVariant;
 
-    final startStr = _formatAbbreviated(trip.startDate);
-    final endStr = _formatAbbreviated(trip.endDate);
+    // Month and day, plus the year outside the current one, ordered by the
+    // diver's date format preference (#964).
+    final units = ref.watch(unitFormatterProvider);
+    final startStr = units.formatMonthDayWithYear(trip.startDate);
+    final endStr = units.formatMonthDayWithYear(trip.endDate);
     final dateRangeStr = '$startStr - $endStr';
 
     return Semantics(
@@ -56,19 +68,57 @@ class DenseTripListTile extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(
+              horizontal: kRecordRowDenseHorizontalPadding,
+              vertical: 10,
+            ),
             child: Row(
               children: [
-                // Trip name (expanded)
+                SelectionCheckboxSlot(
+                  isSelectionMode: isSelectionMode,
+                  isChecked: isChecked,
+                  onChanged: onCheckChanged,
+                  gap: 8,
+                ),
+                // Trip name (expanded), then how it nests
                 Expanded(
-                  child: Text(
-                    trip.name,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          trip.name,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      TripCountryFlags(tripId: trip.id, maxFlags: 3, gap: 6),
+                      if (nestingNote != null) ...[
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            nestingNote!,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: secondaryTextColor),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
+                if (showSharedBadge) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message:
+                        context.l10n.accessibility_label_sharedWithProfiles,
+                    child: Icon(
+                      Icons.people_outline,
+                      size: 16,
+                      color: colorScheme.primary,
+                    ),
+                  ),
+                ],
                 const SizedBox(width: 8),
                 // Abbreviated date range (~100px)
                 SizedBox(
@@ -94,12 +144,9 @@ class DenseTripListTile extends StatelessWidget {
                     textAlign: TextAlign.right,
                   ),
                 ),
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: secondaryTextColor,
-                    size: 18,
-                  ),
+                RecordListChevron(
+                  size: RecordListChevron.denseSize,
+                  color: secondaryTextColor,
                 ),
               ],
             ),

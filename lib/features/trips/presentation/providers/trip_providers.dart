@@ -1,38 +1,73 @@
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/core/utils/stream_debounce.dart';
 
-import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart'
+    show DiveRepository;
+import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart'
     as domain;
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
-import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/divers/presentation/providers/profile_hides_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
+import 'package:submersion/features/query/presentation/providers/narrow_by_ids.dart';
+import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
 import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/trips/domain/constants/trip_field.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/trips/data/repositories/trip_country_queries.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/entities/trip_country.dart';
+import 'package:submersion/features/trips/query/trip_filter_query.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 /// Filter state for trip list
 class TripFilterState {
   final String? equipmentId;
 
-  const TripFilterState({this.equipmentId});
+  /// The advanced part (#2365): a typed or built query, ANDed with the
+  /// equipment axis by `TripFilterQuery.toQuery`.
+  final QueryNode? query;
 
-  bool get hasActiveFilters => equipmentId != null;
+  const TripFilterState({this.equipmentId, this.query});
+
+  bool get hasActiveFilters => equipmentId != null || query != null;
 
   TripFilterState copyWith({
     String? equipmentId,
+    QueryNode? query,
     bool clearEquipmentId = false,
+    bool clearQuery = false,
   }) {
     return TripFilterState(
       equipmentId: clearEquipmentId ? null : (equipmentId ?? this.equipmentId),
+      query: clearQuery ? null : (query ?? this.query),
     );
   }
+
+  // Value equality, so the id-set family reuses its instance for an equal
+  // filter.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TripFilterState &&
+          other.equipmentId == equipmentId &&
+          other.query == query;
+
+  @override
+  int get hashCode => Object.hash(equipmentId, query);
 }
 
 /// Trip filter state provider
@@ -40,17 +75,39 @@ final tripFilterProvider = StateProvider<TripFilterState>(
   (ref) => const TripFilterState(),
 );
 
+/// Replaces the trip list's query (#2365), keeping its equipment axis.
+void setTripQuery(WidgetRef ref, QueryNode? query) {
+  final notifier = ref.read(tripFilterProvider.notifier);
+  notifier.state = notifier.state.copyWith(
+    query: query,
+    clearQuery: query == null,
+  );
+}
+
+/// Drops every axis of the trip list's filter: the list's Clear all, and the
+/// Trips overview's (issue #4414).
+void clearTripFilter(WidgetRef ref) =>
+    ref.read(tripFilterProvider.notifier).state = const TripFilterState();
+
 /// Repository provider
 final tripRepositoryProvider = Provider<TripRepository>((ref) {
   return TripRepository();
 });
 
-/// All trips provider
+/// All trips provider.
+///
+/// A one-shot read that self-invalidates whenever the `trips` table changes
+/// (a sync apply, a local create/edit/delete, ...), so list UIs refresh
+/// automatically while imperative `ref.read(allTripsProvider.future)` reads
+/// still resolve.
 final allTripsProvider = FutureProvider<List<Trip>>((ref) async {
   final repository = ref.watch(tripRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
+
   return repository.getAllTrips(diverId: validatedDiverId);
 });
 
@@ -62,25 +119,70 @@ final allTripsWithStatsProvider = FutureProvider<List<TripWithStats>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  invalidateOnTripListChanges(ref);
   return repository.getAllTripsWithStats(diverId: validatedDiverId);
 });
 
-/// Helper provider for async equipment filtering
-final _equipmentFilteredTripsProvider =
-    FutureProvider.family<List<TripWithStats>, String>((
-      ref,
-      equipmentId,
-    ) async {
-      final tripsAsync = ref.watch(tripListNotifierProvider);
-      if (!tripsAsync.hasValue) return [];
+/// Every trip's countries, for the flags beside trips (issue #4426): one
+/// read for the whole list, scoped like the trips' dive counts.
+final tripCountryQueriesProvider = Provider<TripCountryQueries>(
+  (ref) => TripCountryQueries(),
+);
 
-      final trips = tripsAsync.value!;
-      final equipmentRepository = EquipmentRepository();
-      final tripIds = await equipmentRepository.getTripIdsForEquipment(
-        equipmentId,
+/// Auto-disposed: with no trip screen showing flags it stops, so dive and
+/// site writes elsewhere do not keep re-running its query.
+final tripCountriesProvider =
+    FutureProvider.autoDispose<Map<String, List<TripCountry>>>((ref) async {
+      final queries = ref.watch(tripCountryQueriesProvider);
+      final validatedDiverId = await ref.watch(
+        validatedCurrentDiverIdProvider.future,
       );
-      final tripIdSet = tripIds.toSet();
-      return trips.where((t) => tripIdSet.contains(t.trip.id)).toList();
+      // Covers trips and every dives write (a dive moved to another site
+      // included).
+      invalidateOnTripListChanges(ref);
+      // A site's country edited changes the flags without touching the trips
+      // or dives tables.
+      ref.invalidateSelfWhen(
+        ref.read(siteRepositoryProvider).watchSitesChanges(),
+      );
+      return queries.getTripCountries(diverId: validatedDiverId);
+    });
+
+/// Rebuilds [ref]'s provider whenever [allTripsWithStatsProvider] would
+/// refresh, for a read of some of the same entries (Global Search's rows,
+/// issue #4247).
+void invalidateOnTripListChanges(Ref ref) {
+  ref.invalidateSelfWhen(ref.read(tripRepositoryProvider).watchTripsChanges());
+  // The per-trip stats aggregate the trip's dives, so a merge or a bulk delete
+  // changes them without the trips table being written (issue #958).
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchMeasuredRuntimeChanges(),
+  );
+}
+
+/// The ids the trip filter selects, from the compiled query (#2365). Keyed
+/// on the filter's value; a write to any table the query read refreshes it
+/// in place. A shared trip's dives are the active diver's alone, as its
+/// stats count them.
+///
+/// Only trips the diver can see, so the set is the filtered list's rows and
+/// the equipment Trips row can count it (issue #4016). Hiding or sharing a
+/// trip writes no table the query reads, hence the extra tick.
+final queryFilteredTripIdsProvider = FutureProvider.autoDispose
+    .family<Set<String>, TripFilterState>((ref, filter) async {
+      ref.invalidateSelfWhen(
+        ref.watch(queryIdSetRunnerProvider).watchTables(const {
+          'trip_hides',
+          'trip_shares',
+        }),
+      );
+      final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+      final compiled = compileTripFilter(filter, diverId: diverId);
+      return watchQueryIds(
+        ref,
+        compiled,
+        scope: visibleTripsScope(compiled.rootAlias, diverId),
+      );
     });
 
 /// Filtered trips provider - applies current filter to trip list.
@@ -106,20 +208,29 @@ final filteredTripsProvider = Provider<AsyncValue<List<TripWithStats>>>((ref) {
     return AsyncValue.data(trips);
   }
 
-  // If filtering by equipment, delegate to async family provider
-  if (filter.equipmentId != null) {
-    return ref.watch(_equipmentFilteredTripsProvider(filter.equipmentId!));
-  }
-
-  return AsyncValue.data(trips);
+  // Every axis narrows through the compiled query, by narrowByIds's rules.
+  return narrowByIds(
+    AsyncValue.data(trips),
+    ref.watch(queryFilteredTripIdsProvider(filter)),
+    (t) => t.trip.id,
+  );
 });
 
 /// Trip sort state provider
-final tripSortProvider = StateProvider<SortState<TripSortField>>(
-  (ref) => const SortState(
-    field: TripSortField.startDate,
-    direction: SortDirection.descending,
-  ),
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final tripSortProvider = Provider<SortState<TripSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(settingsProvider.select((s) => s.listArrangements.tripSort)),
+        TripSortField.values,
+      ) ??
+      const SortState(
+        field: TripSortField.startDate,
+        direction: SortDirection.descending,
+      ),
 );
 
 /// Sorted and filtered trips provider
@@ -138,6 +249,7 @@ List<TripWithStats> _applyTripSorting(
   SortState<TripSortField> sort,
 ) {
   final sorted = List<TripWithStats>.from(trips);
+  final collator = TextCollator();
 
   sorted.sort((a, b) {
     int comparison;
@@ -150,7 +262,7 @@ List<TripWithStats> _applyTripSorting(
       case TripSortField.endDate:
         comparison = a.trip.endDate.compareTo(b.trip.endDate);
       case TripSortField.name:
-        comparison = a.trip.name.compareTo(b.trip.name);
+        comparison = collator.compare(a.trip.name, b.trip.name);
     }
 
     if (invertForText) {
@@ -167,37 +279,111 @@ List<TripWithStats> _applyTripSorting(
 /// Single trip provider
 final tripByIdProvider = FutureProvider.family<Trip?, String>((ref, id) async {
   final repository = ref.watch(tripRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
   return repository.getTripById(id);
 });
 
-/// Trip with stats provider
+/// Trip with stats provider.
+///
+/// Scopes aggregate stats to the currently-active diver so that shared trips
+/// only show that diver's dive count, bottom time, and depth figures.
+///
+/// Self-invalidates on `dives` table writes for the same reason
+/// [TripListNotifier] subscribes to them: `getTripWithStats` LEFT JOINs the
+/// dives table, so a merge/consolidate or a sync apply changes the counts
+/// without touching the trip row. The trip detail page renders this as the
+/// Trip page's totals directly above the day lines that
+/// [divesForTripProvider] feeds, so leaving it stale would show "5 dives"
+/// over days that add up to 4.
+///
+/// Watches BOTH tables because `getTripWithStats` reads both: it calls
+/// `getTripById` before running the dives aggregate, and the page renders the
+/// returned `trip` (name, dates, location) alongside the stats. A synced
+/// rename would otherwise leave the header showing the old name indefinitely,
+/// since no dives-table write need accompany it.
 final tripWithStatsProvider = FutureProvider.family<TripWithStats, String>((
   ref,
   tripId,
 ) async {
   final repository = ref.watch(tripRepositoryProvider);
-  return repository.getTripWithStats(tripId);
+  final diveRepository = ref.watch(diveRepositoryProvider);
+  final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+
+  ref.invalidateSelfWhen(diveRepository.watchMeasuredRuntimeChanges());
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
+
+  return repository.getTripWithStats(tripId, diverId: diverId);
 });
 
-/// Dives for a trip provider (IDs only)
+/// Dives for a trip provider (IDs only).
+///
+/// Scoped to the currently-active diver so that shared trips only show that
+/// diver's dives on the detail page. Self-invalidates on any `dives` table
+/// write (a merge/consolidate, a direct edit, a sync apply, ...) the same way
+/// [tripListNotifierProvider] already does for the trip list's dive counts --
+/// without this, the trip detail page keeps showing a dive that a merge just
+/// folded away until something else happens to invalidate it.
 final diveIdsForTripProvider = FutureProvider.family<List<String>, String>((
   ref,
   tripId,
 ) async {
   final repository = ref.watch(tripRepositoryProvider);
-  return repository.getDiveIdsForTrip(tripId);
+  final diveRepository = ref.watch(diveRepositoryProvider);
+  final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+
+  ref.invalidateSelfWhen(diveRepository.watchDivesChanges());
+  // A trip's dives include its side trips', so linking or unlinking one
+  // changes them without a dive row being written (issue #3658).
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
+
+  return repository.getDiveIdsForTrip(tripId, diverId: diverId);
 });
 
-/// Full dive entities for a trip provider
+/// A trip's dives, for the screens that list them.
+///
+/// Every trip screen waits on this, so it reads the dives without decoding a
+/// profile or pressure series for each one (issue #3831). What a card can show
+/// is all there, SAC and tank pressures included, but `Dive.profile` is empty
+/// on nearly every dive: a screen that draws one reads it through
+/// `getMergedProfile`.
+///
+/// Scoped to the currently-active diver so that shared trips only show that
+/// diver's dives. See [diveIdsForTripProvider] for why this self-invalidates
+/// on dives-table writes.
 final divesForTripProvider = FutureProvider.family<List<domain.Dive>, String>((
   ref,
   tripId,
 ) async {
   final tripRepository = ref.watch(tripRepositoryProvider);
-  final diveRepository = DiveRepository();
-  final diveIds = await tripRepository.getDiveIdsForTrip(tripId);
+  final diveRepository = ref.watch(diveRepositoryProvider);
+  final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+
+  // Includes the buddy link tables: the trip story and day map cards show
+  // buddy names, and a rename or a synced buddy link never restamps the dive
+  // row (#1769, #3039).
+  ref.invalidateSelfWhen(diveRepository.watchDivesChangesWithBuddyLinks());
+  // The day rows' runtime, to match the trip total above them. Not the whole
+  // runtime tick: the line above already follows the dive row.
+  ref.invalidateSelfWhen(diveRepository.watchTables(measuredRuntimeTables));
+  // And a side trip linked or unlinked (issue #3658).
+  ref.invalidateSelfWhen(tripRepository.watchTripsChanges());
+  // Each dive carries its site, whose name and location the day lines show.
+  // A site edited writes only the site row, never the dives at it (#4624).
+  // Debounced like the dive ticks: a catalogue fill or a sync pull writes
+  // many sites at once, and one reload covers them all.
+  ref.invalidateSelfWhen(
+    ref
+        .read(siteRepositoryProvider)
+        .watchSitesChanges()
+        .debounce(DiveRepository.changeTickDebounce),
+  );
+
+  final diveIds = await tripRepository.getDiveIdsForTrip(
+    tripId,
+    diverId: diverId,
+  );
   if (diveIds.isEmpty) return [];
-  return diveRepository.getDivesByIds(diveIds);
+  return diveRepository.getDivesByIdsWithoutSamples(diveIds);
 });
 
 /// Trip search provider
@@ -212,6 +398,7 @@ final tripSearchProvider = FutureProvider.family<List<Trip>, String>((
     return ref.watch(allTripsProvider).value ?? [];
   }
   final repository = ref.watch(tripRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
   return repository.searchTrips(query, diverId: validatedDiverId);
 });
 
@@ -224,6 +411,7 @@ final tripForDateProvider = FutureProvider.family<Trip?, DateTime>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchTripsChanges());
   return repository.findTripForDate(date, diverId: validatedDiverId);
 });
 
@@ -245,6 +433,20 @@ class TripListNotifier extends StateNotifier<AsyncValue<List<TripWithStats>>> {
         _initializeAndLoad();
       }
     });
+
+    // Auto-refresh when the underlying tables change (e.g. after a sync).
+    // Subscribe to both the trips table and the dives table: the stats query
+    // LEFT JOINs dives, so a synced dive can change the per-trip counts even
+    // when no trip row changed.
+    final tripsChangeSub = _repository.watchTripsChanges().listen(
+      (_) => _silentReload(),
+    );
+    final divesChangeSub = _ref
+        .read(diveRepositoryProvider)
+        .watchMeasuredRuntimeChanges()
+        .listen((_) => _silentReload());
+    _ref.onDispose(tripsChangeSub.cancel);
+    _ref.onDispose(divesChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -272,6 +474,28 @@ class TripListNotifier extends StateNotifier<AsyncValue<List<TripWithStats>>> {
     }
   }
 
+  /// Silent reload used when the underlying tables change (e.g. after a sync).
+  ///
+  /// Mirrors [_loadTrips] but never flips state to loading, so the list
+  /// refreshes in place without flashing a spinner. The trip stats LEFT JOIN
+  /// the dives table, so this fires for both trip and dive table changes.
+  Future<void> _silentReload() async {
+    try {
+      // Resolve the validated diver id first: a tick can arrive before
+      // _initializeAndLoad() has populated _validatedDiverId, which would
+      // otherwise query with diverId: null and show unscoped stats.
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final trips = await _repository.getAllTripsWithStats(
+        diverId: _validatedDiverId,
+      );
+      if (mounted) state = AsyncValue.data(trips);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
+    }
+  }
+
   Future<void> refresh() async {
     try {
       // Get fresh validated diver ID before loading
@@ -287,30 +511,56 @@ class TripListNotifier extends StateNotifier<AsyncValue<List<TripWithStats>>> {
     }
   }
 
-  Future<Trip> addTrip(Trip trip) async {
-    // Get fresh validated diver ID before creating
-    final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
-
-    // Always set diverId to the current validated diver for new trips
-    // This ensures the trip's diverId matches the filter used to display it
-    final tripWithDiver = validatedId != null
-        ? trip.copyWith(diverId: validatedId)
-        : trip;
-    final newTrip = await _repository.createTrip(tripWithDiver);
+  /// Deletes [id] when the active profile may (issue #2594). False, with
+  /// nothing changed, for a shared trip another profile owns.
+  Future<bool> deleteTrip(String id) async {
+    final actingDiverId = await _ref.read(
+      validatedCurrentDiverIdProvider.future,
+    );
+    final deleted = await _repository.deleteTrip(
+      id,
+      actingDiverId: actingDiverId,
+    );
     await refresh();
-    return newTrip;
+    return deleted;
   }
 
-  Future<void> updateTrip(Trip trip) async {
-    await _repository.updateTrip(trip);
+  /// Hides another profile's shared trip [id] from the active profile only
+  /// (issue #2594). False when the policy refuses.
+  Future<bool> hideTrip(String id) async {
+    final diverId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return false;
+    final hidden = await _ref
+        .read(profileHidesRepositoryProvider)
+        .hide(SharedItemKind.trip, id, diverId);
     await refresh();
-    _ref.invalidate(tripByIdProvider(trip.id));
-    _ref.invalidate(tripWithStatsProvider(trip.id));
+    _ref.invalidate(hiddenItemsProvider);
+    return hidden;
   }
 
-  Future<void> deleteTrip(String id) async {
-    await _repository.deleteTrip(id);
+  /// Hides other profiles' shared trips [ids] from the active profile only
+  /// (issue #2594), refreshing the list once. Returns how many are hidden
+  /// afterwards.
+  Future<int> hideTrips(List<String> ids) async {
+    final diverId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return 0;
+    final hidden = await _ref
+        .read(profileHidesRepositoryProvider)
+        .hideAll(SharedItemKind.trip, ids, diverId);
     await refresh();
+    _ref.invalidate(hiddenItemsProvider);
+    return hidden;
+  }
+
+  /// Shows a hidden trip [id] to the active profile again.
+  Future<void> unhideTrip(String id) async {
+    final diverId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return;
+    await _ref
+        .read(profileHidesRepositoryProvider)
+        .unhide(SharedItemKind.trip, id, diverId);
+    await refresh();
+    _ref.invalidate(hiddenItemsProvider);
   }
 
   Future<void> assignDiveToTrip(String diveId, String tripId) async {
@@ -448,3 +698,13 @@ final tripCompactCardConfigProvider =
         ],
       ),
     );
+
+/// The trip a list returned to reopens and scrolls back to: the one last
+/// opened, while the list as filtered still shows it (#3301).
+final rememberedTripIdProvider = Provider<AsyncValue<String?>>(
+  (ref) => rememberedListedId(
+    items: ref.watch(sortedFilteredTripsProvider),
+    rememberedId: ref.watch(highlightedTripIdProvider),
+    idOf: (entry) => entry.trip.id,
+  ),
+);

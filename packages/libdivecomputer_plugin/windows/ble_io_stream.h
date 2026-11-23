@@ -1,10 +1,13 @@
 #ifndef BLE_IO_STREAM_H_
 #define BLE_IO_STREAM_H_
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,6 +18,10 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
+
+#include "ble_connect_failure.h"
+#include "bluetooth_route_policy.h"
+#include "ble_read_poll.h"
 
 extern "C" {
 #include "libdc_wrapper.h"
@@ -34,8 +41,11 @@ class BleIoStream {
   ~BleIoStream();
 
   // Connect to a BLE device by address and discover GATT characteristics.
-  // Blocks until ready or timeout. Returns true on success.
-  bool ConnectAndDiscover(uint64_t bluetooth_address);
+  // Blocks until ready or timeout. Returns true on success. A transient
+  // failure is retried within kConnectRetryWindowMs (issue #4094), checking
+  // `cancelled` between attempts so a cancelled download stops waiting.
+  bool ConnectAndDiscover(uint64_t bluetooth_address,
+                          const std::function<bool()>& cancelled = {});
 
   // Build the libdc_io_callbacks_t struct pointing to this instance.
   // The caller must keep this BleIoStream alive while the callbacks are
@@ -54,7 +64,24 @@ class BleIoStream {
   // Set callback for PIN code requests.
   void SetOnPinCodeRequired(std::function<void(const std::string&)> callback);
 
+  // Why the last ConnectAndDiscover returned false, and the log line that
+  // explains it (issue #4094). kNone until a connect has failed.
+  BleConnectFailure connect_failure() const { return connect_failure_; }
+  const std::string& connect_failure_detail() const {
+    return connect_failure_detail_;
+  }
+
  private:
+  // Logs `detail` as the connect failure, records why, and returns false so
+  // a failure path can end in `return Fail(...)`.
+  // `hresult` is the code of the winrt::hresult_error behind it, or 0 for a
+  // GattCommunicationStatus, so the retry policy can tell them apart.
+  bool Fail(BleConnectFailure failure, const std::string& detail,
+            int32_t hresult = 0);
+
+  // One connect and discovery attempt; ConnectAndDiscover repeats it.
+  bool ConnectAndDiscoverOnce(uint64_t bluetooth_address);
+
   // Discover GATT services and find the best write/notify characteristic
   // pair.
   bool DiscoverCharacteristics();
@@ -68,6 +95,9 @@ class BleIoStream {
   static int CloseCallback(void* userdata);
   static int IoctlCallback(void* userdata, unsigned int request,
                             void* data, size_t size);
+  // DC_IOCTL_BLE_CHARACTERISTIC_READ (issue #422): read one characteristic
+  // by UUID from any discovered service into the request buffer.
+  int ReadCharacteristic(const winrt::guid& uuid, void* data, size_t size);
   static int PollCallback(void* userdata, int timeout);
   static int PurgeCallback(void* userdata, unsigned int direction);
 
@@ -75,31 +105,139 @@ class BleIoStream {
   int PerformRead(void* data, size_t size, size_t* actual);
   int PerformWrite(const void* data, size_t size, size_t* actual);
 
-  // GATT notification handler.
+  // Defined below with the credit state; declared here for the handlers.
+  struct CreditBalance;
+
+  // GATT notification handler. `generation` is the connect attempt that
+  // subscribed it and `credits` that attempt's balance; a callback from an
+  // earlier attempt is dropped and can only ever touch its own, closed,
+  // balance.
   void OnCharacteristicValueChanged(
       winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
           GattCharacteristic const& sender,
       winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
-          GattValueChangedEventArgs const& args);
+          GattValueChangedEventArgs const& args,
+      uint32_t generation, const std::shared_ptr<CreditBalance>& credits);
+
+  // Subscribes OnCharacteristicValueChanged for the current attempt.
+  winrt::event_token SubscribeValueChanged(
+      winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
+          GattCharacteristic const& characteristic);
+
+  // Telit/Stollmann Terminal I/O credit handshake. See the block comment in
+  // ble_io_stream.cc and darwin's BleCharacteristicSelector.
+  bool GrantInitialCredits();
+  void ReplenishCredits(const std::shared_ptr<CreditBalance>& credits);
+  // Unsubscribe from and forget the credit characteristics.
+  void ReleaseCreditCharacteristics();
 
   // Known service/characteristic UUIDs for dive computers.
   static const winrt::guid kPreferredServiceUuid;
   static const winrt::guid kPreferredWriteUuid;
   static const winrt::guid kPreferredNotifyUuid;
+  static const winrt::guid kHalcyonSymbiosTxUuid;
+  static const winrt::guid kHalcyonSymbiosRxUuid;
+  static const winrt::guid kTerminalIoServiceUuid;
+  static const winrt::guid kTerminalIoDataRxUuid;
+  static const winrt::guid kTerminalIoDataTxUuid;
+  static const winrt::guid kTerminalIoCreditsRxUuid;
+  static const winrt::guid kTerminalIoCreditsTxUuid;
+  static const winrt::guid kUbloxServiceUuid;
+  static const winrt::guid kUbloxDataUuid;
+  static const winrt::guid kUbloxCreditsUuid;
+  static const winrt::guid kCressiServiceUuid;
+  // Read-poll service (issue #1454): its data characteristic can be read and
+  // written but can neither notify nor indicate.
+  static const winrt::guid kSeacServiceUuid;
+  static const winrt::guid kSeacDataUuid;
+
+  // Opening credit grant. 0xFF is reserved by the TIO protocol, so 254 is the
+  // largest value that means "credits" rather than a control code.
+  static constexpr uint8_t kTerminalIoInitialGrant = 254;
+  // Balance at or below which the client tops the module back up.
+  static constexpr int kTerminalIoRefillThreshold = 32;
 
   winrt::Windows::Devices::Bluetooth::BluetoothLEDevice device_{nullptr};
+  // Held for the connection's lifetime to keep a throughput-optimized
+  // (low-interval) connection request active; released in Close(). A faster
+  // connection interval lets a dive computer's serial->BLE bridge drain its
+  // buffer during bulk logbook dumps without dropping notifications (#280).
+  winrt::Windows::Devices::Bluetooth::
+      BluetoothLEPreferredConnectionParametersRequest
+          preferred_connection_request_{nullptr};
+  // Held with MaintainConnection while connected, so Windows keeps the link
+  // between GATT calls (issue #4094); released in Close().
+  winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattSession
+      gatt_session_{nullptr};
   winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
       GattCharacteristic write_characteristic_{nullptr};
   winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
       GattCharacteristic notify_characteristic_{nullptr};
   winrt::event_token notify_token_;
+  // Every characteristic discovery saw, for characteristic reads (#422).
+  std::vector<winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
+                  GattCharacteristic>
+      all_characteristics_;
+  // ATT handle of the data notify characteristic, cached so the notification
+  // thread can identify a callback's source without reading
+  // notify_characteristic_ -- Close() clears that member concurrently, and
+  // revoking the ValueChanged token does not wait for handlers already
+  // running, so reading the WinRT object from the callback would be a data
+  // race. Zero means "no characteristic selected", which rejects everything.
+  std::atomic<uint16_t> notify_attribute_handle_{0};
+  // UART Credits RX/TX, non-null only on Telit Terminal I/O devices.
+  winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
+      GattCharacteristic credits_write_characteristic_{nullptr};
+  winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::
+      GattCharacteristic credits_notify_characteristic_{nullptr};
+  winrt::event_token credits_notify_token_;
+  // Whether a failed opening grant is fatal (Telit) or falls back to running
+  // without flow control (u-blox, where it is optional).
+  bool credits_required_ = false;
+  // Credit balance, held behind a shared_ptr so the fire-and-forget grant
+  // completion can settle it without capturing `this`: the async operation may
+  // outlive this stream, and the balance must survive that long to be updated
+  // safely.
+  //
+  // WinRT can dispatch ValueChanged on several thread-pool threads at once, so
+  // the decrement/check/grant sequence is guarded as a unit: two concurrent
+  // refills would hand the module credits twice.
+  struct CreditBalance {
+    std::mutex mutex;
+    int credits = 0;
+    bool grant_in_flight = false;
+    // Set once the opening grant is confirmed. Top-ups stay suppressed until
+    // then: notifications go live before that write is issued, and a refill
+    // requested in the window would put a second credit write on the wire
+    // beside it and count both grants.
+    bool open = false;
+  };
+  std::shared_ptr<CreditBalance> credits_ =
+      std::make_shared<CreditBalance>();
 
   std::mutex read_mutex_;
   std::condition_variable read_cv_;
-  std::vector<uint8_t> read_buffer_;
+  // One entry per GATT notification. libdivecomputer's packet parsers
+  // require each read to return bytes from at most one notification;
+  // coalescing them into a flat buffer loses packet boundaries.
+  std::deque<std::vector<uint8_t>> read_chunks_;
+  // Which connect attempt owns read_chunks_, guarded by read_mutex_. A retry
+  // reconnects to the same device, so the new data characteristic usually
+  // has the same attribute handle as the old one and the handle check alone
+  // would admit a late notification from the failed attempt (issue #4094).
+  uint32_t link_generation_ = 0;
+
+  // Non-null only when the read-poll tier was selected. Read, poll and purge
+  // go to it instead of read_chunks_, which stays empty in that mode.
+  std::unique_ptr<BleReadPoller> read_poller_;
 
   int timeout_ms_ = 10000;
   std::string device_name_;
+  BleConnectFailure connect_failure_ = BleConnectFailure::kNone;
+  std::string connect_failure_detail_;
+  int32_t connect_failure_hresult_ = 0;
+  // The WinRT call in flight, named in the log when one throws.
+  std::string connect_step_;
 
   // PIN code authentication support.
   std::mutex pin_mutex_;

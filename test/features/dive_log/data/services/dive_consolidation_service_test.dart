@@ -1,0 +1,2506 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/sync/event_scope_tombstone.dart';
+import 'package:submersion/core/services/sync/hlc.dart';
+import 'package:submersion/core/services/sync/sync_clock.dart';
+import 'package:submersion/features/dive_computer/data/services/reparse_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart'
+    as codec;
+import 'package:submersion/features/dive_log/domain/codecs/tank_pressure_series_codec.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart'
+    as domain;
+
+import '../../../../helpers/clock_expectations.dart';
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository diveRepo;
+  late DiveConsolidationService service;
+  late ProfileSeriesRepository profileSeries;
+  late TankPressureSeriesRepository tankSeries;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    await db.customStatement('PRAGMA foreign_keys = OFF');
+    diveRepo = DiveRepository();
+    service = DiveConsolidationService(diveRepo);
+    profileSeries = ProfileSeriesRepository();
+    tankSeries = TankPressureSeriesRepository();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  domain.DiveTank tank(
+    String id, {
+    required double o2,
+    double he = 0,
+    double? start,
+    double? end,
+    int order = 0,
+  }) => domain.DiveTank(
+    id: id,
+    gasMix: domain.GasMix(o2: o2, he: he),
+    startPressure: start,
+    endPressure: end,
+    order: order,
+  );
+
+  /// Seeds a dive via the repository (base row, tanks, profile) and, when
+  /// [computerId] is given, stamps the raw `dives.computerId` FK column the
+  /// same way a real download does (the domain Dive entity has no
+  /// computerId field, so createDive can never set it -- see
+  /// dive_repository_impl.dart:4481-4482).
+  Future<void> seedDive(
+    String id, {
+    required DateTime entry,
+    int runtimeMin = 30,
+    double depth = 18,
+    String? computerId,
+    String? serial,
+    Duration? bottomTime,
+    domain.GeoPoint? entryLocation,
+    domain.GeoPoint? exitLocation,
+    List<domain.DiveTank> tanks = const [],
+    List<domain.DiveProfilePoint>? profile,
+    bool isPlanned = false,
+    int? diveNumber,
+    String? outingId,
+  }) async {
+    await diveRepo.createDive(
+      domain.Dive(
+        id: id,
+        diverId: 'diver1',
+        dateTime: entry,
+        entryTime: entry,
+        runtime: Duration(minutes: runtimeMin),
+        bottomTime: bottomTime,
+        maxDepth: depth,
+        diveNumber: diveNumber,
+        isPlanned: isPlanned,
+        outingId: outingId,
+        diveComputerSerial: serial,
+        entryLocation: entryLocation,
+        exitLocation: exitLocation,
+        tanks: tanks,
+        profile:
+            profile ??
+            [
+              const domain.DiveProfilePoint(timestamp: 0, depth: 0),
+              domain.DiveProfilePoint(
+                timestamp: runtimeMin * 30,
+                depth: depth,
+                temperature: 22.5,
+                tts: 5,
+                cns: 10.0,
+              ),
+              domain.DiveProfilePoint(timestamp: runtimeMin * 60, depth: 0),
+            ],
+      ),
+    );
+    if (computerId != null) {
+      await (db.update(db.dives)..where((t) => t.id.equals(id))).write(
+        DivesCompanion(computerId: Value(computerId)),
+      );
+    }
+  }
+
+  Future<void> seedDataSource(
+    String id, {
+    required String diveId,
+    String? computerId,
+    bool isPrimary = true,
+    int? mergeSourceSlot,
+    Uint8List? rawData,
+    Uint8List? rawFingerprint,
+    String? descriptorVendor,
+    String? descriptorProduct,
+    int? descriptorModel,
+  }) async {
+    await db
+        .into(db.diveDataSources)
+        .insert(
+          DiveDataSourcesCompanion.insert(
+            id: id,
+            diveId: diveId,
+            importedAt: DateTime.utc(2026, 7, 1),
+            createdAt: DateTime.utc(2026, 7, 1),
+          ).copyWith(
+            isPrimary: Value(isPrimary),
+            computerId: Value(computerId),
+            mergeSourceSlot: Value(mergeSourceSlot),
+            rawData: Value(rawData),
+            rawFingerprint: Value(rawFingerprint),
+            descriptorVendor: Value(descriptorVendor),
+            descriptorProduct: Value(descriptorProduct),
+            descriptorModel: Value(descriptorModel),
+          ),
+        );
+  }
+
+  /// One single-sample tank pressure series, for tests exercising the
+  /// consolidation writer, which now reads and writes series rows instead
+  /// of legacy `tank_pressure_profiles` rows. `computerId` left null: the
+  /// legacy row it replaces carried none either, and the stamp/copy steps
+  /// under test are what attribute it.
+  Future<void> seedTankPressureSeries(
+    String id, {
+    required String diveId,
+    required String tankId,
+    required int timestamp,
+    required double pressure,
+  }) async {
+    await tankSeries.insertSeries(
+      id: id,
+      diveId: diveId,
+      tankId: tankId,
+      samples: [TankPressureSample(timestamp: timestamp, pressure: pressure)],
+      now: 1000,
+    );
+  }
+
+  Future<void> seedEvent(
+    String id, {
+    required String diveId,
+    required int timestamp,
+    String eventType = 'gaschange',
+    String? tankId,
+    String? computerId,
+  }) async {
+    await db
+        .into(db.diveProfileEvents)
+        .insert(
+          DiveProfileEventsCompanion.insert(
+            id: id,
+            diveId: diveId,
+            timestamp: timestamp,
+            eventType: eventType,
+            createdAt: 0,
+          ).copyWith(tankId: Value(tankId), computerId: Value(computerId)),
+        );
+  }
+
+  Future<void> seedGasSwitch(
+    String id, {
+    required String diveId,
+    required String tankId,
+    required int timestamp,
+    String? computerId,
+  }) async {
+    await db
+        .into(db.gasSwitches)
+        .insert(
+          GasSwitchesCompanion.insert(
+            id: id,
+            diveId: diveId,
+            timestamp: timestamp,
+            tankId: tankId,
+            createdAt: 0,
+            computerId: Value(computerId),
+          ),
+        );
+  }
+
+  Future<void> seedMedia(String id, {required String diveId}) async {
+    await db
+        .into(db.media)
+        .insert(
+          MediaCompanion.insert(
+            id: id,
+            filePath: '/photos/$id.jpg',
+            createdAt: 0,
+            updatedAt: 0,
+          ).copyWith(diveId: Value(diveId)),
+        );
+  }
+
+  Future<void> seedTag(
+    String id, {
+    required String diveId,
+    required String tagId,
+  }) async {
+    await db
+        .into(db.diveTags)
+        .insert(
+          DiveTagsCompanion.insert(
+            id: id,
+            diveId: diveId,
+            tagId: tagId,
+            createdAt: 0,
+          ),
+        );
+  }
+
+  Future<void> seedBuddy(
+    String id, {
+    required String diveId,
+    required String buddyId,
+  }) async {
+    await db
+        .into(db.diveBuddies)
+        .insert(
+          DiveBuddiesCompanion.insert(
+            id: id,
+            diveId: diveId,
+            buddyId: buddyId,
+            createdAt: 0,
+          ),
+        );
+  }
+
+  Future<void> seedEquipment({
+    required String diveId,
+    required String equipmentId,
+  }) async {
+    await db
+        .into(db.diveEquipment)
+        .insert(
+          DiveEquipmentCompanion.insert(
+            diveId: diveId,
+            equipmentId: equipmentId,
+          ),
+        );
+  }
+
+  Future<void> seedDiveTypeRow(
+    String id, {
+    required String diveId,
+    required String diveTypeId,
+  }) async {
+    await db
+        .into(db.diveDiveTypes)
+        .insert(
+          DiveDiveTypesCompanion.insert(
+            id: id,
+            diveId: diveId,
+            diveTypeId: diveTypeId,
+            createdAt: 0,
+          ),
+        );
+  }
+
+  Future<void> seedSighting(
+    String id, {
+    required String diveId,
+    required String speciesId,
+  }) async {
+    await db
+        .into(db.sightings)
+        .insert(
+          SightingsCompanion.insert(
+            id: id,
+            diveId: diveId,
+            speciesId: speciesId,
+          ),
+        );
+  }
+
+  Future<void> seedWeight(
+    String id, {
+    required String diveId,
+    double amountKg = 2.0,
+    String label = '',
+  }) async {
+    await db
+        .into(db.diveWeights)
+        .insert(
+          DiveWeightsCompanion.insert(
+            id: id,
+            diveId: diveId,
+            weightType: 'Integrated',
+            amountKg: amountKg,
+            createdAt: 0,
+            label: Value(label),
+          ),
+        );
+  }
+
+  Future<void> seedCustomField(
+    String id, {
+    required String diveId,
+    required String fieldKey,
+    required String fieldValue,
+  }) async {
+    await db
+        .into(db.diveCustomFields)
+        .insert(
+          DiveCustomFieldsCompanion.insert(
+            id: id,
+            diveId: diveId,
+            fieldKey: fieldKey,
+            createdAt: 0,
+          ).copyWith(fieldValue: Value(fieldValue)),
+        );
+  }
+
+  /// Two overlapping dives (target 't', secondary 's', 60s apart) each with
+  /// a computer, a data source, a profile carrying temp/tts/cns, two tanks
+  /// (one dedupable pair: tank-t1 <-> tank-s1), tank pressures, two events,
+  /// and (on the secondary only) one media row.
+  Future<void> seedConsolidatableFixture() async {
+    await seedDive(
+      't',
+      entry: DateTime.utc(2026, 7, 1, 9),
+      computerId: 'comp-t',
+      serial: 'SER-T',
+      tanks: [
+        tank('tank-t1', o2: 21, start: 200, end: 100, order: 0),
+        tank('tank-t2', o2: 32, start: 200, end: 120, order: 1),
+      ],
+    );
+    await seedDataSource('src-t', diveId: 't', computerId: 'comp-t');
+    await seedTankPressureSeries(
+      'tp-t1',
+      diveId: 't',
+      tankId: 'tank-t1',
+      timestamp: 60,
+      pressure: 190,
+    );
+    await seedTankPressureSeries(
+      'tp-t2',
+      diveId: 't',
+      tankId: 'tank-t2',
+      timestamp: 60,
+      pressure: 190,
+    );
+    await seedEvent('event-t1', diveId: 't', timestamp: 30, tankId: 'tank-t1');
+    await seedEvent('event-t2', diveId: 't', timestamp: 900, eventType: 'deco');
+
+    await seedDive(
+      's',
+      entry: DateTime.utc(2026, 7, 1, 9, 1), // 60s after target
+      computerId: 'comp-s',
+      serial: 'SER-S',
+      tanks: [
+        // Dedupable: same gas, pressures within the 5 bar tolerance of
+        // tank-t1.
+        tank('tank-s1', o2: 21, start: 205, end: 105, order: 0),
+        // Not dedupable: pure O2 deco bottle.
+        tank('tank-s2', o2: 100, start: 200, end: 150, order: 1),
+      ],
+    );
+    await seedDataSource('src-s', diveId: 's', computerId: 'comp-s');
+    await seedTankPressureSeries(
+      'tp-s1',
+      diveId: 's',
+      tankId: 'tank-s1',
+      timestamp: 60,
+      pressure: 195,
+    );
+    await seedTankPressureSeries(
+      'tp-s2',
+      diveId: 's',
+      tankId: 'tank-s2',
+      timestamp: 60,
+      pressure: 195,
+    );
+    await seedEvent('event-s1', diveId: 's', timestamp: 30, tankId: 'tank-s1');
+    await seedGasSwitch(
+      'switch-s1',
+      diveId: 's',
+      tankId: 'tank-s1',
+      timestamp: 30,
+      computerId: 'comp-s',
+    );
+    await seedEvent('event-s2', diveId: 's', timestamp: 900, eventType: 'deco');
+    await seedMedia('media-s', diveId: 's');
+  }
+
+  group('apply', () {
+    test(
+      'scenario 1: re-parents everything and tombstones the secondary',
+      () async {
+        await seedConsolidatableFixture();
+        // A switch the diver entered: no computer.
+        await seedGasSwitch(
+          'switch-s-manual',
+          diveId: 's',
+          tankId: 'tank-s1',
+          timestamp: 600,
+        );
+
+        final outcome = await service.apply(
+          targetDiveId: 't',
+          secondaryDiveIds: ['s'],
+        );
+        expect(outcome.targetDiveId, 't');
+
+        // Target has both computers' profile series.
+        final series = await profileSeries.getSeriesForDive('t');
+        final allSamples = [for (final s in series) ...s.samples];
+        expect(allSamples, hasLength(6)); // 3 target + 3 secondary
+
+        // Secondary's series is shifted by +60 and carries the secondary's
+        // computerId, demoted.
+        final secondarySeries = series.where((s) => s.computerId == 'comp-s');
+        expect(secondarySeries, hasLength(1));
+        expect(secondarySeries.single.samples.map((p) => p.timestamp).toSet(), {
+          60,
+          960,
+          1860,
+        });
+        expect(secondarySeries.every((s) => !s.isPrimary), isTrue);
+
+        // Secondary's events shifted by +60 and carry the secondary's
+        // computerId.
+        final events = await (db.select(
+          db.diveProfileEvents,
+        )..where((t) => t.diveId.equals('t'))).get();
+        // Re-parented events get fresh ids (the originals are left behind
+        // under diveId='s' since FK enforcement is off in this suite), so
+        // identify them by computerId attribution instead.
+        final secondaryEvents = events.where((e) => e.computerId == 'comp-s');
+        expect(secondaryEvents.map((e) => e.timestamp).toSet(), {90, 960});
+        expect(secondaryEvents.every((e) => e.computerId == 'comp-s'), isTrue);
+
+        // Its gas switches keep their own attribution (#2582): the
+        // computer's stays the computer's, and the diver's stays
+        // unattributed so no Replace Source can delete it.
+        final switches = await (db.select(
+          db.gasSwitches,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(
+          {for (final s in switches) s.timestamp: s.computerId},
+          {90: 'comp-s', 660: null},
+        );
+
+        // Secondary's tank pressure series shifted by +60 and carry the
+        // secondary's computerId.
+        final pressureSeries = await tankSeries.getSeriesForDive('t');
+        final secondaryPressureSeries = pressureSeries.where(
+          (p) => p.computerId == 'comp-s',
+        );
+        expect(
+          secondaryPressureSeries
+              .expand((p) => p.samples)
+              .map((p) => p.timestamp)
+              .toSet(),
+          {120},
+        );
+        expect(
+          secondaryPressureSeries.every((p) => p.computerId == 'comp-s'),
+          isTrue,
+        );
+
+        // Secondary dive row gone, tombstoned.
+        final remaining = await db.select(db.dives).get();
+        expect(remaining.map((r) => r.id), ['t']);
+        final tombstones = await (db.select(
+          db.deletionLog,
+        )..where((t) => t.entityType.equals('dives'))).get();
+        expect(tombstones.map((t) => t.recordId).toSet(), {'s'});
+      },
+    );
+
+    test(
+      'scenario 2: dedups matching tanks, keeps non-matching with attribution',
+      () async {
+        await seedConsolidatableFixture();
+
+        await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+        final tanks =
+            await (db.select(db.diveTanks)
+                  ..where((t) => t.diveId.equals('t'))
+                  ..orderBy([(t) => OrderingTerm.asc(t.tankOrder)]))
+                .get();
+        // tank-s1 deduped into tank-t1: no new row. tank-s2 kept, fresh id.
+        expect(tanks, hasLength(3));
+        expect(tanks.map((t) => t.id), contains('tank-t1'));
+        expect(tanks.map((t) => t.id), contains('tank-t2'));
+        expect(tanks.map((t) => t.id), isNot(contains('tank-s1')));
+
+        final newTank = tanks.firstWhere(
+          (t) => t.id != 'tank-t1' && t.id != 'tank-t2',
+        );
+        expect(newTank.computerId, 'comp-s');
+        expect(newTank.tankOrder, 2); // continues after target's 0, 1.
+
+        // The dedupable tank's pressure series lands on tank-t1's id with
+        // the secondary's computerId.
+        final tankT1Series = await tankSeries.getSeriesForTank('t', 'tank-t1');
+        expect(tankT1Series, hasLength(2)); // original + folded-in
+        final foldedIn = tankT1Series.firstWhere((s) => s.id != 'tp-t1');
+        expect(foldedIn.computerId, 'comp-s');
+        expect(foldedIn.samples.single.timestamp, 120); // 60 + 60s offset
+
+        // The non-dedupable tank's pressure series lands on the fresh id.
+        final newTankSeries = await tankSeries.getSeriesForTank(
+          't',
+          newTank.id,
+        );
+        expect(newTankSeries, hasLength(1));
+        expect(newTankSeries.single.computerId, 'comp-s');
+      },
+    );
+
+    test('scenario 3: dive_data_sources ends with a primary row plus the '
+        'secondary re-pointed, non-primary, raw bytes preserved', () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+      await seedDataSource('src-t', diveId: 't', computerId: 'comp-t');
+      await seedDataSource(
+        'src-s',
+        diveId: 's',
+        computerId: 'comp-s',
+        rawData: Uint8List.fromList([1, 2, 3]),
+        rawFingerprint: Uint8List.fromList([9, 9]),
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final sources = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals('t'))).get();
+      expect(sources, hasLength(2));
+      expect(sources.where((s) => s.isPrimary), hasLength(1));
+      final repointed = sources.firstWhere((s) => !s.isPrimary);
+      expect(repointed.computerId, 'comp-s');
+      expect(repointed.rawData, [1, 2, 3]);
+      expect(repointed.rawFingerprint, [9, 9]);
+    });
+
+    test(
+      'scenario 3a: the carried source records the time offset its '
+      'profile was re-based by, and the primary records none (#1177)',
+      () async {
+        await seedConsolidatableFixture();
+
+        await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+        final sources = await (db.select(
+          db.diveDataSources,
+        )..where((t) => t.diveId.equals('t'))).get();
+
+        // The offset cannot be recovered from the raw bytes, so a re-parse can
+        // only put the secondary strand back on the dive's clock if the number
+        // is persisted here. The fixture's secondary starts 60s after the
+        // target, which is the same shift its profile rows were re-based by.
+        final carried = sources.firstWhere((s) => !s.isPrimary);
+        expect(carried.timeOffsetSeconds, 60);
+
+        // The target's own source was never re-based; claiming an offset for
+        // it would shift the primary strand on the next re-parse.
+        final primary = sources.firstWhere((s) => s.isPrimary);
+        expect(primary.timeOffsetSeconds, anyOf(isNull, 0));
+      },
+    );
+
+    test('scenario 3b: secondary with NO dive_data_sources row (manual/file '
+        'import) gets a synthesized non-primary source on the target, '
+        'carrying the secondary computer id, maxDepth, and runtime', () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDataSource('src-t', diveId: 't', computerId: 'comp-t');
+
+      // Secondary reachable by consolidating a manual/file-entered dive:
+      // it has a computerId (assigned at consolidation time) but was
+      // never downloaded, so it has no dive_data_sources row at all.
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        depth: 27.5,
+        runtimeMin: 50,
+        bottomTime: const Duration(minutes: 42),
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final sources = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals('t'))).get();
+      expect(sources, hasLength(2));
+      expect(sources.where((s) => s.isPrimary), hasLength(1));
+
+      final synthesized = sources.firstWhere((s) => !s.isPrimary);
+      expect(synthesized.computerId, 'comp-s');
+      expect(synthesized.maxDepth, 27.5);
+      // The runtime it measured, never the derived bottom time (#2421).
+      expect(synthesized.duration, const Duration(minutes: 50).inSeconds);
+    });
+
+    test('scenario 4: stamps pre-existing target children with the primary '
+        "computer on first consolidation", () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        tanks: [tank('tank-t1', o2: 21)],
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+      await seedGasSwitch(
+        'switch-t1',
+        diveId: 't',
+        tankId: 'tank-t1',
+        timestamp: 0,
+      );
+
+      final before = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.id.equals('tank-t1'))).getSingle();
+      expect(before.computerId, isNull);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final targetRow = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      final after = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.id.equals('tank-t1'))).getSingle();
+      expect(after.computerId, targetRow.computerId);
+      expect(after.computerId, 'comp-t');
+      // A switch with no computer is one the diver entered, and stays
+      // unattributed so a Replace Source cannot delete it (#2582).
+      final targetSwitch = await (db.select(
+        db.gasSwitches,
+      )..where((t) => t.id.equals('switch-t1'))).getSingle();
+      expect(targetSwitch.computerId, isNull);
+    });
+
+    test('the tank computer backfill carries a fresh clock (#2644)', () async {
+      addTearDown(SyncClock.instance.reset);
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        tanks: [tank('tank-t1', o2: 21)],
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+      final before = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.id.equals('tank-t1'))).getSingle();
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final after = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.id.equals('tank-t1'))).getSingle();
+      expect(after.computerId, 'comp-t');
+      expectFresherClock(before.hlc, after.hlc);
+    });
+
+    test(
+      'events stamped with the primary computer carry a fresh clock',
+      () async {
+        // Stamping moves the event into any scope tombstone that computer
+        // already has on this dive; with its old clock, a relayed copy of
+        // that scope would delete it (#1926).
+        await seedDive(
+          't',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-t',
+          serial: 'SER-T',
+        );
+        await seedDive(
+          's',
+          entry: DateTime.utc(2026, 7, 1, 9, 1),
+          computerId: 'comp-s',
+          serial: 'SER-S',
+        );
+        await db.customStatement(
+          'INSERT INTO dive_profile_events '
+          '(id, dive_id, timestamp, event_type, created_at) '
+          "VALUES ('ev-t', 't', 10, 'bookmark', 1)",
+        );
+        await SyncRepository().logScopedDeletion(
+          const EventScopeTombstone(diveId: 't', computerId: 'comp-t'),
+        );
+        final scope = (await db.select(db.deletionLog).get()).singleWhere(
+          (d) => d.entityType == EventScopeTombstone.entityType,
+        );
+
+        await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+        final event = await (db.select(
+          db.diveProfileEvents,
+        )..where((t) => t.id.equals('ev-t'))).getSingle();
+        expect(event.computerId, 'comp-t');
+        expect(
+          Hlc.parse(event.hlc!).compareTo(Hlc.parse(scope.originHlc!)),
+          greaterThan(0),
+        );
+      },
+    );
+
+    test('scenario 5: events preserved with attribution; gas switches '
+        'remapped to merged tank ids', () async {
+      await seedConsolidatableFixture();
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      // event-s1 is re-parented under a fresh id (the original id's row
+      // is left behind under diveId='s' since FK enforcement is off in
+      // this suite), so locate it by its new diveId + shifted timestamp.
+      final event =
+          await (db.select(db.diveProfileEvents)
+                ..where((t) => t.diveId.equals('t') & t.timestamp.equals(90)))
+              .getSingle();
+      // event-s1 originally referenced tank-s1, which deduped into
+      // tank-t1.
+      expect(event.tankId, isNot('tank-s1'));
+      final tankT1 = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.id.equals('tank-t1'))).getSingle();
+      expect(event.tankId, tankT1.id);
+      expect(event.computerId, 'comp-s');
+      expect(event.diveId, 't');
+
+      final gasSwitches = await (db.select(
+        db.gasSwitches,
+      )..where((t) => t.diveId.equals('t'))).get();
+      expect(gasSwitches, hasLength(1));
+      expect(gasSwitches.single.tankId, tankT1.id);
+      expect(gasSwitches.single.timestamp, 90);
+    });
+
+    test('scenario 6: media re-pointed to the target', () async {
+      await seedConsolidatableFixture();
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final media = await (db.select(
+        db.media,
+      )..where((t) => t.id.equals('media-s'))).getSingle();
+      expect(media.diveId, 't');
+    });
+
+    // The secondary's media moves to the target, and the shift that media
+    // is placed by moves with it (issue #4539).
+    test('the shift of the dive that owns the media carries', () async {
+      await seedConsolidatableFixture();
+      await diveRepo.setMediaTimeOffsetSeconds('s', -47);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      expect(target.mediaTimeOffsetSeconds, -47);
+    });
+
+    // The target's own media is placed by its zero; taking the secondary's
+    // shift would move it.
+    test('a target that owns media keeps its own shift', () async {
+      await seedConsolidatableFixture();
+      await seedMedia('media-t', diveId: 't');
+      await diveRepo.setMediaTimeOffsetSeconds('s', -47);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      expect(target.mediaTimeOffsetSeconds, 0);
+    });
+
+    test(
+      'scenario 7: rejects a same-computer selection; nothing written',
+      () async {
+        await seedDive(
+          't2',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-x',
+        );
+        await seedDive(
+          's2',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-x',
+        );
+
+        expect(
+          () => service.apply(targetDiveId: 't2', secondaryDiveIds: ['s2']),
+          throwsArgumentError,
+        );
+
+        final remaining = await db.select(db.dives).get();
+        expect(remaining.map((r) => r.id).toSet(), {'t2', 's2'});
+        expect(await db.select(db.deletionLog).get(), isEmpty);
+      },
+    );
+
+    test('scenario 7b: same-computer rejection message starts with '
+        "'sameComputer'", () async {
+      await seedDive(
+        't2b',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-x',
+      );
+      await seedDive(
+        's2b',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-x',
+      );
+
+      await expectLater(
+        () => service.apply(targetDiveId: 't2b', secondaryDiveIds: ['s2b']),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message.toString(),
+            'message',
+            startsWith('sameComputer'),
+          ),
+        ),
+      );
+    });
+
+    group('a copy of a stretch of the target by the same computer', () {
+      // A 48-minute dive sampled every 10 s, and its second half as the
+      // computer logged it on a second entry: samples from 1300 s on, on that
+      // entry's own clock.
+      domain.DiveProfilePoint point(int t) => domain.DiveProfilePoint(
+        timestamp: t,
+        depth: t == 0 || t >= 2880 ? 0 : 8 + 6 * (1 + (t ~/ 10) % 7) / 7,
+      );
+      final whole = [for (var t = 0; t <= 2880; t += 10) point(t)];
+      final secondHalf = [
+        for (var t = 1300; t <= 2880; t += 10)
+          domain.DiveProfilePoint(timestamp: t - 1300, depth: point(t).depth),
+      ];
+
+      Future<void> seedSplitDive({
+        List<domain.DiveTank> wholeTanks = const [],
+        List<domain.DiveTank> halfTanks = const [],
+        bool halfHasSource = true,
+        String? wholeComputerId = 'comp-x',
+        String? serial,
+      }) async {
+        await seedDive(
+          'whole',
+          entry: DateTime.utc(2026, 4, 10, 19, 52),
+          runtimeMin: 48,
+          computerId: wholeComputerId,
+          serial: serial,
+          tanks: wholeTanks,
+          profile: whole,
+        );
+        await seedDataSource(
+          'src-whole',
+          diveId: 'whole',
+          computerId: 'comp-x',
+          rawData: Uint8List.fromList([1, 2, 3]),
+        );
+        await seedDive(
+          'half',
+          entry: DateTime.utc(
+            2026,
+            4,
+            10,
+            19,
+            52,
+          ).add(const Duration(seconds: 1300)),
+          runtimeMin: 26,
+          computerId: 'comp-x',
+          serial: serial,
+          tanks: halfTanks,
+          profile: secondHalf,
+        );
+        if (halfHasSource) {
+          await seedDataSource(
+            'src-half',
+            diveId: 'half',
+            computerId: 'comp-x',
+            rawData: Uint8List.fromList([9, 9, 9]),
+          );
+        }
+      }
+
+      test('folds in for its raw bytes, repeats nothing the target holds and '
+          'is undone like any consolidation', () async {
+        await seedSplitDive();
+        // The target already has the stretch's safety stop; the copy repeats
+        // it two seconds off, and also holds a bookmark the target lacks.
+        await seedEvent(
+          'ev-whole',
+          diveId: 'whole',
+          timestamp: 1500,
+          eventType: 'safetyStopStart',
+        );
+        await seedEvent(
+          'ev-half-same',
+          diveId: 'half',
+          timestamp: 198,
+          eventType: 'safetyStopStart',
+        );
+        await seedEvent(
+          'ev-half-new',
+          diveId: 'half',
+          timestamp: 400,
+          eventType: 'bookmark',
+        );
+        await seedTag('tag-half', diveId: 'half', tagId: 'tag-1');
+        final seriesBefore = (await profileSeries.getSeriesForDive(
+          'whole',
+        )).length;
+
+        final outcome = await service.apply(
+          targetDiveId: 'whole',
+          secondaryDiveIds: ['half'],
+        );
+
+        // The copy's dive is gone.
+        final dives = await db.select(db.dives).get();
+        expect(dives.map((d) => d.id), ['whole']);
+
+        // Its raw bytes survive as a non-primary source, placed on the
+        // target's clock; the target's own source is untouched.
+        final sources = await (db.select(
+          db.diveDataSources,
+        )..where((r) => r.diveId.equals('whole'))).get();
+        expect(sources, hasLength(2));
+        final own = sources.singleWhere((r) => r.id == 'src-whole');
+        expect(own.isPrimary, isTrue);
+        expect(own.rawData, [1, 2, 3]);
+        final carried = sources.singleWhere((r) => r.id != 'src-whole');
+        expect(carried.isPrimary, isFalse);
+        expect(carried.rawData, [9, 9, 9]);
+        expect(carried.timeOffsetSeconds, 1300);
+
+        // No second copy of the profile, and no repeated safety stop, but the
+        // bookmark and the tag are the target's now.
+        expect(
+          (await profileSeries.getSeriesForDive('whole')).length,
+          seriesBefore,
+        );
+        final events = await (db.select(
+          db.diveProfileEvents,
+        )..where((e) => e.diveId.equals('whole'))).get();
+        expect(events.map((e) => e.eventType).toList()..sort(), [
+          'bookmark',
+          'safetyStopStart',
+        ]);
+        final tags = await (db.select(
+          db.diveTags,
+        )..where((t) => t.diveId.equals('whole'))).get();
+        expect(tags.map((t) => t.tagId), ['tag-1']);
+
+        // Undo brings the copy back with its own raw bytes.
+        await service.undo(outcome.snapshot);
+        expect((await db.select(db.dives).get()).map((d) => d.id).toSet(), {
+          'whole',
+          'half',
+        });
+        final restored = await (db.select(
+          db.diveDataSources,
+        )..where((r) => r.diveId.equals('half'))).get();
+        expect(restored.single.rawData, [9, 9, 9]);
+      });
+
+      test('repeats no pressure the target\'s cylinder already has', () async {
+        // The same cylinder on both entries (same gas, pressures within the
+        // dedupe tolerance), so the copy's cylinder folds into the target's.
+        await seedSplitDive(
+          wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+          halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+        );
+        await seedTankPressureSeries(
+          'tp-w',
+          diveId: 'whole',
+          tankId: 'tk-w',
+          timestamp: 1500,
+          pressure: 120,
+        );
+        await seedTankPressureSeries(
+          'tp-h',
+          diveId: 'half',
+          tankId: 'tk-h',
+          timestamp: 200,
+          pressure: 120,
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final held = await tankSeries.getSeriesForDive('whole');
+        expect(held, hasLength(1));
+        expect(held.single.tankId, 'tk-w');
+        expect(held.single.samples.single.timestamp, 1500);
+      });
+
+      test('carries the copy\'s pressures to a cylinder the target has none '
+          'for', () async {
+        await seedSplitDive(
+          wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+          halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+        );
+        await seedTankPressureSeries(
+          'tp-h',
+          diveId: 'half',
+          tankId: 'tk-h',
+          timestamp: 200,
+          pressure: 120,
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final held = await tankSeries.getSeriesForDive('whole');
+        expect(held, hasLength(1));
+        expect(held.single.tankId, 'tk-w');
+        // Placed on the target's clock: 200 s into the copy is 1500 s in.
+        expect(held.single.samples.single.timestamp, 1500);
+      });
+
+      test('folds the copy\'s cylinder into the target\'s although it starts '
+          'at the pressure the split left it at', () async {
+        await seedSplitDive(
+          wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60)],
+          halfTanks: [tank('tk-h', o2: 21, start: 130, end: 60)],
+        );
+        await seedTankPressureSeries(
+          'tp-w',
+          diveId: 'whole',
+          tankId: 'tk-w',
+          timestamp: 1500,
+          pressure: 120,
+        );
+        await seedTankPressureSeries(
+          'tp-h',
+          diveId: 'half',
+          tankId: 'tk-h',
+          timestamp: 200,
+          pressure: 120,
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final tanks = await (db.select(
+          db.diveTanks,
+        )..where((t) => t.diveId.equals('whole'))).get();
+        expect(tanks.map((t) => t.id), ['tk-w']);
+        expect(await tankSeries.getSeriesForDive('whole'), hasLength(1));
+      });
+
+      test('repeats no event the target holds when only the target\'s copy '
+          'of it names no computer', () async {
+        await seedSplitDive();
+        // Logged before downloads stamped a computer on their events.
+        await seedEvent(
+          'ev-whole',
+          diveId: 'whole',
+          timestamp: 1500,
+          eventType: 'safetyStopStart',
+        );
+        await seedEvent(
+          'ev-half',
+          diveId: 'half',
+          timestamp: 200,
+          eventType: 'safetyStopStart',
+          computerId: 'comp-x',
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final events = await (db.select(
+          db.diveProfileEvents,
+        )..where((e) => e.diveId.equals('whole'))).get();
+        expect(events.map((e) => e.id), ['ev-whole']);
+      });
+
+      test('repeats no event the target holds when only the serial ties the '
+          'target to the copy\'s computer', () async {
+        // The target was never linked to a computer row; the serial is what
+        // shows the copy came from the same one.
+        await seedSplitDive(wholeComputerId: null, serial: 'SN-1');
+        await seedEvent(
+          'ev-whole',
+          diveId: 'whole',
+          timestamp: 1500,
+          eventType: 'safetyStopStart',
+        );
+        await seedEvent(
+          'ev-half',
+          diveId: 'half',
+          timestamp: 200,
+          eventType: 'safetyStopStart',
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final events = await (db.select(
+          db.diveProfileEvents,
+        )..where((e) => e.diveId.equals('whole'))).get();
+        expect(events.map((e) => e.id), ['ev-whole']);
+      });
+
+      test(
+        'keeps the readings the target\'s pressure series do not cover',
+        () async {
+          await seedSplitDive(
+            wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+            halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+          );
+          // The target's series stops at 1800 s; the copy runs on to 2700 s.
+          await tankSeries.insertSeries(
+            id: 'tp-w',
+            diveId: 'whole',
+            tankId: 'tk-w',
+            samples: const [
+              TankPressureSample(timestamp: 1300, pressure: 130),
+              TankPressureSample(timestamp: 1800, pressure: 110),
+            ],
+            now: 1000,
+          );
+          await tankSeries.insertSeries(
+            id: 'tp-h',
+            diveId: 'half',
+            tankId: 'tk-h',
+            samples: const [
+              TankPressureSample(timestamp: 200, pressure: 125),
+              TankPressureSample(timestamp: 1400, pressure: 70),
+            ],
+            now: 1000,
+          );
+
+          await service.apply(
+            targetDiveId: 'whole',
+            secondaryDiveIds: ['half'],
+          );
+
+          final held = await tankSeries.getSeriesForDive('whole');
+          expect(held, hasLength(2));
+          final own = held.singleWhere((s) => s.id == 'tp-w');
+          expect(own.samples, hasLength(2));
+          final added = held.singleWhere((s) => s.id != 'tp-w');
+          expect(added.tankId, 'tk-w');
+          expect(added.samples, const [
+            TankPressureSample(timestamp: 2700, pressure: 70),
+          ]);
+        },
+      );
+
+      test('keeps the copy\'s pressures where only another computer\'s series '
+          'covers the cylinder', () async {
+        await seedSplitDive(
+          wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+          halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+        );
+        await tankSeries.insertSeries(
+          id: 'tp-other',
+          diveId: 'whole',
+          tankId: 'tk-w',
+          computerId: 'comp-y',
+          samples: const [
+            TankPressureSample(timestamp: 1300, pressure: 130),
+            TankPressureSample(timestamp: 2880, pressure: 60),
+          ],
+          now: 1000,
+        );
+        await seedTankPressureSeries(
+          'tp-h',
+          diveId: 'half',
+          tankId: 'tk-h',
+          timestamp: 200,
+          pressure: 120,
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final held = await tankSeries.getSeriesForDive('whole');
+        expect(held, hasLength(2));
+        final added = held.singleWhere((s) => s.id != 'tp-other');
+        expect(added.samples.single.timestamp, 1500);
+      });
+
+      test(
+        'lets two switches of the copy repeat only one of the target\'s',
+        () async {
+          await seedSplitDive(
+            wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+            halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+          );
+          await seedGasSwitch(
+            'sw-w',
+            diveId: 'whole',
+            tankId: 'tk-w',
+            timestamp: 1500,
+          );
+          await seedGasSwitch(
+            'sw-h-1',
+            diveId: 'half',
+            tankId: 'tk-h',
+            timestamp: 199,
+          );
+          await seedGasSwitch(
+            'sw-h-2',
+            diveId: 'half',
+            tankId: 'tk-h',
+            timestamp: 201,
+          );
+
+          await service.apply(
+            targetDiveId: 'whole',
+            secondaryDiveIds: ['half'],
+          );
+
+          final switches = await (db.select(
+            db.gasSwitches,
+          )..where((g) => g.diveId.equals('whole'))).get();
+          expect(switches, hasLength(2));
+        },
+      );
+
+      test('keeps a switch of the copy that only another computer\'s switch '
+          'on the target sits beside', () async {
+        await seedSplitDive(
+          wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+          halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+        );
+        await seedGasSwitch(
+          'sw-other',
+          diveId: 'whole',
+          tankId: 'tk-w',
+          timestamp: 1500,
+          computerId: 'comp-y',
+        );
+        await seedGasSwitch(
+          'sw-h',
+          diveId: 'half',
+          tankId: 'tk-h',
+          timestamp: 200,
+          computerId: 'comp-x',
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final switches = await (db.select(
+          db.gasSwitches,
+        )..where((g) => g.diveId.equals('whole'))).get();
+        expect(switches.map((g) => g.computerId).toList()..sort(), [
+          'comp-x',
+          'comp-y',
+        ]);
+      });
+
+      test('keeps an event of the copy on a cylinder other than the one the '
+          'target\'s matching event names', () async {
+        await seedSplitDive(
+          wholeTanks: [
+            tank('tk-w1', o2: 21, start: 200, end: 60, order: 0),
+            tank('tk-w2', o2: 50, start: 200, end: 60, order: 1),
+          ],
+          halfTanks: [
+            tank('tk-h1', o2: 21, start: 200, end: 60, order: 0),
+            tank('tk-h2', o2: 50, start: 200, end: 60, order: 1),
+          ],
+        );
+        await seedEvent(
+          'ev-whole',
+          diveId: 'whole',
+          timestamp: 1500,
+          tankId: 'tk-w1',
+        );
+        // A gas change on the other cylinder at the same moment.
+        await seedEvent(
+          'ev-half-2',
+          diveId: 'half',
+          timestamp: 200,
+          tankId: 'tk-h2',
+        );
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final events = await (db.select(
+          db.diveProfileEvents,
+        )..where((e) => e.diveId.equals('whole'))).get();
+        expect(events.map((e) => e.tankId).toList()..sort(), [
+          'tk-w1',
+          'tk-w2',
+        ]);
+      });
+
+      test('adds no source for a copy that has no source row', () async {
+        await seedSplitDive(halfHasSource: false);
+
+        await service.apply(targetDiveId: 'whole', secondaryDiveIds: ['half']);
+
+        final sources = await (db.select(
+          db.diveDataSources,
+        )..where((r) => r.diveId.equals('whole'))).get();
+        expect(sources.map((r) => r.id), ['src-whole']);
+      });
+
+      test(
+        'repeats no gas switch the target holds and keeps one it lacks',
+        () async {
+          await seedSplitDive(
+            wholeTanks: [tank('tk-w', o2: 21, start: 200, end: 60, order: 0)],
+            halfTanks: [tank('tk-h', o2: 21, start: 200, end: 60, order: 0)],
+          );
+          await seedGasSwitch(
+            'sw-w',
+            diveId: 'whole',
+            tankId: 'tk-w',
+            timestamp: 1500,
+          );
+          // The same switch as the target's, two seconds off on the copy's
+          // clock, and one the target never logged.
+          await seedGasSwitch(
+            'sw-h-same',
+            diveId: 'half',
+            tankId: 'tk-h',
+            timestamp: 198,
+          );
+          await seedGasSwitch(
+            'sw-h-new',
+            diveId: 'half',
+            tankId: 'tk-h',
+            timestamp: 400,
+          );
+
+          await service.apply(
+            targetDiveId: 'whole',
+            secondaryDiveIds: ['half'],
+          );
+
+          final switches = await (db.select(
+            db.gasSwitches,
+          )..where((g) => g.diveId.equals('whole'))).get();
+          expect(switches.map((g) => g.timestamp).toList()..sort(), [
+            1500,
+            1700,
+          ]);
+          expect(switches.every((g) => g.tankId == 'tk-w'), isTrue);
+        },
+      );
+
+      test(
+        'is still refused when its depths differ from the target\'s',
+        () async {
+          await seedSplitDive();
+          // Same computer, same place in time, but not the same samples.
+          await db.customStatement(
+            'DELETE FROM dive_profile_series '
+            "WHERE dive_id = 'half'",
+          );
+          await profileSeries.insertSeries(
+            diveId: 'half',
+            computerId: 'comp-x',
+            isPrimary: true,
+            samples: [
+              for (final p in secondHalf)
+                codec.ProfileSample(
+                  timestamp: p.timestamp,
+                  depth: p.depth == 0 ? 0 : p.depth + 4,
+                ),
+            ],
+            now: 1000,
+          );
+
+          await expectLater(
+            () => service.apply(
+              targetDiveId: 'whole',
+              secondaryDiveIds: ['half'],
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => e.message.toString(),
+                'message',
+                contains('sameComputer'),
+              ),
+            ),
+          );
+          expect((await db.select(db.dives).get()).length, 2);
+        },
+      );
+    });
+
+    test('scenario 7c: rejects an unknown targetDiveId not present in the '
+        'loaded selection, writing nothing', () async {
+      await seedDive(
+        't3',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-a',
+      );
+      await seedDive(
+        's3',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-b',
+      );
+
+      await expectLater(
+        () =>
+            service.apply(targetDiveId: 'not-there', secondaryDiveIds: ['s3']),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message.toString(),
+            'message',
+            contains('targetDiveId'),
+          ),
+        ),
+      );
+
+      final remaining = await db.select(db.dives).get();
+      expect(remaining.map((r) => r.id).toSet(), {'t3', 's3'});
+      expect(await db.select(db.deletionLog).get(), isEmpty);
+    });
+
+    test(
+      'scenario 9: a second consolidation unions sources without nesting',
+      () async {
+        await seedConsolidatableFixture();
+        await seedDive(
+          'u',
+          entry: DateTime.utc(2026, 7, 1, 9, 5),
+          computerId: 'comp-u',
+          serial: 'SER-U',
+        );
+        await seedDataSource('src-u', diveId: 'u', computerId: 'comp-u');
+
+        await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+        await service.apply(targetDiveId: 't', secondaryDiveIds: ['u']);
+
+        final sources = await (db.select(
+          db.diveDataSources,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(sources, hasLength(3));
+        expect(sources.where((s) => s.isPrimary), hasLength(1));
+        expect(sources.map((s) => s.computerId).toSet(), {
+          'comp-t',
+          'comp-s',
+          'comp-u',
+        });
+      },
+    );
+
+    test(
+      'unions role sets per person and undo restores them (#1221)',
+      () async {
+        await seedConsolidatableFixture();
+        await seedBuddy('dbud-t1', diveId: 't', buddyId: 'buddy-x');
+        await seedBuddy('dbud-s1', diveId: 's', buddyId: 'buddy-x');
+        final roles = DiveRoleLinkRepository();
+        await roles.writeDiverRoles('t', ['instructor']);
+        await roles.writeDiverRoles('s', ['safetyDiver']);
+        await roles.writeBuddyRoles('t', 'buddy-x', ['diveMaster']);
+        await roles.writeBuddyRoles('s', 'buddy-x', ['diveGuide']);
+        final beforeT = (
+          diver: await roles.diverRoleIdsForDives(['t']),
+          buddy: await roles.buddyRoleIdsForDives(['t']),
+        );
+
+        final outcome = await service.apply(
+          targetDiveId: 't',
+          secondaryDiveIds: ['s'],
+        );
+
+        expect((await roles.diverRoleIdsForDives(['t']))['t'], [
+          'instructor',
+          'safetyDiver',
+        ]);
+        expect((await roles.buddyRoleIdsForDives(['t']))['t']!['buddy-x'], [
+          'diveGuide',
+          'diveMaster',
+        ]);
+
+        await service.undo(outcome.snapshot);
+
+        expect(await roles.diverRoleIdsForDives(['t']), beforeT.diver);
+        expect(await roles.buddyRoleIdsForDives(['t']), beforeT.buddy);
+      },
+    );
+
+    test(
+      'scenario 10: unions tags/buddies/equipment/dive-types/sightings, '
+      'target wins on custom fields, weights copy only when target has none',
+      () async {
+        await seedConsolidatableFixture();
+
+        // Tags: target has 'tag-shared'; secondary has the same tag (must
+        // NOT duplicate) plus a secondary-only tag (must be added).
+        await seedTag('dtag-t1', diveId: 't', tagId: 'tag-shared');
+        await seedTag('dtag-s1', diveId: 's', tagId: 'tag-shared');
+        await seedTag('dtag-s2', diveId: 's', tagId: 'tag-only-s');
+
+        // Buddies: target has none; secondary's buddy must be added.
+        await seedBuddy('dbud-s1', diveId: 's', buddyId: 'buddy-s1');
+
+        // Equipment: target has 'eq-1'; secondary has the same item (must
+        // NOT duplicate) plus a secondary-only item (must be added).
+        await seedEquipment(diveId: 't', equipmentId: 'eq-1');
+        await seedEquipment(diveId: 's', equipmentId: 'eq-1');
+        await seedEquipment(diveId: 's', equipmentId: 'eq-2');
+
+        // Dive types: seedDive already gives BOTH dives the auto
+        // 'recreational' row, which is the shared type this scenario needs
+        // (it must NOT duplicate). Seeding a second 'recreational' row on
+        // top would be a duplicate the (dive, type) unique index forbids
+        // since v178. Only the secondary-only 'wreck' has to be added here.
+        await seedDiveTypeRow('dtype-s2', diveId: 's', diveTypeId: 'wreck');
+
+        // Sightings: target and secondary both saw 'fish' (one sighting,
+        // target's kept); secondary alone saw 'turtle' (added).
+        await seedSighting('sight-t1', diveId: 't', speciesId: 'fish');
+        await seedSighting('sight-s1', diveId: 's', speciesId: 'fish');
+        await seedSighting('sight-s2', diveId: 's', speciesId: 'turtle');
+
+        // Weights: both dives have weights -- target's must be kept,
+        // secondary's dropped entirely (avoid double-counting lead).
+        await seedWeight('weight-t1', diveId: 't', amountKg: 4.0);
+        await seedWeight('weight-s1', diveId: 's', amountKg: 3.0);
+
+        // Custom fields: both set 'visibility' -- target wins. Secondary
+        // alone sets 'notes2' -- added.
+        await seedCustomField(
+          'cf-t1',
+          diveId: 't',
+          fieldKey: 'visibility',
+          fieldValue: 'good',
+        );
+        await seedCustomField(
+          'cf-s1',
+          diveId: 's',
+          fieldKey: 'visibility',
+          fieldValue: 'bad',
+        );
+        await seedCustomField(
+          'cf-s2',
+          diveId: 's',
+          fieldKey: 'notes2',
+          fieldValue: 'xyz',
+        );
+
+        // Captured before apply so the post-undo assertions don't need to
+        // hardcode ids seedDive's own defaults create (e.g. every dive gets
+        // an auto 'recreational' diveDiveTypes row via
+        // dive_repository_impl.dart's _replaceDiveTypeRows).
+        Future<Set<String>> tagIds() async =>
+            (await db.select(db.diveTags).get()).map((r) => r.id).toSet();
+        Future<Set<String>> buddyIds() async =>
+            (await db.select(db.diveBuddies).get()).map((r) => r.id).toSet();
+        Future<Set<String>> equipmentPairs() async =>
+            (await db.select(db.diveEquipment).get())
+                .map((r) => '${r.diveId}|${r.equipmentId}')
+                .toSet();
+        Future<Set<String>> diveTypeIds() async =>
+            (await db.select(db.diveDiveTypes).get()).map((r) => r.id).toSet();
+        Future<Set<String>> sightingIds() async =>
+            (await db.select(db.sightings).get()).map((r) => r.id).toSet();
+        Future<Set<String>> weightIds() async =>
+            (await db.select(db.diveWeights).get()).map((r) => r.id).toSet();
+        Future<Set<String>> customFieldIds() async =>
+            (await db.select(db.diveCustomFields).get())
+                .map((r) => r.id)
+                .toSet();
+
+        final tagIdsBefore = await tagIds();
+        final buddyIdsBefore = await buddyIds();
+        final equipmentPairsBefore = await equipmentPairs();
+        final diveTypeIdsBefore = await diveTypeIds();
+        final sightingIdsBefore = await sightingIds();
+        final weightIdsBefore = await weightIds();
+        final customFieldIdsBefore = await customFieldIds();
+
+        final outcome = await service.apply(
+          targetDiveId: 't',
+          secondaryDiveIds: ['s'],
+        );
+
+        final tags = await (db.select(
+          db.diveTags,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(tags.map((t) => t.tagId).toSet(), {'tag-shared', 'tag-only-s'});
+        expect(tags, hasLength(2)); // no duplicate for tag-shared
+
+        final buddies = await (db.select(
+          db.diveBuddies,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(buddies.map((b) => b.buddyId).toSet(), {'buddy-s1'});
+
+        final equipment = await (db.select(
+          db.diveEquipment,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(equipment.map((e) => e.equipmentId).toSet(), {'eq-1', 'eq-2'});
+
+        final diveTypes = await (db.select(
+          db.diveDiveTypes,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(diveTypes.map((d) => d.diveTypeId).toSet(), {
+          'recreational',
+          'wreck',
+        });
+        expect(diveTypes, hasLength(2)); // no duplicate for recreational
+
+        final sightings = await (db.select(
+          db.sightings,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(sightings.map((s) => s.speciesId).toSet(), {'fish', 'turtle'});
+        expect(sightings, hasLength(2)); // fish not duplicated
+        expect(sightings.map((s) => s.id), contains('sight-t1')); // kept
+
+        final weights = await (db.select(
+          db.diveWeights,
+        )..where((t) => t.diveId.equals('t'))).get();
+        expect(weights.map((w) => w.id).toSet(), {'weight-t1'});
+        expect(weights.single.amountKg, 4.0);
+
+        final customFields = await (db.select(
+          db.diveCustomFields,
+        )..where((t) => t.diveId.equals('t'))).get();
+        final byKey = {for (final cf in customFields) cf.fieldKey: cf};
+        expect(byKey.keys.toSet(), {'visibility', 'notes2'});
+        expect(byKey['visibility']!.fieldValue, 'good'); // target wins
+        expect(byKey['notes2']!.fieldValue, 'xyz');
+
+        // Undo restores every original row (both dives' own tags, buddies,
+        // equipment, dive types, sightings, weights, custom fields) and
+        // removes the fresh union-created rows on the target.
+        await service.undo(outcome.snapshot);
+
+        expect(await tagIds(), tagIdsBefore);
+        expect(await buddyIds(), buddyIdsBefore);
+        expect(await equipmentPairs(), equipmentPairsBefore);
+        expect(await diveTypeIds(), diveTypeIdsBefore);
+        expect(await sightingIds(), sightingIdsBefore);
+        expect(await weightIds(), weightIdsBefore);
+        expect(await customFieldIds(), customFieldIdsBefore);
+
+        // The fresh union-created rows the fold added to the target
+        // (tag-only-s, buddy-s1, eq-2, wreck, turtle, notes2) were tombstoned
+        // so peers that already pulled the consolidation drop them too.
+        final tombstoneTypes = (await db.select(db.deletionLog).get())
+            .map((t) => t.entityType)
+            .toSet();
+        expect(
+          tombstoneTypes,
+          containsAll({
+            'diveTags',
+            'diveBuddies',
+            'diveEquipment',
+            'diveDiveTypes',
+            'sightings',
+            'diveCustomFields',
+          }),
+        );
+      },
+    );
+  });
+
+  group('undo', () {
+    test('undo with FK ON tombstones the role rows the consolidation added '
+        '(#1221)', () async {
+      await db.customStatement('PRAGMA foreign_keys = ON');
+      await db
+          .into(db.divers)
+          .insert(
+            const DiversCompanion(
+              id: Value('diver1'),
+              name: Value('diver1'),
+              createdAt: Value(0),
+              updatedAt: Value(0),
+            ),
+          );
+      for (final computerId in ['comp-t', 'comp-s']) {
+        await db
+            .into(db.diveComputers)
+            .insert(
+              DiveComputersCompanion.insert(
+                id: computerId,
+                name: computerId,
+                createdAt: 0,
+                updatedAt: 0,
+              ),
+            );
+      }
+      await seedConsolidatableFixture();
+      await db.customStatement(
+        'INSERT INTO buddies (id, name, created_at, updated_at) '
+        "VALUES ('buddy-x', 'X', 0, 0)",
+      );
+      await seedBuddy('dbud-t1', diveId: 't', buddyId: 'buddy-x');
+      await seedBuddy('dbud-s1', diveId: 's', buddyId: 'buddy-x');
+      final roles = DiveRoleLinkRepository();
+      await roles.writeDiverRoles('t', ['instructor']);
+      await roles.writeDiverRoles('s', ['safetyDiver']);
+      await roles.writeBuddyRoles('t', 'buddy-x', ['diveMaster']);
+      await roles.writeBuddyRoles('s', 'buddy-x', ['diveGuide']);
+
+      final outcome = await service.apply(
+        targetDiveId: 't',
+        secondaryDiveIds: ['s'],
+      );
+      final added = [
+        for (final r in await db.select(db.diveDiverRoles).get())
+          if (r.diveId == 't' && r.roleId == 'safetyDiver') r.id,
+        for (final r in await db.select(db.diveBuddyRoles).get())
+          if (r.diveId == 't' && r.roleId == 'diveGuide') r.id,
+      ];
+      expect(added, hasLength(2));
+
+      await service.undo(outcome.snapshot);
+
+      final tombstoned = {
+        for (final t in await db.select(db.deletionLog).get())
+          if (t.entityType == 'diveDiverRoles' ||
+              t.entityType == 'diveBuddyRoles')
+            t.recordId,
+      };
+      expect(tombstoned, containsAll(added));
+      expect((await roles.diverRoleIdsForDives(['t']))['t'], ['instructor']);
+      expect((await roles.buddyRoleIdsForDives(['t']))['t']!['buddy-x'], [
+        'diveMaster',
+      ]);
+    });
+
+    test(
+      'scenario 8: restores both dives byte-for-byte, works with FK ON',
+      () async {
+        await db.customStatement('PRAGMA foreign_keys = ON');
+
+        await db
+            .into(db.divers)
+            .insert(
+              const DiversCompanion(
+                id: Value('diver1'),
+                name: Value('diver1'),
+                createdAt: Value(0),
+                updatedAt: Value(0),
+              ),
+            );
+        for (final computerId in ['comp-t', 'comp-s']) {
+          await db
+              .into(db.diveComputers)
+              .insert(
+                DiveComputersCompanion.insert(
+                  id: computerId,
+                  name: computerId,
+                  createdAt: 0,
+                  updatedAt: 0,
+                ),
+              );
+        }
+
+        await seedConsolidatableFixture();
+
+        final beforeDives = await (db.select(
+          db.dives,
+        )..orderBy([(t) => OrderingTerm.asc(t.id)])).get();
+
+        final outcome = await service.apply(
+          targetDiveId: 't',
+          secondaryDiveIds: ['s'],
+        );
+        await service.undo(outcome.snapshot);
+
+        final afterDives = await (db.select(
+          db.dives,
+        )..orderBy([(t) => OrderingTerm.asc(t.id)])).get();
+        expect(afterDives.map((r) => r.id), ['s', 't']);
+        for (var i = 0; i < beforeDives.length; i++) {
+          expect(
+            afterDives[i].copyWith(updatedAt: 0, hlc: const Value(null)),
+            beforeDives[i].copyWith(updatedAt: 0, hlc: const Value(null)),
+          );
+        }
+
+        // Children restored with original ids.
+        final tanks = await db.select(db.diveTanks).get();
+        expect(tanks.map((t) => t.id).toSet(), {
+          'tank-t1',
+          'tank-t2',
+          'tank-s1',
+          'tank-s2',
+        });
+        final events = await db.select(db.diveProfileEvents).get();
+        expect(events.map((e) => e.id).toSet(), {
+          'event-t1',
+          'event-t2',
+          'event-s1',
+          'event-s2',
+        });
+        final switches = await db.select(db.gasSwitches).get();
+        expect(switches.map((s) => s.id).toSet(), {'switch-s1'});
+        final sources = await db.select(db.diveDataSources).get();
+        expect(sources.every((s) => s.isPrimary), isTrue);
+
+        // Media pointer restored to the secondary.
+        final media = await (db.select(
+          db.media,
+        )..where((t) => t.id.equals('media-s'))).getSingle();
+        expect(media.diveId, 's');
+
+        // Target dive was modified, not created: undo must not tombstone
+        // it -- only the secondary's original tombstone (from apply) plus
+        // undo's own bookkeeping should reference 's', never 't'.
+        final targetTombstones = await (db.select(
+          db.deletionLog,
+        )..where((t) => t.recordId.equals('t'))).get();
+        expect(targetTombstones, isEmpty);
+      },
+    );
+  });
+
+  // #542: entry/exit GPS fixes are scalar columns on the dives row, not
+  // re-parented child rows, so a secondary's coordinates would vanish when it
+  // is folded in and tombstoned. The detail-page map is gated on entry/exit/
+  // site location, so dropping them makes the map disappear entirely. The
+  // fold must adopt a secondary's fix onto the target when the target has none
+  // of its own (target wins -- the same "fill the gap" rule already applied to
+  // weights, and DiveMergeBuilder's _firstNonNull(entryLocation) on the
+  // sequential-combine path).
+  group('apply GPS (#542)', () {
+    const secEntry = domain.GeoPoint(12.5, -70.0);
+    const secExit = domain.GeoPoint(12.51, -70.01);
+
+    test('target lacking GPS adopts entry and exit from a secondary', () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        entryLocation: secEntry,
+        exitLocation: secExit,
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      expect(target.entryLatitude, secEntry.latitude);
+      expect(target.entryLongitude, secEntry.longitude);
+      expect(target.exitLatitude, secExit.latitude);
+      expect(target.exitLongitude, secExit.longitude);
+    });
+
+    test('target GPS is never overwritten by a secondary', () async {
+      const targetEntry = domain.GeoPoint(40.0, -74.0);
+      const targetExit = domain.GeoPoint(40.01, -74.01);
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        entryLocation: targetEntry,
+        exitLocation: targetExit,
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        entryLocation: secEntry,
+        exitLocation: secExit,
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      expect(target.entryLatitude, targetEntry.latitude);
+      expect(target.entryLongitude, targetEntry.longitude);
+      expect(target.exitLatitude, targetExit.latitude);
+      expect(target.exitLongitude, targetExit.longitude);
+    });
+
+    test('entry and exit fill independently across sources', () async {
+      const targetEntry = domain.GeoPoint(40.0, -74.0);
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        entryLocation: targetEntry, // exit intentionally absent
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        entryLocation: secEntry,
+        exitLocation: secExit,
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('t'))).getSingle();
+      // The target keeps its own entry fix...
+      expect(target.entryLatitude, targetEntry.latitude);
+      expect(target.entryLongitude, targetEntry.longitude);
+      // ...and fills only its missing exit from the secondary.
+      expect(target.exitLatitude, secExit.latitude);
+      expect(target.exitLongitude, secExit.longitude);
+    });
+
+    test(
+      'undo restores the target to its pre-consolidation no-GPS state',
+      () async {
+        await seedDive(
+          't',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-t',
+          serial: 'SER-T',
+        );
+        await seedDive(
+          's',
+          entry: DateTime.utc(2026, 7, 1, 9, 1),
+          computerId: 'comp-s',
+          serial: 'SER-S',
+          entryLocation: secEntry,
+          exitLocation: secExit,
+        );
+
+        final outcome = await service.apply(
+          targetDiveId: 't',
+          secondaryDiveIds: ['s'],
+        );
+        await service.undo(outcome.snapshot);
+
+        final target = await (db.select(
+          db.dives,
+        )..where((t) => t.id.equals('t'))).getSingle();
+        expect(target.entryLatitude, isNull);
+        expect(target.entryLongitude, isNull);
+        expect(target.exitLatitude, isNull);
+        expect(target.exitLongitude, isNull);
+      },
+    );
+  });
+
+  // #1809: a dive logged without a site or a runtime, say by an earlier file
+  // import that dropped them, is repaired by re-importing the file and
+  // consolidating each dive into its duplicate. The fold adopts them onto the
+  // target the way it adopts GPS above: only when the target has none.
+  group('weight names (#956)', () {
+    test('a weight copied from a secondary keeps its name, and undo '
+        'restores the original', () async {
+      await seedConsolidatableFixture();
+      await seedWeight('weight-s1', diveId: 's', label: 'Top pocket');
+
+      final outcome = await service.apply(
+        targetDiveId: 't',
+        secondaryDiveIds: ['s'],
+      );
+
+      final copied = await (db.select(
+        db.diveWeights,
+      )..where((t) => t.diveId.equals('t'))).get();
+      expect(copied.single.label, 'Top pocket');
+
+      await service.undo(outcome.snapshot);
+
+      final restored = await (db.select(
+        db.diveWeights,
+      )..where((t) => t.id.equals('weight-s1'))).get();
+      expect(restored.single.label, 'Top pocket');
+    });
+  });
+
+  group('apply site and runtime (#1809)', () {
+    Future<void> setSiteAndRuntime(
+      String id, {
+      required String? siteId,
+      required int? runtimeSeconds,
+    }) => (db.update(db.dives)..where((t) => t.id.equals(id))).write(
+      DivesCompanion(siteId: Value(siteId), runtime: Value(runtimeSeconds)),
+    );
+
+    Future<Dive> targetRow() =>
+        (db.select(db.dives)..where((t) => t.id.equals('t'))).getSingle();
+
+    Future<void> seedPair() async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+    }
+
+    test('a target lacking both adopts them from a secondary', () async {
+      await seedPair();
+      await setSiteAndRuntime('t', siteId: null, runtimeSeconds: null);
+      await setSiteAndRuntime('s', siteId: 'site-s', runtimeSeconds: 2700);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.siteId, 'site-s');
+      expect(target.runtime, 2700);
+    });
+
+    test('a target with no runtime and no profile is still repaired by a '
+        're-import starting at the same instant', () async {
+      final entry = DateTime.utc(2026, 7, 1, 9);
+      await seedDive('t', entry: entry, profile: const []);
+      await setSiteAndRuntime('t', siteId: null, runtimeSeconds: null);
+      await seedDive('s', entry: entry, runtimeMin: 45, profile: const []);
+      await setSiteAndRuntime('s', siteId: 'site-s', runtimeSeconds: 2700);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.siteId, 'site-s');
+      expect(target.runtime, 2700);
+    });
+
+    test('a target that has them keeps its own', () async {
+      await seedPair();
+      await setSiteAndRuntime('t', siteId: 'site-t', runtimeSeconds: 1800);
+      await setSiteAndRuntime('s', siteId: 'site-s', runtimeSeconds: 2700);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.siteId, 'site-t');
+      expect(target.runtime, 1800);
+    });
+
+    test('site and runtime fill independently', () async {
+      await seedPair();
+      await setSiteAndRuntime('t', siteId: 'site-t', runtimeSeconds: null);
+      await setSiteAndRuntime('s', siteId: 'site-s', runtimeSeconds: 2700);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.siteId, 'site-t');
+      expect(target.runtime, 2700);
+    });
+
+    test('undo restores the target to having neither', () async {
+      await seedPair();
+      await setSiteAndRuntime('t', siteId: null, runtimeSeconds: null);
+      await setSiteAndRuntime('s', siteId: 'site-s', runtimeSeconds: 2700);
+
+      final outcome = await service.apply(
+        targetDiveId: 't',
+        secondaryDiveIds: ['s'],
+      );
+      await service.undo(outcome.snapshot);
+
+      final target = await targetRow();
+      expect(target.siteId, isNull);
+      expect(target.runtime, isNull);
+    });
+  });
+
+  // #2932: every other scalar column on the dives row is lost the same way
+  // when its secondary is tombstoned, so the fold fills the target's empty
+  // columns from the secondaries (dive_consolidation_field_fill.dart covers
+  // the per-column rules).
+  group('apply to a plan (#3924)', () {
+    Future<Dive> targetRow() =>
+        (db.select(db.dives)..where((t) => t.id.equals('t'))).getSingle();
+
+    Future<void> seedPair({required bool secondaryIsPlanned}) async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        isPlanned: true,
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        isPlanned: secondaryIsPlanned,
+        diveNumber: secondaryIsPlanned ? null : 42,
+      );
+    }
+
+    test('folding a logged dive into a plan logs the plan', () async {
+      await seedPair(secondaryIsPlanned: false);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.isPlanned, isFalse);
+      expect(target.diveNumber, 42);
+    });
+
+    test('undo puts the plan back', () async {
+      await seedPair(secondaryIsPlanned: false);
+
+      final outcome = await service.apply(
+        targetDiveId: 't',
+        secondaryDiveIds: ['s'],
+      );
+      await service.undo(outcome.snapshot);
+
+      final target = await targetRow();
+      expect(target.isPlanned, isTrue);
+      expect(target.diveNumber, isNull);
+    });
+
+    test('a dive mirrored from the secondary stays real', () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        outingId: 'outing',
+      );
+      await seedDive(
+        'mirror',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      expect((await diveRepo.getDiveTimes('mirror'))!.isUndivedPlan, isFalse);
+    });
+
+    test('folding plans together leaves a plan', () async {
+      await seedPair(secondaryIsPlanned: true);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      expect((await targetRow()).isPlanned, isTrue);
+    });
+  });
+
+  group('apply scalar field fill (#2932)', () {
+    Future<Dive> targetRow() =>
+        (db.select(db.dives)..where((t) => t.id.equals('t'))).getSingle();
+
+    Future<void> seedPair() async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+      await (db.update(db.dives)..where((t) => t.id.equals('s'))).write(
+        const DivesCompanion(
+          airTemp: Value(29),
+          currentStrength: Value('strong'),
+          boatName: Value('Sea Lion'),
+          notes: Value('Turtle at the wall'),
+          excludedFromStats: Value(true),
+        ),
+      );
+    }
+
+    test('a target lacking them adopts the secondary\'s, and undo restores '
+        'the original', () async {
+      await seedPair();
+
+      final outcome = await service.apply(
+        targetDiveId: 't',
+        secondaryDiveIds: ['s'],
+      );
+
+      final target = await targetRow();
+      expect(target.airTemp, 29);
+      expect(target.currentStrength, 'strong');
+      expect(target.boatName, 'Sea Lion');
+      expect(target.notes, 'Turtle at the wall');
+      expect(target.excludedFromStats, isTrue);
+
+      await service.undo(outcome.snapshot);
+
+      final restored = await targetRow();
+      expect(restored.airTemp, isNull);
+      expect(restored.currentStrength, isNull);
+      expect(restored.boatName, isNull);
+      expect(restored.notes, isEmpty);
+      expect(restored.excludedFromStats, isFalse);
+    });
+
+    // Whether the target has a profile comes from its stored series.
+    Future<void> seedMeasurementPair({required bool targetProfile}) async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        profile: targetProfile ? null : const [],
+      );
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+      );
+      await (db.update(db.dives)..where((t) => t.id.equals('t'))).write(
+        const DivesCompanion(maxDepth: Value(null), waterTemp: Value(null)),
+      );
+      await (db.update(db.dives)..where((t) => t.id.equals('s'))).write(
+        const DivesCompanion(maxDepth: Value(31), waterTemp: Value(24)),
+      );
+    }
+
+    test('a target with a stored profile keeps the measurements readers '
+        'derive from it', () async {
+      await seedMeasurementPair(targetProfile: true);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.maxDepth, isNull);
+      expect(target.waterTemp, isNull);
+    });
+
+    test('a target without a profile adopts the secondary\'s '
+        'measurements', () async {
+      await seedMeasurementPair(targetProfile: false);
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.maxDepth, 31);
+      expect(target.waterTemp, 24);
+    });
+
+    test('a target that has them keeps its own', () async {
+      await seedPair();
+      await (db.update(db.dives)..where((t) => t.id.equals('t'))).write(
+        const DivesCompanion(airTemp: Value(25), notes: Value('Mine')),
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final target = await targetRow();
+      expect(target.airTemp, 25);
+      expect(target.notes, 'Mine');
+      expect(target.boatName, 'Sea Lion');
+    });
+  });
+
+  group('consolidate then re-parse (#1177)', () {
+    test('the secondary strand stays aligned with the primary across a '
+        're-parse of the consolidated dive', () async {
+      await seedDive(
+        't',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        computerId: 'comp-t',
+        serial: 'SER-T',
+        profile: const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 0),
+          domain.DiveProfilePoint(timestamp: 60, depth: 12),
+          domain.DiveProfilePoint(timestamp: 120, depth: 18),
+        ],
+      );
+      await seedDataSource('src-t', diveId: 't', computerId: 'comp-t');
+
+      // The secondary computer's clock runs 60s behind the target's, which
+      // is exactly why consolidation re-bases it.
+      await seedDive(
+        's',
+        entry: DateTime.utc(2026, 7, 1, 9, 1),
+        computerId: 'comp-s',
+        serial: 'SER-S',
+        profile: const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 0),
+          domain.DiveProfilePoint(timestamp: 60, depth: 11),
+          domain.DiveProfilePoint(timestamp: 120, depth: 17),
+        ],
+      );
+      await seedDataSource(
+        'src-s',
+        diveId: 's',
+        computerId: 'comp-s',
+        rawData: Uint8List.fromList([1, 2, 3]),
+        descriptorVendor: 'Suunto',
+        descriptorProduct: 'D5',
+        descriptorModel: 1,
+      );
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      Future<List<int>> profileTimestamps({String? computerId}) async {
+        final series = await profileSeries.getSeriesForDive('t');
+        final samples = [
+          for (final s in series.where((s) => s.computerId == computerId))
+            ...s.samples,
+        ]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        return [for (final p in samples) p.timestamp];
+      }
+
+      expect(await profileTimestamps(computerId: 'comp-s'), [60, 120, 180]);
+
+      // Re-parse the whole dive, as the dive detail page and a post-upgrade
+      // bulk re-parse from the device page both do.
+      final result = await ReparseService(db: db).reparseDive(
+        't',
+        parseFn: (vendor, product, model, rawData) async => pigeon.ParsedDive(
+          fingerprint: 'fp',
+          dateTimeYear: 2026,
+          dateTimeMonth: 7,
+          dateTimeDay: 1,
+          dateTimeHour: 9,
+          dateTimeMinute: 1,
+          dateTimeSecond: 0,
+          maxDepthMeters: 17,
+          avgDepthMeters: 10,
+          durationSeconds: 120,
+          // Raw parse output is always on the computer's own clock: it has
+          // no idea consolidation moved it.
+          samples: [
+            pigeon.ProfileSample(timeSeconds: 0, depthMeters: 0),
+            pigeon.ProfileSample(timeSeconds: 60, depthMeters: 11),
+            pigeon.ProfileSample(timeSeconds: 120, depthMeters: 17),
+          ],
+          tanks: const [],
+          gasMixes: const [],
+          events: const [],
+        ),
+      );
+      expect(result.errors, isEmpty);
+      // A consolidated dive keeps a primary source row, so #1164's ownership
+      // guard lets the secondary strand re-parse rather than preserving it.
+      // That is exactly why the offset has to be reapplied here.
+      expect(result.profilesPreserved, 0);
+
+      expect(await profileTimestamps(computerId: 'comp-s'), [60, 120, 180]);
+
+      // The primary strand is untouched, so the two still share a clock.
+      // Consolidation leaves the target's own profile series on a null
+      // computerId (null means "the dive's primary source"); only tanks,
+      // pressures and events get stamped with the primary computer.
+      expect(await profileTimestamps(), [0, 60, 120]);
+    });
+  });
+
+  group('merge slots compose across consolidation (#1451)', () {
+    /// The shape DiveMergeService.apply leaves behind: the segments' own
+    /// provenance rows, none primary, all sharing slot 0. createDive mints a
+    /// primary source of its own, which a real combine would never leave on
+    /// the merged dive, so it goes first.
+    Future<void> seedCombinedDive(String id, {required DateTime entry}) async {
+      await seedDive(id, entry: entry);
+      await (db.delete(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals(id))).go();
+      for (final n in [1, 2]) {
+        await seedDataSource(
+          'src-$id$n',
+          diveId: id,
+          isPrimary: false,
+          mergeSourceSlot: 0,
+        );
+      }
+    }
+
+    test('a folded-in combined dive keeps its own strand', () async {
+      // Both dives were combined from halves before this consolidation, so
+      // both carry slot 0 on every row. Copied over verbatim, all four rows
+      // would read as one strand and the target would show a single chip.
+      await seedCombinedDive('t', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedCombinedDive('s', entry: DateTime.utc(2026, 7, 1, 9));
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final rows = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals('t'))).get();
+      // The target's own two rows keep slot 0; the folded-in dive's land on
+      // slot 1 instead of colliding with them.
+      expect(rows.map((r) => r.mergeSourceSlot).nonNulls.toList()..sort(), [
+        0,
+        0,
+        1,
+        1,
+      ]);
+      // Three chips: each lineage collapses to one, plus the primary row
+      // backfillPrimaryDataSource mints for a target that has none (a merged
+      // dive never has one). Without the rebase the two lineages would read
+      // as one strand and there would be two.
+      final canonical = await diveRepo.getDataSources('t');
+      expect(canonical, hasLength(3));
+      // One survivor per slot, plus the unmarked backfilled primary. Copied
+      // rows are minted with fresh ids, so identify them by slot.
+      final canonicalIds = canonical.map((c) => c.id).toSet();
+      expect(
+        rows
+            .where((r) => canonicalIds.contains(r.id))
+            .map((r) => r.mergeSourceSlot)
+            .toSet(),
+        {0, 1, null},
+      );
+    });
+
+    test('a secondary with no slots of its own is left alone', () async {
+      await seedCombinedDive('t', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('s', entry: DateTime.utc(2026, 7, 1, 9));
+      await (db.delete(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals('s'))).go();
+      await seedDataSource('src-s', diveId: 's', computerId: 'comp-s');
+
+      await service.apply(targetDiveId: 't', secondaryDiveIds: ['s']);
+
+      final rows = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals('t'))).get();
+      // A source that was never carried by a merge stays unmarked: the
+      // rebase only moves slots that exist.
+      expect(
+        rows.where((r) => r.computerId == 'comp-s').single.mergeSourceSlot,
+        isNull,
+      );
+      expect(rows.map((r) => r.mergeSourceSlot).nonNulls.toList(), [0, 0]);
+      expect(await diveRepo.getDataSources('t'), hasLength(3));
+    });
+  });
+}

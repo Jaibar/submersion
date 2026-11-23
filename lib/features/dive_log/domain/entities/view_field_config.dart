@@ -30,10 +30,7 @@ class TableColumnConfig extends Equatable {
 
   factory TableColumnConfig.fromJson(Map<String, dynamic> json) {
     return TableColumnConfig(
-      field: DiveField.values.firstWhere(
-        (e) => e.name == json['field'] as String,
-        orElse: () => DiveField.diveNumber,
-      ),
+      field: diveFieldFromName(json['field'] as String) ?? DiveField.diveNumber,
       width: (json['width'] as num).toDouble(),
       isPinned: json['isPinned'] as bool,
     );
@@ -55,7 +52,7 @@ class TableViewConfig extends Equatable {
     this.sortAscending = true,
   });
 
-  /// Default table configuration with 22 standard columns.
+  /// Default table configuration with 23 standard columns.
   factory TableViewConfig.defaultConfig() {
     return TableViewConfig(
       columns: [
@@ -64,6 +61,7 @@ class TableViewConfig extends Equatable {
         TableColumnConfig(field: DiveField.siteName, isPinned: true),
         TableColumnConfig(field: DiveField.dateTime),
         TableColumnConfig(field: DiveField.diveTypeName),
+        TableColumnConfig(field: DiveField.diveMode),
         TableColumnConfig(field: DiveField.maxDepth),
         TableColumnConfig(field: DiveField.avgDepth),
         TableColumnConfig(field: DiveField.runtime),
@@ -72,7 +70,8 @@ class TableViewConfig extends Equatable {
         TableColumnConfig(field: DiveField.primaryGas),
         TableColumnConfig(field: DiveField.startPressure),
         TableColumnConfig(field: DiveField.endPressure),
-        TableColumnConfig(field: DiveField.sacRate),
+        TableColumnConfig(field: DiveField.sac),
+        TableColumnConfig(field: DiveField.rmv),
         // Environment
         TableColumnConfig(field: DiveField.waterTemp),
         TableColumnConfig(field: DiveField.visibility),
@@ -115,9 +114,7 @@ class TableViewConfig extends Equatable {
     final sortFieldName = json['sortField'] as String?;
     DiveField? sortField;
     if (sortFieldName != null) {
-      sortField = DiveField.values
-          .where((e) => e.name == sortFieldName)
-          .firstOrNull;
+      sortField = diveFieldFromName(sortFieldName);
     }
     return TableViewConfig(
       columns: (json['columns'] as List<dynamic>)
@@ -153,10 +150,7 @@ class CardSlotConfig extends Equatable {
   factory CardSlotConfig.fromJson(Map<String, dynamic> json) {
     return CardSlotConfig(
       slotId: json['slotId'] as String,
-      field: DiveField.values.firstWhere(
-        (e) => e.name == json['field'] as String,
-        orElse: () => DiveField.diveNumber,
-      ),
+      field: diveFieldFromName(json['field'] as String) ?? DiveField.diveNumber,
     );
   }
 
@@ -186,7 +180,7 @@ class CardViewConfig extends Equatable {
         CardSlotConfig(slotId: 'title', field: DiveField.siteName),
         CardSlotConfig(slotId: 'date', field: DiveField.dateTime),
         CardSlotConfig(slotId: 'stat1', field: DiveField.maxDepth),
-        CardSlotConfig(slotId: 'stat2', field: DiveField.bottomTime),
+        CardSlotConfig(slotId: 'stat2', field: DiveField.runtime),
       ],
     );
   }
@@ -199,7 +193,7 @@ class CardViewConfig extends Equatable {
         CardSlotConfig(slotId: 'slot1', field: DiveField.siteName),
         CardSlotConfig(slotId: 'slot2', field: DiveField.dateTime),
         CardSlotConfig(slotId: 'slot3', field: DiveField.maxDepth),
-        CardSlotConfig(slotId: 'slot4', field: DiveField.bottomTime),
+        CardSlotConfig(slotId: 'slot4', field: DiveField.runtime),
       ],
     );
   }
@@ -249,11 +243,7 @@ class CardViewConfig extends Equatable {
           .toList(),
       extraFields:
           (json['extraFields'] as List<dynamic>?)
-              ?.map(
-                (f) => DiveField.values
-                    .where((e) => e.name == f as String)
-                    .firstOrNull,
-              )
+              ?.map((f) => diveFieldFromName(f as String))
               .whereType<DiveField>()
               .toList() ??
           [],
@@ -290,6 +280,7 @@ class FieldPreset extends Equatable {
         TableColumnConfig(field: DiveField.siteName, isPinned: true),
         TableColumnConfig(field: DiveField.dateTime),
         TableColumnConfig(field: DiveField.diveTypeName),
+        TableColumnConfig(field: DiveField.diveMode),
         TableColumnConfig(field: DiveField.maxDepth),
         TableColumnConfig(field: DiveField.avgDepth),
         TableColumnConfig(field: DiveField.runtime),
@@ -298,7 +289,8 @@ class FieldPreset extends Equatable {
         TableColumnConfig(field: DiveField.primaryGas),
         TableColumnConfig(field: DiveField.startPressure),
         TableColumnConfig(field: DiveField.endPressure),
-        TableColumnConfig(field: DiveField.sacRate),
+        TableColumnConfig(field: DiveField.sac),
+        TableColumnConfig(field: DiveField.rmv),
         // Environment
         TableColumnConfig(field: DiveField.waterTemp),
         TableColumnConfig(field: DiveField.visibility),

@@ -3,11 +3,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/models/log_entry.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/settings/presentation/widgets/log_filter_bar.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 void main() {
   Widget buildTestWidget() {
     return const ProviderScope(
-      child: MaterialApp(home: Scaffold(body: LogFilterBar())),
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: Locale('en'),
+        home: Scaffold(body: LogFilterBar()),
+      ),
     );
   }
 
@@ -60,7 +66,7 @@ void main() {
     testWidgets('cannot deselect last remaining chip', (tester) async {
       await tester.pumpWidget(buildTestWidget());
 
-      // Deselect 4 of the 5 chips
+      // Deselect 5 of the 6 chips
       await tester.tap(find.widgetWithText(FilterChip, 'App'));
       await tester.pump();
       await tester.tap(find.widgetWithText(FilterChip, 'Bluetooth'));
@@ -69,6 +75,10 @@ void main() {
       await tester.pump();
       await tester.tap(find.widgetWithText(FilterChip, 'libdc'));
       await tester.pump();
+      await tester.ensureVisible(find.widgetWithText(FilterChip, 'Media'));
+      await tester.tap(find.widgetWithText(FilterChip, 'Media'));
+      await tester.pump();
+      await tester.ensureVisible(find.widgetWithText(FilterChip, 'Database'));
 
       // Only "Database" chip should remain selected
       final dbChip = tester.widget<FilterChip>(
@@ -110,7 +120,7 @@ void main() {
 
     testWidgets('renders min severity label', (tester) async {
       await tester.pumpWidget(buildTestWidget());
-      expect(find.text('Min severity: '), findsOneWidget);
+      expect(find.text('Min severity:'), findsOneWidget);
     });
 
     testWidgets('renders severity dropdown', (tester) async {

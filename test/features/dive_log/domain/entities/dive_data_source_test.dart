@@ -100,33 +100,6 @@ void main() {
       expect(updated.sourceFileFormat, isNull);
     });
 
-    test('displayName returns computerModel when set', () {
-      final now = DateTime.now();
-      final source = DiveDataSource(
-        id: 'r1',
-        diveId: 'd1',
-        isPrimary: true,
-        computerModel: 'Shearwater Perdix',
-        importedAt: now,
-        createdAt: now,
-      );
-
-      expect(source.displayName, 'Shearwater Perdix');
-    });
-
-    test('displayName returns Unknown Source when computerModel is null', () {
-      final now = DateTime.now();
-      final source = DiveDataSource(
-        id: 'r1',
-        diveId: 'd1',
-        isPrimary: true,
-        importedAt: now,
-        createdAt: now,
-      );
-
-      expect(source.displayName, 'Unknown Source');
-    });
-
     test('equality holds for identical field values', () {
       final now = DateTime(2026, 3, 20, 10, 0);
       final a = DiveDataSource(
@@ -176,19 +149,23 @@ void main() {
         id: 'r1',
         diveId: 'd1',
         isPrimary: true,
+        computerName: 'My Perdix',
         computerModel: 'Perdix',
         maxDepth: 30.0,
+        importedFileId: 'c0ffee',
         importedAt: now,
         createdAt: now,
       );
 
-      // 25 fields total in props list
-      expect(source.props, hasLength(25));
+      // 31 fields total in props list
+      expect(source.props, hasLength(31));
       expect(source.props, contains('r1'));
       expect(source.props, contains('d1'));
       expect(source.props, contains(true));
+      expect(source.props, contains('My Perdix'));
       expect(source.props, contains('Perdix'));
       expect(source.props, contains(30.0));
+      expect(source.props, contains('c0ffee'));
     });
 
     test('copyWith handles sourceFileName and sourceFileFormat', () {

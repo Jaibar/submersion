@@ -1,0 +1,755 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/query/domain/query_error_code.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/query/syntax/query_parser.dart';
+import 'package:submersion/core/query/syntax/query_printer.dart';
+import 'package:submersion/core/query/units/unit_prefs.dart';
+
+import '../fixtures/fixture_registry.dart';
+
+void main() {
+  final now = DateTime(2026, 9, 25);
+  const names = MapNameResolver({
+    QuerySubject.sites: {
+      'Salt Pier': 'site-1',
+      'Salt Pier Deep': 'site-2',
+      'Hilma Hooker': 'site-3',
+    },
+  });
+  QueryParser metric() => QueryParser(
+    fixtureRegistry,
+    fixtureDives,
+    ParseContext(prefs: kMetricPrefs, now: now, names: names),
+  );
+  QueryParser imperial() => QueryParser(
+    fixtureRegistry,
+    fixtureDives,
+    ParseContext(
+      prefs: const UnitPrefs(
+        depth: DepthUnit.feet,
+        temperature: TemperatureUnit.fahrenheit,
+        pressure: PressureUnit.psi,
+        weight: WeightUnit.pounds,
+        volume: VolumeUnit.cubicFeet,
+      ),
+      now: now,
+      names: names,
+    ),
+  );
+
+  QueryNode ok(QueryParser p, String s) {
+    final r = p.parse(s);
+    expect(r, isA<ParseOk>(), reason: '$r');
+    return (r as ParseOk).node!;
+  }
+
+  ParseFailure bad(QueryParser p, String s) {
+    final r = p.parse(s);
+    expect(
+      r,
+      isA<ParseFailure>(),
+      reason: 'parsed $s as ${r is ParseOk ? r.node : r}',
+    );
+    return r as ParseFailure;
+  }
+
+  test('a number typed at display precision carries its grain (#4398)', () {
+    final ft = ok(imperial(), 'depth < 27.1') as ConditionNode;
+    expect((ft.value as NumberValue).grain, closeTo(0.1 / 3.28084, 1e-12));
+    final c = ok(imperial(), 'waterTemp < 20c') as ConditionNode;
+    expect((c.value as NumberValue).grain, closeTo(0.1, 1e-12));
+    final finer = ok(imperial(), 'depth < 27.15') as ConditionNode;
+    expect((finer.value as NumberValue).grain, isNull);
+    final rating = ok(metric(), 'rating >= 4') as ConditionNode;
+    expect((rating.value as NumberValue).grain, isNull);
+  });
+
+  test('empty text is an empty query', () {
+    expect((metric().parse('   ') as ParseOk).node, isNull);
+  });
+
+  test(
+    'numbers ground to storage: bare in the preference, suffix explicit',
+    () {
+      expect(
+        ok(metric(), 'depth > 30'),
+        ConditionNode(
+          FieldPath(['depth']),
+          QueryOp.gt,
+          const NumberValue(30, null, grain: 0.1, shown: 30),
+        ),
+      );
+      final imp = ok(imperial(), 'depth > 100') as ConditionNode;
+      expect((imp.value as NumberValue).value, closeTo(30.48, 0.001));
+      final ft = ok(metric(), 'depth > 100ft') as ConditionNode;
+      expect((ft.value as NumberValue).typedUnit, QueryUnit.ft);
+      expect((ft.value as NumberValue).value, closeTo(30.48, 0.001));
+      expect(
+        ok(metric(), 'temp < -2'),
+        ConditionNode(
+          FieldPath(['waterTemp']),
+          QueryOp.lt,
+          const NumberValue(-2, null, grain: 0.1, shown: -2),
+        ),
+      );
+    },
+  );
+
+  test('precedence: NOT, then AND (juxtaposition), then OR; parens group', () {
+    expect(
+      ok(metric(), 'depth > 30 rating >= 4 OR NOT favorite = true'),
+      OrNode([
+        AndNode([
+          ConditionNode(
+            FieldPath(['depth']),
+            QueryOp.gt,
+            const NumberValue(30, null, grain: 0.1, shown: 30),
+          ),
+          ConditionNode(
+            FieldPath(['rating']),
+            QueryOp.gte,
+            const NumberValue(4, null),
+          ),
+        ]),
+        NotNode(
+          ConditionNode(
+            FieldPath(['favorite']),
+            QueryOp.eq,
+            const BoolValue(true),
+          ),
+        ),
+      ]),
+    );
+    expect(
+      ok(metric(), '(weights:none | temp:none) & rating:any'),
+      AndNode([
+        OrNode([
+          ConditionNode(FieldPath(['weights']), QueryOp.isEmpty, null),
+          ConditionNode(FieldPath(['waterTemp']), QueryOp.isEmpty, null),
+        ]),
+        ConditionNode(FieldPath(['rating']), QueryOp.isSet, null),
+      ]),
+    );
+  });
+
+  test('the colon shorthand follows the field type', () {
+    expect(
+      ok(metric(), 'waterType:salt'),
+      ConditionNode(
+        FieldPath(['waterType']),
+        QueryOp.eq,
+        const EnumValue('salt'),
+      ),
+    );
+    expect(
+      ok(metric(), 'notes:manta'),
+      ConditionNode(
+        FieldPath(['notes']),
+        QueryOp.contains,
+        const StringValue('manta'),
+      ),
+    );
+    expect(
+      ok(metric(), 'depth:30'),
+      ConditionNode(
+        FieldPath(['depth']),
+        QueryOp.eq,
+        const NumberValue(30, null, grain: 0.1, shown: 30),
+      ),
+    );
+  });
+
+  test('lists, between, contains and negation', () {
+    expect(
+      ok(metric(), 'waterType in [salt, Fresh]'),
+      ConditionNode(
+        FieldPath(['waterType']),
+        QueryOp.inList,
+        ListValue([const EnumValue('salt'), const EnumValue('fresh')]),
+      ),
+    );
+    expect(
+      ok(metric(), 'depth between 18 and 30'),
+      ConditionNode(
+        FieldPath(['depth']),
+        QueryOp.between,
+        ListValue([
+          const NumberValue(18, null, grain: 0.1, shown: 18),
+          const NumberValue(30, null, grain: 0.1, shown: 30),
+        ]),
+      ),
+    );
+    expect(
+      ok(metric(), 'notes ~ "night dive"'),
+      ConditionNode(
+        FieldPath(['notes']),
+        QueryOp.contains,
+        const StringValue('night dive'),
+      ),
+    );
+    expect(
+      ok(metric(), '-favorite = true'),
+      NotNode(
+        ConditionNode(
+          FieldPath(['favorite']),
+          QueryOp.eq,
+          const BoolValue(true),
+        ),
+      ),
+    );
+  });
+
+  test('dates: a day, a year, a month, quoted phrases, open ranges', () {
+    expect(
+      ok(metric(), 'date >= 2025-01-15'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.gte,
+        DateValue(DateTime(2025, 1, 15)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date in 2025'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.inList,
+        DateRangeValue(DateTime(2025, 1, 1), DateTime(2025, 12, 31)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date = 2025-03'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.inList,
+        DateRangeValue(DateTime(2025, 3, 1), DateTime(2025, 3, 31)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date in "last 90 days"'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.inList,
+        DateRangeValue(DateTime(2026, 6, 27), DateTime(2026, 9, 25)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date between 2025-03-14 and 2025-03-15'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.between,
+        ListValue([
+          DateValue(DateTime(2025, 3, 14)),
+          DateValue(DateTime(2025, 3, 15)),
+        ]),
+      ),
+    );
+    expect(
+      bad(metric(), 'date between 2025 and 2026').error.message,
+      contains('single day'),
+    );
+    expect(
+      ok(metric(), 'date in "since 2024"'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.gte,
+        DateValue(DateTime(2024, 1, 1)),
+      ),
+    );
+  });
+
+  test('date shorthand and date lists never throw (review fix)', () {
+    expect(
+      ok(metric(), 'date:2025'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.inList,
+        DateRangeValue(DateTime(2025, 1, 1), DateTime(2025, 12, 31)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date:2025-03-14'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.eq,
+        DateValue(DateTime(2025, 3, 14)),
+      ),
+    );
+    expect(
+      ok(metric(), 'date in [2025-01-05, 2025-03]'),
+      OrNode([
+        ConditionNode(
+          FieldPath(['date']),
+          QueryOp.eq,
+          DateValue(DateTime(2025, 1, 5)),
+        ),
+        ConditionNode(
+          FieldPath(['date']),
+          QueryOp.inList,
+          DateRangeValue(DateTime(2025, 3, 1), DateTime(2025, 3, 31)),
+        ),
+      ]),
+    );
+    expect(bad(metric(), 'date in []').error.message, contains('empty'));
+  });
+
+  test('an unpadded date is refused, never read as a year plus junk', () {
+    expect(bad(metric(), 'date >= 2025-3-1').error.message, contains('date'));
+    expect(bad(metric(), 'date >= 2025-3-1').error.offset, 8);
+  });
+
+  test('scoped nesting counts against the hop cap', () {
+    expect(
+      bad(
+        metric(),
+        'buddies[buddies[buddies[buddies[buddies[name = x]]]]]',
+      ).error.message,
+      contains('4'),
+    );
+    expect(
+      ok(metric(), 'buddies[buddies[buddies[name = x]]]'),
+      isA<ScopedNode>(),
+    );
+  });
+
+  test('a unit from another dimension is an error, not a fallback', () {
+    expect(bad(metric(), 'depth > 100f').error.message, contains('depth'));
+    expect(bad(metric(), 'temp > 20ft').error.message, contains('unit'));
+    expect(bad(metric(), 'temp > 20ft').error.offset, 7);
+  });
+
+  test('empty quoted text is an error', () {
+    expect(bad(metric(), '""').error.message, contains('empty'));
+    expect(bad(metric(), 'notes ~ ""').error.message, contains('empty'));
+  });
+
+  test('refs resolve by name and report candidates when they do not', () {
+    expect(
+      ok(metric(), 'site = "Salt Pier"'),
+      ConditionNode(FieldPath(['site']), QueryOp.eq, kFixtureSite),
+    );
+    final f = bad(metric(), 'site = "Salt Peer"');
+    expect(f.error.suggestions, contains('Salt Pier'));
+    expect(f.error.offset, 7);
+  });
+
+  test('paths, scoped groups and bare text', () {
+    expect(
+      ok(metric(), 'site.country = Mexico'),
+      ConditionNode(
+        FieldPath(['site', 'country']),
+        QueryOp.eq,
+        const StringValue('Mexico'),
+      ),
+    );
+    expect(
+      ok(metric(), 'buddies.certifications.level = rescue'),
+      ConditionNode(
+        FieldPath(['buddies', 'certifications', 'level']),
+        QueryOp.eq,
+        const StringValue('rescue'),
+      ),
+    );
+    expect(
+      ok(metric(), 'gear[type in [wetsuit, drysuit]]'),
+      ScopedNode(
+        FieldPath(['gear']),
+        ConditionNode(
+          FieldPath(['type']),
+          QueryOp.inList,
+          ListValue([const EnumValue('wetsuit'), const EnumValue('drysuit')]),
+        ),
+      ),
+    );
+    expect(
+      ok(metric(), '"night dive" manta'),
+      AndNode([
+        TextNode(['night', 'dive']),
+        TextNode(['manta']),
+      ]),
+    );
+    expect(ok(metric(), 'depth'), TextNode(['depth']));
+  });
+
+  test('positioned errors', () {
+    expect(bad(metric(), 'depht > 30').error.suggestions, contains('depth'));
+    expect(bad(metric(), 'depht > 30').error.offset, 0);
+    expect(bad(metric(), 'depth > 18,5').error.message, contains(','));
+    expect(bad(metric(), 'depth > 18,5').error.offset, 10);
+    expect(bad(metric(), 'waterType in []').error.message, contains('empty'));
+    expect(bad(metric(), 'rating > 3m').error.message, contains('unit'));
+    expect(bad(metric(), 'depth > 30xx').error.message, contains('unit'));
+    expect(
+      bad(metric(), 'waterType = lake').error.suggestions,
+      contains('salt'),
+    );
+    expect(bad(metric(), 'favorite ~ x').error.message, contains('~'));
+    expect(bad(metric(), '(depth > 30').error.message, contains(')'));
+    expect(bad(metric(), 'depth > ').error.message, contains('value'));
+    expect(
+      bad(metric(), 'weights = 3').error.message,
+      contains('no weights named'),
+    );
+    expect(bad(metric(), 'weights > 3').error.message, contains('relation'));
+  });
+
+  test('relations take !=, in and the colon shorthand', () {
+    expect(
+      ok(metric(), 'site != "Salt Pier"'),
+      ConditionNode(FieldPath(['site']), QueryOp.neq, kFixtureSite),
+    );
+    expect(
+      ok(metric(), 'site in ["Salt Pier", "Hilma Hooker"]'),
+      ConditionNode(
+        FieldPath(['site']),
+        QueryOp.inList,
+        ListValue([kFixtureSite, const RefValue('site-3', 'Hilma Hooker')]),
+      ),
+    );
+    expect(
+      ok(metric(), 'site:"Salt Pier"'),
+      ConditionNode(FieldPath(['site']), QueryOp.eq, kFixtureSite),
+    );
+    expect(bad(metric(), 'site in []').error.message, contains('empty'));
+    expect(bad(metric(), 'site ~ x').error.message, contains('relation'));
+  });
+
+  test('every unfinished construct names what it expected', () {
+    expect(bad(metric(), 'waterType in [salt').error.message, contains(']'));
+    expect(bad(metric(), 'depth between 1 or').error.message, contains('and'));
+    expect(bad(metric(), 'weights[amount > 1').error.message, contains(']'));
+    expect(
+      bad(metric(), 'depth[amount > 1]').error.message,
+      contains('relation'),
+    );
+    expect(bad(metric(), 'favorite = yes').error.message, contains('true'));
+    expect(bad(metric(), 'notes = =').error.message, contains('value'));
+    expect(bad(metric(), 'depth > x').error.message, contains('number'));
+    expect(bad(metric(), 'site = ').error.message, contains('name'));
+    expect(bad(metric(), 'date > ').error.message, contains('date'));
+    expect(bad(metric(), 'date > sometime').error.message, contains('date'));
+    expect(bad(metric(), 'depth > 30 )').error.message, contains('unexpected'));
+    expect(
+      bad(metric(), 'site = "unterminated').error.message,
+      contains('quote'),
+    );
+  });
+
+  test(':none on an enum with a stored value named none is refused', () {
+    final f = bad(metric(), 'current:none');
+    expect(f.error.message, contains('current = none'));
+    expect(f.error.message, contains('NOT current:any'));
+    expect(
+      ok(metric(), 'current = none'),
+      ConditionNode(
+        FieldPath(['current']),
+        QueryOp.eq,
+        const EnumValue('none'),
+      ),
+    );
+    expect(ok(metric(), 'current:any'), isA<ConditionNode>());
+    expect(ok(metric(), 'waterType:none'), isA<ConditionNode>());
+  });
+
+  test('open-ended date phrases honour the operator or are refused', () {
+    final jan1 = DateValue(DateTime(2024, 1, 1));
+    final dec31 = DateValue(DateTime(2023, 12, 31));
+    expect(
+      ok(metric(), 'date in "since 2024"'),
+      ConditionNode(FieldPath(['date']), QueryOp.gte, jan1),
+    );
+    expect(
+      ok(metric(), 'date = "before 2024"'),
+      ConditionNode(FieldPath(['date']), QueryOp.lte, dec31),
+    );
+    expect(
+      ok(metric(), 'date != "since 2024"'),
+      NotNode(ConditionNode(FieldPath(['date']), QueryOp.gte, jan1)),
+    );
+    for (final text in ['date < "since 2024"', 'date >= "before 2024"']) {
+      final f = bad(metric(), text);
+      expect(f.error.message, contains('2024-01-01'), reason: text);
+    }
+    expect(
+      bad(metric(), 'date between "since 2024" and 2025-01-01').error.message,
+      contains('single day'),
+    );
+  });
+
+  group('in and between after a word (#3457)', () {
+    AndNode words(List<String> terms) => AndNode([
+      for (final t in terms) TextNode([t]),
+    ]);
+
+    test('in after a word that names nothing reads as plain words', () {
+      expect(ok(metric(), 'ressel in 2018'), words(['ressel', 'in', '2018']));
+    });
+
+    test('in after a field or relation with no list reads as words', () {
+      expect(ok(metric(), 'depth in 2018'), words(['depth', 'in', '2018']));
+      expect(ok(metric(), 'site in 2018'), words(['site', 'in', '2018']));
+    });
+
+    test('between after a word that names nothing reads as words', () {
+      expect(
+        ok(metric(), 'ressel between 2018 and 2020'),
+        words(['ressel', 'between', '2018', '2020']),
+      );
+    });
+
+    test('between after a relation reads as words', () {
+      expect(
+        ok(metric(), 'site between 2018 and 2020'),
+        words(['site', 'between', '2018', '2020']),
+      );
+    });
+
+    test('between after a field that cannot compare it reads as words', () {
+      expect(
+        ok(metric(), 'favorite between 2018 and 2020'),
+        words(['favorite', 'between', '2018', '2020']),
+      );
+    });
+
+    test('in stays an operator for a date field or a list', () {
+      expect(ok(metric(), 'date in 2025'), isA<ConditionNode>());
+      expect(ok(metric(), 'depth in [10, 20]'), isA<ConditionNode>());
+    });
+
+    test('between stays an operator for a field', () {
+      expect(ok(metric(), 'depth between 18 and 30'), isA<ConditionNode>());
+    });
+
+    test('a mistyped field before a list still suggests the field', () {
+      expect(
+        bad(metric(), 'dpeth in [10, 20]').error.suggestions,
+        contains('depth'),
+      );
+    });
+
+    test('a word ending the text at in is no operator', () {
+      expect(ok(metric(), 'ressel in'), words(['ressel', 'in']));
+    });
+  });
+
+  test('reversed between bounds are put in order', () {
+    expect(
+      ok(metric(), 'depth between 30 and 18'),
+      ConditionNode(
+        FieldPath(['depth']),
+        QueryOp.between,
+        ListValue([
+          const NumberValue(18, null, grain: 0.1, shown: 18),
+          const NumberValue(30, null, grain: 0.1, shown: 30),
+        ]),
+      ),
+    );
+    expect(
+      ok(metric(), 'date between 2025-03-15 and 2025-03-14'),
+      ConditionNode(
+        FieldPath(['date']),
+        QueryOp.between,
+        ListValue([
+          DateValue(DateTime(2025, 3, 14)),
+          DateValue(DateTime(2025, 3, 15)),
+        ]),
+      ),
+    );
+  });
+
+  test(
+    'typed numbers are canonical at four decimals, so printing is lossless',
+    () {
+      final a = ok(metric(), 'depth > 100.12345ft') as ConditionNode;
+      final b = ok(metric(), 'depth > 100.1235ft') as ConditionNode;
+      expect(a, b);
+    },
+  );
+
+  group('presence phrases (#3810)', () {
+    final siteEmpty = ConditionNode(FieldPath(['site']), QueryOp.isEmpty, null);
+    final siteSet = ConditionNode(FieldPath(['site']), QueryOp.isSet, null);
+
+    test('the words a diver reaches for mean :none', () {
+      for (final text in const [
+        'site is blank',
+        'site is null',
+        'site is empty',
+        'site is none',
+        'site is unset',
+        'site is not set',
+      ]) {
+        expect(ok(metric(), text), siteEmpty, reason: text);
+      }
+    });
+
+    test('their opposites mean :any', () {
+      for (final text in const [
+        'site is set',
+        'site is not blank',
+        'site is not null',
+        'site is not empty',
+        'site is not none',
+        'site is not unset',
+      ]) {
+        expect(ok(metric(), text), siteSet, reason: text);
+      }
+    });
+
+    test('the phrase folds case, as the reporter typed it', () {
+      expect(ok(metric(), 'Site is Blank'), siteEmpty);
+      expect(ok(metric(), 'SITE IS NOT NULL'), siteSet);
+    });
+
+    test('a field works like a relation, under any alias', () {
+      expect(
+        ok(metric(), 'notes is empty'),
+        ConditionNode(FieldPath(['notes']), QueryOp.isEmpty, null),
+      );
+      expect(
+        ok(metric(), 'maxDepth is blank'),
+        ConditionNode(FieldPath(['depth']), QueryOp.isEmpty, null),
+      );
+      expect(
+        ok(metric(), 'site.country is empty'),
+        ConditionNode(FieldPath(['site', 'country']), QueryOp.isEmpty, null),
+      );
+    });
+
+    test('it combines with the rest of the grammar', () {
+      expect(
+        ok(metric(), 'site is blank and depth > 30'),
+        AndNode([
+          siteEmpty,
+          ConditionNode(
+            FieldPath(['depth']),
+            QueryOp.gt,
+            const NumberValue(30, null, grain: 0.1, shown: 30),
+          ),
+        ]),
+      );
+      expect(ok(metric(), 'not site is blank'), NotNode(siteEmpty));
+      expect(ok(metric(), 'wreck site is blank'), isA<AndNode>());
+    });
+
+    test('a first word that names no field stays free text', () {
+      expect(
+        ok(metric(), 'boat is empty'),
+        AndNode([
+          TextNode(const ['boat']),
+          TextNode(const ['is']),
+          TextNode(const ['empty']),
+        ]),
+      );
+    });
+
+    test('a word that is no presence word stays free text', () {
+      expect(
+        ok(metric(), 'site is lovely'),
+        AndNode([
+          TextNode(const ['site']),
+          TextNode(const ['is']),
+          TextNode(const ['lovely']),
+        ]),
+      );
+      expect(
+        ok(metric(), 'site is not lovely'),
+        isNot(anyOf(siteEmpty, siteSet)),
+      );
+      expect(ok(metric(), 'site is'), isA<AndNode>());
+    });
+
+    test('text that ends before a phrase does parses as it did', () {
+      expect(ok(metric(), 'depth'), TextNode(const ['depth']));
+      expect(ok(metric(), 'empty'), TextNode(const ['empty']));
+      expect(
+        ok(metric(), 'site is'),
+        AndNode([
+          TextNode(const ['site']),
+          TextNode(const ['is']),
+        ]),
+      );
+      expect(bad(metric(), 'site is not').error, isNotNull);
+    });
+
+    test('a quoted sentence stays a phrase search', () {
+      expect(
+        ok(metric(), '"site is blank"'),
+        TextNode(const ['site', 'is', 'blank']),
+      );
+    });
+
+    test('an enum storing the value none refuses it like :none', () {
+      expect(
+        bad(metric(), 'current is none').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(
+        bad(metric(), 'current is blank').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(
+        bad(metric(), 'current is not none').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(ok(metric(), 'current is set'), isA<ConditionNode>());
+      expect(ok(metric(), 'current is not blank'), isA<ConditionNode>());
+    });
+
+    test('inside a group it reads the fields of that relation', () {
+      expect(
+        ok(metric(), 'site[country is empty]'),
+        ScopedNode(
+          FieldPath(['site']),
+          ConditionNode(FieldPath(['country']), QueryOp.isEmpty, null),
+        ),
+      );
+    });
+
+    test('a field that cannot be empty is refused, not searched as text', () {
+      final error = bad(metric(), 'favorite is blank').error;
+      expect(error.code, QueryErrorCode.opNotForFieldQuoted);
+      expect(error.args['op'], 'blank');
+      expect(error.offset, 'favorite is '.length);
+    });
+
+    test('reads back through the printer as the canonical form', () {
+      final printer = QueryPrinter(fixtureRegistry, fixtureDives, kMetricPrefs);
+      final tree = ok(metric(), 'site is blank');
+      expect(printer.print(tree), 'site:none');
+      expect(ok(metric(), printer.print(tree)), tree);
+    });
+
+    test('three separate words already saved do not change meaning', () {
+      // A saved query is a tree, not text: the words print with explicit
+      // ANDs, so the phrase never forms on the way back in.
+      final saved = AndNode([
+        TextNode(const ['site']),
+        TextNode(const ['is']),
+        TextNode(const ['blank']),
+      ]);
+      final printer = QueryPrinter(fixtureRegistry, fixtureDives, kMetricPrefs);
+      expect(ok(metric(), printer.print(saved)), saved);
+    });
+  });
+
+  group('field names fold case (#3810)', () {
+    test('a key or alias matches whatever the case', () {
+      expect(ok(metric(), 'Depth > 30'), ok(metric(), 'depth > 30'));
+      expect(ok(metric(), 'MAXDEPTH > 30'), ok(metric(), 'depth > 30'));
+      expect(ok(metric(), 'Site:none'), ok(metric(), 'site:none'));
+      expect(
+        ok(metric(), 'SITE.Country:none'),
+        ok(metric(), 'site.country:none'),
+      );
+    });
+
+    test('the tree holds the canonical spelling', () {
+      expect(
+        (ok(metric(), 'WATERTEMP > 20') as ConditionNode).path,
+        FieldPath(['waterTemp']),
+      );
+    });
+  });
+}

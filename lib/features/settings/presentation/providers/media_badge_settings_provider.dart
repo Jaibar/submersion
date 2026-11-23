@@ -1,0 +1,112 @@
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/settings/presentation/providers/serial_preference_writes.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+/// Whether media grids show a provenance badge on every thumbnail.
+///
+/// Health badges (missing, uploading, not backed up) are NOT covered by this
+/// switch. Those report a problem the diver may need to act on, and hiding
+/// them behind a display preference would let a broken photo look healthy.
+/// This only silences the always-on "where did these bytes come from" glyph.
+///
+/// Deliberately kept off AppSettings, matching [DisplayZoomNotifier]: this is
+/// device-local rather than per-diver, since whether a grid is decorated is a
+/// property of the screen you are looking at, not of the person. It also
+/// avoids a settings-table column, which would claim a schema version two
+/// unmerged branches already claim.
+///
+/// Seeded synchronously from SharedPreferences so the first frame of a grid
+/// draws with the right answer instead of flashing badges on and then off.
+class MediaProvenanceBadgesNotifier extends DeviceBadgeToggleNotifier {
+  MediaProvenanceBadgesNotifier(SharedPreferences prefs)
+    : super(prefs, SettingsKeys.mediaProvenanceBadges);
+
+  /// Fixed state with nothing behind it; see
+  /// [DeviceBadgeToggleNotifier.unstored].
+  MediaProvenanceBadgesNotifier.unstored(bool enabled)
+    : super.unstored(enabled, SettingsKeys.mediaProvenanceBadges);
+}
+
+/// A device-local on/off setting, stored in SharedPreferences under [_key]
+/// and on by default ([defaultValue]). Shared by the source badges and the
+/// tag markers so the two cannot drift apart, and by species
+/// identification's identify-on-open switch, its auto-apply
+/// (`AutoApplyNotifier`, off by default) and the dismissal of its download
+/// offer (`SpeciesDownloadPromptDismissedNotifier`, off by default): a
+/// change here reaches all five.
+class DeviceBadgeToggleNotifier extends StateNotifier<bool>
+    with SerialPreferenceWrites {
+  DeviceBadgeToggleNotifier(
+    SharedPreferences prefs,
+    String key, {
+    bool defaultValue = true,
+  }) : _prefs = prefs,
+       _key = key,
+       super(prefs.getBool(key) ?? defaultValue);
+
+  /// Fixed state with nothing behind it.
+  ///
+  /// Used when SharedPreferences is unavailable: a widget test with no
+  /// binding, or an early frame before initialization. [setEnabled] becomes a
+  /// no-op rather than throwing, so a toggle in that state fails quietly
+  /// instead of taking a screen down.
+  DeviceBadgeToggleNotifier.unstored(super.enabled, String key)
+    : _prefs = null,
+      _key = key;
+
+  final SharedPreferences? _prefs;
+  final String _key;
+
+  Future<void> setEnabled(bool value) {
+    if (state == value) return Future<void>.value();
+    state = value;
+    final prefs = _prefs;
+    if (prefs == null) return Future<void>.value();
+    return writeInTurn(() => prefs.setBool(_key, value));
+  }
+}
+
+/// Defaults to enabled, with no storage behind it.
+///
+/// Deliberately does NOT reach for [sharedPreferencesProvider] itself. This is
+/// watched from inside a grid TILE, and that provider throws unless the root
+/// scope overrode it, so a container without the override would put every
+/// thumbnail into an error state. Neither `watch` nor `read` can be defended
+/// against here: a dependency's error becomes this provider's own error state,
+/// which no try/catch in the create function intercepts.
+///
+/// `rootProviderOverrides` swaps in the stored-value notifier, so production
+/// reads and writes the preference while any container without that override
+/// simply renders badges. Enabled is the harmless direction for a decoration.
+final mediaProvenanceBadgesProvider =
+    StateNotifierProvider<MediaProvenanceBadgesNotifier, bool>(
+      (ref) => MediaProvenanceBadgesNotifier.unstored(true),
+    );
+
+/// Whether library thumbnails show the tag markers (issue #4218): a person
+/// when someone is tagged, a fish when a species is, a timer when the item
+/// has a time in its dive.
+///
+/// A separate switch from [MediaProvenanceBadgesNotifier], since the two
+/// answer different questions: where the bytes came from, and what the diver
+/// has recorded about the picture. Device-local and seeded synchronously for
+/// the same reasons that notifier gives.
+class MediaTagBadgesNotifier extends DeviceBadgeToggleNotifier {
+  MediaTagBadgesNotifier(SharedPreferences prefs)
+    : super(prefs, SettingsKeys.mediaTagBadges);
+
+  /// Fixed state with nothing behind it; see
+  /// [DeviceBadgeToggleNotifier.unstored].
+  MediaTagBadgesNotifier.unstored(bool enabled)
+    : super.unstored(enabled, SettingsKeys.mediaTagBadges);
+}
+
+/// Defaults to enabled with no storage behind it, and gains persistence from
+/// `rootProviderOverrides`, exactly as [mediaProvenanceBadgesProvider] does
+/// and for the same reason: it is watched from inside a grid tile.
+final mediaTagBadgesProvider =
+    StateNotifierProvider<MediaTagBadgesNotifier, bool>(
+      (ref) => MediaTagBadgesNotifier.unstored(true),
+    );

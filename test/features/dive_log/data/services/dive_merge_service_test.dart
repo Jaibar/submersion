@@ -1,0 +1,952 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_computer/data/services/reparse_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/data/services/dive_merge_service.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/codecs/tank_pressure_series_codec.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository diveRepo;
+  late DiveMergeService service;
+  late ProfileSeriesRepository profileSeries;
+  late TankPressureSeriesRepository tankSeries;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    await db.customStatement('PRAGMA foreign_keys = OFF');
+    diveRepo = DiveRepository();
+    service = DiveMergeService(diveRepo);
+    profileSeries = ProfileSeriesRepository();
+    tankSeries = TankPressureSeriesRepository();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  /// Seeds a dive with one tank, a 3-sample profile series, and link rows in
+  /// the tables createDive does not cover (buddy, sighting, event, gas
+  /// switch, tank pressure series, data source, media).
+  ///
+  /// [computerId] mirrors how a real dive-computer download stamps a
+  /// profile series: the domain DiveProfilePoint has no computerId field
+  /// (createDive can't set it), so the series DiveRepository.createDive
+  /// wrote (no computer, no source) is deleted and re-inserted with the
+  /// computer stamped on it, same samples and flags, same as production's
+  /// saveComputerReading/reparse_service path. FK enforcement is off by
+  /// default in this suite, so no dive_computers row is seeded.
+  Future<void> seedDive(
+    String id, {
+    required DateTime entry,
+    int runtimeMin = 30,
+    double depth = 10,
+    String? computerId,
+    List<domain.DiveProfilePoint>? profile,
+  }) async {
+    await diveRepo.createDive(
+      domain.Dive(
+        id: id,
+        diverId: 'diver1',
+        dateTime: entry,
+        entryTime: entry,
+        runtime: Duration(minutes: runtimeMin),
+        maxDepth: depth,
+        tanks: [domain.DiveTank(id: 'tank-$id', volume: 11.1)],
+        profile:
+            profile ??
+            [
+              const domain.DiveProfilePoint(timestamp: 0, depth: 0),
+              domain.DiveProfilePoint(timestamp: runtimeMin * 30, depth: depth),
+              domain.DiveProfilePoint(timestamp: runtimeMin * 60, depth: 0),
+            ],
+      ),
+    );
+    if (computerId != null) {
+      final created = await profileSeries.getSeriesForDive(id);
+      await profileSeries.deleteForDive(id);
+      for (final s in created) {
+        await profileSeries.insertSeries(
+          diveId: id,
+          computerId: computerId,
+          sourceId: s.sourceId,
+          isPrimary: s.isPrimary,
+          samples: s.samples,
+          now: 0,
+        );
+      }
+    }
+    await db
+        .into(db.diveBuddies)
+        .insert(
+          DiveBuddiesCompanion.insert(
+            id: 'buddy-$id',
+            diveId: id,
+            buddyId: 'buddy-cat-1',
+            createdAt: 0,
+          ),
+        );
+    await db
+        .into(db.sightings)
+        .insert(
+          SightingsCompanion.insert(
+            id: 'sight-$id',
+            diveId: id,
+            speciesId: 'turtle',
+          ),
+        );
+    await db
+        .into(db.diveProfileEvents)
+        .insert(
+          DiveProfileEventsCompanion.insert(
+            id: 'event-$id',
+            diveId: id,
+            timestamp: 60,
+            eventType: 'gaschange',
+            createdAt: 0,
+          ),
+        );
+    await db
+        .into(db.gasSwitches)
+        .insert(
+          GasSwitchesCompanion.insert(
+            id: 'switch-$id',
+            diveId: id,
+            timestamp: 60,
+            tankId: 'tank-$id',
+            createdAt: 0,
+          ),
+        );
+    await tankSeries.insertSeries(
+      diveId: id,
+      tankId: 'tank-$id',
+      samples: const [TankPressureSample(timestamp: 60, pressure: 180.0)],
+      id: 'tp-$id',
+      now: 0,
+    );
+    await db
+        .into(db.diveDataSources)
+        .insert(
+          DiveDataSourcesCompanion.insert(
+            id: 'src-$id',
+            diveId: id,
+            importedAt: DateTime.utc(2026, 7, 1),
+            createdAt: DateTime.utc(2026, 7, 1),
+          ).copyWith(isPrimary: const Value(true)),
+        );
+    await db
+        .into(db.media)
+        .insert(
+          MediaCompanion.insert(
+            id: 'media-$id',
+            filePath: '/photos/$id.jpg',
+            createdAt: 0,
+            updatedAt: 0,
+          ).copyWith(diveId: Value(id)),
+        );
+  }
+
+  group('role sets (#1221)', () {
+    test('roles are unioned per person and undo restores them', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10), runtimeMin: 20);
+      final roles = DiveRoleLinkRepository();
+      await roles.writeDiverRoles('a', ['instructor']);
+      await roles.writeDiverRoles('b', ['safetyDiver']);
+      await roles.writeBuddyRoles('a', 'buddy-cat-1', ['diveMaster']);
+      await roles.writeBuddyRoles('b', 'buddy-cat-1', ['diveGuide']);
+      final before = (
+        diver: await roles.diverRoleIdsForDives(['a', 'b']),
+        buddy: await roles.buddyRoleIdsForDives(['a', 'b']),
+      );
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      expect((await roles.diverRoleIdsForDives([mergedId]))[mergedId], [
+        'instructor',
+        'safetyDiver',
+      ]);
+      expect(
+        (await roles.buddyRoleIdsForDives([
+          mergedId,
+        ]))[mergedId]!['buddy-cat-1'],
+        ['diveGuide', 'diveMaster'],
+      );
+
+      await service.undo(outcome.snapshot);
+
+      expect(await roles.diverRoleIdsForDives(['a', 'b']), before.diver);
+      expect(await roles.buddyRoleIdsForDives(['a', 'b']), before.buddy);
+      final leftovers = await (db.select(
+        db.diveBuddyRoles,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(leftovers, isEmpty);
+    });
+  });
+
+  group('captureSnapshot', () {
+    test('captures every child table and media pointers', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final snap = await service.captureSnapshot(['a', 'b'], 'merged-1');
+
+      expect(snap.mergedDiveId, 'merged-1');
+      expect(snap.diveRows, hasLength(2));
+      // One packed series per dive (three samples each), not row-per-sample.
+      expect(snap.profileSeriesRows, hasLength(2));
+      expect(snap.tankRows, hasLength(2));
+      expect(snap.buddyRows, hasLength(2));
+      expect(snap.sightingRows, hasLength(2));
+      expect(snap.eventRows, hasLength(2));
+      expect(snap.gasSwitchRows, hasLength(2));
+      expect(snap.tankSeriesRows, hasLength(2));
+      expect(snap.dataSourceRows, hasLength(2));
+      expect(snap.mediaDiveIds, {'media-a': 'a', 'media-b': 'b'});
+    });
+  });
+
+  group('apply', () {
+    test('creates merged dive, copies children, deletes sources', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9), depth: 10);
+      await seedDive(
+        'b',
+        entry: DateTime.utc(2026, 7, 1, 10),
+        depth: 20,
+        runtimeMin: 20,
+      );
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      // Sources gone, tombstones logged.
+      final remaining = await db.select(db.dives).get();
+      expect(remaining.map((r) => r.id), [mergedId]);
+      final tombstones = await (db.select(
+        db.deletionLog,
+      )..where((t) => t.entityType.equals('dives'))).get();
+      expect(tombstones.map((t) => t.recordId).toSet(), {'a', 'b'});
+
+      // Profile series: one per source, re-based, gap-fill appended into
+      // the segment before it.
+      final mergedSeries = await profileSeries.getSeriesForDive(mergedId);
+      expect(mergedSeries, hasLength(2));
+      final allSamples = [for (final s in mergedSeries) ...s.samples]
+        ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      // Dive a ends at 1800s; dive b starts at 3600s; gap samples inside.
+      final gapSamples = allSamples
+          .where((p) => p.timestamp > 1800 && p.timestamp < 3600)
+          .toList();
+      expect(allSamples, hasLength(6 + gapSamples.length));
+      expect(gapSamples.every((p) => p.depth == 0), isTrue);
+      // The gap is filled with 0-depth samples at the source profile's own
+      // cadence (median inter-sample delta; here the sparse 900s seed
+      // profile), hugging both boundaries -- a 2-point fill left a sample
+      // hole the chart drew as a swooping curve with an overshoot loop
+      // (#449 manual test).
+      expect(gapSamples.map((p) => p.timestamp), [1801, 2701, 3599]);
+      // b's first sample re-based to 3600.
+      expect(allSamples.where((p) => p.timestamp == 3600), isNotEmpty);
+
+      // Surface events at the gap boundaries.
+      final events = await (db.select(
+        db.diveProfileEvents,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(
+        events.where((e) => e.eventType == 'surface').map((e) => e.timestamp),
+        containsAll([1800, 3600]),
+      );
+
+      // Both halves breathed the same air cylinder, so the merged dive
+      // carries it once (#2036), and both gas switches re-point at that NEW
+      // tank id on the merged dive.
+      final mergedTanks = await (db.select(
+        db.diveTanks,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(mergedTanks, hasLength(1));
+      final switches = await (db.select(
+        db.gasSwitches,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(switches, hasLength(2));
+      expect(switches.map((s) => s.tankId).toSet(), {mergedTanks.single.id});
+
+      // Tank pressures re-based, and both halves' series land on the one
+      // tank so its pressure line runs across the whole combined dive.
+      final pressures = await tankSeries.getSeriesForDive(mergedId);
+      expect(pressures, hasLength(2));
+      expect(pressures.map((s) => s.tankId).toSet(), {mergedTanks.single.id});
+      expect(pressures.map((s) => s.samples.single.timestamp).toSet(), {
+        60,
+        3660,
+      });
+
+      // Buddies and sightings carried; same-species sightings merged.
+      final buddies = await (db.select(
+        db.diveBuddies,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(buddies.map((b) => b.buddyId).toSet(), {'buddy-cat-1'});
+      final sightings = await (db.select(
+        db.sightings,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(sightings, hasLength(1));
+      expect(sightings.single.count, 2);
+
+      // Data sources carried, all non-primary.
+      final sources = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(sources, hasLength(2));
+      expect(sources.every((s) => !s.isPrimary), isTrue);
+
+      // Media re-pointed, not orphaned.
+      final media = await db.select(db.media).get();
+      expect(media.every((m) => m.diveId == mergedId), isTrue);
+
+      // Merged stats.
+      final mergedRow = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals(mergedId))).getSingle();
+      expect(mergedRow.maxDepth, 20);
+      expect(mergedRow.runtime, 80 * 60); // createDive persists seconds.
+    });
+
+    // Values the diver set by hand (issue #4909): a mark follows its value.
+    test('the combined dive keeps the marks of the values it took', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9), depth: 10);
+      await seedDive(
+        'b',
+        entry: DateTime.utc(2026, 7, 1, 10),
+        depth: 20,
+        runtimeMin: 20,
+      );
+      // The diver corrected b's depth and a's runtime by hand.
+      await db.customStatement(
+        "UPDATE dives SET hand_set_fields = '[\"maxDepth\"]' WHERE id = 'b'",
+      );
+      await db.customStatement(
+        "UPDATE dives SET hand_set_fields = '[\"runtime\"]' WHERE id = 'a'",
+      );
+
+      final outcome = await service.apply(['a', 'b']);
+
+      final merged = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals(outcome.mergedDive.id))).getSingle();
+      // The deepest is b's corrected 20 m; the runtime spans both dives.
+      expect(merged.maxDepth, 20);
+      expect(merged.handSetFields, '["maxDepth"]');
+    });
+
+    test('rejects overlapping selections', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9), runtimeMin: 90);
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+      expect(() => service.apply(['a', 'b']), throwsArgumentError);
+      expect(await db.select(db.dives).get(), hasLength(2)); // untouched
+    });
+
+    test(
+      'rejects when a selected dive no longer exists; DB untouched',
+      () async {
+        await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+        // 'ghost' was never created -> only 1 dive loads -> tooFewDives.
+        expect(() => service.apply(['a', 'ghost']), throwsArgumentError);
+        expect(await db.select(db.dives).get(), hasLength(1));
+        expect(await db.select(db.deletionLog).get(), isEmpty);
+      },
+    );
+
+    test(
+      'stamps synthesized gap samples with the source computerId so '
+      'getProfilesBySource does not see a phantom extra source (#449 F1)',
+      () async {
+        await seedDive(
+          'a',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-1',
+        );
+        await seedDive(
+          'b',
+          entry: DateTime.utc(2026, 7, 1, 10),
+          computerId: 'comp-1',
+        );
+
+        final outcome = await service.apply(['a', 'b']);
+        final mergedId = outcome.mergedDive.id;
+
+        final mergedSeries = await profileSeries.getSeriesForDive(mergedId);
+        // Every series, gap-fill included, must carry the source
+        // computerId. a's series hosts the gap fill, being the only
+        // series on the segment before the gap.
+        expect(mergedSeries.every((s) => s.computerId == 'comp-1'), isTrue);
+        final sampleCount = mergedSeries.fold<int>(
+          0,
+          (sum, s) => sum + s.samples.length,
+        );
+        // 3 samples per source + the densified gap samples.
+        expect(sampleCount, greaterThan(6));
+      },
+    );
+
+    test('gap samples join the primary profile, not a lingering secondary '
+        '(#449 review)', () async {
+      // 'a' has a user-edited primary series (computerId null, the identity
+      // DiveRepository.createDive wrote) plus a lingering non-primary
+      // computer series, mirroring saveEditedProfile.
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await profileSeries.insertSeries(
+        diveId: 'a',
+        computerId: 'sec-comp',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 30, depth: 5)],
+        id: 'sec-a',
+        now: 0,
+      );
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      final mergedSeries = await profileSeries.getSeriesForDive(mergedId);
+      // The surface gap runs from a's extent (1800s) to b's entry (3600s).
+      final gapSamples = [
+        for (final s in mergedSeries) ...s.samples,
+      ].where((p) => p.timestamp > 1800 && p.timestamp < 3600).toList();
+      expect(gapSamples, isNotEmpty);
+      // Attributed to the primary (edited) series, not the secondary source.
+      // Every series holding a gap sample is asserted, not just the first
+      // one found: gap samples landing in BOTH strands is exactly the #449
+      // regression, and a lookup that stops at the first match would let it
+      // through.
+      final hostSeries = mergedSeries
+          .where(
+            (s) =>
+                s.samples.any((p) => p.timestamp > 1800 && p.timestamp < 3600),
+          )
+          .toList();
+      expect(hostSeries, hasLength(1));
+      expect(
+        hostSeries.every((s) => s.isPrimary && s.computerId == null),
+        isTrue,
+      );
+    });
+
+    test('a surface fill with no profile beside it is marked as no edit '
+        '(#4386)', () async {
+      // Live with no source, the fill has the shape that reads as a manual
+      // edit over anything demoted beneath, so it must say it is none.
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9), profile: []);
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10), profile: []);
+
+      final outcome = await service.apply(['a', 'b']);
+
+      final rows = await (db.select(
+        db.diveProfileSeries,
+      )..where((t) => t.diveId.equals(outcome.mergedDive.id))).get();
+      final fill = rows.singleWhere((r) => r.isPrimary && r.sourceId == null);
+      expect(fill.isEdit, isFalse);
+    });
+
+    test('merged copies keep their activation times (#3189)', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await profileSeries.insertSeries(
+        diveId: 'a',
+        computerId: 'sec-comp',
+        isPrimary: false,
+        activatedAt: const Value(5),
+        samples: const [ProfileSample(timestamp: 30, depth: 5)],
+        now: 0,
+      );
+      await profileSeries.insertSeries(
+        diveId: 'a',
+        computerId: 'third-comp',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 30, depth: 6)],
+        now: 0,
+      );
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final outcome = await service.apply(['a', 'b']);
+
+      final merged = await profileSeries.getSeriesForDive(
+        outcome.mergedDive.id,
+      );
+      expect(
+        merged.singleWhere((s) => s.computerId == 'sec-comp').activatedAt,
+        5,
+      );
+      expect(
+        merged.singleWhere((s) => s.computerId == 'third-comp').activatedAt,
+        isNull,
+      );
+    });
+
+    test('gap samples match the source profile sample rate', () async {
+      // 10s-cadence sources -> the surface gap is filled at 10s too, so the
+      // synthesized samples are indistinguishable from the computer's own
+      // rhythm on the chart.
+      List<domain.DiveProfilePoint> dense(int runtimeSec) => [
+        for (var t = 0; t <= runtimeSec; t += 10)
+          domain.DiveProfilePoint(
+            timestamp: t,
+            depth: t == 0 || t == runtimeSec ? 0 : 10,
+          ),
+      ];
+      await seedDive(
+        'a',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        runtimeMin: 5,
+        profile: dense(300),
+      );
+      await seedDive(
+        'b',
+        entry: DateTime.utc(2026, 7, 1, 9, 15),
+        runtimeMin: 5,
+        profile: dense(300),
+      );
+
+      final outcome = await service.apply(['a', 'b']);
+      final allSamples =
+          (await profileSeries.getSeriesForDive(
+              outcome.mergedDive.id,
+            )).expand((s) => s.samples).toList()
+            ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+      // Gap runs 300..900 (a ends at 300; b re-based to 900).
+      final gapSamples = allSamples
+          .where((p) => p.timestamp > 300 && p.timestamp < 900)
+          .toList();
+      expect(gapSamples.first.timestamp, 301);
+      expect(gapSamples.last.timestamp, 899);
+      expect(gapSamples.every((p) => p.depth == 0), isTrue);
+      for (var i = 1; i < gapSamples.length; i++) {
+        expect(
+          gapSamples[i].timestamp - gapSamples[i - 1].timestamp,
+          lessThanOrEqualTo(10),
+        );
+      }
+    });
+
+    test('zero-length gaps between touching dives get no surface events or '
+        'gap samples (#449 F3/F8)', () async {
+      // 'a' ends exactly when 'b' starts -- gap is 0 seconds.
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9), runtimeMin: 30);
+      await seedDive(
+        'b',
+        entry: DateTime.utc(2026, 7, 1, 9, 30),
+        runtimeMin: 30,
+      );
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      final mergedSeries = await profileSeries.getSeriesForDive(mergedId);
+      // 3 samples per source, no synthesized gap samples.
+      expect(mergedSeries.fold<int>(0, (sum, s) => sum + s.samples.length), 6);
+
+      final events = await (db.select(
+        db.diveProfileEvents,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(events.where((e) => e.eventType == 'surface'), isEmpty);
+    });
+  });
+
+  group('undo', () {
+    test(
+      'restores sources byte-for-byte and removes the merged dive',
+      () async {
+        await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+        await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+        final before = await (db.select(
+          db.dives,
+        )..orderBy([(t) => OrderingTerm.asc(t.id)])).get();
+
+        final outcome = await service.apply(['a', 'b']);
+        await service.undo(outcome.snapshot);
+
+        final after = await (db.select(
+          db.dives,
+        )..orderBy([(t) => OrderingTerm.asc(t.id)])).get();
+        expect(after.map((r) => r.id), ['a', 'b']);
+        // Every column identical except updatedAt and hlc: undo's
+        // markRecordPending deliberately stamps a fresh, newer HLC on the
+        // restored row (per DiveMergeService.undo's doc comment) so it wins
+        // LWW conflict resolution over the merge's tombstone.
+        // Drift ROW classes have value equality + copyWith; companions do not.
+        for (var i = 0; i < before.length; i++) {
+          expect(
+            after[i].copyWith(updatedAt: 0, hlc: const Value(null)),
+            before[i].copyWith(updatedAt: 0, hlc: const Value(null)),
+          );
+        }
+
+        // Children restored with original ids.
+        final tanks = await db.select(db.diveTanks).get();
+        expect(tanks.map((t) => t.id).toSet(), {'tank-a', 'tank-b'});
+        final buddies = await db.select(db.diveBuddies).get();
+        expect(buddies.map((b) => b.id).toSet(), {'buddy-a', 'buddy-b'});
+        final events = await db.select(db.diveProfileEvents).get();
+        expect(events.map((e) => e.id).toSet(), {'event-a', 'event-b'});
+        final sources = await db.select(db.diveDataSources).get();
+        expect(sources.every((s) => s.isPrimary), isTrue); // original flag back
+
+        // Media pointers restored.
+        final media = await (db.select(
+          db.media,
+        )..where((t) => t.id.equals('media-a'))).getSingle();
+        expect(media.diveId, 'a');
+
+        // Merged dive tombstoned.
+        final tombstones = await (db.select(
+          db.deletionLog,
+        )..where((t) => t.recordId.equals(outcome.mergedDive.id))).get();
+        expect(tombstones, isNotEmpty);
+      },
+    );
+
+    test('apply + undo round-trip works with foreign_keys ON '
+        '(production path)', () async {
+      await db.customStatement('PRAGMA foreign_keys = ON');
+
+      // Seed every catalog row seedDive's children reference, so seeding
+      // itself passes immediate FK enforcement.
+      await db
+          .into(db.divers)
+          .insert(
+            const DiversCompanion(
+              id: Value('diver1'),
+              name: Value('diver1'),
+              createdAt: Value(0),
+              updatedAt: Value(0),
+            ),
+          );
+      await db
+          .into(db.buddies)
+          .insert(
+            const BuddiesCompanion(
+              id: Value('buddy-cat-1'),
+              name: Value('buddy-cat-1'),
+              createdAt: Value(0),
+              updatedAt: Value(0),
+            ),
+          );
+      await db
+          .into(db.species)
+          .insert(
+            const SpeciesCompanion(
+              id: Value('turtle'),
+              commonName: Value('Turtle'),
+              category: Value('reptile'),
+            ),
+          );
+
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final outcome = await service.apply(['a', 'b']);
+      await service.undo(outcome.snapshot);
+
+      final after = await (db.select(
+        db.dives,
+      )..orderBy([(t) => OrderingTerm.asc(t.id)])).get();
+      expect(after.map((r) => r.id), ['a', 'b']);
+      final tanks = await db.select(db.diveTanks).get();
+      expect(tanks.map((t) => t.id).toSet(), {'tank-a', 'tank-b'});
+      // tank_pressure_series.tank_id is an FK into diveTanks: these rows
+      // only restore if the parent tanks were re-inserted first.
+      final pressures = await tankSeries.getRowsForDives(['a', 'b']);
+      expect(pressures.map((p) => p.id).toSet(), {'tp-a', 'tp-b'});
+    });
+  });
+
+  group('same-computer provenance (#1045)', () {
+    /// Stamps [diveId]'s seeded data source row with a shared [computerId]
+    /// and payloads unique to that download, mirroring what a real
+    /// dive-computer download writes for each half of a split pair.
+    Future<void> stampSource(
+      String diveId, {
+      required String computerId,
+      required String sourceUuid,
+      required int fingerprintByte,
+    }) async {
+      await (db.update(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals(diveId))).write(
+        DiveDataSourcesCompanion(
+          computerId: Value(computerId),
+          sourceUuid: Value(sourceUuid),
+          rawFingerprint: Value(Uint8List.fromList([fingerprintByte])),
+          rawData: Value(Uint8List.fromList([fingerprintByte, 0xFF])),
+        ),
+      );
+    }
+
+    test(
+      'both source rows survive the merge with their own raw payloads, while '
+      'the read side collapses them to one canonical source',
+      () async {
+        await seedDive(
+          'a',
+          entry: DateTime.utc(2026, 7, 1, 9),
+          computerId: 'comp-1',
+        );
+        await seedDive(
+          'b',
+          entry: DateTime.utc(2026, 7, 1, 10),
+          computerId: 'comp-1',
+        );
+        await stampSource(
+          'a',
+          computerId: 'comp-1',
+          sourceUuid: 'uuid-a',
+          fingerprintByte: 0xA1,
+        );
+        await stampSource(
+          'b',
+          computerId: 'comp-1',
+          sourceUuid: 'uuid-b',
+          fingerprintByte: 0xB2,
+        );
+
+        final outcome = await service.apply(['a', 'b']);
+        final mergedId = outcome.mergedDive.id;
+
+        // Both rows are carried. They share a computerId but are NOT
+        // duplicates: each is the only surviving copy of one download's
+        // rawData / rawFingerprint / sourceUuid, since step 13 deletes the
+        // originals. Collapsing them here would destroy that half's bytes.
+        final rows = await (db.select(
+          db.diveDataSources,
+        )..where((t) => t.diveId.equals(mergedId))).get();
+        expect(rows, hasLength(2));
+        expect(rows.every((r) => r.computerId == 'comp-1'), isTrue);
+        expect(rows.map((r) => r.sourceUuid).toSet(), {'uuid-a', 'uuid-b'});
+        expect(rows.map((r) => r.rawFingerprint?.first).toSet(), {0xA1, 0xB2});
+        // ReparseService.getSourcesForDiveReparse selects on rawData, so
+        // both halves keep their bytes for a libdivecomputer upgrade. What
+        // a re-parse does with them is scoped by
+        // sourceOwnsProfileStrand: it refreshes each row's
+        // provenance snapshot but leaves the merged profile alone (#1164).
+        expect(rows.where((r) => r.rawData != null), hasLength(2));
+
+        // The import duplicate checker unions keys across ALL rows: a
+        // re-download of EITHER half must still resolve as a duplicate of
+        // the merged dive rather than landing as a new dive.
+        final keys = await diveRepo.getSourceKeysByDiveId();
+        expect(keys[mergedId], containsAll(<String>{'uuid-a', 'uuid-b'}));
+
+        // Read side: one computer, one chip. The duplicate is a display
+        // concern, canonicalized on read (#1005), not a storage defect.
+        final canonical = await diveRepo.getDataSources(mergedId);
+        expect(canonical, hasLength(1));
+      },
+    );
+  });
+
+  group('re-parsing a merged dive (#1164)', () {
+    /// Gives both originals' source rows the raw blob and descriptor triple
+    /// that make them eligible for re-parse, so the merged dive inherits two
+    /// re-parseable carried rows sharing one computer.
+    Future<void> makeSourceReparseable(String diveId) async {
+      await (db.update(
+        db.diveDataSources,
+      )..where((t) => t.id.equals('src-$diveId'))).write(
+        DiveDataSourcesCompanion(
+          computerId: const Value('comp-1'),
+          rawData: Value(Uint8List.fromList([1, 2, 3, 4])),
+          descriptorVendor: const Value('Shearwater'),
+          descriptorProduct: const Value('Perdix'),
+          descriptorModel: const Value(42),
+        ),
+      );
+    }
+
+    test('leaves the combined profile and its surface gap intact', () async {
+      await seedDive(
+        'a',
+        entry: DateTime.utc(2026, 7, 1, 9),
+        depth: 10,
+        computerId: 'comp-1',
+      );
+      await seedDive(
+        'b',
+        entry: DateTime.utc(2026, 7, 1, 10),
+        depth: 20,
+        runtimeMin: 20,
+        computerId: 'comp-1',
+      );
+      await makeSourceReparseable('a');
+      await makeSourceReparseable('b');
+
+      final mergedId = (await service.apply(['a', 'b'])).mergedDive.id;
+
+      Future<List<int>> profileTimestamps() async {
+        final series = await profileSeries.getSeriesForDive(mergedId);
+        return [
+          for (final s in series)
+            for (final p in s.samples) p.timestamp,
+        ]..sort();
+      }
+
+      final before = await profileTimestamps();
+      // Both halves plus the synthesized surface-gap fill.
+      expect(before.length, greaterThan(6));
+      expect(before.any((t) => t > 1800 && t < 3600), isTrue);
+
+      // The parser returns the first half's download verbatim: four samples
+      // in the original dive's frame, exactly what would overwrite the
+      // merged timeline if the guard were missing.
+      final result = await ReparseService(db: db).reparseDive(
+        mergedId,
+        parseFn: (vendor, product, model, rawData) async => pigeon.ParsedDive(
+          fingerprint: 'fp',
+          dateTimeYear: 2026,
+          dateTimeMonth: 7,
+          dateTimeDay: 1,
+          dateTimeHour: 9,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 10,
+          avgDepthMeters: 5,
+          durationSeconds: 1800,
+          samples: [
+            pigeon.ProfileSample(timeSeconds: 0, depthMeters: 0),
+            pigeon.ProfileSample(timeSeconds: 900, depthMeters: 10),
+            pigeon.ProfileSample(timeSeconds: 1800, depthMeters: 0),
+          ],
+          tanks: const [],
+          gasMixes: const [],
+          events: const [],
+        ),
+      );
+
+      expect(await profileTimestamps(), before);
+      expect(result.errors, isEmpty);
+      expect(result.profilesPreserved, 2);
+    });
+  });
+
+  group('imported provenance (#1451)', () {
+    test('carries both rows but marks them one strand, so the merged dive '
+        'reports a single source', () async {
+      // File and cloud imports have no computerId, so nothing collapsed
+      // these rows before merge_source_slot existed: the merged dive
+      // reported two sources and the chart drew only the active half.
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      final rows = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(rows, hasLength(2), reason: 'both halves keep their provenance');
+      expect(rows.every((r) => r.computerId == null), isTrue);
+      expect(rows.map((r) => r.mergeSourceSlot).toSet(), {0});
+
+      expect(await diveRepo.getDataSources(mergedId), hasLength(1));
+      expect(await diveRepo.hasMultipleDataSources(mergedId), isFalse);
+    });
+
+    test('the surviving source owns every segment\'s samples', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+
+      final outcome = await service.apply(['a', 'b']);
+      final mergedId = outcome.mergedDive.id;
+
+      // The chart's multi-source branch draws the active source's own
+      // points. With one canonical source that has to be the whole dive,
+      // not the first half: samples owned by the row that lost the collapse
+      // fall back to the surviving row (getProfilesByDataSource).
+      final profiles = await diveRepo.getProfilesByDataSource(mergedId);
+      expect(profiles, hasLength(1));
+      final merged = await diveRepo.getDiveById(mergedId);
+      expect(
+        profiles.values.single.points.map((p) => p.timestamp).toList(),
+        merged!.profile.map((p) => p.timestamp).toList(),
+      );
+      expect(
+        profiles.values.single.points.last.timestamp,
+        greaterThan(30 * 60),
+        reason: 'runs past the end of the first segment',
+      );
+    });
+
+    test('re-slots against the new merge when a combined dive is combined '
+        'again, without splitting the strand it arrives as', () async {
+      await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+      await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+      final first = await service.apply(['a', 'b']);
+
+      await seedDive('c', entry: DateTime.utc(2026, 7, 1, 12));
+      final second = await service.apply([first.mergedDive.id, 'c']);
+      final mergedId = second.mergedDive.id;
+
+      final rows = await (db.select(
+        db.diveDataSources,
+      )..where((t) => t.diveId.equals(mergedId))).get();
+      expect(rows, hasLength(3), reason: 'every segment keeps its provenance');
+      // The first segment arrives already collapsed to ONE strand, so both
+      // of its rows have to take the same new slot. Numbering rows rather
+      // than strands would hand them slots 0 and 1 while the third segment
+      // took slot 0 again, splitting one dive back into two chips whose
+      // spans interleave -- #1451 all over again, one combine later.
+      expect(rows.map((r) => r.mergeSourceSlot).toSet(), {0});
+      expect(await diveRepo.getDataSources(mergedId), hasLength(1));
+      expect(await diveRepo.hasMultipleDataSources(mergedId), isFalse);
+
+      final profiles = await diveRepo.getProfilesByDataSource(mergedId);
+      expect(profiles, hasLength(1));
+      final merged = await diveRepo.getDiveById(mergedId);
+      expect(
+        profiles.values.single.points.map((p) => p.timestamp).toList(),
+        merged!.profile.map((p) => p.timestamp).toList(),
+        reason: 'the middle segment is not stranded behind a second chip',
+      );
+    });
+
+    test(
+      'a segment that carries two computers keeps one strand per computer',
+      () async {
+        // Consolidate-then-combine: re-slotting by strand must not flatten two
+        // computers into one chip the way it collapses one computer's halves.
+        // seedDive's computerId stamps the profile series only, so the source
+        // rows are attributed here.
+        await seedDive('a', entry: DateTime.utc(2026, 7, 1, 9));
+        await seedDive('b', entry: DateTime.utc(2026, 7, 1, 10));
+        for (final (sourceId, computerId) in const [
+          ('src-a', 'comp-1'),
+          ('src-b', 'comp-2'),
+        ]) {
+          await (db.update(db.diveDataSources)
+                ..where((t) => t.id.equals(sourceId)))
+              .write(DiveDataSourcesCompanion(computerId: Value(computerId)));
+        }
+
+        final merged = (await service.apply(['a', 'b'])).mergedDive.id;
+
+        final rows = await (db.select(
+          db.diveDataSources,
+        )..where((t) => t.diveId.equals(merged))).get();
+        expect(rows.map((r) => r.computerId).toSet(), {'comp-1', 'comp-2'});
+        expect(
+          await diveRepo.getDataSources(merged),
+          hasLength(2),
+          reason: 'computerId still wins over the slot',
+        );
+      },
+    );
+  });
+}

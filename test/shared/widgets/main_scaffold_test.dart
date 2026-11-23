@@ -1,17 +1,42 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/features/auto_update/domain/entities/update_status.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/core/theme/feature_accent_colors.dart';
 import 'package:submersion/features/auto_update/presentation/providers/update_providers.dart';
+import 'package:submersion/features/auto_update/presentation/widgets/update_banner.dart';
+import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/download_providers.dart';
+import 'package:submersion/features/gps_log/data/services/gps_track_recorder.dart';
+import 'package:submersion/features/gps_log/presentation/providers/gps_log_providers.dart';
+import 'package:submersion/features/gps_log/presentation/widgets/gps_recording_strip.dart';
+import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/widgets/main_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/list_memory_scope.dart';
+import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
+import 'package:submersion/shared/widgets/shell_chrome_scope.dart';
+import 'package:submersion/features/gas_calculators/domain/blending/blender_preferences.dart';
 
-Future<Widget> _buildTestApp({String initialLocation = '/dashboard'}) async {
+import '../../helpers/main_scaffold_stubs.dart';
+
+Future<Widget> _buildTestApp({
+  String initialLocation = '/dashboard',
+  // Riverpod's sealed Override type is not re-exported; see test_app.dart.
+  List<dynamic> extraOverrides = const [],
+  ThemeData? theme,
+  // MainScaffold reads the color-accent toggles, so settings must be stubbed
+  // here -- the real SettingsNotifier reaches for the database.
+  AppSettings settings = const AppSettings(),
+  // The /dashboard page; a stateful one lets a test see whether the shell
+  // navigator survived a layout change.
+  Widget dashboard = const Text('Dashboard'),
+}) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
 
@@ -21,10 +46,7 @@ Future<Widget> _buildTestApp({String initialLocation = '/dashboard'}) async {
       ShellRoute(
         builder: (context, state, child) => MainScaffold(child: child),
         routes: [
-          GoRoute(
-            path: '/dashboard',
-            builder: (context, state) => const Text('Dashboard'),
-          ),
+          GoRoute(path: '/dashboard', builder: (context, state) => dashboard),
           GoRoute(
             path: '/dives',
             builder: (context, state) => const Text('Dives'),
@@ -46,6 +68,14 @@ Future<Widget> _buildTestApp({String initialLocation = '/dashboard'}) async {
             builder: (context, state) => const Text('Transfer'),
           ),
           GoRoute(
+            path: '/tracks',
+            builder: (context, state) => const Text('Tracks Page'),
+          ),
+          GoRoute(
+            path: '/tracks/underwater/:id/3d',
+            builder: (context, state) => const Text('Seascape Page'),
+          ),
+          GoRoute(
             path: '/settings',
             builder: (context, state) => const Text('Settings'),
           ),
@@ -58,37 +88,154 @@ Future<Widget> _buildTestApp({String initialLocation = '/dashboard'}) async {
     overrides: [
       sharedPreferencesProvider.overrideWithValue(prefs),
       updateServiceProvider.overrideWith((ref) async => null),
-      updateStatusProvider.overrideWith((ref) => _StubUpdateStatusNotifier()),
-      downloadNotifierProvider.overrideWith((ref) => _StubDownloadNotifier()),
+      updateStatusProvider.overrideWith((ref) => StubUpdateStatusNotifier()),
+      downloadNotifierProvider.overrideWith((ref) => StubDownloadNotifier()),
+      settingsProvider.overrideWith((ref) => StubSettingsNotifier(settings)),
+      ...extraOverrides.cast(),
     ],
     child: MaterialApp.router(
       routerConfig: router,
+      theme: theme,
+      // Pin the locale: these tests find widgets by English label, and
+      // flutter_test forwards the host platform locales.
+      locale: const Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
     ),
   );
 }
 
-/// Stub that avoids the 5-second timer in the real [UpdateStatusNotifier].
-class _StubUpdateStatusNotifier extends StateNotifier<UpdateStatus>
-    implements UpdateStatusNotifier {
-  _StubUpdateStatusNotifier() : super(const UpToDate());
+/// Reports a download in flight, so tapping a destination raises the exit
+/// confirmation and suspends the tap handler while the dialog is up.
+class _DownloadingStubNotifier extends StateNotifier<DownloadState>
+    implements DownloadNotifier {
+  _DownloadingStubNotifier()
+    : super(const DownloadState(phase: DownloadPhase.downloading));
+
+  bool cancelled = false;
+
+  @override
+  Future<void> cancelDownload() async {
+    cancelled = true;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Stub that avoids platform channel dependencies.
-class _StubDownloadNotifier extends StateNotifier<DownloadState>
-    implements DownloadNotifier {
-  _StubDownloadNotifier() : super(const DownloadState());
+/// A shell page with state of its own, so a test can tell whether hiding the
+/// chrome rebuilt the shell navigator (the count would reset to 0).
+class _CounterPage extends StatefulWidget {
+  const _CounterPage();
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  State<_CounterPage> createState() => _CounterPageState();
+}
+
+class _CounterPageState extends State<_CounterPage> {
+  int _count = 0;
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    onPressed: () => setState(() => _count++),
+    child: Text('count $_count'),
+  );
+}
+
+/// Fake AppSettingsRepository used by the nav customization tests.
+class _FakeRepo implements AppSettingsRepository {
+  /// The gear arrangement is not exercised by these tests; the notifier falls
+  /// back to EquipmentArrangement.defaults when the read returns null.
+  @override
+  Future<EquipmentArrangement?> getEquipmentArrangement() async => null;
+
+  @override
+  Future<void> setEquipmentArrangement(
+    EquipmentArrangement arrangement,
+  ) async {}
+
+  /// Phone order (bottom-bar slots first, then the More menu).
+  List<String>? stored;
+
+  /// Wide-screen rail order, stored under its own key.
+  List<String>? storedRail;
+
+  /// No database, so nothing ever ticks.
+  @override
+  Stream<void> watchSettingsChanges() => const Stream.empty();
+
+  @override
+  Future<List<String>?> getNavPrimaryIdsRaw() async => stored;
+  @override
+  Future<void> setNavPrimaryIds(List<String> ids) async {
+    stored = List<String>.from(ids);
+  }
+
+  /// How many times the rail order was read, so a phone-width build can
+  /// assert it never subscribed to a surface it does not render.
+  int railReads = 0;
+
+  @override
+  Future<List<String>?> getNavRailIdsRaw() async {
+    railReads++;
+    return storedRail;
+  }
+
+  @override
+  Future<void> setNavRailIds(List<String> ids) async {
+    storedRail = List<String>.from(ids);
+  }
+
+  @override
+  Future<bool> getShareByDefault() async => false;
+  @override
+  Future<void> setShareByDefault(bool value) async {}
+  @override
+  Future<String?> getRawSetting(String key) async => null;
+  @override
+  Future<void> setRawSetting(String key, String value) async {}
+
+  /// Always-hide-labels settings (#1424), split by surface (#3222),
+  /// defaulting to today's behavior.
+  bool alwaysHideLabelsPhone = false;
+  bool alwaysHideLabelsDesktop = false;
+
+  @override
+  Future<bool> getNavAlwaysHideLabelsPhone() async => alwaysHideLabelsPhone;
+  @override
+  Future<void> setNavAlwaysHideLabelsPhone(bool value) async {
+    alwaysHideLabelsPhone = value;
+  }
+
+  @override
+  Future<bool> getNavAlwaysHideLabelsDesktop() async => alwaysHideLabelsDesktop;
+  @override
+  Future<void> setNavAlwaysHideLabelsDesktop(bool value) async {
+    alwaysHideLabelsDesktop = value;
+  }
+
+  @override
+  Future<bool> getEquipmentGroupByLocation() async => false;
+  @override
+  Future<void> setEquipmentGroupByLocation(bool value) async {}
+
+  @override
+  Future<BlenderPreferences?> getBlenderPreferences() async => null;
+  @override
+  Future<void> setBlenderPreferences(BlenderPreferences prefs) async {}
 }
 
 void main() {
   group('MainScaffold', () {
+    // The lists' memory follows records opened and diver switches anywhere
+    // in the shell (#3301).
+    testWidgets('keeps the lists\' memory for the whole shell', (tester) async {
+      await tester.pumpWidget(await _buildTestApp());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ListMemoryScope), findsOneWidget);
+    });
+
     testWidgets('desktop layout shows NavigationRail', (tester) async {
       tester.view.physicalSize = const Size(1400, 900);
       tester.view.devicePixelRatio = 1.0;
@@ -144,6 +291,87 @@ void main() {
       expect(find.text('Dives'), findsWidgets);
     });
 
+    testWidgets('desktop rail navigates to the Tracks destination', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(await _buildTestApp());
+      await tester.pumpAndSettle();
+
+      // Tracks is rail index 13 (after Transfer, before Search and
+      // Settings; Media and Documents, issue #3631, share one slot earlier
+      // in the rail).
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      rail.onDestinationSelected!(13);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Tracks Page'), findsOneWidget);
+      // Re-reading recomputes the selected index from the /tracks route.
+      final selected = tester
+          .widget<NavigationRail>(find.byType(NavigationRail))
+          .selectedIndex;
+      expect(selected, 13);
+    });
+
+    testWidgets('the Tracks destination stays selected on a nested tracks '
+        'page', (tester) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        await _buildTestApp(initialLocation: '/tracks/underwater/r1/3d'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Seascape Page'), findsOneWidget);
+      expect(
+        tester
+            .widget<NavigationRail>(find.byType(NavigationRail))
+            .selectedIndex,
+        13,
+      );
+    });
+
+    testWidgets('recording strip appears while a GPS session is active', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        await _buildTestApp(
+          extraOverrides: [
+            gpsRecorderStateProvider.overrideWith(
+              (ref) => Stream.value(
+                const GpsRecorderState(
+                  status: GpsRecorderStatus.recording,
+                  trackId: 't1',
+                  pointCount: 3,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Recording GPS track · 3 points'), findsOneWidget);
+    });
+
+    testWidgets('recording strip is absent while idle', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await _buildTestApp());
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Recording GPS track'), findsNothing);
+    });
+
     testWidgets('mobile layout shows NavigationBar', (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1.0;
@@ -154,6 +382,1180 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(NavigationBar), findsOneWidget);
+    });
+
+    testWidgets(
+      'a phone build viewing an overflow route highlights the More tab',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // Default primary destinations are [dashboard, dives, sites, trips];
+        // equipment only appears in the overflow "More" sheet, so no primary
+        // route matches and _calculateSelectedIndex must fall through to the
+        // last (More) index rather than defaulting to 0.
+        await tester.pumpWidget(
+          await _buildTestApp(initialLocation: '/equipment'),
+        );
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(bar.selectedIndex, bar.destinations.length - 1);
+      },
+    );
+  });
+
+  group('MainScaffold mobile nav customization', () {
+    Future<({Widget app, GoRouter router})> buildHarnessWithRouter({
+      required AppSettingsRepository repo,
+      EdgeInsets systemPadding = EdgeInsets.zero,
+      DownloadNotifier Function()? downloadNotifier,
+      Locale locale = const Locale('en'),
+    }) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      final router = GoRouter(
+        initialLocation: '/dashboard',
+        routes: [
+          ShellRoute(
+            builder: (context, state, child) => MainScaffold(child: child),
+            routes: [
+              GoRoute(
+                path: '/dashboard',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/dives',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/sites',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/trips',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/equipment',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/buddies',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/dive-centers',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/certifications',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/courses',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/insights',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/planning',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/transfer',
+                builder: (context, state) => const SizedBox(),
+              ),
+              GoRoute(
+                path: '/settings',
+                builder: (context, state) => const SizedBox(),
+              ),
+            ],
+          ),
+        ],
+      );
+
+      final app = ProviderScope(
+        overrides: [
+          appSettingsRepositoryProvider.overrideWithValue(repo),
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          updateServiceProvider.overrideWith((ref) async => null),
+          updateStatusProvider.overrideWith(
+            (ref) => StubUpdateStatusNotifier(),
+          ),
+          downloadNotifierProvider.overrideWith(
+            (ref) => downloadNotifier?.call() ?? StubDownloadNotifier(),
+          ),
+          settingsProvider.overrideWith(
+            (ref) => StubSettingsNotifier(const AppSettings()),
+          ),
+        ],
+        child: MaterialApp.router(
+          routerConfig: router,
+          locale: locale,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          // MaterialApp.builder wraps the Navigator, so padding stated here
+          // is what the modal route's own SafeArea sees.
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(padding: systemPadding),
+            child: child!,
+          ),
+        ),
+      );
+
+      return (app: app, router: router);
+    }
+
+    Future<Widget> buildHarness({
+      required AppSettingsRepository repo,
+      EdgeInsets systemPadding = EdgeInsets.zero,
+      Locale locale = const Locale('en'),
+    }) async {
+      final result = await buildHarnessWithRouter(
+        repo: repo,
+        systemPadding: systemPadding,
+        locale: locale,
+      );
+      return result.app;
+    }
+
+    group('label fit on a narrow phone (#4336)', () {
+      testWidgets('shrinks German labels that would split mid-word', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(375, 667);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        await tester.pumpWidget(
+          await buildHarness(repo: _FakeRepo(), locale: const Locale('de')),
+        );
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        final colors = Theme.of(
+          tester.element(find.byType(NavigationBar)),
+        ).colorScheme;
+        final selected = bar.labelTextStyle!.resolve({WidgetState.selected})!;
+        final unselected = bar.labelTextStyle!.resolve(<WidgetState>{})!;
+        final disabled = bar.labelTextStyle!.resolve({WidgetState.disabled})!;
+
+        expect(selected.fontSize, lessThan(12));
+        expect(unselected.fontSize, selected.fontSize);
+        // The shrunk style keeps Material 3's label colours.
+        expect(selected.color, colors.onSurface);
+        expect(unselected.color, colors.onSurfaceVariant);
+        expect(disabled.color, colors.onSurfaceVariant.withValues(alpha: 0.38));
+      });
+
+      testWidgets('leaves labels that fit at the default style', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(375, 667);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        await tester.pumpWidget(await buildHarness(repo: _FakeRepo()));
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(bar.labelTextStyle, isNull);
+      });
+
+      testWidgets('passes no style while the labels are hidden', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(375, 667);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsPhone = true;
+        await tester.pumpWidget(
+          await buildHarness(repo: repo, locale: const Locale('de')),
+        );
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(bar.labelTextStyle, isNull);
+      });
+    });
+
+    group('always-hide labels (#1424)', () {
+      testWidgets('the bottom bar always shows labels by default', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo();
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(
+          bar.labelBehavior,
+          NavigationDestinationLabelBehavior.alwaysShow,
+        );
+      });
+
+      testWidgets('turning always-hide on hides the bottom bar labels', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsPhone = true;
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(
+          bar.labelBehavior,
+          NavigationDestinationLabelBehavior.alwaysHide,
+        );
+      });
+
+      testWidgets('the desktop rail starts extended when always-hide is off', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(1400, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo();
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+        expect(rail.extended, isTrue);
+      });
+
+      testWidgets('the desktop rail starts collapsed when always-hide is on', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(1400, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsDesktop = true;
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+        expect(rail.extended, isFalse);
+      });
+
+      testWidgets(
+        'a phone-only setting does not collapse the desktop rail (#3222)',
+        (tester) async {
+          tester.view.physicalSize = const Size(1400, 900);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+
+          final repo = _FakeRepo()..alwaysHideLabelsPhone = true;
+          await tester.pumpWidget(await buildHarness(repo: repo));
+          await tester.pumpAndSettle();
+
+          final rail = tester.widget<NavigationRail>(
+            find.byType(NavigationRail),
+          );
+          expect(rail.extended, isTrue);
+        },
+      );
+
+      testWidgets(
+        'a desktop-only setting does not hide the phone bar labels (#3222)',
+        (tester) async {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+
+          final repo = _FakeRepo()..alwaysHideLabelsDesktop = true;
+          await tester.pumpWidget(await buildHarness(repo: repo));
+          await tester.pumpAndSettle();
+
+          final bar = tester.widget<NavigationBar>(find.byType(NavigationBar));
+          expect(
+            bar.labelBehavior,
+            NavigationDestinationLabelBehavior.alwaysShow,
+          );
+        },
+      );
+
+      testWidgets(
+        'the manual collapse arrow still overrides the setting for the session',
+        (tester) async {
+          tester.view.physicalSize = const Size(1400, 900);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+
+          final repo = _FakeRepo();
+          await tester.pumpWidget(await buildHarness(repo: repo));
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
+            isTrue,
+          );
+
+          await tester.tap(find.byIcon(Icons.keyboard_double_arrow_left));
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
+            isFalse,
+          );
+        },
+      );
+
+      testWidgets('a wider phone shows more than the minimum primary slots', (
+        tester,
+      ) async {
+        // 700 base width, labels shown: (700 - 2*80) / 80 = 6.75 -> 6 slots,
+        // well above the 3-slot minimum.
+        tester.view.physicalSize = const Size(700, 1400);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo();
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        // [Home, 6 middle, More] = 8 destinations, not the old fixed 5.
+        expect(find.byType(NavigationDestination), findsNWidgets(8));
+      });
+
+      testWidgets(
+        'a narrow landscape phone bases the slot count on height, not width',
+        (tester) async {
+          // width (700) >= height (400), but 700 is still under the 800px
+          // rail threshold, so this is phone bottom-bar mode. The slot count
+          // must use min(width, height) so a rotation cannot change it:
+          // basing it on height (400) gives the 3-slot minimum, while
+          // wrongly basing it on width (700) would give 6.
+          tester.view.physicalSize = const Size(700, 400);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+
+          final repo = _FakeRepo();
+          await tester.pumpWidget(await buildHarness(repo: repo));
+          await tester.pumpAndSettle();
+
+          // [Home, 3 middle (the minimum), More] = 5 destinations.
+          expect(find.byType(NavigationDestination), findsNWidgets(5));
+        },
+      );
+    });
+
+    group('nav item tooltips', () {
+      Finder tooltipIn(Type navType, String message) => find.descendant(
+        of: find.byType(navType),
+        matching: find.byWidgetPredicate(
+          (w) => w is Tooltip && w.message == message,
+        ),
+      );
+
+      testWidgets('a collapsed desktop rail names every item on hover', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(1400, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsDesktop = true;
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        expect(tooltipIn(NavigationRail, 'Dives'), findsOneWidget);
+        expect(tooltipIn(NavigationRail, 'Settings'), findsOneWidget);
+
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(gesture.removePointer);
+        await gesture.addPointer(location: Offset.zero);
+        final icon = find.descendant(
+          of: tooltipIn(NavigationRail, 'Dives'),
+          matching: find.byType(Icon),
+        );
+        await gesture.moveTo(tester.getCenter(icon));
+        await tester.pump(const Duration(seconds: 1));
+
+        // The tooltip renders through an OverlayPortal, whose overlay child
+        // stays a descendant of the Tooltip in the element tree. The rail's
+        // own (hidden) label is not under the Tooltip, so this finds only the
+        // tooltip text.
+        final shown = find.descendant(
+          of: tooltipIn(NavigationRail, 'Dives'),
+          matching: find.text('Dives'),
+        );
+        expect(shown, findsOneWidget);
+
+        // Beside the rail, level with the icon, so it never covers the
+        // neighbouring destinations.
+        final shownRect = tester.getRect(shown);
+        final iconRect = tester.getRect(icon);
+        expect(shownRect.left, greaterThan(iconRect.right));
+        expect(
+          (shownRect.center.dy - iconRect.center.dy).abs(),
+          lessThan(iconRect.height / 2),
+        );
+        await gesture.moveTo(Offset.zero);
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets('an RTL rail puts the tooltip on the icon\'s other side', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(1400, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsDesktop = true;
+        await tester.pumpWidget(
+          await buildHarness(repo: repo, locale: const Locale('ar')),
+        );
+        await tester.pumpAndSettle();
+
+        // Arabic labels, so the Dives destination is found by its icon.
+        final icon = find.byIcon(Icons.scuba_diving_outlined);
+        final tooltip = find.ancestor(of: icon, matching: find.byType(Tooltip));
+        expect(tooltip, findsOneWidget);
+
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(gesture.removePointer);
+        await gesture.addPointer(location: Offset.zero);
+        await gesture.moveTo(tester.getCenter(icon));
+        await tester.pump(const Duration(seconds: 1));
+
+        final shown = find.descendant(of: tooltip, matching: find.byType(Text));
+        expect(shown, findsOneWidget);
+        // The rail hugs the right edge in RTL, so the tooltip opens leftwards.
+        expect(
+          tester.getRect(shown).right,
+          lessThan(tester.getRect(icon).left),
+        );
+        await gesture.moveTo(Offset.zero);
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets('the narrow tablet rail names every item on hover', (
+        tester,
+      ) async {
+        // 1000px is rail width but under the extended threshold, so this
+        // rail can never show its labels.
+        tester.view.physicalSize = const Size(1000, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo();
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        expect(tooltipIn(NavigationRail, 'Dives'), findsOneWidget);
+      });
+
+      testWidgets('an extended rail adds no tooltip over its visible labels', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(1400, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo();
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
+          isTrue,
+        );
+        expect(tooltipIn(NavigationRail, 'Dives'), findsNothing);
+      });
+
+      testWidgets('the phone bar still names items when labels are hidden', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final repo = _FakeRepo()..alwaysHideLabelsPhone = true;
+        await tester.pumpWidget(await buildHarness(repo: repo));
+        await tester.pumpAndSettle();
+
+        expect(tooltipIn(NavigationBar, 'Home'), findsOneWidget);
+      });
+    });
+
+    testWidgets('default primary ids render default nav labels', (
+      tester,
+    ) async {
+      // Phone-sized viewport.
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo();
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(NavigationDestination, 'Home'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Dives'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Sites'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Trips'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'More'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('custom primary ids render custom labels', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo()..stored = ['equipment', 'buddies', 'insights'];
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(NavigationDestination, 'Home'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Equipment'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Buddies'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'Insights'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(NavigationDestination, 'More'),
+        findsOneWidget,
+      );
+      // Replaced items should not appear in the primary bar.
+      expect(find.widgetWithText(NavigationDestination, 'Dives'), findsNothing);
+      expect(find.widgetWithText(NavigationDestination, 'Sites'), findsNothing);
+      expect(find.widgetWithText(NavigationDestination, 'Trips'), findsNothing);
+    });
+
+    testWidgets('wide-screen rail still shows all 16 default destinations', (
+      tester,
+    ) async {
+      // Wide viewport (desktop-extended so rail labels are rendered as Text).
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo()..stored = ['equipment', 'buddies', 'insights'];
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      // The rail reads its own storage key, which this repo leaves unset, so
+      // it keeps the default 16-entry order no matter how the phone bottom
+      // bar was customized. That independence is the point of the two keys.
+      // NavigationRailDestination is a descriptor (not a Widget), so inspect
+      // the NavigationRail.destinations list directly.
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      expect(rail.destinations, hasLength(16));
+
+      String labelOf(NavigationRailDestination d) {
+        final label = d.label;
+        if (label is Text) return label.data ?? '';
+        return label.toString();
+      }
+
+      final labels = rail.destinations.map(labelOf).toList();
+      expect(labels, [
+        'Home',
+        'Dives',
+        'Sites',
+        'Trips',
+        'Equipment',
+        'Buddies',
+        'Dive Centers',
+        'Training',
+        'Media',
+        'Species',
+        'Insights',
+        'Planning',
+        'Transfer',
+        'Tracks',
+        'Search',
+        'Settings',
+      ]);
+    });
+
+    testWidgets('a phone build never reads the rail order', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo();
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      // Building the rail provider would kick off a settings read for an
+      // order this layout never renders.
+      expect(repo.railReads, 0);
+    });
+
+    testWidgets('a rail-width build does read the rail order', (tester) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo();
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      expect(repo.railReads, greaterThan(0));
+    });
+
+    testWidgets('wide-screen rail renders the stored rail order', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // A partial stored value: normalization keeps these three at the top and
+      // appends the rest in canonical order.
+      final repo = _FakeRepo()..storedRail = ['settings', 'insights', 'dives'];
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      expect(rail.destinations, hasLength(16));
+
+      String labelOf(NavigationRailDestination d) {
+        final label = d.label;
+        if (label is Text) return label.data ?? '';
+        return label.toString();
+      }
+
+      final labels = rail.destinations.map(labelOf).toList();
+      // Home stays pinned at the top; the stored order follows it.
+      expect(labels.take(4).toList(), [
+        'Home',
+        'Settings',
+        'Insights',
+        'Dives',
+      ]);
+      // Nothing is lost: every destination still has a rail row.
+      expect(labels.toSet(), hasLength(16));
+    });
+
+    testWidgets('rail customization leaves the phone bottom bar alone', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo()..storedRail = ['settings', 'insights', 'dives'];
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      // Phone order is unset, so the bottom bar keeps its defaults even though
+      // the rail was rearranged.
+      for (final label in const ['Home', 'Dives', 'Sites', 'Trips', 'More']) {
+        expect(
+          find.widgetWithText(NavigationDestination, label),
+          findsOneWidget,
+          reason: '$label should still occupy a default bottom-bar slot',
+        );
+      }
+      expect(
+        find.widgetWithText(NavigationDestination, 'Settings'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('tapping a reordered rail item navigates to its route', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // 'transfer' is canonically near the end; pulling it to the top proves
+      // the tap handler indexes into the stored order, not the canonical one.
+      final repo = _FakeRepo()..storedRail = ['transfer'];
+      final harness = await buildHarnessWithRouter(repo: repo);
+      await tester.pumpWidget(harness.app);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Transfer'));
+      await tester.pumpAndSettle();
+
+      expect(
+        harness.router.routerDelegate.currentConfiguration.uri.path,
+        '/transfer',
+      );
+    });
+
+    testWidgets('an order change mid-tap does not reroute the tap', (
+      tester,
+    ) async {
+      // The tap handler suspends on the download confirmation. If it resolved
+      // the index against the provider afterwards instead of against the list
+      // that rendered the rail, an order change arriving in that gap would
+      // send the user somewhere they never tapped.
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo();
+      final download = _DownloadingStubNotifier();
+      final harness = await buildHarnessWithRouter(
+        repo: repo,
+        downloadNotifier: () => download,
+      );
+      await tester.pumpWidget(harness.app);
+      await tester.pumpAndSettle();
+
+      // Rail renders the canonical order, so index 1 is Dives.
+      await tester.tap(find.text('Dives'));
+      await tester.pump();
+      expect(find.text('Leave'), findsOneWidget, reason: 'dialog should be up');
+
+      // While the dialog is up, a sync applies a different rail order.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NavigationRail)),
+      );
+      await container.read(navRailOrderNotifierProvider.notifier).setOrder([
+        'transfer',
+        'tracks',
+      ]);
+      await tester.pump();
+
+      await tester.tap(find.text('Leave'));
+      await tester.pumpAndSettle();
+
+      // Dives is what was tapped, so Dives is where we land, even though
+      // index 1 now means Transfer.
+      expect(
+        harness.router.routerDelegate.currentConfiguration.uri.path,
+        '/dives',
+      );
+      expect(download.cancelled, isTrue);
+    });
+
+    testWidgets('tapping a customized primary item navigates to its route', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo()..stored = ['equipment', 'buddies', 'insights'];
+      final harness = await buildHarnessWithRouter(repo: repo);
+      await tester.pumpWidget(harness.app);
+      await tester.pumpAndSettle();
+
+      // Tap the customized "Equipment" destination in the primary nav bar.
+      await tester.tap(find.widgetWithText(NavigationDestination, 'Equipment'));
+      await tester.pumpAndSettle();
+
+      // The router should have navigated to /equipment.
+      expect(
+        harness.router.routerDelegate.currentConfiguration.uri.path,
+        '/equipment',
+      );
+    });
+
+    testWidgets('overflow sheet reflects current customization', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = _FakeRepo()..stored = ['equipment', 'buddies', 'insights'];
+      await tester.pumpWidget(await buildHarness(repo: repo));
+      await tester.pumpAndSettle();
+
+      // Tap the "More" destination to open the overflow sheet.
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await tester.pumpAndSettle();
+
+      // The overflow sheet should contain the items NOT in primary. The sheet
+      // is height-capped, so the tiles past the fold have to be scrolled to;
+      // reaching them all is itself the guard that none is stranded.
+      final sheetList = find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byType(Scrollable),
+      );
+      for (final label in const [
+        'Dives',
+        'Sites',
+        'Trips',
+        'Dive Centers',
+        'Training',
+        'Planning',
+        'Transfer',
+        'Settings',
+      ]) {
+        final tile = find.widgetWithText(ListTile, label);
+        await tester.scrollUntilVisible(tile, 100, scrollable: sheetList);
+        expect(tile, findsOneWidget);
+      }
+
+      // Items now in primary should NOT appear in the overflow sheet.
+      expect(find.widgetWithText(ListTile, 'Equipment'), findsNothing);
+      expect(find.widgetWithText(ListTile, 'Buddies'), findsNothing);
+      expect(find.widgetWithText(ListTile, 'Insights'), findsNothing);
+    });
+
+    // Issue #1480: the overflow sheet is scroll-controlled, and a dozen
+    // destinations are taller than a phone screen, so the sheet grew until it
+    // touched y=0 and its header sat under the Android status bar.
+    testWidgets('overflow sheet stops short of the top edge on a phone', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(360, 560);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(await buildHarness(repo: _FakeRepo()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.byType(BottomSheet)).top, greaterThan(0));
+    });
+
+    // `useSafeArea: true` inserts `SafeArea(bottom: false)`, so it covers top,
+    // left and right and deliberately lets the sheet run to the bottom edge.
+    // The SafeArea in the builder supplies the bottom inset the outer one
+    // skips; it is not a double application, because a SafeArea strips the
+    // padding it consumes out of the MediaQuery it hands down.
+    testWidgets('overflow sheet applies every system inset exactly once', (
+      tester,
+    ) async {
+      const insets = EdgeInsets.only(top: 44, left: 30, right: 30, bottom: 34);
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await buildHarness(repo: _FakeRepo(), systemPadding: insets),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await tester.pumpAndSettle();
+
+      final screen = tester.getRect(find.byType(MaterialApp));
+      final sheet = tester.getRect(find.byType(BottomSheet));
+      final body = tester.getRect(
+        find.byKey(const ValueKey('navOverflowSheetBody')),
+      );
+
+      expect(sheet.left, insets.left);
+      expect(sheet.right, screen.right - insets.right);
+      expect(sheet.top, greaterThanOrEqualTo(insets.top));
+      expect(sheet.bottom, screen.bottom);
+      expect(body.bottom, screen.bottom - insets.bottom);
+      expect(body.left, sheet.left);
+      expect(body.right, sheet.right);
+    });
+
+    testWidgets('overflow sheet close action survives scrolling the list', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(360, 560);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(await buildHarness(repo: _FakeRepo()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await tester.pumpAndSettle();
+
+      final closeButton = find.widgetWithIcon(IconButton, Icons.close);
+      final before = tester.getRect(closeButton);
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      expect(tester.getRect(closeButton), before);
+
+      await tester.tap(closeButton);
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+    });
+  });
+
+  group('MainScaffold nav accent icons', () {
+    ThemeData accentTheme() => ThemeData(
+      brightness: Brightness.light,
+      extensions: const <ThemeExtension<dynamic>>[FeatureAccentColors.light],
+    );
+
+    AppSettings accentSettings({required bool on}) =>
+        AppSettings(accentNavIcons: on);
+
+    testWidgets('mobile nav icons are tinted when the toggle is on', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: true),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final icon = tester.widget<Icon>(
+        find.descendant(
+          of: find.byType(NavigationBar),
+          matching: find.byIcon(Icons.scuba_diving_outlined),
+        ),
+      );
+      expect(icon.color, FeatureAccentColors.light.of('dives'));
+    });
+
+    testWidgets('mobile nav icons are untinted when the toggle is off', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: false),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final icon = tester.widget<Icon>(
+        find.descendant(
+          of: find.byType(NavigationBar),
+          matching: find.byIcon(Icons.scuba_diving_outlined),
+        ),
+      );
+      expect(icon.color, isNull);
+    });
+
+    testWidgets('the More sentinel is never tinted', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: true),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 'more' has no palette entry, so it stays on the theme default even
+      // with accents enabled.
+      final icon = tester.widget<Icon>(
+        find.descendant(
+          of: find.byType(NavigationBar),
+          matching: find.byIcon(Icons.more_horiz_outlined),
+        ),
+      );
+      expect(icon.color, isNull);
+    });
+
+    testWidgets('rail icons are tinted when the toggle is on', (tester) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: true),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // NavigationRailDestination is a descriptor, so read the icons from the
+      // rail's destination list rather than the widget tree.
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      final sitesIcon = rail.destinations[2].icon as Icon;
+      expect(sitesIcon.color, FeatureAccentColors.light.of('sites'));
+
+      final selectedSitesIcon = rail.destinations[2].selectedIcon as Icon;
+      expect(selectedSitesIcon.color, FeatureAccentColors.light.of('sites'));
+    });
+
+    testWidgets('rail icons are untinted when the toggle is off', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: false),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      expect((rail.destinations[2].icon as Icon).color, isNull);
+    });
+
+    testWidgets('overflow sheet icons are tinted when the toggle is on', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          settings: accentSettings(on: true),
+          theme: accentTheme(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(NavigationDestination, 'More'));
+      await tester.pumpAndSettle();
+
+      final tile = tester.widget<ListTile>(
+        find.widgetWithText(ListTile, 'Equipment'),
+      );
+      expect(
+        (tile.leading as Icon).color,
+        FeatureAccentColors.light.of('equipment'),
+      );
+    });
+  });
+
+  group('MainScaffold chrome hide requests (#1087)', () {
+    ShellChromeController controllerOf(WidgetTester tester) =>
+        ShellChromeScope.maybeOf(tester.element(find.byType(_CounterPage)))!;
+
+    Future<void> pumpAt(WidgetTester tester, Size size) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        await _buildTestApp(dashboard: const _CounterPage()),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a phone hides its bottom bar and strips while requested', (
+      tester,
+    ) async {
+      await pumpAt(tester, const Size(390, 844));
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byType(UpdateBanner), findsOneWidget);
+      expect(find.byType(GpsRecordingStrip), findsOneWidget);
+
+      final token = Object();
+      controllerOf(tester).requestHidden(token);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byType(UpdateBanner), findsNothing);
+      expect(find.byType(GpsRecordingStrip), findsNothing);
+
+      controllerOf(tester).releaseHidden(token);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsOneWidget);
+    });
+
+    testWidgets('a wide screen hides its rail and divider while requested', (
+      tester,
+    ) async {
+      await pumpAt(tester, const Size(1024, 800));
+      expect(find.byType(NavigationRail), findsOneWidget);
+
+      controllerOf(tester).requestHidden(Object());
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationRail), findsNothing);
+      expect(find.byType(VerticalDivider), findsNothing);
+      expect(find.byType(SafeArea), findsNothing);
+    });
+
+    testWidgets('the page keeps its state across hide and restore', (
+      tester,
+    ) async {
+      await pumpAt(tester, const Size(390, 844));
+      await tester.tap(find.text('count 0'));
+      await tester.pump();
+
+      final token = Object();
+      controllerOf(tester).requestHidden(token);
+      await tester.pumpAndSettle();
+      expect(find.text('count 1'), findsOneWidget);
+
+      controllerOf(tester).releaseHidden(token);
+      await tester.pumpAndSettle();
+      expect(find.text('count 1'), findsOneWidget);
+    });
+
+    testWidgets('crossing the rail breakpoint while hidden stays hidden', (
+      tester,
+    ) async {
+      await pumpAt(tester, const Size(390, 844));
+      await tester.tap(find.text('count 0'));
+      await tester.pump();
+      controllerOf(tester).requestHidden(Object());
+      await tester.pumpAndSettle();
+
+      tester.view.physicalSize = const Size(1024, 800);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationRail), findsNothing);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.text('count 1'), findsOneWidget);
     });
   });
 }

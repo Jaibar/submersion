@@ -7,10 +7,23 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_data.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/media_item_view.dart';
+import 'package:submersion/features/media/presentation/widgets/unavailable_media_placeholder.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_gallery_page.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_media_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+import '../../../media/presentation/support/capturing_media_repository.dart';
+import '../../../media/presentation/support/media_widget_harness.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/presentation/editing/record_media_sitting.dart';
+import 'package:submersion/features/media/presentation/helpers/media_hold.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
 
 void main() {
   group('TripGalleryPage', () {
@@ -76,7 +89,8 @@ void main() {
 
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Error loading photos'), findsOneWidget);
+      expect(find.text("Couldn't load the photos."), findsOneWidget);
+      expect(find.textContaining('Network error'), findsNothing);
     });
 
     testWidgets('shows empty state when no photos', (tester) async {
@@ -102,25 +116,6 @@ void main() {
         find.text('Tap the camera icon to scan your gallery'),
         findsOneWidget,
       );
-    });
-
-    testWidgets('shows camera icon button in app bar', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            mediaForTripProvider('test-trip').overrideWith((ref) {
-              return Future.value(<Dive, List<MediaItem>>{});
-            }),
-          ],
-          child: const MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripGalleryPage(tripId: 'test-trip'),
-          ),
-        ),
-      );
-
-      expect(find.byIcon(Icons.photo_camera), findsOneWidget);
     });
 
     testWidgets('shows dive sections with photos', (tester) async {
@@ -323,5 +318,282 @@ void main() {
               as SliverGridDelegateWithFixedCrossAxisCount;
       expect(delegate.crossAxisCount, 4);
     });
+
+    testWidgets('orphaned media still renders through MediaItemView', (
+      tester,
+    ) async {
+      // The orphan flag is a persisted claim that may be stale or may have
+      // been written by another device; the tile lets the resolver chain
+      // decide instead of drawing a broken tile from the flag (#1409).
+      final testDive = Dive(
+        id: 'dive-1',
+        dateTime: DateTime(2024, 1, 15, 10, 30),
+        diveNumber: 1,
+      );
+
+      final orphanedMedia = MediaItem(
+        id: 'media-orphan',
+        diveId: 'dive-1',
+        mediaType: MediaType.photo,
+        takenAt: DateTime(2024, 1, 15, 10, 45),
+        platformAssetId: 'asset-orphan',
+        isOrphaned: true,
+        createdAt: DateTime(2024, 1, 15),
+        updatedAt: DateTime(2024, 1, 15),
+      );
+
+      final repository = CapturingMediaRepository();
+      // Assert against the semantics tree itself, not the widgets that feed
+      // it: the claim under test is what assistive tech hears.
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaForTripProvider('test-trip').overrideWith((ref) {
+              return Future.value({
+                testDive: [orphanedMedia],
+              });
+            }),
+            mediaResolverOverride(),
+            mediaRepositoryProvider.overrideWithValue(repository),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripGalleryPage(tripId: 'test-trip'),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MediaItemView), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(MediaItemView),
+          matching: find.byType(Image),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
+      expect(find.byType(UnavailableMediaPlaceholder), findsNothing);
+      // The label must not read the stale flag either: a screen reader
+      // should never hear "missing" over a thumbnail that just rendered.
+      final l10n = tester.element(find.byType(TripGalleryPage)).l10n;
+      expect(
+        find.bySemanticsLabel(_contains(l10n.trips_gallery_thumbnail_photo)),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(
+          _contains(l10n.media_unavailablePlaceholder_fileNotFound),
+        ),
+        findsNothing,
+      );
+      // The resolver produced bytes, so the stale flag is corrected.
+      expect(repository.writes, [(id: 'media-orphan', isOrphaned: false)]);
+      semantics.dispose();
+    });
+
+    testWidgets('an item nothing can serve announces the missing reason', (
+      tester,
+    ) async {
+      // The tile's own label is availability-agnostic, so the placeholder
+      // has to be what tells a screen reader the photo is not here.
+      final testDive = Dive(
+        id: 'dive-1',
+        dateTime: DateTime(2024, 1, 15, 10, 30),
+        diveNumber: 1,
+      );
+
+      final missingMedia = MediaItem(
+        id: 'media-missing',
+        diveId: 'dive-1',
+        mediaType: MediaType.photo,
+        takenAt: DateTime(2024, 1, 15, 10, 45),
+        platformAssetId: 'asset-missing',
+        isOrphaned: true,
+        createdAt: DateTime(2024, 1, 15),
+        updatedAt: DateTime(2024, 1, 15),
+      );
+
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaForTripProvider('test-trip').overrideWith((ref) {
+              return Future.value({
+                testDive: [missingMedia],
+              });
+            }),
+            mediaResolverOverride(
+              resolverData: const UnavailableData(
+                kind: UnavailableKind.notFound,
+              ),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripGalleryPage(tripId: 'test-trip'),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      final l10n = tester.element(find.byType(TripGalleryPage)).l10n;
+      expect(find.byType(UnavailableMediaPlaceholder), findsOneWidget);
+      // Both reach the semantics tree: the tile's plain label and the
+      // placeholder's reason.
+      expect(
+        find.bySemanticsLabel(_contains(l10n.trips_gallery_thumbnail_photo)),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(
+          _contains(l10n.media_unavailablePlaceholder_fileNotFound),
+        ),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('a video tile carries the video label', (tester) async {
+      final testDive = Dive(
+        id: 'dive-1',
+        dateTime: DateTime(2024, 1, 15, 10, 30),
+        diveNumber: 1,
+      );
+
+      final video = MediaItem(
+        id: 'media-video',
+        diveId: 'dive-1',
+        mediaType: MediaType.video,
+        takenAt: DateTime(2024, 1, 15, 10, 45),
+        platformAssetId: 'asset-video',
+        createdAt: DateTime(2024, 1, 15),
+        updatedAt: DateTime(2024, 1, 15),
+      );
+
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaForTripProvider('test-trip').overrideWith((ref) {
+              return Future.value({
+                testDive: [video],
+              });
+            }),
+            mediaResolverOverride(),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripGalleryPage(tripId: 'test-trip'),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      final l10n = tester.element(find.byType(TripGalleryPage)).l10n;
+      expect(
+        find.bySemanticsLabel(_contains(l10n.trips_gallery_thumbnail_video)),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.videocam), findsOneWidget);
+      semantics.dispose();
+    });
+  });
+
+  group('following the trip page lock (issue #4527)', () {
+    final trip = Trip(
+      id: 'test-trip',
+      name: 'Red Sea',
+      startDate: DateTime(2030, 6, 1),
+      endDate: DateTime(2030, 6, 8),
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    Future<void> pumpGallery(
+      WidgetTester tester, {
+      RecordEditController<Trip>? sitting,
+    }) => tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaForTripProvider(
+            'test-trip',
+          ).overrideWith((ref) => Future.value(<Dive, List<MediaItem>>{})),
+        ],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: TripGalleryPage(tripId: 'test-trip', sitting: sitting),
+        ),
+      ),
+    );
+
+    testWidgets('opened by its address it offers no Scan', (tester) async {
+      await pumpGallery(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.photo_camera), findsNothing);
+    });
+
+    testWidgets('handed a sitting it offers Scan, shows what the sitting '
+        'holds, and drops the Scan when the sitting ends', (tester) async {
+      final controller = RecordEditController<Trip>(onSave: (_) async {});
+      addTearDown(controller.dispose);
+      controller.unlock(trip);
+      final session = controller.session!;
+      holdSittingMedia(
+        session,
+        SittingMediaWriters(
+          writeRows: (_) async => const [],
+          insertNetwork: (_) async => const [],
+          unlink: (_) async {},
+          replace: (_, _, _) async {},
+          drainDeletes: () async {},
+          enqueueUpload: (_) {},
+        ),
+        cardId: 'photos',
+      );
+      addMediaToSitting(session, [
+        HeldMediaRow((
+          item: MediaItem(
+            id: 'm1',
+            diveId: 'd1',
+            mediaType: MediaType.photo,
+            sourceType: MediaSourceType.platformGallery,
+            platformAssetId: 'a1',
+            takenAt: DateTime.utc(2030, 6, 2),
+            createdAt: DateTime.utc(2030, 6, 2),
+            updatedAt: DateTime.utc(2030, 6, 2),
+          ),
+          enrichment: null,
+        )),
+      ]);
+
+      await pumpGallery(tester, sitting: controller);
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.photo_camera), findsOneWidget);
+      expect(find.byKey(const Key('trip-held-photo-m1')), findsOneWidget);
+
+      controller.lock();
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.photo_camera), findsNothing);
+      expect(find.byKey(const Key('trip-held-photos')), findsNothing);
+    });
   });
 }
+
+/// A semantics-label pattern that matches a node containing [text].
+///
+/// [CommonFinders.bySemanticsLabel] compares a String label for equality,
+/// so a merged node ("Photo thumbnail...\nFile not found") would miss a
+/// plain-string match while still being exactly what a screen reader reads.
+RegExp _contains(String text) => RegExp(RegExp.escape(text));

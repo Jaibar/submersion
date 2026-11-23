@@ -1,0 +1,160 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/plan_tank_list.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/segment_list.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_editor_pane.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_results_pane.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_setup_accordion.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_kit.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+
+import '../../../helpers/info_sheets.dart';
+import '../../../helpers/planner_results.dart';
+import '../../../helpers/test_app.dart';
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier() : super(const AppSettings());
+
+  @override
+  Future<void> setMapStyle(MapStyle style) async =>
+      state = state.copyWith(mapStyle: style);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  final overrides = [
+    ...plannerResultsInline(),
+    settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+  ];
+
+  testWidgets('PlanStatTile shows label and value', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: PlanStatTile(label: 'Runtime', value: "46'"),
+        ),
+      ),
+    );
+    expect(find.text('RUNTIME'), findsOneWidget);
+    expect(find.text("46'"), findsOneWidget);
+  });
+
+  testWidgets('editor pane stacks tanks, segments, setup', (tester) async {
+    tester.view.physicalSize = const Size(400, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const SizedBox(width: 320, child: PlanEditorPane()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(SegmentList), findsOneWidget);
+    expect(find.byType(PlanTankList), findsOneWidget);
+    expect(find.byType(PlanSetupAccordion), findsOneWidget);
+  });
+
+  testWidgets('editor pane puts tanks above segments above setup', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const SizedBox(width: 320, child: PlanEditorPane()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Gas before profile: a segment's tank dropdown can only offer tanks that
+    // already exist, so the cylinders have to be defined first. Asserted on
+    // vertical offsets rather than presence, because presence alone passed
+    // both orders.
+    final tanksY = tester.getTopLeft(find.byType(PlanTankList)).dy;
+    final segmentsY = tester.getTopLeft(find.byType(SegmentList)).dy;
+    final setupY = tester.getTopLeft(find.byType(PlanSetupAccordion)).dy;
+    expect(tanksY, lessThan(segmentsY));
+    expect(segmentsY, lessThan(setupY));
+  });
+
+  testWidgets('results pane shows stat tiles reflecting the outcome', (
+    tester,
+  ) async {
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: SizedBox(
+          width: 340,
+          height: 700,
+          child: PlanResultsPane(controller: controller),
+        ),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanResultsPane)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanStatTile), findsNWidgets(4));
+    expect(find.text('RUNTIME'), findsOneWidget);
+  });
+  testWidgets('the results tiles carry one info icon', (tester) async {
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: SizedBox(
+          width: 340,
+          height: 700,
+          child: PlanResultsPane(controller: controller),
+        ),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanResultsPane)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+    expect(find.byType(InfoCorner), findsOneWidget);
+    expect(find.byType(InfoButton), findsWidgets);
+  });
+
+  testWidgets('every info icon on the results opens its sheet', (tester) async {
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    // Tall enough that the whole results column builds at once.
+    tester.view.physicalSize = const Size(500, 9000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: PlanResultsPane(controller: controller),
+      ),
+    );
+    ProviderScope.containerOf(tester.element(find.byType(PlanResultsPane)))
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+
+    // The tile grid, the deco schedule and the gas section at least.
+    expect(await openEveryInfoSheet(tester), greaterThanOrEqualTo(3));
+  });
+}

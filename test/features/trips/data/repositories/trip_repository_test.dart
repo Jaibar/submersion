@@ -1,4 +1,7 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/database.dart' hide Trip;
+import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 
@@ -25,6 +28,7 @@ void main() {
     String? resortName,
     String? liveaboardName,
     String notes = '',
+    DateTime? returnFlightAt,
   }) {
     final now = DateTime.now();
     final start = startDate ?? now;
@@ -38,6 +42,7 @@ void main() {
       resortName: resortName,
       liveaboardName: liveaboardName,
       notes: notes,
+      returnFlightAt: returnFlightAt,
       createdAt: now,
       updatedAt: now,
     );
@@ -298,6 +303,26 @@ void main() {
     });
 
     group('findTripForDate', () {
+      test('of trips starting the same day, the larger id wins', () async {
+        // Overlapping trips stored at the same local midnight tie on the
+        // start; the id breaks it so the import review, which reads all
+        // trips, names the same one (issue #3022).
+        for (final id in ['trip-b', 'trip-c', 'trip-a']) {
+          await repository.createTrip(
+            createTestTrip(
+              id: id,
+              name: id,
+              startDate: DateTime(2024, 6, 1),
+              endDate: DateTime(2024, 6, 15),
+            ),
+          );
+        }
+
+        final result = await repository.findTripForDate(DateTime(2024, 6, 10));
+
+        expect(result?.id, 'trip-c');
+      });
+
       test('should find trip containing the given date', () async {
         final trip = await repository.createTrip(
           createTestTrip(
@@ -356,6 +381,52 @@ void main() {
         expect(result, isNotNull);
         expect(result!.id, equals(trip.id));
       });
+
+      test('should include a dive later on the end date', () async {
+        // The editor asks with the dive's time of day; the trip ends at
+        // midnight of its last day, which is still a trip day (#2618).
+        final trip = await repository.createTrip(
+          createTestTrip(
+            name: 'June Trip',
+            startDate: DateTime(2024, 6, 1),
+            endDate: DateTime(2024, 6, 15),
+          ),
+        );
+
+        final result = await repository.findTripForDate(
+          DateTime(2024, 6, 15, 16, 30),
+        );
+
+        expect(result?.id, equals(trip.id));
+        expect(
+          await repository.findTripForDate(DateTime(2024, 6, 16, 0, 30)),
+          isNull,
+        );
+      });
+
+      test(
+        'should include a dive earlier on a start date with a time',
+        () async {
+          // A new trip's start defaults to now, time of day included.
+          final trip = await repository.createTrip(
+            createTestTrip(
+              name: 'June Trip',
+              startDate: DateTime(2024, 6, 1, 18),
+              endDate: DateTime(2024, 6, 15, 18),
+            ),
+          );
+
+          final result = await repository.findTripForDate(
+            DateTime(2024, 6, 1, 8),
+          );
+
+          expect(result?.id, equals(trip.id));
+          expect(
+            await repository.findTripForDate(DateTime(2024, 5, 31, 23)),
+            isNull,
+          );
+        },
+      );
     });
 
     group('getDiveCountForTrip', () {
@@ -382,7 +453,7 @@ void main() {
 
           expect(stats.trip.id, equals(trip.id));
           expect(stats.diveCount, equals(0));
-          expect(stats.totalBottomTime, equals(0));
+          expect(stats.totalRuntime, equals(0));
           expect(stats.maxDepth, isNull);
           expect(stats.avgDepth, isNull);
         },
@@ -393,6 +464,87 @@ void main() {
           () => repository.getTripWithStats('non-existent-id'),
           throwsException,
         );
+      });
+    });
+
+    group('trip time totals (issue #889)', () {
+      const ts = 1700000000000;
+
+      Future<void> insertDive({
+        required String tripId,
+        required String diveId,
+        int? bottomTime,
+        int? runtime,
+      }) async {
+        final db = DatabaseService.instance.database;
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion.insert(
+                id: diveId,
+                diveDateTime: ts,
+                tripId: Value(tripId),
+                bottomTime: Value(bottomTime),
+                runtime: Value(runtime),
+                createdAt: ts,
+                updatedAt: ts,
+              ),
+            );
+      }
+
+      test('getTripWithStats totals runtime rather than bottom time', () async {
+        final trip = await repository.createTrip(
+          createTestTrip(name: 'Runtime Trip'),
+        );
+        // Two dives whose ascent adds 10 minutes each on top of bottom time.
+        await insertDive(
+          tripId: trip.id,
+          diveId: 'r1',
+          bottomTime: 2400,
+          runtime: 3000,
+        );
+        await insertDive(
+          tripId: trip.id,
+          diveId: 'r2',
+          bottomTime: 1800,
+          runtime: 2400,
+        );
+
+        final stats = await repository.getTripWithStats(trip.id);
+
+        expect(stats.totalRuntime, equals(5400));
+      });
+
+      test('getTripWithStats adds no time for a dive with only a bottom '
+          'time', () async {
+        final trip = await repository.createTrip(
+          createTestTrip(name: 'Mixed Trip'),
+        );
+        await insertDive(tripId: trip.id, diveId: 'm1', bottomTime: 2400);
+        await insertDive(tripId: trip.id, diveId: 'm2', runtime: 3000);
+
+        final stats = await repository.getTripWithStats(trip.id);
+
+        expect(stats.diveCount, equals(2));
+        expect(stats.totalRuntime, equals(3000));
+      });
+
+      test('getAllTripsWithStats totals runtime rather than bottom '
+          'time', () async {
+        final trip = await repository.createTrip(
+          createTestTrip(name: 'Listed Trip'),
+        );
+        await insertDive(
+          tripId: trip.id,
+          diveId: 'l1',
+          bottomTime: 2400,
+          runtime: 3000,
+        );
+
+        final results = await repository.getAllTripsWithStats();
+        final row = results.firstWhere((r) => r.trip.id == trip.id);
+
+        expect(row.totalRuntime, equals(3000));
       });
     });
 
@@ -423,6 +575,365 @@ void main() {
         final diveIds = await repository.getDiveIdsForTrip(trip.id);
 
         expect(diveIds, isEmpty);
+      });
+    });
+
+    group('diver-scoped stats and dive lists (shared-trip isolation)', () {
+      late AppDatabase db;
+      const ts = 1700000000000;
+      late String tripId;
+
+      /// Insert a minimal dive row owned by [diverId], assigned to [tripId].
+      Future<String> insertDive({
+        required String diverId,
+        required String tripId,
+        required String diveId,
+        int bottomTime = 3600,
+        double maxDepth = 20.0,
+      }) async {
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion.insert(
+                id: diveId,
+                diverId: Value(diverId),
+                diveDateTime: ts,
+                tripId: Value(tripId),
+                bottomTime: Value(bottomTime),
+                maxDepth: Value(maxDepth),
+                avgDepth: Value(maxDepth / 2),
+                createdAt: ts,
+                updatedAt: ts,
+              ),
+            );
+        return diveId;
+      }
+
+      setUp(() async {
+        db = DatabaseService.instance.database;
+
+        // Create two divers.
+        for (final id in ['A', 'B']) {
+          await db
+              .into(db.divers)
+              .insert(
+                DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+
+        // Create a shared trip owned by diver A.
+        final trip = await repository.createTrip(
+          createTestTrip(
+            id: 'shared-trip',
+            name: 'Shared Trip',
+          ).copyWith(diverId: 'A', isShared: true),
+        );
+        tripId = trip.id;
+
+        // Diver A has 2 dives on this trip; Diver B has 3.
+        await insertDive(diverId: 'A', tripId: tripId, diveId: 'a1');
+        await insertDive(diverId: 'A', tripId: tripId, diveId: 'a2');
+        await insertDive(diverId: 'B', tripId: tripId, diveId: 'b1');
+        await insertDive(diverId: 'B', tripId: tripId, diveId: 'b2');
+        await insertDive(diverId: 'B', tripId: tripId, diveId: 'b3');
+      });
+
+      // getDiveIdsForTrip ---------------------------------------------------
+
+      test(
+        'getDiveIdsForTrip with diverId returns only that diver\'s dives',
+        () async {
+          final ids = await repository.getDiveIdsForTrip(tripId, diverId: 'A');
+          expect(ids.toSet(), equals({'a1', 'a2'}));
+        },
+      );
+
+      test('getDiveIdsForTrip with null diverId returns all dives', () async {
+        final ids = await repository.getDiveIdsForTrip(tripId);
+        expect(ids.toSet(), equals({'a1', 'a2', 'b1', 'b2', 'b3'}));
+      });
+
+      // getDiveCountForTrip -------------------------------------------------
+
+      test(
+        'getDiveCountForTrip with diverId counts only that diver\'s dives',
+        () async {
+          expect(
+            await repository.getDiveCountForTrip(tripId, diverId: 'A'),
+            equals(2),
+          );
+          expect(
+            await repository.getDiveCountForTrip(tripId, diverId: 'B'),
+            equals(3),
+          );
+        },
+      );
+
+      test('getDiveCountForTrip with null diverId counts all dives', () async {
+        expect(await repository.getDiveCountForTrip(tripId), equals(5));
+      });
+
+      // getTripWithStats ----------------------------------------------------
+
+      test(
+        'getTripWithStats with diverId returns stats for only that diver',
+        () async {
+          final statsA = await repository.getTripWithStats(
+            tripId,
+            diverId: 'A',
+          );
+          expect(statsA.diveCount, equals(2));
+
+          final statsB = await repository.getTripWithStats(
+            tripId,
+            diverId: 'B',
+          );
+          expect(statsB.diveCount, equals(3));
+        },
+      );
+
+      test('getTripWithStats with null diverId aggregates all dives', () async {
+        final stats = await repository.getTripWithStats(tripId);
+        expect(stats.diveCount, equals(5));
+      });
+
+      // getAllTripsWithStats ------------------------------------------------
+
+      test(
+        'getAllTripsWithStats with diverId scopes dive stats to that diver',
+        () async {
+          final results = await repository.getAllTripsWithStats(diverId: 'A');
+          expect(results, isNotEmpty);
+          final row = results.firstWhere((r) => r.trip.id == tripId);
+          // Only A's 2 dives should count.
+          expect(row.diveCount, equals(2));
+        },
+      );
+
+      test('getAllTripsWithStats with null diverId counts all dives', () async {
+        final results = await repository.getAllTripsWithStats();
+        final row = results.firstWhere((r) => r.trip.id == tripId);
+        expect(row.diveCount, equals(5));
+      });
+    });
+
+    group('isShared persistence', () {
+      test('createTrip persists isShared when set on entity', () async {
+        final trip = createTestTrip(
+          name: 'Shared Trip',
+        ).copyWith(isShared: true);
+        final created = await repository.createTrip(trip);
+
+        final readBack = await repository.getTripById(created.id);
+        expect(readBack, isNotNull);
+        expect(readBack!.isShared, isTrue);
+      });
+
+      test('createTrip defaults isShared to false when not set', () async {
+        final trip = createTestTrip(name: 'Default Trip');
+        final created = await repository.createTrip(trip);
+
+        final readBack = await repository.getTripById(created.id);
+        expect(readBack!.isShared, isFalse);
+      });
+
+      test('updateTrip persists isShared changes', () async {
+        final trip = createTestTrip(name: 'Toggle');
+        final created = await repository.createTrip(trip);
+
+        await repository.updateTrip(created.copyWith(isShared: true));
+
+        final readBack = await repository.getTripById(created.id);
+        expect(readBack!.isShared, isTrue);
+      });
+    });
+
+    group('returnFlightAt persistence', () {
+      test('createTrip and getTripById round-trip the flight time', () async {
+        final created = await repository.createTrip(
+          createTestTrip(
+            name: 'Flight trip',
+            startDate: DateTime.utc(2026, 8, 1),
+            endDate: DateTime.utc(2026, 8, 10),
+            returnFlightAt: DateTime.utc(2026, 8, 10, 14, 30),
+          ),
+        );
+
+        final loaded = await repository.getTripById(created.id);
+
+        expect(
+          loaded!.returnFlightAt!.millisecondsSinceEpoch,
+          DateTime.utc(2026, 8, 10, 14, 30).millisecondsSinceEpoch,
+        );
+        // Wall-clock-as-UTC round-trip: components must survive on any
+        // device timezone, so the decode has to be isUtc.
+        expect(loaded.returnFlightAt!.isUtc, isTrue);
+        expect(loaded.returnFlightAt!.hour, 14);
+        expect(loaded.returnFlightAt!.minute, 30);
+      });
+
+      test(
+        'updateTrip with null clears a previously set flight time',
+        () async {
+          final created = await repository.createTrip(
+            createTestTrip(
+              name: 'Cleared trip',
+              startDate: DateTime.utc(2026, 8, 1),
+              endDate: DateTime.utc(2026, 8, 10),
+              returnFlightAt: DateTime.utc(2026, 8, 10, 14, 30),
+            ),
+          );
+
+          await repository.updateTrip(created.copyWith(returnFlightAt: null));
+
+          final loaded = await repository.getTripById(created.id);
+          expect(loaded!.returnFlightAt, isNull);
+        },
+      );
+
+      test(
+        'findTripForDate surfaces returnFlightAt (raw-SQL mapper)',
+        () async {
+          await repository.createTrip(
+            createTestTrip(
+              name: 'Raw mapper trip',
+              startDate: DateTime.utc(2026, 8, 1),
+              endDate: DateTime.utc(2026, 8, 10),
+              returnFlightAt: DateTime.utc(2026, 8, 10, 14, 30),
+            ),
+          );
+
+          final found = await repository.findTripForDate(
+            DateTime.utc(2026, 8, 5),
+          );
+
+          expect(found!.returnFlightAt, isNotNull);
+        },
+      );
+    });
+
+    group('sharing actions', () {
+      late AppDatabase db;
+      const ts = 1700000000000;
+
+      setUp(() async {
+        db = DatabaseService.instance.database;
+        for (final id in ['A', 'B']) {
+          await db
+              .into(db.divers)
+              .insert(
+                DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+      });
+    });
+
+    group('visibility filter', () {
+      late AppDatabase db;
+      const ts = 1700000000000;
+
+      setUp(() async {
+        db = DatabaseService.instance.database;
+        for (final id in ['A', 'B', 'C']) {
+          await db
+              .into(db.divers)
+              .insert(
+                DiversCompanion.insert(
+                  id: id,
+                  name: id,
+                  createdAt: ts,
+                  updatedAt: ts,
+                ),
+              );
+        }
+      });
+
+      test('getAllTrips returns owner + shared for a given diver', () async {
+        await repository.createTrip(
+          createTestTrip(name: 'Owned by A').copyWith(diverId: 'A'),
+        );
+        await repository.createTrip(
+          createTestTrip(name: 'Owned by B').copyWith(diverId: 'B'),
+        );
+        await repository.createTrip(
+          createTestTrip(
+            name: 'Shared from B',
+          ).copyWith(diverId: 'B', isShared: true),
+        );
+
+        final names = (await repository.getAllTrips(
+          diverId: 'A',
+        )).map((t) => t.name).toSet();
+        expect(names, equals({'Owned by A', 'Shared from B'}));
+      });
+
+      test('getAllTrips with null diverId returns everything', () async {
+        await repository.createTrip(
+          createTestTrip(name: 'One').copyWith(diverId: 'A'),
+        );
+        await repository.createTrip(
+          createTestTrip(name: 'Two').copyWith(diverId: 'B'),
+        );
+
+        final trips = await repository.getAllTrips();
+        expect(trips.length, equals(2));
+      });
+
+      test('searchTrips honors visibility filter', () async {
+        await repository.createTrip(
+          createTestTrip(name: 'Bonaire A').copyWith(diverId: 'A'),
+        );
+        await repository.createTrip(
+          createTestTrip(
+            name: 'Bonaire B',
+          ).copyWith(diverId: 'B', isShared: true),
+        );
+        await repository.createTrip(
+          createTestTrip(name: 'Bonaire C').copyWith(diverId: 'C'),
+        );
+
+        final results = await repository.searchTrips('Bonaire', diverId: 'A');
+        final names = results.map((t) => t.name).toSet();
+        expect(names, equals({'Bonaire A', 'Bonaire B'}));
+      });
+
+      test('findTripForDate honors visibility filter', () async {
+        final day = DateTime(2024, 6, 15);
+        await repository.createTrip(
+          createTestTrip(
+            name: 'A trip',
+            startDate: day,
+            endDate: day,
+          ).copyWith(diverId: 'B', isShared: true),
+        );
+        final trip = await repository.findTripForDate(day, diverId: 'A');
+        expect(trip, isNotNull);
+        expect(trip!.name, equals('A trip'));
+      });
+
+      test('getAllTripsWithStats honors visibility filter', () async {
+        await repository.createTrip(
+          createTestTrip(
+            name: 'Shared X',
+          ).copyWith(diverId: 'B', isShared: true),
+        );
+        await repository.createTrip(
+          createTestTrip(name: 'Private Y').copyWith(diverId: 'B'),
+        );
+
+        final all = await repository.getAllTripsWithStats(diverId: 'A');
+        final names = all.map((t) => t.trip.name).toSet();
+        expect(names, equals({'Shared X'}));
       });
     });
   });

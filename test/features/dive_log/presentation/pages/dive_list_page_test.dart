@@ -2,14 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/search/dive_search_action.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/search/dive_search_header.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_edit_page.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_list_count_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
@@ -19,11 +21,14 @@ import 'package:submersion/features/divers/presentation/providers/diver_provider
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tank_presets/presentation/providers/tank_preset_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/models/list_entry_count.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 import '../../../../helpers/test_database.dart';
 
 void main() {
@@ -181,7 +186,11 @@ void main() {
 
       return [
         sharedPreferencesProvider.overrideWithValue(prefs),
-        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        // The view mode is read from the diver's saved settings (#3748).
+        settingsProvider.overrideWith(
+          (ref) =>
+              MockSettingsNotifier(AppSettings(diveListViewMode: viewMode)),
+        ),
         currentDiverIdProvider.overrideWith(
           (ref) => MockCurrentDiverIdNotifier(),
         ),
@@ -189,7 +198,9 @@ void main() {
           (ref) => _MockPaginatedDiveListNotifier(),
         ),
         diveListNotifierProvider.overrideWith((ref) => _MockDiveListNotifier()),
-        diveListViewModeProvider.overrideWith((ref) => viewMode),
+        diveTableCountProvider.overrideWithValue(
+          const ListEntryCount.unfiltered(0),
+        ),
         showProfilePanelProvider.overrideWith((ref) => showProfilePanel),
         customTankPresetsProvider.overrideWith((ref) async => []),
       ];
@@ -217,6 +228,52 @@ void main() {
       expect(find.byType(MasterDetailScaffold), findsNothing);
     });
 
+    testWidgets('mobile DiveListContent menu match sites navigates', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(400, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await buildBranchOverrides();
+      final router = GoRouter(
+        initialLocation: '/dives',
+        routes: [
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) => const DiveListPage(),
+          ),
+          GoRoute(
+            path: '/dives/match-sites',
+            builder: (_, _) => const Scaffold(body: Text('match sites page')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DiveListContent), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.more_vert).first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('Match Dives'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('match sites page'), findsOneWidget);
+    });
+
     testWidgets('table mode renders TableModeLayout', (tester) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(1200, 800);
@@ -237,6 +294,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TableModeLayout), findsOneWidget);
+      // Table mode titles the list with its entry count (#2669).
+      expect(
+        tester
+            .widget<TableModeLayout>(find.byType(TableModeLayout))
+            .appBarSubtitle,
+        isNotNull,
+      );
     });
 
     testWidgets('desktop mode renders MasterDetailScaffold', (tester) async {
@@ -342,7 +406,9 @@ void main() {
       expect(find.text('VISIBLE COLUMNS'), findsOneWidget);
     });
 
-    testWidgets('table mode search button opens search', (tester) async {
+    testWidgets('table mode search button opens the search row', (
+      tester,
+    ) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(1200, 800);
       addTearDown(() {
@@ -361,11 +427,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.search));
+      await tester.tap(find.byKey(kDiveSearchActionKey));
       await tester.pumpAndSettle();
 
-      // The search delegate should open, showing a search bar
-      expect(find.byType(TextField), findsOneWidget);
+      // The one search row (#2773) opens under the app bar.
+      expect(find.byKey(kDiveSearchFieldKey), findsOneWidget);
     });
 
     testWidgets('tapping FAB in table mode shows add dive sheet', (
@@ -395,6 +461,98 @@ void main() {
       // The dive FAB shows a bottom sheet rather than navigating directly
       // Verify it was tapped without error
       expect(find.byType(DiveListPage), findsOneWidget);
+    });
+
+    // Table mode has no app bar inside the list, so "Select items" lives in
+    // the page header's overflow menu and drives the list through the
+    // controller the page hands it (issue #2775).
+    group('table mode "Select items"', () {
+      Future<void> pumpTablePage(WidgetTester tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await buildBranchOverrides(
+          viewMode: ListViewMode.table,
+        );
+        await tester.pumpWidget(
+          buildBranchTestWidget(
+            child: const DiveListPage(),
+            overrides: overrides,
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shows no separate Select strip above the table', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+        expect(find.byIcon(Icons.checklist), findsNothing);
+      });
+
+      testWidgets('is the first overflow entry and enters selection', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        await tester.tap(find.byIcon(Icons.more_vert));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+          lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+        );
+
+        await tester.tap(find.byKey(selectItemsMenuKey));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+        expect(find.text('0 selected'), findsOneWidget);
+      });
+
+      testWidgets('leaves the entry out while selecting', (tester) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+
+        // The header's overflow, not the selection bar's.
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byIcon(Icons.more_vert),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Detailed'), findsOneWidget);
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+      });
+
+      testWidgets('selection does not outlive leaving table mode', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(DiveListPage)),
+        );
+        container
+            .read(settingsProvider.notifier)
+            .setDiveListViewMode(ListViewMode.detailed);
+        await tester.pumpAndSettle();
+        container
+            .read(settingsProvider.notifier)
+            .setDiveListViewMode(ListViewMode.table);
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      });
     });
 
     testWidgets('table mode popup menu shows view mode options', (
@@ -521,7 +679,7 @@ void main() {
       expect(find.byType(MasterDetailScaffold), findsOneWidget);
     });
 
-    testWidgets('table mode filter button with Badge is present', (
+    testWidgets('table mode search button with Badge is present', (
       tester,
     ) async {
       tester.view.devicePixelRatio = 1.0;
@@ -542,9 +700,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // The filter button with Badge indicator should be present
-      expect(find.byIcon(Icons.filter_list), findsOneWidget);
-      expect(find.byType(Badge), findsOneWidget);
+      // The search action carries the old filter icon's Badge (#2773). (The
+      // data-quality review button also wears a Badge, so scope the check to
+      // the search action.)
+      final action = find.byKey(kDiveSearchActionKey);
+      expect(action, findsOneWidget);
+      expect(
+        find.descendant(of: action, matching: find.byType(Badge)),
+        findsOneWidget,
+      );
     });
 
     testWidgets('table mode profile toggle button is present when enabled', (
@@ -648,7 +812,7 @@ void main() {
       expect(find.byType(DiveProfilePanel), findsOneWidget);
     });
 
-    testWidgets('table mode popup menu advanced search navigates', (
+    testWidgets('table mode popup menu no longer offers Advanced Search', (
       tester,
     ) async {
       tester.view.devicePixelRatio = 1.0;
@@ -669,10 +833,6 @@ void main() {
             path: '/dives',
             builder: (context, state) => const DiveListPage(),
           ),
-          GoRoute(
-            path: '/dives/search',
-            builder: (_, _) => const Scaffold(body: Text('advanced search')),
-          ),
         ],
       );
 
@@ -692,12 +852,159 @@ void main() {
       await tester.tap(find.byIcon(Icons.more_vert));
       await tester.pumpAndSettle();
 
-      // Tap Advanced Search
-      await tester.tap(find.textContaining('Advanced'));
+      // Advanced Search became the Refine panel, reached from the search
+      // row (#2773).
+      expect(find.textContaining('Advanced'), findsNothing);
+    });
+
+    testWidgets('table mode popup menu match sites navigates', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await buildBranchOverrides(
+        viewMode: ListViewMode.table,
+      );
+
+      final router = GoRouter(
+        initialLocation: '/dives',
+        routes: [
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) => const DiveListPage(),
+          ),
+          GoRoute(
+            path: '/dives/match-sites',
+            builder: (_, _) => const Scaffold(body: Text('match sites page')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
       await tester.pumpAndSettle();
 
-      // Verify navigation occurred
-      expect(find.text('advanced search'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.textContaining('Match Dives'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('match sites page'), findsOneWidget);
+    });
+
+    testWidgets('table mode popup menu fetch conditions runs the flow', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      // The real bulkConditionsServiceProvider is exercised here, so the flow
+      // needs a database to count candidates against. An empty one has none,
+      // which is what the assertion below checks for.
+      await setUpTestDatabase();
+      addTearDown(tearDownTestDatabase);
+
+      final overrides = await buildBranchOverrides(
+        viewMode: ListViewMode.table,
+      );
+
+      final router = GoRouter(
+        initialLocation: '/dives',
+        routes: [
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) => const DiveListPage(),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          ],
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.textContaining('Fetch Conditions'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No dives are missing conditions.'), findsOneWidget);
+    });
+
+    testWidgets('table mode popup menu data quality navigates', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await buildBranchOverrides(
+        viewMode: ListViewMode.table,
+      );
+
+      final router = GoRouter(
+        initialLocation: '/dives',
+        routes: [
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) => const DiveListPage(),
+          ),
+          GoRoute(
+            path: '/dives/quality',
+            builder: (_, _) => const Scaffold(body: Text('data quality page')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.rule));
+      await tester.pumpAndSettle();
+
+      expect(find.text('data quality page'), findsOneWidget);
     });
 
     testWidgets('table mode detail builder invoked via selected query param', (
@@ -760,14 +1067,109 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(DiveEditPage), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is DiveDetailPage && w.newDiveRequest != null,
+        ),
+        findsOneWidget,
+      );
     });
 
-    // Note: The edit builder test for dives is not included because
-    // DiveEditPage.initState synchronously accesses the database, which
-    // throws a StateError that cannot be caught by takeException().
-    // The detail and create builder tests above are sufficient to cover the
-    // editBuilder closure line (it follows the same pattern).
+    // The old address of the pane's edit form opens the dive page in the
+    // pane, unlocked; the sitting's end returns the pane to the dive
+    // (issue #4527, plan 11).
+    for (final mode in [ListViewMode.detailed, ListViewMode.table]) {
+      testWidgets('${mode.name}: ?selected=<id>&mode=edit shows the dive page '
+          'unlocked, and its sitting ending returns to ?selected=<id>', (
+        tester,
+      ) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await buildBranchOverrides(viewMode: mode);
+        await tester.pumpWidget(
+          buildBranchTestWidget(
+            child: const DiveListPage(),
+            overrides: [
+              ...overrides,
+              tableDetailsPaneProvider('dives').overrideWith((ref) => true),
+            ],
+            initialLocation: '/dives?selected=test-dive-id&mode=edit',
+          ),
+        );
+        await tester.pump();
+        tester.takeException();
+        await tester.pump();
+        tester.takeException();
+
+        final opened = find.byWidgetPredicate(
+          (w) => w is DiveDetailPage && w.openUnlocked,
+        );
+        expect(opened, findsOneWidget);
+        expect(tester.widget<DiveDetailPage>(opened).diveId, 'test-dive-id');
+
+        tester.widget<DiveDetailPage>(opened).onSittingEnded!();
+        for (var i = 0; i < 4; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+          tester.takeException();
+        }
+
+        expect(opened, findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (w) => w is DiveDetailPage && w.diveId == 'test-dive-id',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      // A dive deleted from the pane's edit mode is gone: the pane leaves
+      // it for the bare list, not back to `?selected=<id>`.
+      testWidgets('${mode.name}: a dive deleted in ?mode=edit leaves the pane '
+          'at /dives', (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(tester.view.reset);
+
+        final overrides = await buildBranchOverrides(viewMode: mode);
+        await tester.pumpWidget(
+          buildBranchTestWidget(
+            child: const DiveListPage(),
+            overrides: [
+              ...overrides,
+              tableDetailsPaneProvider('dives').overrideWith((ref) => true),
+            ],
+            initialLocation: '/dives?selected=test-dive-id&mode=edit',
+          ),
+        );
+        await tester.pump();
+        tester.takeException();
+        await tester.pump();
+        tester.takeException();
+
+        final opened = find.byWidgetPredicate(
+          (w) => w is DiveDetailPage && w.openUnlocked,
+        );
+        expect(opened, findsOneWidget);
+
+        tester.widget<DiveDetailPage>(opened).onDeleted!();
+        for (var i = 0; i < 4; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+          tester.takeException();
+        }
+
+        final router = GoRouter.of(tester.element(find.byType(DiveListPage)));
+        expect(
+          router.routerDelegate.currentConfiguration.uri.toString(),
+          '/dives',
+        );
+        expect(find.byType(DiveDetailPage), findsNothing);
+      });
+    }
   });
 }
 

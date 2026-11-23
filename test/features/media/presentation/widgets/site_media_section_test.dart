@@ -1,0 +1,722 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart' show StateProvider;
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/media_unlink_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/site_attachment_category.dart';
+import 'package:submersion/features/media/presentation/pages/site_media_viewer_page.dart';
+import 'package:submersion/features/media/presentation/providers/media_learned_aspect_provider.dart';
+import 'package:submersion/features/media/presentation/providers/site_media_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
+import 'package:submersion/features/media/presentation/widgets/site_media_section.dart';
+
+// `Override` is not exported from flutter_riverpod's public barrel; the
+// shared test helper re-types it for widget tests.
+import '../../../../helpers/mock_providers.dart' show Override;
+import '../support/media_widget_harness.dart';
+
+/// Repository stub so the notifier under test never reaches the database.
+///
+/// [SiteMediaListNotifier]'s constructor eagerly loads the site's media;
+/// widget tests have no `DatabaseService` behind it, so the load is served
+/// from here instead of throwing on every construction.
+class _StubMediaRepository extends MediaRepository {
+  @override
+  Future<List<MediaItem>> getMediaForSite(String siteId) async =>
+      const <MediaItem>[];
+}
+
+/// Records the ids the section asks to unlink, and can fail on demand.
+///
+/// [deleteCalls] is owned by the test rather than the notifier: the provider
+/// is lazy, so a flow that never unlinks never constructs one.
+class _RecordingSiteMediaNotifier extends SiteMediaListNotifier {
+  _RecordingSiteMediaNotifier(
+    Ref ref, {
+    required this.deleteCalls,
+    this.failWith,
+  }) : super(_StubMediaRepository(), ref, 'site-1');
+
+  final List<List<String>> deleteCalls;
+  final Object? failWith;
+
+  final List<(List<String>, SiteAttachmentCategory?)> categoryCalls = [];
+
+  /// Rows the fake reports as updated; null means every id passed.
+  int? updatedCount;
+
+  @override
+  Future<int> setSiteCategory(
+    List<String> ids,
+    SiteAttachmentCategory? category,
+  ) async {
+    categoryCalls.add((List<String>.of(ids), category));
+    if (failWith != null) throw failWith!;
+    return updatedCount ?? ids.length;
+  }
+
+  @override
+  Future<SiteUnlinkOutcome> unlinkMultipleMedia(List<String> ids) async {
+    deleteCalls.add(List<String>.of(ids));
+    if (failWith != null) throw failWith!;
+    return SiteUnlinkOutcome(deleted: ids.length, keptLinked: 0);
+  }
+}
+
+void main() {
+  final photoA = testMediaItem(
+    id: 'm1',
+    siteId: 'site-1',
+    originalFilename: 'entry.png',
+    takenAt: DateTime(2026, 3, 1, 9),
+  );
+  final photoB = testMediaItem(
+    id: 'm2',
+    siteId: 'site-1',
+    originalFilename: 'mooring.png',
+    takenAt: DateTime(2026, 3, 1, 10),
+  );
+
+  /// Hosts [SiteMediaSection] for 'site-1' with the attachments provider
+  /// resolved to [attachments] (or stuck loading / failing instead).
+  Future<Widget> host({
+    VoidCallback? onPhotos,
+    VoidCallback? onDoc,
+    void Function(MediaItem)? onOpenDocument,
+    int divePhotoCount = 0,
+    List<String>? divePhotoReads,
+    List<MediaItem> attachments = const [],
+    Future<List<MediaItem>>? pendingAttachments,
+    Object? attachmentsError,
+    FutureOr<List<MediaItem>> Function(Ref ref)? loadAttachments,
+    List<Override> extraOverrides = const [],
+    RecordEditController<DiveSite>? editsInPlace,
+  }) async {
+    final section = SiteMediaSection(
+      siteId: 'site-1',
+      onAddPhotosPressed: onPhotos,
+      onAddDocumentPressed: onDoc,
+      onOpenDocument: onOpenDocument,
+    );
+    return mediaTestApp(
+      overrides: [
+        // Tiles wait for the learned shapes (issue #4741); none, and no
+        // database behind them.
+        mediaAspectCacheRepositoryProvider.overrideWithValue(
+          FakeAspectCacheRepository(),
+        ),
+        mediaForSiteProvider('site-1').overrideWith((ref) {
+          if (loadAttachments != null) return loadAttachments(ref);
+          if (pendingAttachments != null) return pendingAttachments;
+          if (attachmentsError != null) throw attachmentsError;
+          return attachments;
+        }),
+        mediaCountFromDivesAtSiteProvider(
+          'site-1',
+        ).overrideWith((ref) async => divePhotoCount),
+        flatMediaFromDivesAtSiteProvider('site-1').overrideWith((ref) async {
+          divePhotoReads?.add('site-1');
+          return const <MediaItem>[];
+        }),
+        ...extraOverrides,
+      ],
+      home: Scaffold(
+        body: SingleChildScrollView(
+          // A page that edits the site in place holds its scope over the
+          // card (issue #4527).
+          child: editsInPlace == null
+              ? section
+              : RecordEditScope<DiveSite>(
+                  controller: editsInPlace,
+                  child: section,
+                ),
+        ),
+      ),
+    );
+  }
+
+  testWidgets('empty state renders site empty message', (tester) async {
+    await tester.pumpWidget(await host(onPhotos: () {}, onDoc: () {}));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('No maps, photos, or documents attached to this site'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('add menu exposes photos and document actions', (tester) async {
+    var photos = 0;
+    var docs = 0;
+    await tester.pumpWidget(
+      await host(onPhotos: () => photos++, onDoc: () => docs++),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.add_photo_alternate));
+    await tester.pumpAndSettle();
+    expect(find.text('Add photos or videos'), findsOneWidget);
+    await tester.tap(find.text('Add document'));
+    await tester.pumpAndSettle();
+    expect(docs, 1);
+    expect(photos, 0);
+  });
+
+  testWidgets('add menu routes the photos entry to its own callback', (
+    tester,
+  ) async {
+    var photos = 0;
+    var docs = 0;
+    await tester.pumpWidget(
+      await host(onPhotos: () => photos++, onDoc: () => docs++),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.add_photo_alternate));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add photos or videos'));
+    await tester.pumpAndSettle();
+    expect(photos, 1);
+    expect(docs, 0);
+  });
+
+  testWidgets('the add menu is hidden when neither action is wired', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await host());
+    await tester.pumpAndSettle();
+    expect(find.text('Site Media'), findsOneWidget);
+    expect(find.byIcon(Icons.add_photo_alternate), findsNothing);
+  });
+
+  // Issue #4502: photos from the site's dives moved to their own Site
+  // Details card, so this section shows only what is attached to the site.
+  testWidgets('does not show photos from dives', (tester) async {
+    final reads = <String>[];
+    await tester.pumpWidget(
+      await host(
+        onPhotos: () {},
+        onDoc: () {},
+        divePhotoCount: 5,
+        divePhotoReads: reads,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(ExpansionTile), findsNothing);
+    expect(find.textContaining('Photos from dives'), findsNothing);
+    expect(reads, isEmpty);
+  });
+
+  group('attachments grid', () {
+    testWidgets('renders one thumbnail tile per attachment', (tester) async {
+      await tester.pumpWidget(await host(attachments: [photoA, photoB]));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MediaThumbnailTile), findsNWidgets(2));
+      // The grid replaces the empty state entirely.
+      expect(
+        find.text('No maps, photos, or documents attached to this site'),
+        findsNothing,
+      );
+      final tiles = tester
+          .widgetList<MediaThumbnailTile>(find.byType(MediaThumbnailTile))
+          .toList();
+      expect(tiles.map((t) => t.item.id), ['m1', 'm2']);
+      // Not in selection mode, so nothing is dimmed or checked.
+      expect(tiles.every((t) => !t.isSelectionMode), isTrue);
+      expect(find.byIcon(Icons.check), findsNothing);
+    });
+
+    testWidgets('tapping a photo tile opens the attachments viewer', (
+      tester,
+    ) async {
+      await tester.pumpWidget(await host(attachments: [photoA, photoB]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(MediaThumbnailTile).at(1));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SiteMediaViewerPage), findsOneWidget);
+      final viewer = tester.widget<SiteMediaViewerPage>(
+        find.byType(SiteMediaViewerPage),
+      );
+      expect(viewer.siteId, 'site-1');
+      expect(viewer.initialMediaId, 'm2');
+      expect(viewer.scope, SiteViewerScope.attachments);
+    });
+
+    testWidgets('tapping a document tile hands off instead of opening the '
+        'viewer', (tester) async {
+      final doc = testMediaItem(
+        id: 'doc-1',
+        siteId: 'site-1',
+        mediaType: MediaType.document,
+        originalFilename: 'site-map.pdf',
+      );
+      final opened = <MediaItem>[];
+      await tester.pumpWidget(
+        await host(attachments: [photoA, doc], onOpenDocument: opened.add),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(MediaThumbnailTile).at(1));
+      await tester.pumpAndSettle();
+
+      expect(opened.map((m) => m.id), ['doc-1']);
+      expect(find.byType(SiteMediaViewerPage), findsNothing);
+    });
+  });
+
+  // NOTE: this file does not call verifySelectionContract. Its host() builder
+  // is async (Future<Widget>) while the helper takes a synchronous build
+  // callback, and the attachments override captures its list by value so the
+  // helper's filter step cannot narrow it. The contract's substance is
+  // covered here directly: the Select affordance below, and select-all, exit
+  // and unlink in the groups that follow.
+  group('select affordance', () {
+    testWidgets('a reload holding its rows keeps the bar and its exit', (
+      tester,
+    ) async {
+      final reload = StateProvider<int>((ref) => 0);
+      await tester.pumpWidget(
+        await host(
+          loadAttachments: (ref) async {
+            ref.watch(reload);
+            return [photoA, photoB];
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+
+      ProviderScope.containerOf(
+        tester.element(find.byType(SiteMediaSection)),
+      ).read(reload.notifier).state++;
+      // One frame inside the reload, before the attachments resolve again.
+      await tester.pump();
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+    });
+
+    testWidgets('a visible Select button enters selection mode', (
+      tester,
+    ) async {
+      await tester.pumpWidget(await host(attachments: [photoA]));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('enter_selection')),
+        findsOneWidget,
+        reason: 'selecting attachments must not require a hidden long-press',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+      expect(find.text('0 selected'), findsOneWidget);
+    });
+
+    testWidgets('a long-press on a tile does not enter selection mode', (
+      tester,
+    ) async {
+      await tester.pumpWidget(await host(attachments: [photoA]));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaThumbnailTile).first);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('selection_exit')),
+        findsNothing,
+        reason: 'selection mode is reachable only through the Select control',
+      );
+      // With no long-press handler left, the hold resolves as an ordinary tap
+      // on release and opens the viewer, exactly as a tap would.
+      expect(find.byType(SiteMediaViewerPage), findsOneWidget);
+    });
+
+    testWidgets('Escape leaves selection mode', (tester) async {
+      await tester.pumpWidget(await host(attachments: [photoA]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+    });
+  });
+
+  group('selection mode', () {
+    /// Enters selection mode and checks the first attachment tile.
+    Future<void> enterSelection(WidgetTester tester) async {
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(MediaThumbnailTile).first);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('selecting a tile shows the selection header', (tester) async {
+      await tester.pumpWidget(await host(attachments: [photoA, photoB]));
+      await tester.pumpAndSettle();
+      // Normal header before entering selection.
+      expect(find.text('Site Media'), findsOneWidget);
+
+      await enterSelection(tester);
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+      expect(find.text('1 selected'), findsOneWidget);
+      // The normal header (and its add menu) yields to the selection header.
+      expect(find.text('Site Media'), findsNothing);
+      expect(find.byIcon(Icons.add_photo_alternate), findsNothing);
+      // The anchor tile is the selected one.
+      expect(find.byIcon(Icons.check), findsOneWidget);
+    });
+
+    testWidgets('select all extends the selection to every attachment', (
+      tester,
+    ) async {
+      await tester.pumpWidget(await host(attachments: [photoA, photoB]));
+      await tester.pumpAndSettle();
+      await enterSelection(tester);
+
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNWidgets(2));
+      // Select-all hides once nothing is left to select.
+      // The shared bar keeps a stable action set: select-all disables rather
+      // than disappearing once everything is checked.
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_select_all')),
+            )
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('cancelling returns to the normal header', (tester) async {
+      await tester.pumpWidget(await host(attachments: [photoA, photoB]));
+      await tester.pumpAndSettle();
+      await enterSelection(tester);
+
+      await tester.tap(find.byKey(const ValueKey('selection_exit')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      expect(find.text('Site Media'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNothing);
+    });
+  });
+
+  group('unlink', () {
+    late List<List<String>> deleteCalls;
+
+    /// Pumps the section with two attachments, both selected, and the
+    /// unlink confirmation dialog open.
+    Future<void> openUnlinkDialog(
+      WidgetTester tester, {
+      Object? failWith,
+    }) async {
+      deleteCalls = [];
+      await tester.pumpWidget(
+        await host(
+          attachments: [photoA, photoB],
+          extraOverrides: [
+            siteMediaListNotifierProvider('site-1').overrideWith(
+              (ref) => _RecordingSiteMediaNotifier(
+                ref,
+                deleteCalls: deleteCalls,
+                failWith: failWith,
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_action_unlink')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the confirmation names the site, not the dive', (
+      tester,
+    ) async {
+      await openUnlinkDialog(tester);
+
+      expect(find.byType(AlertDialog), findsOneWidget);
+      // Same verb as every other media surface; the body is what makes this
+      // one the site's, by naming the carve-out a dive still holds.
+      expect(find.text('Unlink 2 items?'), findsOneWidget);
+      expect(
+        find.text(
+          'Removes 2 items from your library, along with their cloud copies '
+          'and thumbnails. Media a dive still uses is kept. Your original '
+          'files are not affected.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('cancelling dismisses without deleting anything', (
+      tester,
+    ) async {
+      await openUnlinkDialog(tester);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(deleteCalls, isEmpty);
+      // The selection survives a cancelled unlink.
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+
+    testWidgets('confirming unlinks the selected ids and reports success', (
+      tester,
+    ) async {
+      await openUnlinkDialog(tester);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Unlink'));
+      await tester.pumpAndSettle();
+
+      expect(deleteCalls, [
+        ['m1', 'm2'],
+      ]);
+      expect(find.text('Unlinked 2 items'), findsOneWidget);
+      // Selection mode exits once the unlink lands.
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      expect(find.text('Site Media'), findsOneWidget);
+    });
+
+    testWidgets('a failing unlink surfaces the error and keeps the '
+        'selection', (tester) async {
+      await openUnlinkDialog(tester, failWith: Exception('row locked'));
+
+      await tester.tap(find.widgetWithText(TextButton, 'Unlink'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Failed to unlink: Exception: row locked'),
+        findsOneWidget,
+      );
+      expect(find.text('Unlinked 2 items'), findsNothing);
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+  });
+
+  group('async states', () {
+    testWidgets('a still-loading attachment list shows a spinner', (
+      tester,
+    ) async {
+      final pending = Completer<List<MediaItem>>();
+      addTearDown(() => pending.complete(const <MediaItem>[]));
+
+      await tester.pumpWidget(await host(pendingAttachments: pending.future));
+      // No settle: the progress indicator animates forever.
+      await tester.pump();
+
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(MediaThumbnailTile), findsNothing);
+      expect(
+        find.text('No maps, photos, or documents attached to this site'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a failing attachment query shows the error text', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await host(attachmentsError: Exception('disk unreadable')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Error loading media'), findsOneWidget);
+      expect(find.byType(MediaThumbnailTile), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+  });
+
+  // Issue #1039: categories and the new bulk actions.
+  group('categories', () {
+    testWidgets('categorized attachments render under headings', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await host(
+          attachments: [
+            photoA.copyWith(siteCategory: SiteAttachmentCategory.underwater),
+            photoB,
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Underwater (1)'), findsOneWidget);
+      expect(find.text('Uncategorized (1)'), findsOneWidget);
+    });
+
+    late _RecordingSiteMediaNotifier notifier;
+
+    Future<void> selectBoth(
+      WidgetTester tester, {
+      Object? failWith,
+      int? updatedCount,
+    }) async {
+      await tester.pumpWidget(
+        await host(
+          attachments: [photoA, photoB],
+          extraOverrides: [
+            siteMediaListNotifierProvider('site-1').overrideWith(
+              (ref) => notifier = _RecordingSiteMediaNotifier(
+                ref,
+                deleteCalls: [],
+                failWith: failWith,
+              )..updatedCount = updatedCount,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('Set category applies the choice to every checked item', (
+      tester,
+    ) async {
+      await selectBoth(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('selection_action_setCategory')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Underwater'));
+      await tester.pumpAndSettle();
+      expect(notifier.categoryCalls.single.$1.toSet(), {'m1', 'm2'});
+      expect(
+        notifier.categoryCalls.single.$2,
+        SiteAttachmentCategory.underwater,
+      );
+      expect(find.text('Updated 2 items'), findsOneWidget);
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+    });
+
+    testWidgets('Set category reports only the rows actually updated', (
+      tester,
+    ) async {
+      // One of the two was unlinked on another device meanwhile.
+      await selectBoth(tester, updatedCount: 1);
+      await tester.tap(
+        find.byKey(const ValueKey('selection_action_setCategory')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Underwater'));
+      await tester.pumpAndSettle();
+      expect(find.text('Updated 1 item'), findsOneWidget);
+    });
+
+    testWidgets('a failing Set category reports it and keeps the selection', (
+      tester,
+    ) async {
+      await selectBoth(tester, failWith: Exception('row locked'));
+      await tester.tap(
+        find.byKey(const ValueKey('selection_action_setCategory')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Parking'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Failed to set category'), findsOneWidget);
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+
+    testWidgets('Edit details is enabled only for a single checked item', (
+      tester,
+    ) async {
+      await selectBoth(tester);
+      final edit = find.byKey(const ValueKey('selection_action_editDetails'));
+      expect(tester.widget<IconButton>(edit).onPressed, isNull);
+
+      await tester.tap(find.byType(MediaThumbnailTile).first);
+      await tester.pumpAndSettle();
+      expect(find.text('1 selected'), findsOneWidget);
+      expect(tester.widget<IconButton>(edit).onPressed, isNotNull);
+
+      await tester.tap(edit);
+      await tester.pumpAndSettle();
+      expect(find.text('Attachment details'), findsOneWidget);
+    });
+  });
+
+  // An attachment's details are its own record's, edited under its own
+  // lock where the site page edits in place (issue #4527, phase 2): the
+  // card's single Edit details goes. A locked page writes nothing, so the
+  // bulk Set category goes too, as Unlink does (media library, plan 2).
+  testWidgets('a locked site page offers neither Edit details nor Set '
+      'category', (tester) async {
+    final controller = RecordEditController<DiveSite>(onSave: (_) async {});
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      await host(
+        attachments: [
+          photoA.copyWith(displaySizeOverride: AttachmentDisplaySize.large),
+          photoB,
+        ],
+        editsInPlace: controller,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // A large attachment is a tile too, with no menu of its own.
+    expect(find.byType(MediaThumbnailTile), findsNWidgets(2));
+    expect(find.byTooltip('More options'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('enter_selection')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MediaThumbnailTile).first);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('selection_action_editDetails')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('selection_action_setCategory')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a browser offers neither adding nor selecting (#4121)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await host(
+        onPhotos: () {},
+        onDoc: () {},
+        attachments: [photoA, photoB],
+        extraOverrides: [
+          deviceCapabilitiesProvider.overrideWithValue(DeviceCapabilities.web),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.add_photo_alternate), findsNothing);
+    expect(find.byKey(const ValueKey('enter_selection')), findsNothing);
+    expect(find.byType(MediaThumbnailTile), findsNWidgets(2));
+  });
+}

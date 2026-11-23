@@ -1,5 +1,19 @@
 import 'package:drift/drift.dart';
 
+import 'package:submersion/core/database/local_cache_identification_table.dart';
+import 'package:submersion/core/database/local_cache_media_aspect_table.dart';
+import 'package:submersion/core/database/local_cache_site_catalogue_tables.dart';
+import 'package:submersion/core/database/local_cache_vertical_distance_table.dart';
+
+export 'package:submersion/core/database/local_cache_identification_table.dart'
+    show IdentificationEmbeddings;
+export 'package:submersion/core/database/local_cache_media_aspect_table.dart'
+    show MediaAspectCache;
+export 'package:submersion/core/database/local_cache_site_catalogue_tables.dart'
+    show SiteCatalogueEntries, SiteCatalogueMeta;
+export 'package:submersion/core/database/local_cache_vertical_distance_table.dart'
+    show DiveVerticalDistanceCache;
+
 part 'local_cache_database.g.dart';
 
 /// Local-only table for caching resolved asset IDs per device.
@@ -15,10 +29,767 @@ class LocalAssetCache extends Table {
   Set<Column> get primaryKey => {mediaId};
 }
 
-@DriftDatabase(tables: [LocalAssetCache])
+/// Per-device media transfer queue (media store Phase 1). Never synced,
+/// never backed up: a restored database must not carry another device's
+/// in-flight transfers.
+class MediaTransferQueue extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get mediaId => text()();
+  TextColumn get direction => text().withDefault(const Constant('upload'))();
+  TextColumn get objectKind => text().withDefault(const Constant('original'))();
+  TextColumn get contentHash => text().nullable()();
+  TextColumn get state => text().withDefault(const Constant('pending'))();
+  IntColumn get attempts => integer().withDefault(const Constant(0))();
+  IntColumn get nextAttemptAt => integer().nullable()();
+  TextColumn get resumeStateJson => text().nullable()();
+  TextColumn get errorMessage => text().nullable()();
+  IntColumn get priority => integer().withDefault(const Constant(0))();
+  // Transfer progress (v3), surfaced in the Transfers view.
+  IntColumn get progressBytes => integer().nullable()();
+  IntColumn get totalBytes => integer().nullable()();
+  // Adjustable upload quality: a per-item re-upload override level (v4).
+  TextColumn get overrideLevel => text().nullable()();
+  // Operation payload for non-upload directions (v6). For 'delete' entries:
+  // {"originalExt": ..., "renditionExt": ...} -- the two facts that cannot
+  // be recovered once the media row is gone.
+  TextColumn get payloadJson => text().nullable()();
+  IntColumn get createdAt => integer()();
+  IntColumn get updatedAt => integer()();
+}
+
+/// Per-device index of content-addressed cache files (media store Phase 1).
+class MediaCacheEntries extends Table {
+  TextColumn get contentHash => text()();
+  TextColumn get kind => text()(); // 'original' | 'thumb' | 'rendition'
+  TextColumn get relativePath => text()();
+  IntColumn get sizeBytes => integer()();
+  IntColumn get lastAccessedAt => integer()();
+  IntColumn get createdAt => integer()();
+  // The authoritative store-object version this copy was fetched for, as
+  // epoch millis (a rendition's synced remoteCompressedUploadedAt). Freshness
+  // compares this against the item's current stamp -- both the uploading
+  // device's clock -- so device clock skew cannot strand or thrash the cache.
+  // Null for kinds that are not version-checked (original/thumb) and for
+  // rendition entries cached before v5 (treated as stale on the next read).
+  IntColumn get sourceVersion => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {contentHash, kind};
+}
+
+/// Cached bathymetry grids keyed by quantized coordinate (0.02 degree
+/// cells). Re-derivable third-party data: never synced, never backed up.
+/// status semantics: 'ok' = usable grid in gridBlob (or, for a row cached
+/// before v20, in gridJson); 'empty' = fetched fine, definitively no water
+/// here; 'unavailable' = reserved for future definitive negatives.
+/// Transient failures write NO row.
+class BathymetryCache extends Table {
+  TextColumn get cacheKey => text()();
+  RealColumn get centerLat => real()();
+  RealColumn get centerLon => real()();
+  TextColumn get status => text()();
+  TextColumn get sourceId => text().nullable()();
+  RealColumn get resolutionMeters => real().nullable()();
+
+  /// The pre-v20 grid encoding. Read only to convert a legacy row, which is
+  /// rewritten into [gridBlob] (and this cleared) the first time it is read.
+  TextColumn get gridJson => text().nullable()();
+  IntColumn get fetchedAt => integer()();
+
+  /// The grid in `bathymetry_grid_codec.dart`'s compact binary form (v20).
+  BlobColumn get gridBlob => blob().nullable()();
+
+  /// Stored bytes of [gridBlob], so the byte budget can total the cache
+  /// without reading a single grid (v20). Null for a row cached as JSON
+  /// before v20 until its first read converts it; the budget sizes such a
+  /// row from its JSON instead (`bathymetryStoredBytes`).
+  IntColumn get gridBytes => integer().nullable()();
+
+  /// Epoch millis this row last served a read, the eviction order for the
+  /// byte budget. Null falls back to [fetchedAt] (v20).
+  IntColumn get lastUsedAt => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {cacheKey};
+}
+
+/// Cached swissBATHY3D tiles, keyed by the LV95 1-km tile index (e.g.
+/// "2600_1200"). Never synced, never backed up: re-derivable from the
+/// public OGD/STAC source. This sits BELOW [BathymetryCache] in the cache
+/// stack — one physical swissBATHY3D tile can be reused by several
+/// [BathymetryCache] quantized cells, so caching at tile granularity is what
+/// actually guarantees "every tile is downloaded only once" (the task's OGD
+/// fair-use requirement), independent of the coarser 0.02 degree cache grid.
+/// status semantics: 'ok' = usable grid in gridBlob (gridJson before v20);
+/// 'gap' = the STAC
+/// lookup for this tile definitively found no covering asset. Transient
+/// failures (network error, STAC error, a download that is not a zip) write
+/// NO row. 'empty' is the pre-#1770 negative, written before downloads were
+/// validated: SwissBathyTileCacheRepository.read drops it so the tile
+/// re-resolves once.
+class SwissBathyTileCache extends Table {
+  TextColumn get tileKey => text()();
+  TextColumn get status => text()();
+  TextColumn get gridJson => text().nullable()();
+  IntColumn get fetchedAt => integer()();
+
+  /// The STAC item's `datetime` (or `updated`/`created` fallback) at the
+  /// time this tile was last downloaded — the version token the periodic
+  /// freshness check compares against. Null for 'gap' rows and rows
+  /// written before this field existed (v14).
+  TextColumn get sourceDatetime => text().nullable()();
+
+  /// When this row was last confirmed current: set to [fetchedAt] on
+  /// download, bumped without a re-download when a freshness check finds no
+  /// version change. Null means "never checked" and is treated as due for a
+  /// check immediately, which covers rows written before this field existed.
+  IntColumn get checkedAt => integer().nullable()();
+
+  /// The href of the STAC asset [sourceDatetime] was read from. A freshness
+  /// check matches the current STAC response back to this exact asset by
+  /// href before comparing datetimes, rather than assuming the first
+  /// bbox-overlapping candidate is the one that actually covered this tile
+  /// (it is not necessarily -- see [SwissBathy3dSource._firstOverlappingCandidate]).
+  /// Null for 'gap' rows and rows written before this field existed
+  /// (v15), which fall back to one full re-resolution on their next check.
+  TextColumn get sourceHref => text().nullable()();
+
+  /// The `SwissLakeLevel.meanLevelMeters` this tile's cached depths were
+  /// computed against (depth = referenceLevelMeters - elevation). Compared
+  /// against the CURRENT lookup's mean level on read -- a mismatch means a
+  /// correction to `swiss_lake_levels.dart` (a lake's bbox or documented
+  /// level changed) since this tile was cached, so the baked-in depths are
+  /// wrong and the row must be dropped rather than served stale. Null for
+  /// 'gap' rows and rows written before this field existed (v17), which
+  /// are ALSO treated as a mismatch (not trusted as-is): unlike
+  /// [sourceDatetime]/[checkedAt], there is no way to tell whether an old
+  /// row's baked-in level is still correct without this field, so it falls
+  /// back to one full re-resolution on its next read -- the only way to
+  /// actually correct already-wrongly-cached tiles (e.g. a coordinate that
+  /// used to resolve to a coarser neighboring lake's bbox before a
+  /// whitelist correction) rather than merely preventing new ones. Null
+  /// only for rows written before this field existed (v17) -- every 'ok'
+  /// AND 'gap' row written since then stores its actual level, so the
+  /// mismatch check above applies uniformly to both statuses.
+  RealColumn get referenceLevelMeters => real().nullable()();
+
+  /// The tile in `bathymetry_grid_codec.dart`'s compact binary form (v20).
+  /// A row cached before v20 holds [gridJson] instead and is rewritten into
+  /// this column the first time it is read.
+  BlobColumn get gridBlob => blob().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {tileKey};
+}
+
+/// Cached third-party reef data, keyed by quantized coordinate. Never synced
+/// and never backed up: any device can re-derive this from a site's
+/// coordinates, so a restored database re-fetches rather than carrying
+/// another device's stale results.
+class ReefDataCache extends Table {
+  /// A `ReefProviderId.name`.
+  TextColumn get provider => text()();
+
+  /// `ReefCoordinateKey.format` output, e.g. "12.160,-68.280".
+  TextColumn get coordKey => text()();
+
+  /// Dive date as `yyyy-MM-dd` for historical reef health; empty otherwise.
+  TextColumn get variant => text().withDefault(const Constant(''))();
+
+  /// Provider-specific JSON. Empty object when status is not `ok`.
+  TextColumn get payloadJson => text()();
+
+  /// A `ReefDataStatus.name`.
+  TextColumn get status => text()();
+
+  IntColumn get fetchedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {provider, coordKey, variant};
+}
+
+/// Folders the repair watcher scans (Media section Phase 5). Per-device by
+/// construction: a path from another machine is meaningless here, and a
+/// cache wipe costs a re-add, never user data.
+class WatchedRoots extends Table {
+  TextColumn get path => text()();
+  IntColumn get addedAt => integer()();
+  IntColumn get lastScanAt => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {path};
+}
+
+/// The watcher's file index (Media section Phase 5). Size and mtime are the
+/// change detector: a rescan re-hashes only files whose stat differs, so a
+/// NAS full of unchanged photos costs one stat each instead of one full
+/// read each.
+class WatchedFolderIndex extends Table {
+  TextColumn get rootPath => text()();
+  TextColumn get relativePath => text()();
+  IntColumn get sizeBytes => integer()();
+  IntColumn get mtimeMillis => integer()();
+
+  /// Null until first hashed.
+  TextColumn get contentHash => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {rootPath, relativePath};
+}
+
+/// Simplified GPS track geometry, cached per level of detail.
+///
+/// NOT synced and never backed up: every device can re-derive this from the
+/// gps_tracks points blob in milliseconds, so paying the main database's
+/// schema-bump, HLC, tombstone, and backup costs would buy nothing.
+class GpsTrackGeometryCache extends Table {
+  TextColumn get trackId => text()();
+
+  /// 'thumbnail' (50 m tolerance) | 'overview' (10 m) | 'detail' (2 m)
+  TextColumn get lodLevel => text()();
+
+  /// Gzipped JSON in the same format as gps_tracks.points. Null when
+  /// [status] is not 'ok'.
+  BlobColumn get points => blob().nullable()();
+
+  /// 'ok' | 'empty' | 'unavailable'. An explicit negative is cached so a
+  /// genuinely empty track is not re-derived on every scroll.
+  TextColumn get status => text()();
+
+  IntColumn get createdAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {trackId, lodLevel};
+}
+
+/// Cached NOAA CO-OPS harmonic station constituents. Re-derivable
+/// third-party data: never synced, never backed up. status semantics:
+/// 'ok' = usable constituents in constituentsJson; 'unavailable' = the
+/// station deterministically has no harmonic data. Transient fetch
+/// failures write NO row.
+class NoaaTideStations extends Table {
+  TextColumn get stationId => text()();
+  TextColumn get name => text()();
+  RealColumn get latitude => real()();
+  RealColumn get longitude => real()();
+
+  /// JSON object: {"M2": {"amplitude": 0.576, "phase": 208.2}, ...}
+  TextColumn get constituentsJson => text().withDefault(const Constant('{}'))();
+
+  /// MSL minus MLLW in meters (station datum offset); null when the
+  /// station's datums were unavailable (heights then reference MSL).
+  RealColumn get datumOffsetMllw => real().nullable()();
+  TextColumn get status => text()();
+  IntColumn get fetchedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {stationId};
+}
+
+/// Memoized result of the computed decompression-obligation classification
+/// for one dive (#623).
+///
+/// Local-only by construction: every device can re-derive this from the dive
+/// profile it already holds, so it carries no HLC, is never synced, and is
+/// never backed up. A restored database recomputes rather than inheriting
+/// another device's answer, which may have been produced under different
+/// gradient factors.
+class DecoClassificationCache extends Table {
+  TextColumn get diveId => text()();
+
+  /// Whether the app's own analysis put the diver into decompression.
+  BoolColumn get hadDeco => boolean()();
+
+  /// Fingerprint of every input that can change the answer: engine version,
+  /// the gradient factors actually used, and the dive's profile revision.
+  /// A mismatch means recompute.
+  TextColumn get inputsHash => text()();
+
+  IntColumn get computedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {diveId};
+}
+
+/// Each diver's last Explore sentences with the model's parse, so the field
+/// can offer them and a re-run skips the model. Local-only by construction:
+/// no HLC, never synced, never backed up; rows with an older schema version
+/// are dropped on read.
+class RecentQueries extends Table {
+  /// The diver who asked. A sentence names that diver's own buddies and
+  /// sites, and its pinned identities are theirs.
+  TextColumn get diverId => text()();
+
+  /// The normalized sentence, so a retyped sentence bumps its row.
+  TextColumn get key => text()();
+  TextColumn get sentence => text()();
+  TextColumn get locale => text()();
+  TextColumn get parsedJson => text()();
+  IntColumn get schemaVersion => integer()();
+  TextColumn get subject => text()();
+  IntColumn get lastUsedAt => integer()();
+
+  /// typed (a query the diver wrote) or asked (a sentence put to the
+  /// model); the v18 rows were all asked (#2773).
+  TextColumn get kind => text().withDefault(const Constant('asked'))();
+
+  /// One row per diver, language and sentence.
+  @override
+  Set<Column> get primaryKey => {diverId, locale, key};
+}
+
+@DriftDatabase(
+  tables: [
+    LocalAssetCache,
+    MediaTransferQueue,
+    MediaCacheEntries,
+    BathymetryCache,
+    SwissBathyTileCache,
+    ReefDataCache,
+    NoaaTideStations,
+    GpsTrackGeometryCache,
+    WatchedRoots,
+    WatchedFolderIndex,
+    DecoClassificationCache,
+    RecentQueries,
+    SiteCatalogueEntries,
+    SiteCatalogueMeta,
+    DiveVerticalDistanceCache,
+    IdentificationEmbeddings,
+    MediaAspectCache,
+  ],
+)
 class LocalCacheDatabase extends _$LocalCacheDatabase {
   LocalCacheDatabase(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 26;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onUpgrade: (m, from, to) async {
+      if (from < 2) {
+        // Creates the tables with the CURRENT schema, columns included.
+        await m.createTable(mediaTransferQueue);
+        await m.createTable(mediaCacheEntries);
+      }
+      if (from >= 2 && from < 3) {
+        await m.addColumn(mediaTransferQueue, mediaTransferQueue.progressBytes);
+        await m.addColumn(mediaTransferQueue, mediaTransferQueue.totalBytes);
+      }
+      // Only v2/v3 stored schemas lack this column; a v1 upgrade already
+      // created the table with the full current schema above.
+      if (from >= 2 && from < 4) {
+        await m.addColumn(mediaTransferQueue, mediaTransferQueue.overrideLevel);
+      }
+      // v5: rendition cache freshness token. Only v2..v4 stored schemas lack
+      // it; the v1 create path above already includes the current schema.
+      if (from >= 2 && from < 5) {
+        await m.addColumn(mediaCacheEntries, mediaCacheEntries.sourceVersion);
+      }
+      // v6: delete-intent payload. Only v2..v5 stored schemas lack it; the
+      // v1 create path above already includes the current schema.
+      if (from >= 2 && from < 6) {
+        await m.addColumn(mediaTransferQueue, mediaTransferQueue.payloadJson);
+      }
+      // v7: bathymetry grid cache. from < 7 covers both the v1 path and
+      // v2..v6 upgrades.
+      if (from < 7) {
+        await m.createTable(bathymetryCache);
+      }
+      // v8: reef data cache. Renumbered from v7 at merge time because the
+      // bathymetry branch claimed v7 first. Every stored schema below 8
+      // lacks this table, including v1, because the from<2 branch above
+      // predates it. Drift's createTable is CREATE TABLE IF NOT EXISTS, so
+      // a dev DB that already ran the reef branch at v7 upgrades cleanly.
+      if (from < 8) {
+        await m.createTable(reefDataCache);
+      }
+      // v9: NOAA tide station constituent cache.
+      if (from < 9) {
+        await m.createTable(noaaTideStations);
+      }
+      // v10: simplified GPS track geometry, keyed by (track, LOD).
+      // Renumbered from v9 at merge time because the tide branch claimed 9
+      // first. Every stored schema below 10 lacks it, including v1, for the
+      // same reason reef_data_cache did. A dev DB that already ran this
+      // branch at v9 is healed by the beforeOpen backstop below.
+      if (from < 10) {
+        await m.createTable(gpsTrackGeometryCache);
+      }
+      // v11: repair watcher state (Media section Phase 5). Renumbered from v9
+      // at merge time: main had meanwhile taken 9 for the tide cache and 10
+      // for the GPS geometry cache. A dev DB that already ran this branch at
+      // v9 is healed by the beforeOpen backstop below.
+      if (from < 11) {
+        await m.createTable(watchedRoots);
+        await m.createTable(watchedFolderIndex);
+      }
+      // v12: drop poisoned negative resolutions. Renumbered from v10 at merge
+      // time for the same reason as v11 above. The gallery search window was
+      // computed by copying a UTC DateTime's calendar fields into a LOCAL
+      // DateTime, which shifted it by the whole UTC offset and meant the
+      // raw-instant reading of taken_at was never actually queried. Rows that
+      // only match on that reading were therefore recorded `unresolved` and
+      // locked behind a 24h/3d/7d backoff, so the fix would not take effect
+      // for up to a week. These entries are a pure derived negative cache --
+      // deleting them costs one gallery re-scan each and nothing else.
+      //
+      // Resolved mappings are deliberately left alone: they are correct, and
+      // re-deriving them would cost a full gallery scan per row for nothing.
+      //
+      // No beforeOpen backstop, unlike the createTable steps above: if a
+      // ladder collision skips this, the only consequence is that the stale
+      // negatives expire on their own within 7 days.
+      if (from < 12) {
+        await customStatement(
+          "DELETE FROM local_asset_cache WHERE resolution_method = 'unresolved'",
+        );
+      }
+      // v13: computed deco-obligation classifications (#623).
+      if (from < 13) {
+        await m.createTable(decoClassificationCache);
+      }
+      // v14: swissBATHY3D tile cache (Bathymetrie-Daten Schweiz, part 1).
+      if (from < 14) {
+        await m.createTable(swissBathyTileCache);
+      }
+      // v15: periodic swissBATHY3D tile freshness check -- the version token
+      // and last-checked timestamp that let a stale-but-cached tile be
+      // revalidated with one light STAC item lookup instead of an unbounded
+      // re-download.
+      //
+      // Column-existence checked first, not just from<15: v14's createTable
+      // above already builds the table with the CURRENT (post-v15) column
+      // set for any upgrade path that starts below v14, so blindly adding
+      // these columns again would collide there. And if a ladder collision
+      // left v14's createTable unrun, the table does not exist yet either --
+      // the beforeOpen re-assert below creates it with the full current
+      // schema, so there is nothing to add here in that case.
+      if (from < 15) {
+        final cols = await customSelect(
+          "PRAGMA table_info('swiss_bathy_tile_cache')",
+        ).get();
+        final columnNames = cols.map((c) => c.read<String>('name')).toSet();
+        if (columnNames.isNotEmpty) {
+          if (!columnNames.contains('source_datetime')) {
+            await m.addColumn(
+              swissBathyTileCache,
+              swissBathyTileCache.sourceDatetime,
+            );
+          }
+          if (!columnNames.contains('checked_at')) {
+            await m.addColumn(
+              swissBathyTileCache,
+              swissBathyTileCache.checkedAt,
+            );
+          }
+        }
+      }
+      // v16: the href a freshness check's version token was read from, so a
+      // stale check can match back to the exact previously-covering asset
+      // instead of assuming the first bbox-overlapping candidate is it.
+      //
+      // Column-existence checked first for the same reason as v15 above:
+      // v14's createTable already builds the table with the current
+      // (post-v16) column set for upgrades starting below v14.
+      if (from < 16) {
+        final cols = await customSelect(
+          "PRAGMA table_info('swiss_bathy_tile_cache')",
+        ).get();
+        final columnNames = cols.map((c) => c.read<String>('name')).toSet();
+        if (columnNames.isNotEmpty && !columnNames.contains('source_href')) {
+          await m.addColumn(
+            swissBathyTileCache,
+            swissBathyTileCache.sourceHref,
+          );
+        }
+      }
+      // v17: the lake reference level a tile's cached depths were computed
+      // against, so a correction to the swissBATHY3D lake table (a bbox or
+      // documented level change) invalidates only the tiles it actually
+      // affects instead of either serving them stale forever or wiping the
+      // whole cache. See SwissBathyTileCache.referenceLevelMeters's doc.
+      //
+      // Column-existence checked first for the same reason as v15/v16
+      // above: v14's createTable already builds the table with the current
+      // (post-v17) column set for upgrades starting below v14.
+      if (from < 17) {
+        final cols = await customSelect(
+          "PRAGMA table_info('swiss_bathy_tile_cache')",
+        ).get();
+        final columnNames = cols.map((c) => c.read<String>('name')).toSet();
+        if (columnNames.isNotEmpty &&
+            !columnNames.contains('reference_level_meters')) {
+          await m.addColumn(
+            swissBathyTileCache,
+            swissBathyTileCache.referenceLevelMeters,
+          );
+        }
+      }
+      // v18: Explore recent queries. Table-only rung, no backfill.
+      if (from < 18) {
+        await m.createTable(recentQueries);
+      }
+      // v19: recent searches gain a kind, typed or asked (#2773). Rows the
+      // v18 rung created were all asked; the column default says so. A
+      // table v18 created below this step already has the column.
+      if (from < 19) {
+        final cols = await customSelect(
+          "PRAGMA table_info('recent_queries')",
+        ).get();
+        final names = cols.map((c) => c.read<String>('name')).toSet();
+        if (names.isNotEmpty && !names.contains('kind')) {
+          await m.addColumn(recentQueries, recentQueries.kind);
+        }
+      }
+      // v20: terrain grids in a compact binary column, plus the size and
+      // last-read stamp the byte budget needs (#4258). Legacy JSON rows
+      // stay readable and are converted the first time they are read.
+      if (from < 20) {
+        await _addGridBlobColumns();
+      }
+      // v21: the built-in site catalogue. Table-only rung: the importer
+      // fills the tables from the bundled file after the first frame.
+      if (from < 21) {
+        await m.createTable(siteCatalogueEntries);
+        await m.createTable(siteCatalogueMeta);
+        await _createSiteCatalogueIndex();
+      }
+      // v22: a catalogue record's kind (dive site or register record), and
+      // the index that reads one kind near a point.
+      if (from < 22) {
+        await addSiteCatalogueKind(this);
+      }
+      // v23: each dive's vertical distance (issue #4569).
+      if (from < 23) await m.createTable(diveVerticalDistanceCache);
+      // v24: where a researched catalogue record's position came from.
+      if (from < 24) await addSiteCataloguePositionFrom(this);
+      // v25: marine life crop embeddings (issue #4668).
+      if (from < 25) await m.createTable(identificationEmbeddings);
+      // v26: each library thumbnail's learned shape (issue #4738).
+      if (from < 26) await m.createTable(mediaAspectCache);
+    },
+    beforeOpen: (details) async {
+      // Ladder-collision self-heal: a parallel branch that also claimed v7
+      // may have stamped user_version first on a shared dev machine, so
+      // onUpgrade never runs here and a table would be missing. Idempotent
+      // re-assert, mirroring the main DB's pattern. Keep the column shapes
+      // in sync with the BathymetryCache and ReefDataCache tables.
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS bathymetry_cache (
+          cache_key TEXT NOT NULL,
+          center_lat REAL NOT NULL,
+          center_lon REAL NOT NULL,
+          status TEXT NOT NULL,
+          source_id TEXT NULL,
+          resolution_meters REAL NULL,
+          grid_json TEXT NULL,
+          fetched_at INTEGER NOT NULL,
+          grid_blob BLOB NULL,
+          grid_bytes INTEGER NULL,
+          last_used_at INTEGER NULL,
+          PRIMARY KEY (cache_key)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS reef_data_cache (
+          provider TEXT NOT NULL,
+          coord_key TEXT NOT NULL,
+          variant TEXT NOT NULL DEFAULT '',
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          fetched_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, coord_key, variant)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS gps_track_geometry_cache (
+          track_id TEXT NOT NULL,
+          lod_level TEXT NOT NULL,
+          points BLOB NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (track_id, lod_level)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS noaa_tide_stations (
+          station_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          latitude REAL NOT NULL,
+          longitude REAL NOT NULL,
+          constituents_json TEXT NOT NULL DEFAULT '{}',
+          datum_offset_mllw REAL NULL,
+          status TEXT NOT NULL,
+          fetched_at INTEGER NOT NULL,
+          PRIMARY KEY (station_id)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS watched_roots (
+          path TEXT NOT NULL,
+          added_at INTEGER NOT NULL,
+          last_scan_at INTEGER,
+          PRIMARY KEY (path)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS watched_folder_index (
+          root_path TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          mtime_millis INTEGER NOT NULL,
+          content_hash TEXT,
+          PRIMARY KEY (root_path, relative_path)
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS deco_classification_cache (
+          dive_id TEXT NOT NULL,
+          had_deco INTEGER NOT NULL,
+          inputs_hash TEXT NOT NULL,
+          computed_at INTEGER NOT NULL,
+          PRIMARY KEY (dive_id)
+        )
+      ''');
+      // v18 mirror, same collision self-heal as above. Development builds
+      // of v18 created the table keyed on the sentence alone; the rows are a
+      // convenience cache, so any shape whose key lacks the diver is dropped
+      // and recreated.
+      final recentColumns = await customSelect(
+        "SELECT name, pk FROM pragma_table_info('recent_queries')",
+      ).get();
+      if (recentColumns.isNotEmpty &&
+          !recentColumns.any(
+            (r) =>
+                r.read<String>('name') == 'diver_id' && r.read<int>('pk') > 0,
+          )) {
+        await customStatement('DROP TABLE recent_queries');
+      }
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS recent_queries (
+          diver_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          sentence TEXT NOT NULL,
+          locale TEXT NOT NULL,
+          parsed_json TEXT NOT NULL,
+          schema_version INTEGER NOT NULL,
+          subject TEXT NOT NULL,
+          last_used_at INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'asked',
+          PRIMARY KEY (diver_id, locale, key)
+        )
+      ''');
+      // v19 mirror: a table a colliding branch created without the kind.
+      final recentKind = await customSelect(
+        "SELECT name FROM pragma_table_info('recent_queries') "
+        "WHERE name = 'kind'",
+      ).get();
+      if (recentKind.isEmpty) {
+        await customStatement(
+          "ALTER TABLE recent_queries ADD COLUMN kind TEXT NOT NULL "
+          "DEFAULT 'asked'",
+        );
+      }
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS swiss_bathy_tile_cache (
+          tile_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          grid_json TEXT NULL,
+          fetched_at INTEGER NOT NULL,
+          source_datetime TEXT NULL,
+          checked_at INTEGER NULL,
+          source_href TEXT NULL,
+          reference_level_meters REAL NULL,
+          grid_blob BLOB NULL,
+          PRIMARY KEY (tile_key)
+        )
+      ''');
+      // CREATE TABLE IF NOT EXISTS above is a no-op when the table already
+      // exists -- the exact ladder-collision case this backstop is meant to
+      // heal, e.g. a database stamped at v17 (by a colliding branch that
+      // claimed the same user_version first) whose table still has the v16
+      // shape. The onUpgrade `from < 17` step never runs then, since Drift
+      // reads the already-stamped v17 and sees nothing to upgrade from, so
+      // the column would otherwise stay permanently missing.
+      final swissBathyCols = await customSelect(
+        "PRAGMA table_info('swiss_bathy_tile_cache')",
+      ).get();
+      final swissBathyColumnNames = swissBathyCols
+          .map((c) => c.read<String>('name'))
+          .toSet();
+      if (!swissBathyColumnNames.contains('reference_level_meters')) {
+        await customStatement(
+          'ALTER TABLE swiss_bathy_tile_cache '
+          'ADD COLUMN reference_level_meters REAL NULL',
+        );
+      }
+      // v20 mirror, for a database a colliding branch stamped at v20 first.
+      await _addGridBlobColumns();
+      // v21 mirror, for a database a colliding branch stamped at v21 first.
+      await customStatement(kCreateSiteCatalogueTableSql);
+      await customStatement(kCreateSiteCatalogueMetaTableSql);
+      await _createSiteCatalogueIndex();
+      // v22 mirror, for a database a colliding branch stamped at v22 first.
+      await addSiteCatalogueKind(this);
+      // v23 mirror, for a database a colliding branch stamped at v23 first.
+      await customStatement(kCreateDiveVerticalDistanceCacheSql);
+      await customStatement(kCreateIdentificationEmbeddingsSql);
+      // v26 mirror, for a database a colliding branch stamped at v26 first.
+      await customStatement(kCreateMediaAspectCacheSql);
+      // v24 mirror, for a database a colliding branch stamped at v24 first.
+      await addSiteCataloguePositionFrom(this);
+    },
+  );
+
+  /// Idempotent, so the v21 rung and the open backstop (which also covers
+  /// a fresh create) share it.
+  Future<void> _createSiteCatalogueIndex() =>
+      customStatement(kCreateSiteCatalogueIndexSql);
+
+  /// The v20 columns, added wherever a table lacks them. Idempotent, so the
+  /// rung and the open backstop share it. Legacy rows are not backfilled:
+  /// an UPDATE that grows a record rewrites its whole JSON grid, which on
+  /// the unbounded caches #4258 is about meant seconds of blocked open at
+  /// launch. The budget sizes them from their JSON on demand instead.
+  Future<void> _addGridBlobColumns() async {
+    final hasTable = await _addMissingColumns('bathymetry_cache', const {
+      'grid_blob': 'BLOB NULL',
+      'grid_bytes': 'INTEGER NULL',
+      'last_used_at': 'INTEGER NULL',
+    });
+    if (hasTable) {
+      // The byte budget's columns sit after grid_blob in every record, so a
+      // table scan for them walks each grid's overflow pages: the whole
+      // cache, after every write. This covering index answers the budget's
+      // queries without reading a grid.
+      await customStatement(
+        'CREATE INDEX IF NOT EXISTS bathymetry_cache_budget_idx '
+        'ON bathymetry_cache '
+        '(status, grid_bytes, last_used_at, fetched_at, cache_key)',
+      );
+    }
+    await _addMissingColumns('swiss_bathy_tile_cache', const {
+      'grid_blob': 'BLOB NULL',
+    });
+  }
+
+  /// Adds each of [columns] (name to SQL type) that [table] lacks, and
+  /// returns whether [table] exists. A missing table is left alone:
+  /// whatever creates it later builds the current shape.
+  Future<bool> _addMissingColumns(
+    String table,
+    Map<String, String> columns,
+  ) async {
+    final existing = (await customSelect(
+      "PRAGMA table_info('$table')",
+    ).get()).map((c) => c.read<String>('name')).toSet();
+    if (existing.isEmpty) return false;
+    for (final MapEntry(key: name, value: type) in columns.entries) {
+      if (existing.contains(name)) continue;
+      await customStatement('ALTER TABLE $table ADD COLUMN $name $type');
+    }
+    return true;
+  }
 }

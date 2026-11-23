@@ -1,0 +1,425 @@
+import 'package:collection/collection.dart';
+import 'package:equatable/equatable.dart';
+
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+
+/// Library health facet: rows whose backing file is missing (persisted
+/// orphan flag).
+///
+/// There is deliberately no "unlinked" facet, but NOT because unlinked rows
+/// cannot exist: they can. A row with `retain_in_library` set keeps its place
+/// with no dive, site or equipment link, and the orphan sweep
+/// (`getSweepableOrphanIds`) exists precisely to collect the unlinked rows
+/// nothing retains. The facet was simply never built, so an album saved with
+/// one decodes to no constraint.
+///
+/// The Attached to facet ([MediaAttachmentKind.unlinked]) now offers what
+/// that value meant, but an album still holding `"health": "unlinked"` keeps
+/// decoding to no constraint: such albums have shown every picture since the
+/// value was removed, and reviving it would quietly change what they show
+/// (issue #4224).
+enum MediaHealthFilter { missing }
+
+/// What a library row is attached to (issue #4224), by the row's own links
+/// and in the precedence `groupByDive` and the By dive SQL group key use, so
+/// every row is exactly one kind:
+///
+/// - [dive]: `dive_id` is set.
+/// - [site]: no dive, `site_id` is set (a site map, a rules board). A dive
+///   photo is never a site picture because its dive has a site.
+/// - [equipment]: no dive or site, `equipment_id` is set.
+/// - [unlinked]: none of the three.
+///
+/// Declared in the order the filter sheet and the active chip list them.
+enum MediaAttachmentKind { dive, site, equipment, unlinked }
+
+/// Cross-dive library filter. Compiled to SQL by MediaLibraryRepository;
+/// all fields combine with AND. Phase 5 serializes this for smart albums.
+class MediaLibraryFilter {
+  const MediaLibraryFilter({
+    this.mediaType,
+    this.siteId,
+    this.tripId,
+    this.diveId,
+    this.speciesId,
+    this.fromDate,
+    this.toDate,
+    this.sourceType,
+    this.health,
+    this.tagIds = const {},
+    this.buddyIds = const {},
+    this.includeMe = false,
+    this.noPeople = false,
+    this.notPlacedInDive = false,
+    this.attachedTo = const {},
+  });
+
+  final MediaType? mediaType;
+  final String? siteId;
+  final String? tripId;
+  final String? diveId;
+
+  /// Rows tagged with this species (a `media_species` row for the pair).
+  final String? speciesId;
+
+  /// Inclusive bounds applied to the sort key (takenAt, falling back to
+  /// createdAt).
+  final DateTime? fromDate;
+  final DateTime? toDate;
+
+  final MediaSourceType? sourceType;
+  final MediaHealthFilter? health;
+
+  /// Rows carrying any of these tags (issue #1970). Empty means no tag
+  /// constraint.
+  final Set<String> tagIds;
+
+  /// Rows tagged with any of these buddies (issue #1745). Empty means no
+  /// buddy constraint.
+  final Set<String> buddyIds;
+
+  /// Rows the viewing diver is tagged in as "Me" (issue #1745). A flag, not
+  /// a diver id: smart albums are shared by every profile on the device, so
+  /// "Photos of me" shows each profile its own photos.
+  final bool includeMe;
+
+  /// Rows with no one tagged at all: no buddy and no diver's Me tag
+  /// (issue #4148). The opposite of the people tile marker, so a row shows
+  /// here exactly when its tile has no people marker. The filter sheet keeps
+  /// it apart from [buddyIds] and [includeMe]; set together, they match
+  /// nothing.
+  final bool noPeople;
+
+  /// Dive rows the profile chart would draw no marker for (issue #4148): the
+  /// opposite of the time-in-dive tile marker, limited to rows linked to a
+  /// dive, since a row with no dive cannot be placed in one.
+  final bool notPlacedInDive;
+
+  /// Rows attached to any of these kinds (issue #4224). Empty means no
+  /// constraint.
+  final Set<MediaAttachmentKind> attachedTo;
+
+  /// Whether a person (a buddy or Me) narrows the rows. False for
+  /// [noPeople], which asks for the rows with no person instead.
+  bool get hasPeople => buddyIds.isNotEmpty || includeMe;
+
+  static const MediaLibraryFilter none = MediaLibraryFilter();
+
+  bool get isEmpty =>
+      mediaType == null &&
+      siteId == null &&
+      tripId == null &&
+      diveId == null &&
+      speciesId == null &&
+      fromDate == null &&
+      toDate == null &&
+      sourceType == null &&
+      health == null &&
+      tagIds.isEmpty &&
+      !hasPeople &&
+      !noPeople &&
+      !notPlacedInDive &&
+      attachedTo.isEmpty;
+
+  /// Sentinel-based copyWith so callers can explicitly clear a field back to
+  /// null (the plain `??` idiom cannot).
+  MediaLibraryFilter copyWith({
+    Object? mediaType = _undefined,
+    Object? siteId = _undefined,
+    Object? tripId = _undefined,
+    Object? diveId = _undefined,
+    Object? speciesId = _undefined,
+    Object? fromDate = _undefined,
+    Object? toDate = _undefined,
+    Object? sourceType = _undefined,
+    Object? health = _undefined,
+    Set<String>? tagIds,
+    Set<String>? buddyIds,
+    bool? includeMe,
+    bool? noPeople,
+    bool? notPlacedInDive,
+    Set<MediaAttachmentKind>? attachedTo,
+  }) {
+    return MediaLibraryFilter(
+      mediaType: mediaType == _undefined
+          ? this.mediaType
+          : mediaType as MediaType?,
+      siteId: siteId == _undefined ? this.siteId : siteId as String?,
+      tripId: tripId == _undefined ? this.tripId : tripId as String?,
+      diveId: diveId == _undefined ? this.diveId : diveId as String?,
+      speciesId: speciesId == _undefined
+          ? this.speciesId
+          : speciesId as String?,
+      fromDate: fromDate == _undefined ? this.fromDate : fromDate as DateTime?,
+      toDate: toDate == _undefined ? this.toDate : toDate as DateTime?,
+      sourceType: sourceType == _undefined
+          ? this.sourceType
+          : sourceType as MediaSourceType?,
+      health: health == _undefined ? this.health : health as MediaHealthFilter?,
+      tagIds: tagIds ?? this.tagIds,
+      buddyIds: buddyIds ?? this.buddyIds,
+      includeMe: includeMe ?? this.includeMe,
+      noPeople: noPeople ?? this.noPeople,
+      notPlacedInDive: notPlacedInDive ?? this.notPlacedInDive,
+      attachedTo: attachedTo ?? this.attachedTo,
+    );
+  }
+
+  static const Object _undefined = Object();
+
+  /// Serialized form stored by smart albums. Ids and enum names mean the
+  /// same thing on every device, which is why an album can sync.
+  ///
+  /// The dates are written as wall-clock-as-UTC millis rather than as the
+  /// local instant. [fromDate] and [toDate] are calendar bounds -- what
+  /// matters is the day the user picked, and MediaLibraryRepository already
+  /// compares them against `taken_at`, which is itself stored wall-clock.
+  /// Encoding the instant would hand a device in another timezone a bound
+  /// shifted by the offset between them, quietly moving an album's day
+  /// boundary by up to a day.
+  Map<String, dynamic> toJson() => {
+    'mediaType': mediaType?.name,
+    'siteId': siteId,
+    'tripId': tripId,
+    'diveId': diveId,
+    'speciesId': speciesId,
+    'fromDate': _dateToMillis(fromDate),
+    'toDate': _dateToMillis(toDate),
+    'sourceType': sourceType?.name,
+    'health': health?.name,
+    // Left out when empty, so an album saved before tags keeps the JSON it
+    // always had. Sorted, so the same selection always encodes the same.
+    if (tagIds.isNotEmpty) 'tagIds': tagIds.sorted(),
+    // Left out when empty or off, like the tags (issue #1745).
+    if (buddyIds.isNotEmpty) 'buddyIds': buddyIds.sorted(),
+    if (includeMe) 'me': true,
+    // Left out when off, like Me (issue #4148).
+    if (noPeople) 'noPeople': true,
+    if (notPlacedInDive) 'notPlacedInDive': true,
+    // Left out when empty, like the tags (issue #4224).
+    if (attachedTo.isNotEmpty)
+      'attachedTo': [for (final kind in attachedTo) kind.name]..sort(),
+  };
+
+  /// Decodes leniently: an album written by a newer version (or a value
+  /// this build no longer knows) degrades to "no constraint" rather than
+  /// throwing and taking the library view down with it.
+  static MediaLibraryFilter fromJson(Map<String, dynamic> json) {
+    return MediaLibraryFilter(
+      mediaType: _enumByName(MediaType.values, json['mediaType']),
+      siteId: json['siteId'] as String?,
+      tripId: json['tripId'] as String?,
+      diveId: json['diveId'] as String?,
+      speciesId: json['speciesId'] as String?,
+      fromDate: _dateFromMillis(json['fromDate']),
+      toDate: _dateFromMillis(json['toDate']),
+      sourceType: _enumByName(MediaSourceType.values, json['sourceType']),
+      health: _enumByName(MediaHealthFilter.values, json['health']),
+      tagIds: switch (json['tagIds']) {
+        final List<dynamic> ids => {...ids.whereType<String>()},
+        _ => const {},
+      },
+      buddyIds: switch (json['buddyIds']) {
+        final List<dynamic> ids => {...ids.whereType<String>()},
+        _ => const {},
+      },
+      includeMe: json['me'] == true,
+      noPeople: json['noPeople'] == true,
+      notPlacedInDive: json['notPlacedInDive'] == true,
+      attachedTo: switch (json['attachedTo']) {
+        final List<dynamic> names => {
+          for (final name in names)
+            ?_enumByName(MediaAttachmentKind.values, name),
+        },
+        _ => const {},
+      },
+    );
+  }
+
+  static T? _enumByName<T extends Enum>(List<T> values, Object? raw) {
+    if (raw is! String) return null;
+    for (final value in values) {
+      if (value.name == raw) return value;
+    }
+    return null;
+  }
+
+  static int? _dateToMillis(DateTime? date) =>
+      date == null ? null : asWallClockUtc(date).millisecondsSinceEpoch;
+
+  static DateTime? _dateFromMillis(Object? raw) => raw is int
+      ? fromWallClockUtc(DateTime.fromMillisecondsSinceEpoch(raw, isUtc: true))
+      : null;
+
+  @override
+  bool operator ==(Object other) {
+    return other is MediaLibraryFilter &&
+        other.mediaType == mediaType &&
+        other.siteId == siteId &&
+        other.tripId == tripId &&
+        other.diveId == diveId &&
+        other.speciesId == speciesId &&
+        other.fromDate == fromDate &&
+        other.toDate == toDate &&
+        other.sourceType == sourceType &&
+        other.health == health &&
+        const SetEquality<String>().equals(other.tagIds, tagIds) &&
+        const SetEquality<String>().equals(other.buddyIds, buddyIds) &&
+        other.includeMe == includeMe &&
+        other.noPeople == noPeople &&
+        other.notPlacedInDive == notPlacedInDive &&
+        const SetEquality<MediaAttachmentKind>().equals(
+          other.attachedTo,
+          attachedTo,
+        );
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    mediaType,
+    siteId,
+    tripId,
+    diveId,
+    speciesId,
+    fromDate,
+    toDate,
+    sourceType,
+    health,
+    const SetEquality<String>().hash(tagIds),
+    const SetEquality<String>().hash(buddyIds),
+    includeMe,
+    noPeople,
+    notPlacedInDive,
+    const SetEquality<MediaAttachmentKind>().hash(attachedTo),
+  );
+}
+
+/// Keyset cursor: the last entry's value for the active sort key, plus its
+/// row id as the tiebreaker.
+///
+/// [sortKey] is an int for the date and size fields and a String for the name
+/// field. It is always non-null: the repository coalesces every sort
+/// expression, because a NULL key makes the keyset predicate (`key < ?`)
+/// evaluate to NULL, which is falsy, and silently truncates the result set at
+/// the first NULL row.
+///
+/// [groupKeys] holds the last entry's group keys when the page was grouped
+/// (issue #4268), in the order the query sorts by them, ahead of [sortKey].
+/// They are coalesced for the same reason, and are empty for an ungrouped
+/// page.
+class MediaLibraryCursor extends Equatable {
+  const MediaLibraryCursor({
+    required this.sortKey,
+    required this.id,
+    this.groupKeys = const [],
+  });
+
+  final Object sortKey;
+  final String id;
+  final List<Object> groupKeys;
+
+  @override
+  List<Object?> get props => [groupKeys, sortKey, id];
+}
+
+/// One library row: the media item plus denormalized dive header fields for
+/// the by-dive and timeline groupers.
+class MediaLibraryEntry extends Equatable {
+  const MediaLibraryEntry({
+    required this.item,
+    this.diveNumber,
+    this.diveDateTime,
+    this.siteName,
+    this.attachedSiteName,
+    this.attachedEquipmentName,
+    this.hasPeople = false,
+    this.hasSpecies = false,
+    this.hasTimeInDive = false,
+  });
+
+  final MediaItem item;
+  final int? diveNumber;
+  final DateTime? diveDateTime;
+
+  /// The name of the dive's site. Null for a row with no dive, even when the
+  /// row is attached to a site of its own: that one is [attachedSiteName].
+  final String? siteName;
+
+  /// The name of the site the row itself is attached to (`media.site_id`),
+  /// such as a site map with no dive (issue #4149).
+  final String? attachedSiteName;
+
+  /// The name of the equipment item the row is attached to
+  /// (`media.equipment_id`).
+  final String? attachedEquipmentName;
+
+  /// Whether anyone (a buddy or a diver's Me tag) is tagged on the item
+  /// (issue #4218).
+  final bool hasPeople;
+
+  /// Whether any species is tagged on the item (issue #4218).
+  final bool hasSpecies;
+
+  /// Whether the item has a time in its dive that the profile chart would
+  /// draw it at (issue #4218). See `LibraryTileMarkers.hasTimeInDive` for the
+  /// rule.
+  final bool hasTimeInDive;
+
+  /// Sentinel-based for the nullable fields, as [MediaLibraryFilter.copyWith]
+  /// is, so a caller can clear one back to null.
+  MediaLibraryEntry copyWith({
+    MediaItem? item,
+    Object? diveNumber = MediaLibraryFilter._undefined,
+    Object? diveDateTime = MediaLibraryFilter._undefined,
+    Object? siteName = MediaLibraryFilter._undefined,
+    Object? attachedSiteName = MediaLibraryFilter._undefined,
+    Object? attachedEquipmentName = MediaLibraryFilter._undefined,
+    bool? hasPeople,
+    bool? hasSpecies,
+    bool? hasTimeInDive,
+  }) => MediaLibraryEntry(
+    item: item ?? this.item,
+    diveNumber: diveNumber == MediaLibraryFilter._undefined
+        ? this.diveNumber
+        : diveNumber as int?,
+    diveDateTime: diveDateTime == MediaLibraryFilter._undefined
+        ? this.diveDateTime
+        : diveDateTime as DateTime?,
+    siteName: siteName == MediaLibraryFilter._undefined
+        ? this.siteName
+        : siteName as String?,
+    attachedSiteName: attachedSiteName == MediaLibraryFilter._undefined
+        ? this.attachedSiteName
+        : attachedSiteName as String?,
+    attachedEquipmentName:
+        attachedEquipmentName == MediaLibraryFilter._undefined
+        ? this.attachedEquipmentName
+        : attachedEquipmentName as String?,
+    hasPeople: hasPeople ?? this.hasPeople,
+    hasSpecies: hasSpecies ?? this.hasSpecies,
+    hasTimeInDive: hasTimeInDive ?? this.hasTimeInDive,
+  );
+
+  @override
+  List<Object?> get props => [
+    item,
+    diveNumber,
+    diveDateTime,
+    siteName,
+    attachedSiteName,
+    attachedEquipmentName,
+    hasPeople,
+    hasSpecies,
+    hasTimeInDive,
+  ];
+}
+
+/// One page of library results. [nextCursor] is null on the last page.
+class MediaLibraryPageResult {
+  const MediaLibraryPageResult({required this.entries, this.nextCursor});
+
+  final List<MediaLibraryEntry> entries;
+  final MediaLibraryCursor? nextCursor;
+}

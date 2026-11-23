@@ -1,0 +1,207 @@
+import 'package:flutter/widgets.dart' show Size;
+
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
+import 'package:submersion/shared/widgets/nav/nav_id_aliases.dart';
+import 'package:submersion/shared/widgets/nav/nav_shortcuts.dart';
+import 'package:submersion/shared/widgets/nav/nav_slot_count.dart';
+
+/// Canonical list of every nav destination, including the `more` sentinel.
+final navDestinationsProvider = Provider<List<NavDestination>>((ref) {
+  return availableNavDestinations(
+    kNavDestinations,
+    ref.watch(deviceCapabilitiesProvider),
+  );
+});
+
+/// Ids of destinations the user can reorder on either surface.
+final movableNavIdsProvider = Provider<List<String>>(
+  (ref) => [
+    for (final d in ref.watch(navDestinationsProvider))
+      if (!d.isPinned) d.id,
+  ],
+);
+
+/// Computes the current phone primary slot count from the live view size and
+/// the label-visibility setting (#1424).
+///
+/// Shared by every widget that needs a `navPrimaryDestinationsProvider` /
+/// `navOverflowDestinationsProvider` family key, so the bottom bar, the More
+/// sheet, and the Appearance page preview tile all agree on the same slot
+/// count within a build.
+int currentPhonePrimarySlotCount(WidgetRef ref, Size viewSize) {
+  final alwaysHideLabels =
+      ref.watch(navAlwaysHideLabelsPhoneProvider).value ?? false;
+  final availableCount = ref.watch(movableNavIdsProvider).length;
+  final baseWidth = viewSize.width < viewSize.height
+      ? viewSize.width
+      : viewSize.height;
+  return phonePrimarySlotCount(
+    baseWidth: baseWidth,
+    showLabels: !alwaysHideLabels,
+    availableCount: availableCount,
+  );
+}
+
+/// The phone nav order: bottom-bar slots first, then the More menu, in order.
+final navPhoneOrderNotifierProvider =
+    StateNotifierProvider<NavOrderNotifier, List<String>>((ref) {
+      final repository = ref.watch(appSettingsRepositoryProvider);
+      return NavOrderNotifier(
+        read: repository.getNavPrimaryIdsRaw,
+        write: repository.setNavPrimaryIds,
+        movableIds: ref.watch(movableNavIdsProvider),
+        shortcutOrderIds: kNavShortcutOrderIds,
+      );
+    });
+
+/// The wide-screen rail order, below the pinned Home destination.
+///
+/// Independent of the phone order: a rail is long enough to show everything,
+/// so the sequence that reads well there is rarely the one that decides which
+/// three destinations earn a bottom-bar slot.
+final navRailOrderNotifierProvider =
+    StateNotifierProvider<NavOrderNotifier, List<String>>((ref) {
+      final repository = ref.watch(appSettingsRepositoryProvider);
+      return NavOrderNotifier(
+        read: repository.getNavRailIdsRaw,
+        write: repository.setNavRailIds,
+        movableIds: ref.watch(movableNavIdsProvider),
+        shortcutOrderIds: kNavShortcutOrderIds,
+      );
+    });
+
+/// Convenience alias -- reads the current normalized phone order.
+final navPhoneOrderProvider = Provider<List<String>>((ref) {
+  return ref.watch(navPhoneOrderNotifierProvider);
+});
+
+/// Convenience alias -- reads the current normalized rail order.
+final navRailOrderProvider = Provider<List<String>>((ref) {
+  return ref.watch(navRailOrderNotifierProvider);
+});
+
+/// The phone primary list: [dashboard, ...slotCount middle items, more].
+///
+/// Parameterized by [slotCount] rather than reading a fixed constant, since
+/// how many middle slots fit is computed from the live screen width and
+/// label-visibility setting (#1424, see `phonePrimarySlotCount`).
+final navPrimaryDestinationsProvider =
+    Provider.family<List<NavDestination>, int>((ref, slotCount) {
+      final byId = _destinationsById(ref);
+      final middle = ref
+          .watch(navPhoneOrderProvider)
+          .take(slotCount)
+          .map((id) => resolveNavDestination(id, byId))
+          .whereType<NavDestination>()
+          .toList(growable: false);
+      return [byId['dashboard']!, ...middle, byId['more']!];
+    });
+
+/// Phone overflow ("More") destinations, in the order the user chose.
+///
+/// [slotCount] must match the value passed to [navPrimaryDestinationsProvider]
+/// for the same build, so every movable id appears in exactly one of the two.
+final navOverflowDestinationsProvider =
+    Provider.family<List<NavDestination>, int>((ref, slotCount) {
+      final byId = _destinationsById(ref);
+      return ref
+          .watch(navPhoneOrderProvider)
+          .skip(slotCount)
+          .map((id) => resolveNavDestination(id, byId))
+          .whereType<NavDestination>()
+          .toList(growable: false);
+    });
+
+/// Wide-screen rail destinations: pinned Home, then the user's rail order.
+///
+/// The `more` sentinel never appears here; a rail shows every destination, so
+/// it has no overflow.
+final navRailDestinationsProvider = Provider<List<NavDestination>>((ref) {
+  final byId = _destinationsById(ref);
+  final rest = ref
+      .watch(navRailOrderProvider)
+      .map((id) => resolveNavDestination(id, byId))
+      .whereType<NavDestination>()
+      .toList(growable: false);
+  return [byId['dashboard']!, ...rest];
+});
+
+Map<String, NavDestination> _destinationsById(Ref ref) {
+  return {for (final d in ref.watch(navDestinationsProvider)) d.id: d};
+}
+
+/// Owns one persisted nav order: the full list of movable ids, in the order
+/// the user arranged them.
+///
+/// Two instances exist, one per surface, differing only in which settings key
+/// [read] and [write] address.
+class NavOrderNotifier extends StateNotifier<List<String>> {
+  NavOrderNotifier({
+    required this.read,
+    required this.write,
+    required this.movableIds,
+    this.shortcutOrderIds = const [],
+  }) : super(normalizeNavOrder(stored: const [], movableIds: movableIds)) {
+    _load();
+  }
+
+  static final _log = LoggerService.forClass(NavOrderNotifier);
+
+  /// Reads the raw stored order, or `null` when the key has never been
+  /// written, its value is not a JSON list, or the read failed. Every null
+  /// means the same thing here: fall back to the canonical order.
+  final Future<List<String>?> Function() read;
+
+  /// Persists a normalized order. Throws so a failed save reaches the caller.
+  final Future<void> Function(List<String>) write;
+
+  final List<String> movableIds;
+
+  /// Every nav shortcut this build knows (#2936). A stored shortcut outside
+  /// this list is dropped on load.
+  final List<String> shortcutOrderIds;
+
+  Future<void> _load() async {
+    List<String>? raw;
+    try {
+      raw = await read();
+    } catch (e, stackTrace) {
+      // The repository already logs and swallows its own read errors, so this
+      // only fires if the read itself could not be attempted. Keep the
+      // canonical order rather than failing the provider: an unreadable
+      // preference should cost the user their customization, not their nav.
+      _log.error('Failed to load nav order', error: e, stackTrace: stackTrace);
+      return;
+    }
+    final normalized = normalizeNavOrder(
+      stored: raw ?? const [],
+      movableIds: movableIds,
+      shortcutOrderIds: shortcutOrderIds,
+    );
+    if (mounted) state = normalized;
+  }
+
+  /// Normalizes [ids], persists, and updates state.
+  ///
+  /// The saved value also carries each renamed destination's old id (see
+  /// [withLegacyNavIds]) so an older synced build keeps the user's slot; the
+  /// state holds only the normalized ids.
+  ///
+  /// Rethrows a write failure so the caller can roll its optimistic UI back.
+  Future<void> setOrder(List<String> ids) async {
+    final normalized = normalizeNavOrder(
+      stored: ids,
+      movableIds: movableIds,
+      shortcutOrderIds: shortcutOrderIds,
+    );
+    await write(withLegacyNavIds(normalized));
+    if (mounted) state = normalized;
+  }
+
+  /// Restores the canonical order, which carries no shortcuts.
+  Future<void> resetToDefaults() => setOrder(movableIds);
+}

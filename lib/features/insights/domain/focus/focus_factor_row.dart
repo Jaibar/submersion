@@ -1,0 +1,83 @@
+import 'package:flutter/foundation.dart';
+
+import 'package:submersion/features/insights/domain/time_of_day_bucket.dart';
+
+/// One dive's factors for Dive focus, in storage units. Categorical values
+/// are the stable keys the Insights distributions already emit, so the
+/// existing label helpers can render them.
+@immutable
+class FocusFactorRow {
+  const FocusFactorRow({
+    required this.diveId,
+    required this.dateTime,
+    required this.timeOfDay,
+    this.maxDepth,
+    this.avgDepth,
+    this.durationMinutes,
+    this.waterTemp,
+    this.visibilityKey,
+    this.currentStrength,
+    this.waterType,
+    this.entryMethod,
+    this.siteId,
+    this.siteName,
+    this.diveTypes = const [],
+    this.gasClass,
+    this.firstTankVolume,
+    this.weight,
+    this.suitKey,
+    this.buddyKey,
+  });
+
+  final String diveId;
+
+  /// `dive_date_time`, a wall-clock value stored as UTC.
+  final DateTime dateTime;
+
+  /// The Time patterns bucket, from sunrise and sunset at the dive site
+  /// (issue #3340). Required so every row builder goes through
+  /// `TimeOfDayClassifier`, the one classification path.
+  final TimeOfDayBucket timeOfDay;
+  final double? maxDepth;
+  final double? avgDepth;
+
+  /// Measured runtime in minutes, null for a dive with only a bottom time.
+  final double? durationMinutes;
+  final double? waterTemp;
+
+  /// A `VisibilityBand` name, `range_spanning` for a band-picked range that
+  /// crosses a band edge (issue #3226), or `legacy_<Visibility>`, as
+  /// `getVisibilityDistribution` emits.
+  final String? visibilityKey;
+
+  /// A `CurrentStrength` enum name.
+  final String? currentStrength;
+
+  /// A `WaterType` enum name, falling back to the site's.
+  final String? waterType;
+
+  /// An `EntryMethod` enum name, falling back to the site's.
+  final String? entryMethod;
+  final String? siteId;
+  final String? siteName;
+
+  /// Every dive type linked to the dive (ids or slugs); a dive can be
+  /// several types at once.
+  final List<String> diveTypes;
+
+  /// `air`, `nitrox` or `trimix`; null with no tanks.
+  final String? gasClass;
+
+  /// Litres of water capacity of the first tank by tank order.
+  final double? firstTankVolume;
+
+  /// Lead in kilograms.
+  final double? weight;
+
+  /// The [SuitType.key] of the dive's suit (a drysuit, else its thickest
+  /// wetsuit); null with no suit linked.
+  final String? suitKey;
+
+  /// `solo` or `buddy`; null when neither is recorded.
+  final String? buddyKey;
+}

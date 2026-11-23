@@ -81,6 +81,19 @@ class TableViewConfigNotifier extends StateNotifier<domain.TableViewConfig> {
     _save();
   }
 
+  /// Removes [field]'s column, pinned or not, unless it is the last one
+  /// (#2984); a sort on it is cleared. The column picker adds it back.
+  void hideColumn(DiveField field) {
+    if (state.columns.length <= 1) return;
+    final next = state.columns.where((c) => c.field != field).toList();
+    if (next.length == state.columns.length) return;
+    state = state.copyWith(
+      columns: next,
+      clearSortField: state.sortField == field,
+    );
+    _save();
+  }
+
   /// Cycle sort for [field]: unsorted -> ascending -> descending -> unsorted.
   void setSortField(DiveField field) {
     if (state.sortField != field) {
@@ -111,8 +124,7 @@ class TableViewConfigNotifier extends StateNotifier<domain.TableViewConfig> {
   void reorderColumn(int oldIndex, int newIndex) {
     final cols = List<domain.TableColumnConfig>.from(state.columns);
     final item = cols.removeAt(oldIndex);
-    final target = newIndex > oldIndex ? newIndex - 1 : newIndex;
-    cols.insert(target.clamp(0, cols.length), item);
+    cols.insert(newIndex.clamp(0, cols.length), item);
     state = state.copyWith(columns: cols);
     _save();
   }
@@ -338,6 +350,24 @@ final detailedCardConfigProvider =
 // Table presets provider
 // ---------------------------------------------------------------------------
 
+// no-tick: this provider caches no row that could go stale -- it holds a write,
+// and re-running it re-runs that write. A tick here would restore exactly the
+// loop it exists to break. The rows it seeds are read by tablePresetsProvider
+// below, which does subscribe, so a preset arriving by sync still shows up.
+/// Seeds the built-in table presets for a diver, once per container.
+///
+/// Deliberately separate from [tablePresetsProvider]: that provider ticks on
+/// every `field_presets` write, and a seeding write inside its own build would
+/// invalidate the build that issued it. Holding the seed in its own provider
+/// means a self-invalidation replays the read and not the write, so the pair
+/// settles after one pass however many times the tick fires (issue #1355).
+final _builtInTablePresetsSeedProvider = FutureProvider.family<void, String>((
+  ref,
+  diverId,
+) async {
+  await ref.watch(viewConfigRepositoryProvider).ensureBuiltInPresets(diverId);
+});
+
 /// Loads all field presets for a diver (built-in + user-saved).
 final tablePresetsProvider =
     FutureProvider.family<List<domain.FieldPreset>, String>((
@@ -345,6 +375,7 @@ final tablePresetsProvider =
       diverId,
     ) async {
       final repo = ref.watch(viewConfigRepositoryProvider);
-      await repo.ensureBuiltInPresets(diverId);
+      ref.invalidateSelfWhen(repo.watchPresetsChanges());
+      await ref.watch(_builtInTablePresetsSeedProvider(diverId).future);
       return repo.getPresetsForMode(diverId, ListViewMode.table);
     });

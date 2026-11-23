@@ -1,0 +1,272 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/providers/provider.dart';
+
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/insights/presentation/formatters/suit_type_label.dart';
+import 'package:submersion/features/insights/presentation/insights_dive_filters.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_charts.dart';
+import 'package:submersion/features/insights/presentation/widgets/dive_trend_chart.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
+import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+/// Whole minutes, for the runtime and bottom time charts' axis and tooltips.
+String _minutes(BuildContext context, double value) =>
+    context.l10n.surfaceInterval_format_minutes(value.toStringAsFixed(0));
+
+class InsightsProgressionPage extends ConsumerWidget {
+  final bool embedded;
+
+  const InsightsProgressionPage({super.key, this.embedded = false});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
+
+    final content = SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildDepthProgressionSection(context, ref, units),
+          const SizedBox(height: 16),
+          _buildRuntimeSection(context, ref),
+          const SizedBox(height: 16),
+          _buildBottomTimeSection(context, ref),
+          const SizedBox(height: 16),
+          _buildDivesPerYearSection(context, ref),
+          const SizedBox(height: 16),
+          _buildDivesBySuitTypeSection(context, ref),
+          const SizedBox(height: 16),
+          _buildCumulativeSection(context, ref),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_progression_appBar_title,
+      body: content,
+    );
+  }
+
+  Widget _buildDepthProgressionSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    return TrendChartSection(
+      chartId: TrendChartIds.depth,
+      onDiveSelected: (diveId) => context.push('/dives/$diveId'),
+      title: context.l10n.insights_progression_depthProgression_title,
+      infoSummary: context.l10n.info_insights_depthTrend_summary,
+      subtitle: context.l10n.insights_progression_depthProgression_subtitle,
+      pointsAsync: ref.watch(depthProgressionTrendProvider),
+      errorMessage: context.l10n.insights_progression_depthProgression_error,
+      lineColor: Colors.indigo,
+      valueFormatter: (value) => units.formatDepth(value),
+      rateFormatter: (value) => units.formatDepth(value),
+    );
+  }
+
+  Widget _buildRuntimeSection(BuildContext context, WidgetRef ref) {
+    String minutes(double value) => _minutes(context, value);
+
+    return TrendChartSection(
+      chartId: TrendChartIds.runtime,
+      onDiveSelected: (diveId) => context.push('/dives/$diveId'),
+      title: context.l10n.insights_progression_runtime_title,
+      infoSummary: context.l10n.info_insights_runtimeTrend_summary,
+      infoTerms: const [DiveTerm.runtime],
+      subtitle: context.l10n.insights_progression_runtime_subtitle,
+      pointsAsync: ref.watch(runtimeTrendProvider),
+      errorMessage: context.l10n.insights_progression_runtime_error,
+      lineColor: Colors.purple,
+      valueFormatter: minutes,
+      rateFormatter: minutes,
+    );
+  }
+
+  Widget _buildBottomTimeSection(BuildContext context, WidgetRef ref) {
+    String minutes(double value) => _minutes(context, value);
+
+    return TrendChartSection(
+      chartId: TrendChartIds.bottomTime,
+      onDiveSelected: (diveId) => context.push('/dives/$diveId'),
+      title: context.l10n.insights_progression_bottomTime_title,
+      infoSummary: context.l10n.info_insights_bottomTimeTrend_summary,
+      infoTerms: const [DiveTerm.bottomTime, DiveTerm.runtime],
+      subtitle: context.l10n.insights_progression_bottomTime_subtitle,
+      pointsAsync: ref.watch(bottomTimeTrendProvider),
+      errorMessage: context.l10n.insights_progression_bottomTime_error,
+      lineColor: Colors.teal,
+      valueFormatter: minutes,
+      rateFormatter: minutes,
+    );
+  }
+
+  Widget _buildDivesPerYearSection(BuildContext context, WidgetRef ref) {
+    final divesPerYearAsync = ref.watch(divesPerYearProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_progression_divesPerYear_title,
+      subtitle: context.l10n.insights_progression_divesPerYear_subtitle,
+      child: divesPerYearAsync.when(
+        data: (data) {
+          if (data.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.bar_chart,
+              message: context.l10n.insights_progression_divesPerYear_empty,
+            );
+          }
+          final chartData = data
+              .map((d) => (label: '${d.year}', count: d.count))
+              .toList();
+          final description = data
+              .map(
+                (d) =>
+                    context.l10n.insights_progression_divesPerYear_countInYear(
+                      d.count,
+                      '${d.year}',
+                    ),
+              )
+              .join(', ');
+          return Semantics(
+            label: context.l10n.insights_progression_divesPerYear_semanticLabel(
+              description,
+            ),
+            child: CategoryBarChart(
+              data: chartData,
+              barColor: Theme.of(context).colorScheme.primary,
+              // When bars are crowded, compact "2024" → "'24" so 4-digit
+              // years don't overrun each other on narrow screens.
+              compactXLabelFormatter: (year) =>
+                  year.length == 4 ? "'${year.substring(2)}" : year,
+              onOpenBar: (index) => openFilteredChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_progression_divesPerYear_title,
+                row: chartData[index].label,
+                narrow: (scope) => yearDivesFilter(scope, data[index].year),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_progression_divesPerYear_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDivesBySuitTypeSection(BuildContext context, WidgetRef ref) {
+    final suitsAsync = ref.watch(divesBySuitTypeProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_progression_divesBySuitType_title,
+      subtitle: context.l10n.insights_progression_divesBySuitType_subtitle,
+      child: suitsAsync.when(
+        data: (stats) {
+          // One bar per wetsuit thickness and style, then the drysuit, in
+          // the order the repository sorts them (issue #4490).
+          final chartData = [
+            for (final s in stats)
+              (label: suitTypeLabel(s.type, context.l10n), count: s.count),
+          ];
+          if (chartData.isEmpty) {
+            return StatEmptyState(
+              icon: Icons.bar_chart,
+              message: context.l10n.insights_progression_divesBySuitType_empty,
+            );
+          }
+          // Locale-neutral label:count pairs so the screen-reader summary
+          // matches the app locale rather than hard-coded English prose.
+          final description = chartData
+              .map((d) => '${d.label}: ${d.count}')
+              .join(', ');
+          return Semantics(
+            label: context.l10n
+                .insights_progression_divesBySuitType_semanticLabel(
+                  description,
+                ),
+            child: CategoryBarChart(
+              data: chartData,
+              barColor: Theme.of(context).colorScheme.tertiary,
+              onOpenBar: (index) => openChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_progression_divesBySuitType_title,
+                row: chartData[index].label,
+                load: (repository, diverId, scope) =>
+                    repository.getSuitTypeDiveIds(
+                      type: stats[index].type,
+                      diverId: diverId,
+                      filter: scope,
+                    ),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_progression_divesBySuitType_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCumulativeSection(BuildContext context, WidgetRef ref) {
+    final cumulativeAsync = ref.watch(cumulativeDiveCountProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_progression_cumulative_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_progression_cumulative_title,
+        summary: context.l10n.info_insights_cumulative_summary,
+      ),
+      subtitle: context.l10n.insights_progression_cumulative_subtitle,
+      child: cumulativeAsync.when(
+        // A date axis, not the index axis: the count now steps once per dive,
+        // so a trip is a run of steps rather than one. No aggregation or fit
+        // controls, because a mean of a running total says nothing.
+        data: (data) => DiveTrendChart(
+          points: data,
+          dateFormat: ref.watch(dateFormatProvider),
+          gapThreshold: ref.watch(trendGapThresholdProvider),
+          pointColor: Colors.green,
+          valueFormatter: (value) => value.toStringAsFixed(0),
+        ),
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_progression_cumulative_error,
+        ),
+      ),
+    );
+  }
+}

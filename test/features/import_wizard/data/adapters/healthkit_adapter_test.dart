@@ -14,13 +14,16 @@ import 'package:submersion/features/dive_import/domain/services/imported_dive_co
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
 import 'package:submersion/features/import_wizard/data/adapters/healthkit_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/healthkit_adapter_steps.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_notice.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_phase.dart';
 import 'package:submersion/core/constants/map_style.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../../../../helpers/test_app.dart';
 
@@ -44,10 +47,12 @@ ImportedDive makeDive({
   double? avgDepth = 10.0,
   double? minTemperature = 24.0,
   List<ImportedProfileSample> profile = const [],
+  int? diveNumber,
 }) {
   final start = startTime ?? DateTime(2026, 3, 15, 9, 00);
   final end = endTime ?? start.add(const Duration(minutes: 42));
   return ImportedDive(
+    diveNumber: diveNumber,
     sourceId: sourceId,
     source: ImportSource.appleWatch,
     startTime: start,
@@ -76,10 +81,10 @@ Dive makeDomainDive({
     maxDepth: maxDepth,
     runtime: duration,
     notes: '',
-    diveTypeId: '',
+    diveTypeIds: [''],
     tanks: const [],
     profile: const [],
-    equipment: const [],
+    gear: looseGear(const []),
     photoIds: const [],
     sightings: const [],
   );
@@ -114,6 +119,22 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('buildBundle()', () {
+    test('names Apple Health and the fetched range (#161)', () async {
+      adapter.setParsedDives(
+        [makeDive()],
+        range: DateTimeRange(
+          start: DateTime(2026, 9, 5),
+          end: DateTime(2026, 10, 5, 23, 59),
+        ),
+      );
+
+      final details = (await adapter.buildBundle()).source.details;
+
+      expect(details.title, 'Apple Health');
+      expect(details.rangeStart, DateTime(2026, 9, 5));
+      expect(details.rangeEnd, DateTime(2026, 10, 5, 23, 59));
+    });
+
     test('returns bundle with dives group', () async {
       final dive = makeDive();
       adapter.setParsedDives([dive]);
@@ -155,7 +176,8 @@ void main() {
 
         expect(item.subtitle, contains('18.5m'));
         expect(item.subtitle, contains('42 min'));
-        expect(item.subtitle, contains('24.0'));
+        // A whole-degree reading no longer carries a '.0' (#912).
+        expect(item.subtitle, contains('24°C'));
       },
     );
 
@@ -368,6 +390,100 @@ void main() {
   // performImport
   // -------------------------------------------------------------------------
 
+  group('dive numbering (issue #1832)', () {
+    test(
+      'numbers imported dives oldest-first from the next free number',
+      () async {
+        final newer = makeDive(
+          sourceId: 'healthkit-newer',
+          startTime: DateTime(2026, 3, 16, 9),
+        );
+        final older = makeDive(
+          sourceId: 'healthkit-older',
+          startTime: DateTime(2026, 3, 15, 9),
+        );
+        adapter.setParsedDives([newer, older]);
+        final bundle = await adapter.buildBundle();
+        var next = 8;
+        when(
+          mockRepo.getNextDiveNumber(diverId: diverId),
+        ).thenAnswer((_) async => next++);
+        when(
+          mockConverter.convert(
+            any,
+            diverId: anyNamed('diverId'),
+            diveNumber: anyNamed('diveNumber'),
+          ),
+        ).thenReturn(makeDomainDive());
+
+        await adapter.performImport(bundle, {
+          ImportEntityType.dives: {0, 1},
+        }, {});
+
+        verifyInOrder([
+          mockConverter.convert(older, diverId: diverId, diveNumber: 8),
+          mockConverter.convert(newer, diverId: diverId, diveNumber: 9),
+        ]);
+      },
+    );
+
+    test('keeps the source number when retaining it', () async {
+      final dive = makeDive(diveNumber: 30);
+      adapter.setParsedDives([dive]);
+      final bundle = await adapter.buildBundle();
+      when(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).thenReturn(makeDomainDive());
+
+      await adapter.performImport(
+        bundle,
+        {
+          ImportEntityType.dives: {0},
+        },
+        {},
+        retainSourceDiveNumbers: true,
+      );
+
+      verify(
+        mockConverter.convert(dive, diverId: diverId, diveNumber: 30),
+      ).called(1);
+      verifyNever(mockRepo.getNextDiveNumber(diverId: anyNamed('diverId')));
+    });
+
+    test('reports a retained number another dive already uses', () async {
+      final dive = makeDive(diveNumber: 30);
+      adapter.setParsedDives([dive]);
+      final bundle = await adapter.buildBundle();
+      when(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).thenReturn(makeDomainDive(id: 'healthkit-dive'));
+      when(
+        mockRepo.countDivesSharingDiveNumber(['healthkit-dive']),
+      ).thenAnswer((_) async => 1);
+
+      final result = await adapter.performImport(
+        bundle,
+        {
+          ImportEntityType.dives: {0},
+        },
+        {},
+        retainSourceDiveNumbers: true,
+      );
+
+      final notice = result.notices.single;
+      expect(notice.kind, ImportNoticeKind.diveNumberConflict);
+      expect(notice.count, 1);
+    });
+  });
+
   group('performImport()', () {
     test('imports selected dives via converter and repository', () async {
       final dive = makeDive();
@@ -376,7 +492,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(dive, diverId: diverId),
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(domainDive)).thenAnswer((_) async => domainDive);
 
@@ -384,7 +504,13 @@ void main() {
         ImportEntityType.dives: {0},
       }, {});
 
-      verify(mockConverter.convert(dive, diverId: diverId)).called(1);
+      verify(
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
       verify(mockRepo.createDive(domainDive)).called(1);
       expect(result.importedCounts[ImportEntityType.dives], equals(1));
     });
@@ -397,7 +523,11 @@ void main() {
 
       final domainDive1 = makeDomainDive(id: 'dive-1');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(
         mockRepo.createDive(domainDive1),
@@ -408,8 +538,20 @@ void main() {
         ImportEntityType.dives: {0},
       }, {});
 
-      verify(mockConverter.convert(dive1, diverId: diverId)).called(1);
-      verifyNever(mockConverter.convert(dive2, diverId: diverId));
+      verify(
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
+      verifyNever(
+        mockConverter.convert(
+          dive2,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
       expect(result.importedCounts[ImportEntityType.dives], equals(1));
     });
 
@@ -429,7 +571,13 @@ void main() {
         },
       );
 
-      verifyNever(mockConverter.convert(any, diverId: anyNamed('diverId')));
+      verifyNever(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
       verifyNever(mockRepo.createDive(any));
       expect(result.skippedCount, equals(1));
       expect(result.importedCounts[ImportEntityType.dives], equals(0));
@@ -442,7 +590,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(dive, diverId: diverId),
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(domainDive)).thenAnswer((_) async => domainDive);
 
@@ -455,7 +607,13 @@ void main() {
         },
       );
 
-      verify(mockConverter.convert(dive, diverId: diverId)).called(1);
+      verify(
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
       verify(mockRepo.createDive(domainDive)).called(1);
       expect(result.importedCounts[ImportEntityType.dives], equals(1));
     });
@@ -470,10 +628,18 @@ void main() {
       final domainDive1 = makeDomainDive(id: 'dive-1');
       final domainDive3 = makeDomainDive(id: 'dive-3');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(
-        mockConverter.convert(dive3, diverId: diverId),
+        mockConverter.convert(
+          dive3,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive3);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -505,10 +671,18 @@ void main() {
       final domainDive1 = makeDomainDive(id: 'dive-1');
       final domainDive2 = makeDomainDive(id: 'dive-2');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(
-        mockConverter.convert(dive2, diverId: diverId),
+        mockConverter.convert(
+          dive2,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive2);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -575,15 +749,14 @@ void main() {
       );
     });
 
-    test('supportedDuplicateActions contains skip and importAsNew', () {
-      expect(
-        adapter.supportedDuplicateActions,
-        containsAll([DuplicateAction.skip, DuplicateAction.importAsNew]),
-      );
-      expect(
-        adapter.supportedDuplicateActions,
-        isNot(contains(DuplicateAction.consolidate)),
-      );
+    test('supportedDuplicateActions offers skip, import, fill and merge '
+        '(#637)', () {
+      expect(adapter.supportedDuplicateActions, {
+        DuplicateAction.skip,
+        DuplicateAction.importAsNew,
+        DuplicateAction.fillPlanned,
+        DuplicateAction.consolidate,
+      });
     });
 
     test('acquisitionSteps has three steps', () {
@@ -736,10 +909,10 @@ void main() {
         bottomTime: const Duration(minutes: 40),
         maxDepth: 18.5,
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -772,10 +945,10 @@ void main() {
         bottomTime: const Duration(minutes: 40),
         maxDepth: 18.5,
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -808,10 +981,10 @@ void main() {
         bottomTime: const Duration(minutes: 38),
         maxDepth: 18.5,
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -845,10 +1018,10 @@ void main() {
           bottomTime: null,
           maxDepth: 18.5,
           notes: '',
-          diveTypeId: '',
+          diveTypeIds: [''],
           tanks: const [],
           profile: const [],
-          equipment: const [],
+          gear: looseGear(const []),
           photoIds: const [],
           sightings: const [],
         );
@@ -889,10 +1062,10 @@ void main() {
         bottomTime: const Duration(minutes: 33),
         maxDepth: 18.5,
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -969,10 +1142,10 @@ void main() {
         maxDepth: null,
         runtime: const Duration(minutes: 42),
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -1025,10 +1198,10 @@ void main() {
           notes: '',
         ),
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -1193,10 +1366,13 @@ void main() {
       adapter.setParsedDives([dive1, dive2, dive3]);
       final bundle = await adapter.buildBundle();
 
-      final existing = makeDomainDive(id: 'ex-1');
-      when(
-        mockRepo.getAllDives(diverId: diverId),
-      ).thenAnswer((_) async => [existing]);
+      when(mockRepo.getAllDives(diverId: diverId)).thenAnswer(
+        (_) async => [
+          makeDomainDive(id: 'ex-1', dateTime: dive1.startTime),
+          makeDomainDive(id: 'ex-2', dateTime: dive2.startTime),
+          makeDomainDive(id: 'ex-3', dateTime: dive3.startTime),
+        ],
+      );
 
       var callIndex = 0;
       when(
@@ -1219,6 +1395,83 @@ void main() {
       // dive1 (0.9) and dive3 (0.6) match; dive2 (0.3) does not
       expect(dupes, containsAll([0, 2]));
       expect(dupes, isNot(contains(1)));
+    });
+
+    test('scores a workout only against dives near its start', () async {
+      final workoutStart = DateTime(2026, 3, 15, 9, 00);
+      adapter.setParsedDives([makeDive(startTime: workoutStart)]);
+      final bundle = await adapter.buildBundle();
+
+      when(mockRepo.getAllDives(diverId: diverId)).thenAnswer(
+        (_) async => [
+          makeDomainDive(id: 'days-away', dateTime: DateTime(2026, 3, 12, 9)),
+          makeDomainDive(
+            id: 'at-the-window',
+            dateTime: workoutStart.add(
+              DiveMatcher.candidateWindow + const Duration(seconds: 1),
+            ),
+          ),
+          makeDomainDive(id: 'near', dateTime: DateTime(2026, 3, 15, 9, 10)),
+        ],
+      );
+      when(
+        mockMatcher.calculateMatchScore(
+          wearableStartTime: anyNamed('wearableStartTime'),
+          wearableMaxDepth: anyNamed('wearableMaxDepth'),
+          wearableDurationSeconds: anyNamed('wearableDurationSeconds'),
+          existingStartTime: anyNamed('existingStartTime'),
+          existingMaxDepth: anyNamed('existingMaxDepth'),
+          existingDurationSeconds: anyNamed('existingDurationSeconds'),
+        ),
+      ).thenReturn(0.8);
+
+      final result = await adapter.checkDuplicates(bundle);
+
+      verify(
+        mockMatcher.calculateMatchScore(
+          wearableStartTime: anyNamed('wearableStartTime'),
+          wearableMaxDepth: anyNamed('wearableMaxDepth'),
+          wearableDurationSeconds: anyNamed('wearableDurationSeconds'),
+          existingStartTime: anyNamed('existingStartTime'),
+          existingMaxDepth: anyNamed('existingMaxDepth'),
+          existingDurationSeconds: anyNamed('existingDurationSeconds'),
+        ),
+      ).called(1);
+      expect(
+        result.groups[ImportEntityType.dives]!.matchResults![0]!.diveId,
+        'near',
+      );
+    });
+
+    test('finds a saved dive by its entry time, not its dive date', () async {
+      final workoutStart = DateTime(2026, 3, 15, 9, 00);
+      adapter.setParsedDives([makeDive(startTime: workoutStart)]);
+      final bundle = await adapter.buildBundle();
+
+      final saved = makeDomainDive(
+        id: 'corrected',
+        dateTime: DateTime(2026, 3, 12, 9),
+      ).copyWith(entryTime: workoutStart);
+      when(
+        mockRepo.getAllDives(diverId: diverId),
+      ).thenAnswer((_) async => [saved]);
+      when(
+        mockMatcher.calculateMatchScore(
+          wearableStartTime: anyNamed('wearableStartTime'),
+          wearableMaxDepth: anyNamed('wearableMaxDepth'),
+          wearableDurationSeconds: anyNamed('wearableDurationSeconds'),
+          existingStartTime: anyNamed('existingStartTime'),
+          existingMaxDepth: anyNamed('existingMaxDepth'),
+          existingDurationSeconds: anyNamed('existingDurationSeconds'),
+        ),
+      ).thenReturn(0.8);
+
+      final result = await adapter.checkDuplicates(bundle);
+
+      expect(
+        result.groups[ImportEntityType.dives]!.matchResults![0]!.diveId,
+        'corrected',
+      );
     });
 
     test('preserves non-dives groups in result bundle', () async {
@@ -1263,7 +1516,13 @@ void main() {
 
       expect(result.importedCounts[ImportEntityType.dives], equals(0));
       expect(result.skippedCount, equals(0));
-      verifyNever(mockConverter.convert(any, diverId: anyNamed('diverId')));
+      verifyNever(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
       verifyNever(mockRepo.createDive(any));
     });
 
@@ -1287,7 +1546,13 @@ void main() {
       }, {});
 
       expect(result.importedCounts[ImportEntityType.dives], equals(0));
-      verifyNever(mockConverter.convert(any, diverId: anyNamed('diverId')));
+      verifyNever(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
     });
 
     test('returns importedDiveIds for each imported dive', () async {
@@ -1299,10 +1564,18 @@ void main() {
       final domainDive1 = makeDomainDive(id: 'uuid-aaa');
       final domainDive2 = makeDomainDive(id: 'uuid-bbb');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(
-        mockConverter.convert(dive2, diverId: diverId),
+        mockConverter.convert(
+          dive2,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive2);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -1320,7 +1593,11 @@ void main() {
       final bundle = await adapter.buildBundle();
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(any, diverId: anyNamed('diverId')),
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1341,7 +1618,11 @@ void main() {
 
         final domainDive1 = makeDomainDive(id: 'uuid-1');
         when(
-          mockConverter.convert(dive1, diverId: diverId),
+          mockConverter.convert(
+            dive1,
+            diverId: diverId,
+            diveNumber: anyNamed('diveNumber'),
+          ),
         ).thenReturn(domainDive1);
         when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -1371,10 +1652,18 @@ void main() {
       final domainDive1 = makeDomainDive(id: 'uuid-1');
       final domainDive2 = makeDomainDive(id: 'uuid-2');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(
-        mockConverter.convert(dive2, diverId: diverId),
+        mockConverter.convert(
+          dive2,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive2);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -1390,8 +1679,20 @@ void main() {
         },
       );
 
-      verify(mockConverter.convert(dive1, diverId: diverId)).called(1);
-      verify(mockConverter.convert(dive2, diverId: diverId)).called(1);
+      verify(
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
+      verify(
+        mockConverter.convert(
+          dive2,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
       expect(result.importedCounts[ImportEntityType.dives], equals(2));
     });
 
@@ -1404,7 +1705,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(any, diverId: anyNamed('diverId')),
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1429,7 +1734,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(any, diverId: anyNamed('diverId')),
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1449,7 +1758,11 @@ void main() {
 
       final domainDive1 = makeDomainDive(id: 'uuid-1');
       when(
-        mockConverter.convert(dive1, diverId: diverId),
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive1);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive1);
 
@@ -1466,8 +1779,20 @@ void main() {
 
       expect(result.importedCounts[ImportEntityType.dives], equals(1));
       expect(result.skippedCount, equals(1));
-      verifyNever(mockConverter.convert(dive0, diverId: diverId));
-      verify(mockConverter.convert(dive1, diverId: diverId)).called(1);
+      verifyNever(
+        mockConverter.convert(
+          dive0,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
+      verify(
+        mockConverter.convert(
+          dive1,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
     });
 
     test('all selected as skip results in zero imports', () async {
@@ -1491,7 +1816,13 @@ void main() {
 
       expect(result.importedCounts[ImportEntityType.dives], equals(0));
       expect(result.skippedCount, equals(2));
-      verifyNever(mockConverter.convert(any, diverId: anyNamed('diverId')));
+      verifyNever(
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      );
     });
 
     test('all as importAsNew imports everything', () async {
@@ -1503,7 +1834,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(any, diverId: anyNamed('diverId')),
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1530,7 +1865,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(dive, diverId: diverId),
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1546,7 +1885,13 @@ void main() {
       );
 
       // Should still only import once (Set deduplicates)
-      verify(mockConverter.convert(dive, diverId: diverId)).called(1);
+      verify(
+        mockConverter.convert(
+          dive,
+          diverId: diverId,
+          diveNumber: anyNamed('diveNumber'),
+        ),
+      ).called(1);
       expect(result.importedCounts[ImportEntityType.dives], equals(1));
     });
 
@@ -1559,7 +1904,11 @@ void main() {
 
       final domainDive = makeDomainDive();
       when(
-        mockConverter.convert(any, diverId: anyNamed('diverId')),
+        mockConverter.convert(
+          any,
+          diverId: anyNamed('diverId'),
+          diveNumber: anyNamed('diveNumber'),
+        ),
       ).thenReturn(domainDive);
       when(mockRepo.createDive(any)).thenAnswer((_) async => domainDive);
 
@@ -1771,22 +2120,24 @@ void main() {
       tester,
     ) async {
       final service = MockHealthImportService();
-      final completer = Completer<bool>();
-      when(service.hasPermissions()).thenAnswer((_) => completer.future);
+      final completer = Completer<HealthPermissionStatus>();
+      when(service.permissionStatus()).thenAnswer((_) => completer.future);
 
       await tester.pumpWidget(buildPermissionsStep(service));
 
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
-      completer.complete(false);
+      completer.complete(HealthPermissionStatus.granted);
       await tester.pumpAndSettle();
     });
 
-    testWidgets('shows granted state when permissions already granted', (
+    testWidgets('shows granted state when the platform confirms access', (
       tester,
     ) async {
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => true);
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.granted);
 
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
@@ -1794,115 +2145,94 @@ void main() {
       expect(find.text('HealthKit Access Granted'), findsOneWidget);
       expect(find.text('You can proceed to the next step.'), findsOneWidget);
       expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      // Nothing to request: the platform already said yes.
+      verifyNever(service.requestPermissions());
     });
 
-    testWidgets('shows request button when permissions not yet granted', (
+    testWidgets('requests access when the platform will not disclose it', (
       tester,
     ) async {
+      // Regression for #1128: iOS never reports read access, so the step used
+      // to sit on "Access Required" and demand a button tap on every visit.
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
-
-      await tester.pumpWidget(buildPermissionsStep(service));
-      await tester.pumpAndSettle();
-
-      expect(find.text('HealthKit Access Required'), findsOneWidget);
-      expect(find.text('Grant HealthKit Access'), findsOneWidget);
-    });
-
-    testWidgets('shows description text when permissions not granted', (
-      tester,
-    ) async {
-      final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
-
-      await tester.pumpWidget(buildPermissionsStep(service));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.text(
-          'Submersion needs access to your Apple Health data to import '
-          'dives recorded by your Apple Watch.',
-        ),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('shows health_and_safety icon when permissions not granted', (
-      tester,
-    ) async {
-      final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
-
-      await tester.pumpWidget(buildPermissionsStep(service));
-      await tester.pumpAndSettle();
-
-      expect(find.byIcon(Icons.health_and_safety), findsAtLeast(1));
-    });
-
-    testWidgets('tapping request button calls requestPermissions', (
-      tester,
-    ) async {
-      final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
-      final requestCompleter = Completer<bool>();
       when(
-        service.requestPermissions(),
-      ).thenAnswer((_) => requestCompleter.future);
-
-      await tester.pumpWidget(buildPermissionsStep(service));
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Grant HealthKit Access'));
-      await tester.pump();
-
-      verify(service.requestPermissions()).called(1);
-
-      // Shows requesting state
-      expect(find.text('Requesting...'), findsOneWidget);
-
-      requestCompleter.complete(true);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('shows granted state after permissions granted via button', (
-      tester,
-    ) async {
-      final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.undetermined);
       when(service.requestPermissions()).thenAnswer((_) async => true);
 
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Grant HealthKit Access'));
-      await tester.pumpAndSettle();
-
+      verify(service.requestPermissions()).called(1);
       expect(find.text('HealthKit Access Granted'), findsOneWidget);
-      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.text('Continue'), findsNothing);
     });
 
-    testWidgets('stays on request screen when permissions denied via button', (
+    testWidgets('explains where to fix access once it is requested', (
       tester,
     ) async {
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
-      when(service.requestPermissions()).thenAnswer((_) async => false);
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.undetermined);
+      when(service.requestPermissions()).thenAnswer((_) async => true);
 
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Grant HealthKit Access'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('HealthKit Access Required'), findsOneWidget);
-      expect(find.text('Grant HealthKit Access'), findsOneWidget);
+      expect(
+        find.textContaining('never tells apps whether read access'),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('button is disabled while requesting permissions', (
+    testWidgets('shows the unavailable state off Apple platforms', (
       tester,
     ) async {
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.unsupported);
+
+      await tester.pumpWidget(buildPermissionsStep(service));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Not Available'), findsOneWidget);
+      verifyNever(service.requestPermissions());
+    });
+
+    testWidgets('offers a retry button when the platform refuses access', (
+      tester,
+    ) async {
+      final service = MockHealthImportService();
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.denied);
+
+      await tester.pumpWidget(buildPermissionsStep(service));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Apple HealthKit'), findsOneWidget);
+      expect(find.text('Continue'), findsOneWidget);
+      expect(find.byIcon(Icons.health_and_safety), findsAtLeast(1));
+      expect(
+        find.text(
+          'Submersion uses Apple HealthKit to read underwater diving workout '
+          'data, including depth, duration, water temperature, and heart '
+          'rate, to create detailed dive logs.',
+        ),
+        findsOneWidget,
+      );
+      verifyNever(service.requestPermissions());
+    });
+
+    testWidgets('tapping the retry button requests access again', (
+      tester,
+    ) async {
+      final service = MockHealthImportService();
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.denied);
       final requestCompleter = Completer<bool>();
       when(
         service.requestPermissions(),
@@ -1911,61 +2241,84 @@ void main() {
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
 
-      // Tap the button to start the request.
-      await tester.tap(find.text('Grant HealthKit Access'));
+      await tester.tap(find.text('Continue'));
       await tester.pump();
 
-      // While the request is in flight, tapping again should be a no-op
-      // because the button disables itself (onPressed = null).
-      // Verify by checking that requestPermissions was called exactly once.
       verify(service.requestPermissions()).called(1);
+      expect(find.text('Requesting...'), findsOneWidget);
 
-      requestCompleter.complete(false);
+      // The button disables itself while the request is in flight.
+      await tester.tap(find.byType(FilledButton));
+      await tester.pump();
+      verifyNever(service.requestPermissions());
+
+      requestCompleter.complete(true);
       await tester.pumpAndSettle();
+
+      expect(find.text('HealthKit Access Granted'), findsOneWidget);
     });
 
-    testWidgets('handles exception during hasPermissions check gracefully', (
+    testWidgets('stays on the request screen when the request fails', (
       tester,
     ) async {
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenThrow(Exception('platform error'));
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.undetermined);
+      when(service.requestPermissions()).thenAnswer((_) async => false);
 
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
 
-      // Falls through to the request screen
-      expect(find.text('HealthKit Access Required'), findsOneWidget);
-      expect(find.text('Grant HealthKit Access'), findsOneWidget);
+      expect(find.text('Apple HealthKit'), findsOneWidget);
+      expect(find.text('Continue'), findsOneWidget);
+    });
+
+    testWidgets('requests access when the status check throws', (tester) async {
+      final service = MockHealthImportService();
+      when(service.permissionStatus()).thenThrow(Exception('platform error'));
+      when(service.requestPermissions()).thenAnswer((_) async => true);
+
+      await tester.pumpWidget(buildPermissionsStep(service));
+      await tester.pumpAndSettle();
+
+      // A failed check is not a denial, so it must not block the import.
+      verify(service.requestPermissions()).called(1);
+      expect(find.text('HealthKit Access Granted'), findsOneWidget);
     });
 
     testWidgets('handles exception during requestPermissions gracefully', (
       tester,
     ) async {
       final service = MockHealthImportService();
-      when(service.hasPermissions()).thenAnswer((_) async => false);
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.undetermined);
       when(service.requestPermissions()).thenThrow(Exception('platform error'));
 
       await tester.pumpWidget(buildPermissionsStep(service));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Grant HealthKit Access'));
-      await tester.pumpAndSettle();
-
       // Should recover -- still on request screen, not crashed
-      expect(find.text('HealthKit Access Required'), findsOneWidget);
-      expect(find.text('Grant HealthKit Access'), findsOneWidget);
+      expect(find.text('Apple HealthKit'), findsOneWidget);
+      expect(find.text('Continue'), findsOneWidget);
     });
 
     testWidgets(
-      'sets healthKitPermissionsGrantedProvider when permissions granted on check',
+      'sets healthKitPermissionsGrantedProvider once access is ready',
       (tester) async {
         final service = MockHealthImportService();
-        when(service.hasPermissions()).thenAnswer((_) async => true);
+        when(
+          service.permissionStatus(),
+        ).thenAnswer((_) async => HealthPermissionStatus.granted);
 
         late WidgetRef capturedRef;
         await tester.pumpWidget(
           ProviderScope(
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              locale: const Locale('en'),
               home: Scaffold(
                 body: Column(
                   children: [
@@ -2002,6 +2355,57 @@ void main() {
         expect(capturedRef.read(healthKitPermissionsGrantedProvider), isTrue);
       },
     );
+
+    testWidgets('clears healthKitPermissionsGrantedProvider when refused', (
+      tester,
+    ) async {
+      final service = MockHealthImportService();
+      when(
+        service.permissionStatus(),
+      ).thenAnswer((_) async => HealthPermissionStatus.denied);
+
+      late WidgetRef capturedRef;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
+            home: Scaffold(
+              body: Column(
+                children: [
+                  Consumer(
+                    builder: (context, ref, _) {
+                      capturedRef = ref;
+                      return const SizedBox();
+                    },
+                  ),
+                  Expanded(
+                    child: Builder(
+                      builder: (context) {
+                        final widgetAdapter = HealthKitAdapter(
+                          healthService: service,
+                          diveMatcher: MockDiveMatcher(),
+                          converter: MockImportedDiveConverter(),
+                          diveRepository: MockDiveRepository(),
+                          diverId: 'diver-1',
+                        );
+                        return widgetAdapter.acquisitionSteps[0].builder(
+                          context,
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(capturedRef.read(healthKitPermissionsGrantedProvider), isFalse);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -2098,6 +2502,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Scaffold(
               body: Column(
                 children: [
@@ -2132,6 +2539,60 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(capturedRef.read(healthKitDateRangeSelectedProvider), isTrue);
+    });
+
+    testWidgets('publishes a range covering both days end to end', (
+      tester,
+    ) async {
+      // Regression for #1128: the pickers hand back midnight and HealthKit
+      // matches on a strict start date, so a range ending at midnight drops
+      // every dive on its own end day.
+      late WidgetRef capturedRef;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
+            home: Scaffold(
+              body: Column(
+                children: [
+                  Consumer(
+                    builder: (context, ref, _) {
+                      capturedRef = ref;
+                      return const SizedBox();
+                    },
+                  ),
+                  Expanded(
+                    child: Builder(
+                      builder: (context) {
+                        final widgetAdapter = HealthKitAdapter(
+                          healthService: MockHealthImportService(),
+                          diveMatcher: MockDiveMatcher(),
+                          converter: MockImportedDiveConverter(),
+                          diveRepository: MockDiveRepository(),
+                          diverId: 'diver-1',
+                        );
+                        return widgetAdapter.acquisitionSteps[1].builder(
+                          context,
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final range = capturedRef.read(healthKitDateRangeProvider);
+      expect(range.start.hour, equals(0));
+      expect(range.start.minute, equals(0));
+      expect(range.end.hour, equals(23));
+      expect(range.end.minute, equals(59));
+      expect(range.end.second, equals(59));
     });
 
     testWidgets('both date picker buttons are tappable InkWells', (
@@ -2250,7 +2711,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Found 0 dives'), findsOneWidget);
-      expect(find.text('Proceeding to review...'), findsOneWidget);
+      // A zero-dive result points at the two things that actually cause it.
+      expect(find.text('Proceeding to review...'), findsNothing);
+      expect(
+        find.textContaining('Check that the dates cover the dive'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('shows error state when fetch fails', (tester) async {
@@ -2300,6 +2766,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Scaffold(
               body: Column(
                 children: [
@@ -2351,6 +2820,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Scaffold(
               body: Column(
                 children: [
@@ -2421,6 +2893,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Consumer(
               builder: (context, ref, _) {
                 capturedRef = ref;
@@ -2442,6 +2917,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Consumer(
               builder: (context, ref, _) {
                 capturedRef = ref;
@@ -2461,6 +2939,9 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Consumer(
               builder: (context, ref, _) {
                 capturedRef = ref;
@@ -2473,6 +2954,63 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(capturedRef.read(healthKitDivesFetchedProvider), isFalse);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // healthKitWholeDayRange
+  // -------------------------------------------------------------------------
+
+  group('healthKitWholeDayRange', () {
+    test('starts the range at midnight on the start day', () {
+      final range = healthKitWholeDayRange(
+        DateTime(2024, 1, 15, 14, 30),
+        DateTime(2024, 1, 20, 8, 0),
+      );
+
+      expect(range.start, equals(DateTime(2024, 1, 15)));
+    });
+
+    test('runs the range to the last instant of the end day', () {
+      // A dive at 09:00 on the end day must fall inside the range.
+      final range = healthKitWholeDayRange(
+        DateTime(2024, 1, 15),
+        DateTime(2024, 1, 20),
+      );
+
+      expect(range.end, equals(DateTime(2024, 1, 20, 23, 59, 59, 999)));
+      expect(range.end.isAfter(DateTime(2024, 1, 20, 9, 0)), isTrue);
+    });
+
+    test('ends on the last instant the method channel can carry', () {
+      // The health plugin sends both bounds as millisecondsSinceEpoch, so
+      // 23:59:59.999999 would truncate to the same integer. Spelling the end
+      // with microseconds buys nothing; this pins that they are equivalent so
+      // the extra precision is not reintroduced as a "fix".
+      final range = healthKitWholeDayRange(
+        DateTime(2024, 1, 15),
+        DateTime(2024, 1, 20),
+      );
+      final lastMicrosecond = DateTime(
+        2024,
+        1,
+        21,
+      ).subtract(const Duration(microseconds: 1));
+
+      expect(
+        range.end.millisecondsSinceEpoch,
+        equals(lastMicrosecond.millisecondsSinceEpoch),
+      );
+    });
+
+    test('covers a single day picked for both ends', () {
+      final range = healthKitWholeDayRange(
+        DateTime(2024, 1, 15),
+        DateTime(2024, 1, 15),
+      );
+
+      expect(range.start.isBefore(DateTime(2024, 1, 15, 9, 0)), isTrue);
+      expect(range.end.isAfter(DateTime(2024, 1, 15, 9, 0)), isTrue);
     });
   });
 }

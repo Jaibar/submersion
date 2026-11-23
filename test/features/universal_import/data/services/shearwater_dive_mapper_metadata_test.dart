@@ -63,7 +63,21 @@ void main() {
         expect(result['siteName'], 'Maclearie Park');
         expect(result['diveComputerModel'], 'Teric');
         expect(result['diveComputerSerial'], '69FE56D7');
+        expect(result['diveComputerManufacturer'], 'Shearwater');
         expect(result['notes'], contains('Great dive'));
+      });
+
+      test('uppercases a lowercase filename serial (#3106)', () {
+        const rawDive = ShearwaterRawDive(
+          diveId: 'test',
+          fileName: 'Perdix 2[a1b2c3d4]#12 2024-1-1 10-00-00.swlogzp',
+          footerJson: {'UnitSystem': 1},
+        );
+
+        final result = ShearwaterDiveMapper.mapDiveMetadata(rawDive);
+
+        expect(result['diveComputerSerial'], 'A1B2C3D4');
+        expect(result['diveComputerManufacturer'], 'Shearwater');
       });
 
       test('maps conditions to structured enums', () {
@@ -190,6 +204,36 @@ void main() {
 
         // 1013 mbar = 1.013 bar
         expect(result['surfacePressure'], closeTo(1.013, 0.001));
+      });
+
+      test('a zero surface pressure is no reading (#4208)', () {
+        const rawDive = ShearwaterRawDive(
+          diveId: 'test',
+          tankProfileData: {
+            'TankData': [
+              {'SurfacePressureMBar': 0},
+            ],
+          },
+        );
+
+        final result = ShearwaterDiveMapper.mapDiveMetadata(rawDive);
+
+        expect(result['surfacePressure'], isNull);
+      });
+
+      test('a value no surface could read is no reading', () {
+        const rawDive = ShearwaterRawDive(
+          diveId: 'test',
+          tankProfileData: {
+            'TankData': [
+              {'SurfacePressureMBar': 1500},
+            ],
+          },
+        );
+
+        final result = ShearwaterDiveMapper.mapDiveMetadata(rawDive);
+
+        expect(result['surfacePressure'], isNull);
       });
 
       test('handles dive with no metadata gracefully', () {
@@ -432,6 +476,28 @@ void main() {
         expect(sites, hasLength(1));
         expect(sites[0]['name'], 'Maclearie Park');
         expect(sites[0]['uddfId'], 'Maclearie Park');
+      });
+
+      test("suggests a site type from the first dive's environment", () {
+        const dives = [
+          ShearwaterRawDive(
+            diveId: 'a',
+            site: 'Dutch Springs',
+            environment: 'Quarry',
+          ),
+          ShearwaterRawDive(
+            diveId: 'b',
+            site: 'Reef',
+            environment: 'Ocean/Sea',
+          ),
+        ];
+
+        final sites = ShearwaterDiveMapper.mapSites(dives);
+
+        // A suggestion, applied only while the site has no types (#1765).
+        expect(sites[0]['suggestedSiteTypeRefs'], ['quarry']);
+        expect(sites[0].containsKey('siteTypeRefs'), isFalse);
+        expect(sites[1].containsKey('suggestedSiteTypeRefs'), isFalse);
       });
 
       test('deduplicates sites by name', () {

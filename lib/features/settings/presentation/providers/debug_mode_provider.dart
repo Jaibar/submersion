@@ -5,11 +5,12 @@ import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
-const _kDebugModeKey = 'debug_mode_enabled';
+const _kDebugModeKey = LoggerService.debugModePrefKey;
 
 /// Notifier that manages the debug mode toggle state.
 /// Persists to SharedPreferences so debug mode survives app restarts.
-/// Also toggles file logging on [LoggerService] when debug mode changes.
+/// Also switches [LoggerService] between verbose file logging (debug mode)
+/// and the always-on warnings-and-errors file log (#1826).
 class DebugModeNotifier extends StateNotifier<bool> {
   final SharedPreferences _prefs;
   final LogFileService _logFileService;
@@ -20,13 +21,22 @@ class DebugModeNotifier extends StateNotifier<bool> {
   Future<void> enable() async {
     state = true;
     await _prefs.setBool(_kDebugModeKey, true);
-    LoggerService.setFileService(_logFileService);
+    LoggerService.configureFileLogging(_logFileService, verbose: true);
+    // Deliberately no session-environment line here, unlike main.dart. It
+    // would have to be fire-and-forget (a settings toggle must not wait on a
+    // platform channel), and a background version lookup plus a file write
+    // outliving the toggle is a timer and a real-IO future escaping whatever
+    // widget test flipped it. The export header in debug_log_providers.dart
+    // already names the build on every copy, share and save, which is the
+    // path a bug report actually travels (issue #1246).
   }
 
   Future<void> disable() async {
     state = false;
     await _prefs.setBool(_kDebugModeKey, false);
-    LoggerService.setFileService(null);
+    // Keep the file attached: turning debug mode off drops the verbose
+    // levels, not the warnings and errors a later bug report will need.
+    LoggerService.configureFileLogging(_logFileService, verbose: false);
   }
 }
 

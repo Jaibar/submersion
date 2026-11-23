@@ -1,0 +1,462 @@
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy_with_dive_count.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_list_tile.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/shared/models/entity_card_view_config.dart';
+import 'package:submersion/shared/providers/entity_card_config_providers.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
+import '../../helpers/fake_buddy_list_notifier.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
+
+const _config = EntityCardViewConfig<BuddyField>(
+  slots: [
+    EntityCardSlotConfig(slotId: 'title', field: BuddyField.buddyName),
+    EntityCardSlotConfig(slotId: 'subtitle', field: BuddyField.email),
+    EntityCardSlotConfig(slotId: 'stat1', field: BuddyField.diveCount),
+    EntityCardSlotConfig(slotId: 'stat2', field: BuddyField.lastDive),
+  ],
+);
+
+final _epoch = DateTime.fromMillisecondsSinceEpoch(0);
+
+Future<List<dynamic>> _overrides({
+  EntityCardViewConfig<BuddyField> config = _config,
+}) async => [
+  ...await getBaseOverrides(),
+  buddyDetailedCardConfigProvider.overrideWith(
+    (ref) => EntityCardConfigNotifier<BuddyField>(
+      defaultConfig: config,
+      fieldFromName: BuddyFieldAdapter.instance.fieldFromName,
+    ),
+  ),
+  diveRoleMapProvider.overrideWith(
+    (ref) async => {
+      DiveRole.instructorId: DiveRole(
+        id: DiveRole.instructorId,
+        name: 'Instructor',
+        isBuiltIn: true,
+        createdAt: _epoch,
+        updatedAt: _epoch,
+      ),
+    },
+  ),
+];
+
+Buddy _buddy({
+  String name = 'Jane Doe',
+  String? email = 'jane@example.com',
+  String? phone = '+1 555 0100',
+  Uint8List? photo,
+  String? level = 'rescue',
+  String? agency = 'padi',
+}) {
+  return Buddy(
+    id: 'b1',
+    name: name,
+    email: email,
+    phone: phone,
+    photo: photo,
+    certificationLevel: level,
+    certificationAgency: agency,
+    createdAt: DateTime(2026, 1, 1),
+    updatedAt: DateTime(2026, 1, 1),
+  );
+}
+
+void main() {
+  testWidgets('renders slots, cert chip, usual role and contact icons', (
+    tester,
+  ) async {
+    final entry = BuddyWithDiveCount(
+      buddy: _buddy(),
+      diveCount: 23,
+      lastDiveAt: DateTime(2024, 3, 5),
+      usualRoleId: DiveRole.instructorId,
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: BuddyListTile(entry: entry, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Jane Doe'), findsOneWidget);
+    expect(find.text('jane@example.com'), findsOneWidget);
+    expect(find.text('Rescue Diver · PADI'), findsOneWidget);
+    expect(find.text('23 dives'), findsOneWidget);
+    expect(find.text('Instructor'), findsOneWidget);
+    expect(find.byIcon(Icons.mail_outline), findsOneWidget);
+    expect(find.byIcon(Icons.phone_outlined), findsOneWidget);
+    expect(find.text('JD'), findsOneWidget);
+    expect(find.byType(ListTile), findsNothing);
+  });
+
+  testWidgets('draws the avatar without a ring, like the other sections', (
+    tester,
+  ) async {
+    // A PADI buddy used to get a 2 px ring in the agency's dark brand colour
+    // (issue #3466); the agency colour lives on the certification chip only.
+    final entry = BuddyWithDiveCount(buddy: _buddy(), diveCount: 1);
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(entry: entry, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
+    expect(avatar.ringColor, isNull);
+    final circle = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+    expect(circle.radius, 20);
+  });
+
+  testWidgets('hides the usual role for the plain buddy role and empty bits', (
+    tester,
+  ) async {
+    final entry = BuddyWithDiveCount(
+      buddy: _buddy(email: null, phone: null, level: null, agency: null),
+      diveCount: 0,
+      usualRoleId: DiveRole.buddyId,
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: BuddyListTile(entry: entry, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Jane Doe'), findsOneWidget);
+    expect(find.byIcon(Icons.badge_outlined), findsNothing);
+    expect(find.byIcon(Icons.mail_outline), findsNothing);
+    expect(find.byIcon(Icons.phone_outlined), findsNothing);
+    expect(find.textContaining('·'), findsNothing);
+    expect(find.textContaining('--'), findsNothing);
+  });
+
+  testWidgets('renders the stored photo and falls back to initials', (
+    tester,
+  ) async {
+    final image = img.Image(width: 64, height: 64);
+    img.fill(image, color: img.ColorRgb8(10, 20, 30));
+    final bytes = Uint8List.fromList(img.encodeJpg(image, quality: 80));
+
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(photo: bytes), diveCount: 1),
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+    expect(avatar.backgroundImage, isA<ResizeImage>());
+    expect(find.text('JD'), findsNothing);
+
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 1),
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('JD'), findsOneWidget);
+  });
+
+  testWidgets('keeps the title readable on a narrow German phone', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    const longName = 'Maximiliane Schwarzenberger-Hoffmann';
+    final entry = BuddyWithDiveCount(
+      buddy: _buddy(name: longName),
+      diveCount: 123,
+      lastDiveAt: DateTime(2024, 3, 5),
+      usualRoleId: DiveRole.instructorId,
+    );
+
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('de'),
+        child: BuddyListTile(entry: entry, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.getSize(find.text(longName)).width, greaterThan(150));
+  });
+
+  testWidgets('shows a checkbox in selection mode', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 1),
+          isSelectionMode: true,
+          isChecked: true,
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(Checkbox), findsOneWidget);
+  });
+
+  testWidgets('keeps the avatar initials beside the checkbox in selection '
+      'mode', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 1),
+          isSelectionMode: true,
+          isChecked: false,
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('JD'),
+      findsOneWidget,
+      reason: 'the checkbox is inserted ahead of the avatar (issue #1717)',
+    );
+    expect(
+      tester.getTopRight(find.byType(Checkbox)).dx,
+      lessThanOrEqualTo(tester.getTopLeft(find.text('JD')).dx),
+    );
+  });
+
+  testWidgets('keeps the stat line under the title in selection mode', (
+    tester,
+  ) async {
+    Future<double> statOffsetFromTitle({required bool selecting}) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 23),
+            isSelectionMode: selecting,
+            isChecked: false,
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return tester.getTopLeft(find.text('23 dives')).dx -
+          tester.getTopLeft(find.text('Jane Doe')).dx;
+    }
+
+    final normal = await statOffsetFromTitle(selecting: false);
+    final selecting = await statOffsetFromTitle(selecting: true);
+    expect(
+      selecting,
+      normal,
+      reason: 'the lower lines move with the checkbox column',
+    );
+  });
+
+  testWidgets('keeps the extra fields under the title in selection mode', (
+    tester,
+  ) async {
+    const withExtras = EntityCardViewConfig<BuddyField>(
+      slots: [
+        EntityCardSlotConfig(slotId: 'title', field: BuddyField.buddyName),
+        EntityCardSlotConfig(slotId: 'subtitle', field: BuddyField.email),
+        EntityCardSlotConfig(slotId: 'stat1', field: BuddyField.diveCount),
+        EntityCardSlotConfig(slotId: 'stat2', field: BuddyField.lastDive),
+      ],
+      extraFields: [BuddyField.phone],
+    );
+
+    Future<double> extraOffsetFromTitle({required bool selecting}) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(config: withExtras),
+          locale: const Locale('en'),
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 23),
+            isSelectionMode: selecting,
+            isChecked: false,
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return tester.getTopLeft(find.text('+1 555 0100')).dx -
+          tester.getTopLeft(find.text('Jane Doe')).dx;
+    }
+
+    final normal = await extraOffsetFromTitle(selecting: false);
+    final selecting = await extraOffsetFromTitle(selecting: true);
+    expect(selecting, normal);
+  });
+
+  testWidgets('tapping the checkbox toggles the row', (tester) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 1),
+          isSelectionMode: true,
+          isChecked: false,
+          onTap: () => taps++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<Checkbox>(find.byType(Checkbox)).onChanged,
+      isNotNull,
+      reason: 'a disabled checkbox would read as an unselectable row',
+    );
+    await tester.tap(find.byType(Checkbox));
+    expect(
+      taps,
+      1,
+      reason: 'the checkbox claims the tap, so the row toggles exactly once',
+    );
+  });
+
+  group('favorite star (issue #1336)', () {
+    testWidgets('shows an outlined star for a non-favorite buddy', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 0),
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.star_border), findsOneWidget);
+      expect(find.byIcon(Icons.star), findsNothing);
+    });
+
+    testWidgets('shows a filled star for a favorite buddy', (tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(
+              buddy: _buddy().copyWith(isFavorite: true),
+              diveCount: 0,
+            ),
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.star), findsOneWidget);
+      expect(find.byIcon(Icons.star_border), findsNothing);
+    });
+
+    testWidgets('tapping the star writes nothing and opens the buddy', (
+      tester,
+    ) async {
+      final notifier = FakeBuddyListNotifier();
+      var rowTaps = 0;
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...await _overrides(),
+            buddyListNotifierProvider.overrideWith((ref) => notifier),
+          ],
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 0),
+            onTap: () => rowTaps++,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.star_border));
+      await tester.pumpAndSettle();
+
+      // The star only shows the favourite (issue #4527, plan 12): a tap
+      // on it is the row's.
+      expect(notifier.calls, isEmpty);
+      expect(rowTaps, 1);
+    });
+
+    testWidgets('stays visible in selection mode', (tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          child: BuddyListTile(
+            entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 0),
+            isSelectionMode: true,
+            isChecked: false,
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byIcon(Icons.star_border),
+        findsOneWidget,
+        reason:
+            'favoriting is independent of bulk selection, unlike the '
+            'navigation chevron it replaces',
+      );
+    });
+  });
+
+  testWidgets('chevron ends one card padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: BuddyListTile(
+          entry: BuddyWithDiveCount(buddy: _buddy(), diveCount: 3),
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: recordCardBounds(tester),
+      padding: kRecordCardDetailedPadding,
+    );
+  });
+}

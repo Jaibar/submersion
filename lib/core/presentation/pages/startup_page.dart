@@ -1,28 +1,90 @@
+import 'dart:async' show Completer, unawaited;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqlite3/common.dart' as sqlite3;
+import 'package:url_launcher/url_launcher.dart';
 
+import 'package:submersion/app.dart' show resolveAppLocale;
+import 'package:submersion/app.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/sync/changeset_log/local_only_tombstone_gc.dart';
+import 'package:submersion/core/services/sync/changeset_log/peer_cursor_store.dart';
+import 'package:submersion/core/services/sync/changeset_log/publish_state_store.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_sweep.dart';
+import 'package:submersion/core/database/background_database_connection.dart';
+import 'package:submersion/core/database/compaction/database_compaction_prefs.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/database_engine_preflight.dart';
 import 'package:submersion/core/database/database_version_exception.dart';
 import 'package:submersion/core/domain/entities/migration_progress.dart';
+import 'package:submersion/core/presentation/pages/lock_escape_dialogs.dart';
+import 'package:submersion/core/presentation/pages/lock_screen_view.dart';
+import 'package:submersion/core/presentation/startup_brightness.dart';
+import 'package:submersion/core/presentation/startup_failure.dart';
+import 'package:submersion/core/presentation/startup_theme.dart';
 import 'package:submersion/core/presentation/widgets/backup_status_views.dart';
+import 'package:submersion/core/presentation/widgets/dive_log_unavailable_view.dart';
+import 'package:submersion/core/presentation/widgets/icloud_download_progress.dart';
+import 'package:submersion/core/presentation/widgets/interrupted_restore_view.dart';
 import 'package:submersion/core/presentation/widgets/ocean_background.dart';
+import 'package:submersion/core/presentation/widgets/startup_failure_view.dart';
+import 'package:submersion/core/presentation/widgets/startup_recovery_dialogs.dart';
+import 'package:submersion/core/presentation/widgets/version_mismatch_view.dart';
+import 'package:submersion/core/services/accounts/account_deduplicator.dart';
+import 'package:submersion/core/services/accounts/account_startup_migration.dart';
 import 'package:submersion/core/services/background_service.dart';
 import 'package:submersion/core/services/database_location_service.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/dive_log_availability.dart';
+import 'package:submersion/core/services/startup_recovery_service.dart';
 import 'package:submersion/core/services/local_cache_database_service.dart';
+import 'package:submersion/core/services/storage/gc/storage_gc_store.dart';
+import 'package:submersion/core/services/security/biometric_service.dart';
+import 'package:submersion/core/services/security/database_locked_exception.dart';
+import 'package:submersion/core/services/security/database_security_service.dart';
+import 'package:submersion/core/services/security/database_security_sidecar.dart';
+import 'package:submersion/core/services/security/locked_database_escape.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/notification_service.dart';
+import 'package:submersion/core/services/restore_journal.dart';
+import 'package:submersion/core/theme/app_theme_registry.dart';
+import 'package:submersion/core/utils/app_version.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
 import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/data/services/backup_schema_probe.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/data/demo_paths.dart';
+import 'package:submersion/features/demo_mode/data/demo_startup.dart';
+import 'package:submersion/features/demo_mode/data/demo_state_store.dart';
+import 'package:submersion/features/backup/data/services/backup_target.dart';
+import 'package:submersion/features/backup/data/services/downgrade_restore_candidates.dart';
+import 'package:submersion/features/backup/data/services/pre_downgrade_backup_service.dart';
 import 'package:submersion/features/backup/data/services/pre_migration_backup_service.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/entities/backup_type.dart';
 import 'package:submersion/features/backup/domain/exceptions/backup_failed_exception.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
+import 'package:submersion/features/marine_life/data/services/builtin_species_seed_version_store.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/scanned_logs_migration.dart';
+import 'package:submersion/features/media_store/data/media_deletion_coordinator.dart';
+import 'package:submersion/features/media_store/data/media_orphan_backlog_sweep.dart';
+import 'package:submersion/features/media_store/data/media_transfer_queue_repository.dart';
+import 'package:submersion/features/settings/data/set_up_card_prefs.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/main.dart' show SubmersionRestart;
+import 'package:submersion/features/equipment/data/services/computer_gear_dive_heal.dart';
 
 /// Callback signature for the service initializer used by [StartupWrapper].
 ///
@@ -38,11 +100,43 @@ typedef ServiceInitializer =
 typedef SchemaVersionProbe =
     ({bool needsMigration, int totalSteps}) Function(String dbPath);
 
+/// Runs [step], measuring its wall time, and prints a
+/// `[startup] <name>: <ms>ms` attribution line in debug/profile builds.
+///
+/// A top-level function (rather than a private closure) so the real startup
+/// call sites in [StartupWrapper] and unit tests can both reach it; at those
+/// call sites it wraps platform singletons that only run during app launch.
+/// [log] defaults to `!kReleaseMode` and is injectable so tests can exercise
+/// both branches.
+Future<void> timeStartupStep(
+  String name,
+  Future<void> Function() step, {
+  bool log = !kReleaseMode,
+}) async {
+  final sw = Stopwatch()..start();
+  await step();
+  sw.stop();
+  if (log) {
+    debugPrint('[startup] $name: ${sw.elapsedMilliseconds}ms');
+  }
+}
+
 enum _StartupState {
   initializing,
+  downloadingFromICloud,
+  diveLogUnavailable,
+  locked,
+  interruptedRestore,
   backingUp,
   migrating,
+
+  /// Rewriting the database without its free pages, as the app asked
+  /// while it last ran (issue #3333).
+  compacting,
   backupFailed,
+  recoveryRequired,
+  recovering,
+  recoveryFailed,
   ready,
   error,
 }
@@ -72,6 +166,92 @@ class StartupWrapper extends StatefulWidget {
   })?
   preMigrationBackupFactory;
 
+  /// Optional override for the pre-downgrade backup service factory (tests,
+  /// which must not copy real database files).
+  @visibleForTesting
+  final PreDowngradeBackupService Function({
+    required String livePath,
+    required BackupPreferences preferences,
+  })?
+  preDowngradeBackupFactory;
+
+  /// Optional override for the `PRAGMA user_version` probe run against a
+  /// candidate backup before it is offered (used in tests, whose fixture
+  /// "backups" are text files no SQLite build would open).
+  @visibleForTesting
+  final int? Function(String path)? downgradeCandidateProbeOverride;
+
+  /// Optional override for the database engine preflight (used in tests to
+  /// simulate a build whose native library does not resolve).
+  @visibleForTesting
+  final void Function()? enginePreflightOverride;
+
+  /// Optional override for the in-place restore offered by the failure screen
+  /// (used in tests, which must not swap real database files).
+  @visibleForTesting
+  final Future<void> Function(
+    String backupPath,
+    void Function(int currentStep, int totalSteps) onMigrationProgress,
+  )?
+  restoreOverride;
+
+  /// Optional override for the restore journal consulted before anything is
+  /// opened (used in tests, which must not stat or move real files).
+  @visibleForTesting
+  final RestoreJournal Function(String dbPath)? restoreJournalFactory;
+
+  /// Optional override for the backup-file picker offered by the failure
+  /// screen (used in tests, which have no host file picker).
+  @visibleForTesting
+  final Future<String?> Function()? pickBackupFileOverride;
+
+  /// Optional override for the recovery routes offered by the failure screen
+  /// (used in tests).
+  ///
+  /// A widget test cannot drive the real one: its work is `dart:io`, and a
+  /// `dart:io` future started inside the fake-async test zone never completes.
+  /// The move itself is covered against real files in
+  /// `test/core/services/startup_recovery_service_test.dart`; this seam is
+  /// what lets a widget test prove the WIRING around it.
+  @visibleForTesting
+  final StartupRecoveryService? recoveryServiceOverride;
+
+  /// Optional override for "did the database open reach the file" (used in
+  /// tests). The real answer lives on the process-wide DatabaseService, which
+  /// another test may have left in any state.
+  @visibleForTesting
+  final bool Function()? fileReachedOverride;
+
+  /// Optional override for releasing the database connection when startup
+  /// fails (used in tests, which have no real connection to close).
+  @visibleForTesting
+  final Future<void> Function()? closeDatabaseOverride;
+
+  /// Optional override for the check that the configured dive log is on this
+  /// device (used in tests, whose answers would otherwise need real iCloud
+  /// state and real file I/O).
+  @visibleForTesting
+  final DiveLogAvailabilityService? availabilityServiceOverride;
+
+  /// Where demo mode keeps its state (issue #3708). Null (tests that do not
+  /// exercise demo mode) means demo mode is never resumed.
+  final DemoPaths? demoPaths;
+
+  /// Optional override for demo mode's launch decision. See
+  /// [DemoStartup.resolve].
+  @visibleForTesting
+  final Future<DemoStartupDecision> Function()? demoStartupOverride;
+
+  /// Optional override for leaving demo mode when this build cannot open the
+  /// sample logbook. See [DemoStartup.abandon].
+  @visibleForTesting
+  final Future<void> Function()? demoAbandonOverride;
+
+  /// Optional override for the platform question, so tests can run the
+  /// browser branches on the VM.
+  @visibleForTesting
+  final bool? isWebOverride;
+
   const StartupWrapper({
     super.key,
     required this.prefs,
@@ -81,6 +261,20 @@ class StartupWrapper extends StatefulWidget {
     this.schemaVersionProbeOverride,
     this.closeAppOverride,
     this.preMigrationBackupFactory,
+    this.preDowngradeBackupFactory,
+    this.downgradeCandidateProbeOverride,
+    this.enginePreflightOverride,
+    this.restoreOverride,
+    this.restoreJournalFactory,
+    this.recoveryServiceOverride,
+    this.pickBackupFileOverride,
+    this.fileReachedOverride,
+    this.closeDatabaseOverride,
+    this.availabilityServiceOverride,
+    this.demoPaths,
+    this.demoStartupOverride,
+    this.demoAbandonOverride,
+    this.isWebOverride,
   });
 
   @override
@@ -99,12 +293,93 @@ class _StartupWrapperState extends State<StartupWrapper>
   int _dbVersion = 0;
   int _appVersion = 0;
   BackupFailedException? _backupError;
+  sqlite3.SqliteException? _readonlyError;
+
+  /// How far startup had got. Drives [classifyStartupFailure]: the same
+  /// exception means different things depending on what was running.
+  StartupPhase _phase = StartupPhase.preflight;
+
+  bool get _isWeb => widget.isWebOverride ?? HostPlatform.isWeb;
+
+  /// Which class of failure the terminal error screen is reporting.
+  StartupFailureKind _failureKind = StartupFailureKind.unknown;
+
+  /// Whether this launch's schema probe opened an existing database file.
+  /// It opens read-write, which can roll back a hot journal, so after it the
+  /// file may have changed however unreachable its folder looks later.
+  bool _schemaProbeReachedFile = false;
+
+  /// The sample logbook this launch opens instead of the user's database,
+  /// when demo mode is on (issue #3708). Null opens the user's database.
+  String? _demoDatabasePath;
+
+  /// Whether this run of [_runInitialization] is opening the sample logbook,
+  /// so a failure belongs to that disposable file and not the user's own.
+  bool _openingSampleLogbook = false;
+
+  /// Set once the sample logbook failed to open and demo mode was left. Later
+  /// runs open the user's logbook even if the demo state could not be
+  /// cleared, so a failing sample can never loop.
+  bool _sampleLogbookAbandoned = false;
+
+  /// The diver's custom folder, when the failure screen found it unreachable
+  /// (#2178). Null at the default location and whenever the folder is fine.
+  String? _unreachableFolder;
+
+  /// A backup the diver could swap in, discovered after the failure. Null
+  /// until [_loadRecoveryOptions] finds one (and never loaded at all for an
+  /// engine failure, where no restore can help).
+  BackupRecord? _recoveryBackup;
+
+  /// Directory holding [_recoveryBackup], shown so the diver can reach their
+  /// backups by hand. Backup *settings* are unreachable from the splash: it
+  /// runs before the router and the database exist.
+  String? _backupsDirectory;
+
+  /// The pre-upgrade safety copy offered on the schema-mismatch screen, or
+  /// null when the registry holds none this build could open. Separate from
+  /// [_recoveryBackup] because the two are chosen by opposite rules: the
+  /// terminal failure screen wants the NEWEST copy, while a mismatch needs
+  /// the newest copy that is still OLD enough to open here.
+  BackupRecord? _downgradeBackup;
+
+  /// An earlier restore that stopped with the diver's previous database still
+  /// aside, found before anything was opened. Null otherwise (issue #1901).
+  InterruptedRestore? _interruptedRestore;
+
+  /// Why the configured dive log is not on this device, and the folder it
+  /// was expected in. Set only while startup is stopped on that (#2177).
+  DiveLogAvailability? _unavailableDiveLog;
+  String? _unavailableFolder;
+
+  /// Set once the diver has chosen to start a new dive log in a folder whose
+  /// dive log is missing, so the relaunch does not stop on the same screen.
+  bool _startingNewDiveLog = false;
+
+  late final DiveLogAvailabilityService _availability =
+      widget.availabilityServiceOverride ??
+      DiveLogAvailabilityService(widget.locationService);
+
+  static const _log = LoggerService('Startup');
+
+  StartupRestoreStatus _restoreStatus = StartupRestoreStatus.idle;
+  String? _restoreError;
+
+  /// Completed by the unlock handlers to resume [_runInitialization] past
+  /// the lock gate.
+  Completer<void>? _unlockCompleter;
+  bool _biometricAvailable = false;
+
+  /// Navigator key for the splash MaterialApp, so the escape-hatch dialogs
+  /// (Task: recovery code / start fresh) have a dialog-capable context.
+  final GlobalKey<NavigatorState> _splashNavigatorKey =
+      GlobalKey<NavigatorState>();
 
   /// Drives the dissolve of the splash layer over the mounted app beneath.
   /// Forward-only; starts when _state first reaches ready.
   late final AnimationController _splashFadeController = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 900),
+    duration: const Duration(milliseconds: 750),
   );
 
   /// True once the fade completes, at which point the splash widget is
@@ -116,6 +391,11 @@ class _StartupWrapperState extends State<StartupWrapper>
     super.initState();
     _splashFadeController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
+        // coverage:ignore-start
+        if (!kReleaseMode) {
+          debugPrint('[startup] splash fade complete');
+        }
+        // coverage:ignore-end
         setState(() => _splashRemoved = true);
       }
     });
@@ -129,46 +409,139 @@ class _StartupWrapperState extends State<StartupWrapper>
   }
 
   Future<void> _runInitialization() async {
+    _schemaProbeReachedFile = false;
+    _openingSampleLogbook = false;
     try {
+      _phase = StartupPhase.preflight;
+
+      // Prove the database engine works before ANY user file is touched.
+      // In-memory only, so a failure here provably left the diver's data
+      // alone and can say so, instead of being misattributed to whichever
+      // step happened to be running (issue #1129: a Windows build shipped
+      // without sqlcipher.dll and the app reported a failed upgrade).
+      (widget.enginePreflightOverride ?? assertDatabaseEngineAvailable)();
+
+      // Demo mode first (issue #3708): finishing an exit a killed app left
+      // half done restores the preferences everything below reads.
+      _demoDatabasePath = _sampleLogbookAbandoned
+          ? null
+          : (await _resolveDemoStartup()).demoDatabasePath;
+
       // Determine if migration is needed before opening the database
       final dbPath = await widget.locationService.getDatabasePath();
+      final journal = _restoreJournal(dbPath);
+
+      // A dive log that is not on this device has to stop startup here,
+      // before the security gate as well as before the open. The open would
+      // create an empty dive log in its place, and the security gate reads a
+      // missing file as a plaintext one and switches encryption off to match
+      // (issue #2177).
+      if (!_isWeb && !await _ensureDiveLogAvailable(dbPath, journal)) return;
+
+      // App Security gate: must resolve BEFORE the schema probe below, which
+      // needs the cipher key to read an encrypted file.
+      //
+      // While a restore is unsettled, the diver's database is the aside copy,
+      // so the gate judges encryption by that file's header. Judged by the
+      // live path (missing, or a plaintext restored file) an encrypted
+      // install read as an interrupted disable-encryption run and lost the
+      // key the recovery probe below needs (issue #1901).
+      if (_isWeb) {
+        // No encryption at rest and no app lock in a browser; the service
+        // is still configured so the rest of startup can ask it.
+        await DatabaseSecurityService.instance.configure(prefs: widget.prefs);
+      } else {
+        await _resolveSecurityGate(
+          dbPath,
+          headerPath: journal.pendingAsidePath ?? dbPath,
+        );
+      }
+
+      // An earlier restore that never settled left the previous database
+      // aside. Checked after the security gate (probing an encrypted file
+      // needs the key) and before the schema probe on purpose: a missing live
+      // file would otherwise be created fresh by onCreate, and a rejected one
+      // would route to the version-mismatch screen, neither of which is what
+      // happened.
+      final interrupted = _isWeb ? null : journal.findInterrupted();
+      if (interrupted != null) {
+        if (mounted) {
+          setState(() {
+            _interruptedRestore = interrupted;
+            _state = _StartupState.interruptedRestore;
+          });
+        }
+        return;
+      }
+
+      // Everything above judged the user's own database: whether it is on
+      // this device, the app lock and its encryption key, an unsettled
+      // restore. In demo mode the file opened below is the plaintext sample
+      // logbook instead, so it is opened without the key, and it needs no
+      // pre-upgrade backup (it is discarded on exit).
+      final demoPath = _demoDatabasePath;
+      final openPath = demoPath ?? dbPath;
+      if (demoPath != null) DatabaseService.instance.databaseKeyHex = null;
+      _openingSampleLogbook = demoPath != null;
 
       final int? storedVersion;
       final bool needsMigration;
       final int totalSteps;
 
+      // Sync stat on purpose, like _loadRecoveryOptions: a dart:io future
+      // started in the widget-test zone never completes.
+      _schemaProbeReachedFile = _isWeb || File(openPath).existsSync();
       if (widget.schemaVersionProbeOverride != null) {
-        final probe = widget.schemaVersionProbeOverride!(dbPath);
+        final probe = widget.schemaVersionProbeOverride!(openPath);
         needsMigration = probe.needsMigration;
         totalSteps = probe.totalSteps;
         storedVersion =
             null; // probe path doesn't expose storedVersion; backup uses 0 default
+      } else if (_isWeb) {
+        // The browser's probe is asynchronous: drift opens the file once
+        // more to read its stored version, so a pending upgrade shows its
+        // progress here as it does natively. The open below refuses a newer
+        // file and runs the upgrade itself.
+        final sv = await BackgroundDatabaseConnection.readStoredSchemaVersion(
+          openPath,
+        );
+        storedVersion = sv;
+        needsMigration = sv > 0 && sv < AppDatabase.currentSchemaVersion;
+        totalSteps = needsMigration ? AppDatabase.migrationStepCount(sv) : 0;
       } else {
-        storedVersion = DatabaseService.getStoredSchemaVersion(dbPath);
+        storedVersion = DatabaseService.getStoredSchemaVersion(
+          openPath,
+          keyHex: DatabaseService.instance.databaseKeyHex,
+        );
         final sv = storedVersion;
         needsMigration =
             sv != null && sv > 0 && sv < AppDatabase.currentSchemaVersion;
         totalSteps = needsMigration ? AppDatabase.migrationStepCount(sv) : 0;
       }
 
-      if (needsMigration) {
-        if (mounted) {
-          setState(() => _state = _StartupState.backingUp);
-        }
-        try {
-          await _runPreMigrationBackup(
-            dbPath: dbPath,
-            stored: storedVersion ?? 0,
-          );
-        } on BackupFailedException catch (e) {
+      if (needsMigration && demoPath == null) {
+        // The browser has no file to copy aside: its upgrade runs without
+        // the pre-migration backup.
+        if (!_isWeb) {
           if (mounted) {
-            setState(() {
-              _state = _StartupState.backupFailed;
-              _backupError = e;
-            });
+            setState(() => _state = _StartupState.backingUp);
           }
-          return;
+          try {
+            await _runPreMigrationBackup(
+              dbPath: dbPath,
+              stored: storedVersion ?? 0,
+            );
+          } on BackupFailedException catch (e) {
+            if (mounted) {
+              setState(() {
+                _state = _StartupState.backupFailed;
+                _backupError = e;
+              });
+            }
+            return;
+          }
         }
+        _phase = StartupPhase.upgrading;
         if (mounted) {
           setState(() {
             _state = _StartupState.migrating;
@@ -178,40 +551,556 @@ class _StartupWrapperState extends State<StartupWrapper>
             );
           });
         }
+      } else {
+        _phase = StartupPhase.opening;
       }
 
       // Run DB init and minimum splash duration in parallel
       await Future.wait([
-        _initializeServices(),
+        _initializeServices().then((_) => _markLocationVerified()),
         Future.delayed(const Duration(seconds: 1)),
       ]);
 
       if (mounted) {
+        // coverage:ignore-start
+        final readyAt = Stopwatch()..start();
+        if (!kReleaseMode) {
+          debugPrint('[startup] ready; building app under splash');
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            debugPrint(
+              '[startup] first frame after ready: '
+              '${readyAt.elapsedMilliseconds}ms',
+            );
+          });
+        }
+        // coverage:ignore-end
         setState(() => _state = _StartupState.ready);
         _splashFadeController.forward();
       }
     } on DatabaseVersionMismatchException catch (e) {
+      if (await _leaveUnopenableSampleLogbook(e)) return;
       if (mounted) {
         setState(() {
           _state = _StartupState.error;
           _isVersionMismatch = true;
-          _dbVersion = e.databaseVersion;
-          _appVersion = e.appVersion;
+          _dbVersion = e.storedSchemaVersion;
+          _appVersion = e.supportedSchemaVersion;
         });
+        await _loadDowngradeOption();
+      }
+    } on DatabaseLockedException {
+      // The cached/typed key did not open the file (e.g. a keychain restored
+      // from another device). Fall back to the password prompt — the sidecar
+      // is authoritative and unlockWithSecret re-derives from it — then
+      // retry initialization from the top.
+      _unlockCompleter = Completer<void>();
+      if (mounted) setState(() => _state = _StartupState.locked);
+      await _unlockCompleter!.future;
+      if (mounted) {
+        setState(() => _state = _StartupState.initializing);
+        await _runInitialization();
+      }
+    } on sqlite3.SqliteException catch (e) {
+      if (await _leaveUnopenableSampleLogbook(e)) return;
+      if (DatabaseService.isRecoverableReadonlyError(e)) {
+        debugPrint(
+          'Startup hit SQLITE_READONLY (code ${e.extendedResultCode}); '
+          'offering hot-journal recovery.',
+        );
+        if (mounted) {
+          setState(() {
+            _state = _StartupState.recoveryRequired;
+            _readonlyError = e;
+          });
+        }
+      } else {
+        await _enterFailureState(e);
       }
     } catch (e) {
-      debugPrint('FATAL: App initialization failed: $e');
+      if (await _leaveUnopenableSampleLogbook(e)) return;
+      await _enterFailureState(e);
+    }
+  }
+
+  /// Leaves demo mode and opens the user's own logbook when the sample
+  /// logbook is what failed to open. Returns whether it did.
+  ///
+  /// Every screen past a failed open (the version mismatch, the failure
+  /// screen, hot-journal recovery) is about the user's database: its restore
+  /// offers come from their backup registry and act on their file, and demo
+  /// mode seals all of them, so pressing one only showed the seal's error.
+  /// The sample is disposable, so the honest answer is to leave it. The usual
+  /// case is a downgrade: a newer build upgraded the sample, and this one
+  /// cannot read it. If the user's own logbook cannot open either, the rerun
+  /// shows its screens, outside demo mode, where their restores work.
+  ///
+  /// Two failures keep demo mode on and the sample's own screen instead,
+  /// because rerunning would be worse: a connection that will not close
+  /// (initialize() would return early with the sample still open), and an
+  /// exit that could not put the user's preferences back.
+  Future<bool> _leaveUnopenableSampleLogbook(Object error) async {
+    if (!_openingSampleLogbook) return false;
+    _openingSampleLogbook = false;
+    debugPrint(
+      '[startup] the demo sample logbook could not be opened, leaving demo '
+      'mode: $error',
+    );
+    // Closed before the demo files go: an open connection holds the file.
+    final closeError = await _releaseDatabase();
+    if (closeError != null) {
+      debugPrint('[startup] the sample logbook is still open; staying in demo');
+      return false;
+    }
+    if (!await _abandonDemoMode()) return false;
+    _sampleLogbookAbandoned = true;
+    if (!mounted) return true;
+    setState(() {
+      _state = _StartupState.initializing;
+      _isVersionMismatch = false;
+      _errorMessage = '';
+    });
+    await _runInitialization();
+    return true;
+  }
+
+  /// Whether demo mode was left. Never throws. A demo directory that cannot
+  /// be removed still counts as left ([DemoStartup.abandon] leaves it for the
+  /// next launch); state or preferences that cannot be put back do not, and
+  /// demo mode stays on.
+  Future<bool> _abandonDemoMode() async {
+    try {
+      final override = widget.demoAbandonOverride;
+      final paths = widget.demoPaths;
+      if (override != null) {
+        await override();
+      } else if (paths != null) {
+        await DemoStartup.abandon(
+          store: DemoStateStore(paths),
+          prefs: widget.prefs,
+        );
+      } else {
+        DemoModeGate.instance.markActive(false);
+      }
+      return true;
+    } catch (e) {
+      debugPrint('[startup] demo mode could not be left: $e');
+      return false;
+    }
+  }
+
+  /// Routes a terminal startup failure to the error screen under the class it
+  /// actually belongs to, and starts looking for a way out.
+  ///
+  /// Before issue #1134 every failure landed here under the fixed title
+  /// "Database upgrade failed", which was wrong in both directions: it told
+  /// divers their upgrade failed when the database had never been opened, and
+  /// it pointed diagnosis at migration code.
+  ///
+  /// The custom folder is probed first because an unreachable one never says
+  /// so in the error: a folder the sandbox no longer grants surfaces as a
+  /// plain file error or a SQLite open failure. Startup on macOS and iOS used
+  /// to answer that by resetting the storage location, silently (#2178).
+  Future<void> _enterFailureState(Object error) async {
+    // Once the file was reached, by the schema probe or by an open (even one
+    // that failed part way), it may have changed, and the folder must not
+    // take the blame.
+    final fileReached =
+        _schemaProbeReachedFile ||
+        (widget.fileReachedOverride ??
+            () => DatabaseService.instance.hasReachedFile)();
+    // The screen is terminal and every route out relaunches or moves files.
+    // A relaunch would reuse a connection still open (initialize() returns
+    // early while one is), and setting aside would move the open file.
+    await _releaseDatabase();
+    // Probed only when its answer can change the screen: on a dead network
+    // mount every file call can block for the whole network timeout.
+    final unreachableFolder =
+        canBlameUnreachableFolder(error, _phase, fileReached: fileReached)
+        ? await _probeUnreachableFolder()
+        : null;
+    final kind = classifyStartupFailure(
+      error,
+      _phase,
+      locationUnreachable: unreachableFolder != null,
+      fileReached: fileReached,
+    );
+    debugPrint('FATAL: App initialization failed (${kind.name}): $error');
+    if (!mounted) return;
+    setState(() {
+      _state = _StartupState.error;
+      _failureKind = kind;
+      _errorMessage = '$error';
+      _unreachableFolder = kind == StartupFailureKind.locationUnreachable
+          ? unreachableFolder
+          : null;
+    });
+    unawaited(_loadRecoveryOptions());
+  }
+
+  /// Closes any connection this launch opened, and returns why it would not
+  /// close, or null once none is open.
+  ///
+  /// The strict close, not the app-exit one: every route out of the failure
+  /// screen moves or reopens this file, and the exit path may abandon a
+  /// worker still holding it. Never throws: a connection that will not close
+  /// must not replace the failure being reported. A no-op once closed.
+  Future<Object?> _releaseDatabase() async {
+    try {
+      await (widget.closeDatabaseOverride ??
+          () => DatabaseService.instance.close(strict: true))();
+      return null;
+    } catch (e) {
+      debugPrint('Could not close the database after a failed start: $e');
+      return e;
+    }
+  }
+
+  /// How long the failure screen waits on the folder check.
+  static const _folderProbeLimit = Duration(seconds: 1);
+
+  /// The diver's custom folder if it cannot be reached, else null.
+  ///
+  /// Never throws. This runs on the way to a screen the diver reaches because
+  /// something already failed, so a probe that fails too must leave that
+  /// original failure on screen rather than replace it.
+  ///
+  /// Bounded by [_folderProbeLimit]: on a dead network mount every file call
+  /// can block for the whole network timeout, and the splash must not wait
+  /// that long. A probe that does not answer in time counts as reachable,
+  /// which leaves the screen that keeps every route on offer.
+  Future<String?> _probeUnreachableFolder() async {
+    try {
+      return await widget.locationService.unreachableCustomFolder().timeout(
+        _folderProbeLimit,
+        onTimeout: () {
+          debugPrint('Dive log folder check gave no answer; not blaming it');
+          return null;
+        },
+      );
+    } catch (e) {
+      debugPrint('Could not check the dive log folder: $e');
+      return null;
+    }
+  }
+
+  /// Stops startup when the dive log a custom folder points at is not on this
+  /// device, before anything could create an empty one in its place (issue
+  /// #2177). Returns whether startup may carry on.
+  ///
+  /// A dive log iCloud holds is fetched first, under the splash (see
+  /// [DiveLogAvailabilityService.resolve]). Only one that does not arrive, or
+  /// one that is missing outright, stops startup.
+  Future<bool> _ensureDiveLogAvailable(
+    String dbPath,
+    RestoreJournal journal,
+  ) async {
+    // The diver's choice to start a new dive log covers this one launch. It
+    // is spent here, so a later rerun (a restore after the new one failed to
+    // open, say) checks again rather than skipping the gate for good.
+    if (_startingNewDiveLog) {
+      _startingNewDiveLog = false;
+      return true;
+    }
+    // An unsettled restore is the restore screen's to explain: its live path
+    // may be empty on purpose, with the diver's database set aside.
+    if (journal.pendingAsidePath != null) return true;
+
+    final availability = await _availability.resolve(
+      onDownloading: () {
+        _log.info('Dive log at $dbPath is in iCloud only; downloading it');
+        if (mounted) {
+          setState(() => _state = _StartupState.downloadingFromICloud);
+        }
+      },
+    );
+
+    if (availability == DiveLogAvailability.ready) {
+      if (mounted && _state == _StartupState.downloadingFromICloud) {
+        setState(() => _state = _StartupState.initializing);
+      }
+      return true;
+    }
+
+    _log.warning(
+      'Startup stopped before opening: dive log at $dbPath is '
+      '${availability.name}',
+    );
+    if (mounted) {
+      setState(() {
+        _unavailableDiveLog = availability;
+        _unavailableFolder = p.dirname(dbPath);
+        _state = _StartupState.diveLogUnavailable;
+      });
+    }
+    return false;
+  }
+
+  /// Records that the custom location has held a dive log, now that one has
+  /// opened there, so a later loss stops startup instead of reading as a
+  /// first launch (#2177). Best-effort: a failed stamp must not cost the
+  /// diver a launch that has otherwise succeeded.
+  Future<void> _markLocationVerified() async {
+    try {
+      await widget.locationService.markCustomLocationVerified();
+    } catch (e) {
+      _log.warning('Could not stamp the dive log location as verified: $e');
+    }
+  }
+
+  /// Creates a new, empty dive log in the folder whose dive log is missing,
+  /// once the diver confirms. Never offered for a dive log still in iCloud.
+  Future<void> _startNewDiveLogHere() async {
+    final context = _dialogContext;
+    final folder = _unavailableFolder;
+    if (context == null || !context.mounted || folder == null) return;
+    if (!await showStartNewDiveLogDialog(context, folder)) return;
+    _startingNewDiveLog = true;
+    await _relaunchStartup();
+  }
+
+  /// Resolves the App Security gate before any database access.
+  ///
+  /// - App Lock on: show the lock screen and wait for a successful unlock.
+  /// - Encryption on, App Lock off: load the cached key silently; only a
+  ///   missing cached key (new device, keychain wipe) shows the prompt —
+  ///   the database is physically unopenable without it.
+  /// - Both off: no-op.
+  ///
+  /// Also self-heals a flag/file mismatch: the file header is the truth
+  /// (an interrupted enable/disable or restored prefs can disagree).
+  ///
+  /// [headerPath] is the file whose header decides "encrypted or not", when
+  /// that is not [dbPath]: the aside copy of an unsettled restore.
+  Future<void> _resolveSecurityGate(String dbPath, {String? headerPath}) async {
+    final security = DatabaseSecurityService.instance;
+    await security.configure(prefs: widget.prefs);
+
+    final fileEncrypted = isEncryptedDatabaseFile(headerPath ?? dbPath);
+    if (!fileEncrypted && security.encryptionEnabled) {
+      // Interrupted disable-encryption run: the file is plaintext, the flag
+      // is stale. The file wins.
+      await security.preferences.setDbEncryptionEnabled(false);
+      await security.refreshDerivedKey();
+    } else if (fileEncrypted && !security.encryptionEnabled) {
+      // Encrypted-LOOKING file with the flag off. A corrupt plaintext
+      // database has the same non-SQLite header, so only conclude
+      // "interrupted enable-encryption" when the keyslot sidecar is present
+      // to corroborate it (enableSecurity always writes one and it travels
+      // with the database); otherwise leave the file to the existing
+      // corruption-recovery flow.
+      if (DatabaseSecuritySidecar.existsFor(dbPath)) {
+        await security.preferences.setDbEncryptionEnabled(true);
+        await security.refreshDerivedKey();
+      }
+    }
+
+    if (security.appLockEnabled || security.encryptionEnabled) {
+      final cached = await security.tryLoadCachedKey();
+      final mustPrompt =
+          security.appLockEnabled || (security.encryptionEnabled && !cached);
+      if (mustPrompt) {
+        _biometricAvailable =
+            cached &&
+            security.preferences.appLockBiometricsEnabled &&
+            await BiometricService().isAvailable();
+        _unlockCompleter = Completer<void>();
+        if (mounted) setState(() => _state = _StartupState.locked);
+        await _unlockCompleter!.future;
+        if (mounted) setState(() => _state = _StartupState.initializing);
+      }
+    }
+
+    // Sidecar self-heal: unlocked via the cached key but the durable wrapped
+    // copy is gone (deleted, excluded from a folder sync, ...). Rebuild it
+    // now — the cached key is the only unlock left, and losing it too would
+    // strand the database permanently. Declining just reoffers next launch.
+    if ((security.appLockEnabled || security.encryptionEnabled) &&
+        security.isUnlocked &&
+        !DatabaseSecuritySidecar.existsFor(dbPath)) {
+      final ctx = _splashNavigatorKey.currentContext;
+      if (ctx != null && ctx.mounted) {
+        String? newCode;
+        final repaired = await showSidecarRepairDialog(
+          ctx,
+          onSubmit: (password) async {
+            try {
+              newCode = await security.rebuildSidecar(
+                password: password,
+                dbPath: dbPath,
+              );
+              return true;
+            } catch (_) {
+              return false;
+            }
+          },
+        );
+        final codeCtx = _splashNavigatorKey.currentContext;
+        if (repaired == true &&
+            newCode != null &&
+            codeCtx != null &&
+            codeCtx.mounted) {
+          await showNewRecoveryCodeDialog(codeCtx, newCode!);
+        }
+      }
+    }
+
+    DatabaseService.instance.databaseKeyHex = security.databaseKeyHex;
+  }
+
+  /// The last secret (password OR recovery code) that successfully unwrapped
+  /// the Master Key this session. Needed by the forced password reset after
+  /// a recovery-code unlock (changePassword requires the current secret).
+  String? _lastAcceptedSecret;
+
+  /// Unlocks without completing the gate — the recovery-code dialog uses
+  /// this so the forced password reset can finish BEFORE startup proceeds
+  /// (the splash layer, and any dialog on it, is torn down at ready).
+  Future<bool> _unlockSecretOnly(String secret) async {
+    final security = DatabaseSecurityService.instance;
+    final dbPath = await widget.locationService.getDatabasePath();
+    final ok = await security.unlockWithSecret(secret, dbPath: dbPath);
+    if (ok) _lastAcceptedSecret = secret;
+    return ok;
+  }
+
+  Future<bool> _unlockWithPassword(String secret) async {
+    final ok = await _unlockSecretOnly(secret);
+    if (ok) _unlockCompleter?.complete();
+    return ok;
+  }
+
+  Future<void> _handleRecoveryUnlock() async {
+    final ctx = _splashNavigatorKey.currentContext;
+    if (ctx == null) return;
+    final ok = await showRecoveryCodeUnlockDialog(
+      ctx,
+      onSubmit: _unlockSecretOnly,
+    );
+    if (ok != true) return;
+    // Recovery implies the password is lost: force a new one before
+    // continuing (per spec), while the splash layer is still mounted.
+    final resetCtx = _splashNavigatorKey.currentContext;
+    final currentSecret = _lastAcceptedSecret;
+    if (resetCtx != null && resetCtx.mounted && currentSecret != null) {
+      await showForcedPasswordResetDialog(
+        resetCtx,
+        onSubmit: (newPassword) async {
+          final dbPath = await widget.locationService.getDatabasePath();
+          await DatabaseSecurityService.instance.changePassword(
+            currentSecret: currentSecret,
+            newPassword: newPassword,
+            dbPath: dbPath,
+          );
+        },
+      );
+    }
+    _unlockCompleter?.complete();
+  }
+
+  Future<void> _handleStartFresh() async {
+    final ctx = _splashNavigatorKey.currentContext;
+    if (ctx == null) return;
+    final confirmed = await showStartFreshConfirmDialog(ctx);
+    if (confirmed != true) return;
+    final dbPath = await widget.locationService.getDatabasePath();
+    await setAsideLockedDatabase(dbPath: dbPath, prefs: widget.prefs);
+    await DatabaseSecurityService.instance.clearInMemoryState();
+    DatabaseService.instance.databaseKeyHex = null;
+    // Resume initialization: the database file is gone, so a fresh empty
+    // database is created and the first-run wizard takes over.
+    _unlockCompleter?.complete();
+  }
+
+  Future<bool> _unlockWithBiometric() async {
+    // The lock screen lives inside the splash MaterialApp, so the splash
+    // navigator's context is the one carrying Localizations here; this
+    // State's own context sits above that MaterialApp and has none.
+    final promptCtx = _splashNavigatorKey.currentContext;
+    final ok = await BiometricService().authenticate(
+      reason: promptCtx == null
+          ? 'Unlock your dive log'
+          : AppLocalizations.of(promptCtx).lock_biometric_reason,
+    );
+    if (ok) _unlockCompleter?.complete();
+    return ok;
+  }
+
+  /// Attempt to recover the database from a hot-journal-readonly error by
+  /// reopening in read-write mode (which forces SQLite to finish the
+  /// rollback), then retry initialization from the top.
+  Future<void> _runRecovery() async {
+    if (!mounted) return;
+    setState(() {
+      _state = _StartupState.recovering;
+      // Clear any stale text from a prior failed attempt so the
+      // recoveryFailed UI reflects only the current reason.
+      _errorMessage = '';
+    });
+    try {
+      final dbPath = await widget.locationService.getDatabasePath();
+      final recovered = DatabaseService.recoverHotJournal(
+        dbPath,
+        keyHex: DatabaseService.instance.databaseKeyHex,
+      );
+      if (!recovered) {
+        if (mounted) {
+          setState(() {
+            _state = _StartupState.recoveryFailed;
+            _errorMessage =
+                'SQLite could not reopen the database to roll back the '
+                'interrupted transaction.';
+          });
+        }
+        return;
+      }
+      await _runInitialization();
+    } catch (e) {
       if (mounted) {
         setState(() {
-          _state = _StartupState.error;
+          _state = _StartupState.recoveryFailed;
           _errorMessage = '$e';
         });
       }
     }
   }
 
+  /// Leaves [StartupPhase.upgrading] now that the schema ladder is no longer
+  /// in flight.
+  ///
+  /// Everything after the ladder is ordinary service startup, so a failure
+  /// there must not be reported as a failed database upgrade. Observed at two
+  /// points because neither alone is sufficient: the ladder's final progress
+  /// report is the precise instant it finishes and is the one a test can
+  /// drive, while the return of `initialize()` is the backstop that still
+  /// holds if the reported step count ever drifts from the ladder's real one.
+  void _markUpgradeFinished() {
+    _phase = StartupPhase.opening;
+  }
+
+  Future<DemoStartupDecision> _resolveDemoStartup() async {
+    final override = widget.demoStartupOverride;
+    if (override != null) return override();
+    final paths = widget.demoPaths;
+    if (paths == null) return const DemoStartupDecision(null);
+    try {
+      return await DemoStartup.resolve(
+        store: DemoStateStore(paths),
+        prefs: widget.prefs,
+      );
+    } catch (e) {
+      // Never block a launch on demo mode: the user's logbook opens.
+      debugPrint('[startup] demo mode state could not be read: $e');
+      return const DemoStartupDecision(null);
+    }
+  }
+
   Future<void> _initializeServices() async {
     void onProgress(int currentStep, int totalSteps) {
+      // reportProgress() in the migration ladder increments BEFORE it calls
+      // back, so the final report means the last step already completed.
+      if (totalSteps > 0 && currentStep >= totalSteps) {
+        _markUpgradeFinished();
+      }
       if (mounted) {
         setState(() {
           _progress = MigrationProgress(
@@ -227,23 +1116,180 @@ class _StartupWrapperState extends State<StartupWrapper>
       return;
     }
 
-    await DatabaseService.instance.initialize(
-      locationService: widget.locationService,
-      onMigrationProgress: onProgress,
+    // Real service bootstrap. Each step wraps a platform singleton or a real
+    // database, so this block runs during app launch rather than unit tests
+    // (cf. the coverage-ignored bootstrap in lib/main.dart). The wall-time
+    // attribution itself lives in the unit-tested [timeStartupStep].
+    // coverage:ignore-start
+    // Leftover sync temp files, every launch (issue #1931). An interrupted
+    // sync strands its `ssv1_` base export or assembled base in the app temp
+    // dir, a full copy of the library, and nothing else reclaims it short of
+    // Repair sync. First, ahead of the database: the sweep needs no database
+    // or provider (a device that signed out can still hold a leftover), so it
+    // still runs when the open fails or waits on a lock, and it lists the dir
+    // before any sync of this launch has started. Its five-minute grace
+    // covers one that starts while the listing runs. Not awaited, and no
+    // try/catch: the sweep logs and swallows every failure itself.
+    unawaited(sweepLeftoverSyncTempFiles());
+
+    // The foreground launch is the one open allowed to compact: a rewrite
+    // takes a while, and only here is there a screen to say so.
+    final compaction = DatabaseCompactionPrefs(
+      await SharedPreferences.getInstance(),
+    );
+    await timeStartupStep(
+      'database',
+      () => DatabaseService.instance.initialize(
+        locationService: widget.locationService,
+        onMigrationProgress: onProgress,
+        compaction: compaction,
+        onCompacting: () {
+          if (mounted) setState(() => _state = _StartupState.compacting);
+        },
+        pathOverride: _demoDatabasePath,
+      ),
     );
 
-    await LocalCacheDatabaseService.instance.initialize();
-    await NotificationService.instance.initialize();
-    await initializeBackgroundService();
+    // Backstop for the same rule the final progress report already applies:
+    // whatever the ladder reported, it is finished once initialize() returns.
+    _markUpgradeFinished();
 
-    try {
-      await TileCacheService.instance.initialize();
-    } catch (e) {
-      debugPrint('Warning: Tile cache initialization failed: $e');
+    // The sample logbook is open now, so a later step that fails is a startup
+    // failure of its own and must not discard a sample that works.
+    _openingSampleLogbook = false;
+
+    await timeStartupStep(
+      'localCache',
+      LocalCacheDatabaseService.instance.initialize,
+    );
+    await timeStartupStep('accountMigration', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await AccountStartupMigration(prefs: prefs).run();
+      // After the migration, so rows it seeds are already at their
+      // deterministic ids and the pass finds nothing to do on a fresh
+      // install. Both swallow their own errors: neither can block startup.
+      await AccountDeduplicator(prefs: prefs).run();
+      await runSetUpCardSeed(prefs);
+    });
+    await timeStartupStep(
+      'notifications',
+      NotificationService.instance.initialize,
+    );
+    // No background isolate or OS scheduler in a browser.
+    if (!_isWeb) {
+      await timeStartupStep('backgroundService', initializeBackgroundService);
     }
 
-    final speciesRepository = SpeciesRepository();
-    await speciesRepository.seedBuiltInSpecies();
+    // No tile cache in a browser: tiles come straight from the network.
+    if (!_isWeb) {
+      await timeStartupStep('tileCache', () async {
+        try {
+          await TileCacheService.instance.initialize();
+          // Age-sweep the browse cache. Not awaited: it is an indexed delete
+          // that nothing downstream depends on, and blocking first frame on
+          // housekeeping is how a splash screen grows a 20-second hang. Scoped
+          // to the browse store, so a downloaded offline region is never swept.
+          unawaited(
+            TileCacheService.instance
+                .removeOldTiles(TileCacheService.browseTileMaxAge)
+                .catchError((Object e) {
+                  debugPrint('Browse tile age sweep failed (will retry): $e');
+                }),
+          );
+        } catch (e) {
+          debugPrint('Warning: Tile cache initialization failed: $e');
+        }
+      });
+    }
+
+    await timeStartupStep('speciesSeed', () async {
+      final speciesRepository = SpeciesRepository();
+      await speciesRepository.seedBuiltInSpecies(
+        versionStore: PrefsBuiltInSpeciesSeedVersionStore(
+          await SharedPreferences.getInstance(),
+        ),
+      );
+    });
+
+    // Unlinked-media sweep, every launch. Fire-and-forget: it must not delay
+    // first frame and runs against the now-open databases. Empty on a
+    // healthy library; catches anything a not-yet-upgraded peer syncs in.
+    final mediaRepository = MediaRepository();
+    final sweep = MediaOrphanBacklogSweep(
+      mediaRepository: mediaRepository,
+      coordinator: MediaDeletionCoordinator(
+        mediaRepository: mediaRepository,
+        queue: () => MediaTransferQueueRepository(),
+      ),
+    );
+    // An async closure rather than `.catchError` on the Future<int>: it
+    // hands `unawaited` a genuine Future<void> instead of a swept-row count
+    // nobody reads, and it keeps the stack trace. Nothing surfaces this
+    // failure to the user and the retry is a whole launch away, so the
+    // trace is the only diagnostic there will be. Untyped catch on purpose:
+    // an uninitialized local cache database throws StateError, not
+    // Exception, and a failed sweep must never take down startup.
+    unawaited(() async {
+      try {
+        await sweep.run();
+      } catch (e, stackTrace) {
+        debugPrint(
+          'Orphaned-media backlog sweep failed (will retry): $e\n$stackTrace',
+        );
+      }
+    }());
+
+    // Scanned-page folder migration (issue #1645), every launch. The common
+    // case is one directory stat that finds nothing; on an install that
+    // still has `<documents>/scanned_logs/` it moves the pages under
+    // `Submersion` and relinks their rows. Fire-and-forget like the media
+    // sweep above, but with no try/catch: run() folds every failure into
+    // its report by contract, so the report is the only diagnostic.
+    unawaited(() async {
+      final report = await ScannedLogsMigration(
+        relocateRows: (from, to) =>
+            mediaRepository.relocateLocalFile(from: from, to: to),
+      ).run();
+      if (report.outcome != ScannedLogsMigrationOutcome.noLegacyData) {
+        debugPrint('Scanned logs migration: $report');
+      }
+    }());
+
+    // Tombstone GC for a library that never syncs, every launch. The cloud
+    // path runs GC at the tail of a successful sync, which a device with no
+    // provider never reaches, so its deletion log otherwise grows forever.
+    // Gated on there being no trace of a prior sync: a device that synced
+    // and then went local-only still owes its peers those tombstones. Same
+    // fire-and-forget shape as the media sweep above, for the same reasons.
+    //
+    // Ahead of it, awaited, the one-time pass that puts every computer's
+    // Equipment item on every dive it recorded (issue #4846). The pass reads
+    // the diveEquipment tombstones to leave off what the diver removed, so
+    // the GC must not collect them while it runs. It writes a row per dive on
+    // a large library, which keeps it off the startup path itself, and it
+    // never throws.
+    unawaited(() async {
+      await ComputerGearDiveHeal().run();
+      try {
+        final db = DatabaseService.instance.database;
+        await LocalOnlyTombstoneGc(
+          syncRepository: SyncRepository(database: db),
+          peerCursors: PeerCursorStore(db),
+          publishStates: PublishStateStore(db),
+        ).run();
+      } catch (e, stackTrace) {
+        debugPrint(
+          'Local-only tombstone GC failed (will retry): $e\n$stackTrace',
+        );
+      }
+    }());
+
+    // The scratch-file and local cache sweeps run from the storage cleanup
+    // coordinator (storageGcCoordinatorProvider, issue #3396), which the app
+    // kicks once the first frame is up. The two jobs above stay here: the sync
+    // temp sweep must run before the database opens, and the unlinked-media
+    // sweep deletes rows, not files.
+    // coverage:ignore-end
   }
 
   Future<void> _runPreMigrationBackup({
@@ -263,6 +1309,7 @@ class _StartupWrapperState extends State<StartupWrapper>
 
     final PreMigrationBackupService service;
     final String appVersion;
+    BackupDirLease? lease;
     if (widget.preMigrationBackupFactory != null) {
       service = widget.preMigrationBackupFactory!(
         livePath: dbPath,
@@ -271,19 +1318,44 @@ class _StartupWrapperState extends State<StartupWrapper>
       appVersion = '0.0.0.0';
     } else {
       final info = await PackageInfo.fromPlatform();
-      appVersion = '${info.version}.${info.buildNumber}';
+      appVersion = formatAppVersion(info);
       service = PreMigrationBackupService(
         livePathProvider: () async => dbPath,
-        backupsDirProvider: () => BackupService.resolveBackupsDirectory(prefs),
+        // Resolve LAZILY, inside the provider. Resolution arms any
+        // security-scoped bookmark for the custom location and self-heals a
+        // dead one to the sandbox default, but it also touches the filesystem
+        // and can throw (an ejected volume, or a location that is no longer
+        // creatable). PreMigrationBackupService calls this provider inside the
+        // region guarded by fallbackBackupsDirProvider, so resolving here keeps
+        // any failure recoverable. Resolving eagerly instead would move the
+        // throw outside that guard, where it escapes as a bare
+        // FileSystemException rather than a BackupFailedException and strands
+        // startup on the terminal "Database upgrade failed" screen. Keeping it
+        // lazy is what makes "a pre-migration backup can never brick startup"
+        // actually hold.
+        backupsDirProvider: () async {
+          lease = await BackupService.resolveBackupsDirectoryLeased(prefs);
+          return lease!.path;
+        },
+        fallbackBackupsDirProvider:
+            BackupService.resolveDefaultBackupsDirectory,
         preferences: prefs,
+        // The security gate has already run, so this is the live key when
+        // protection is on. Needed only to open the database for the
+        // pre-copy WAL checkpoint.
+        databaseKeyHexProvider: () => DatabaseService.instance.databaseKeyHex,
       );
     }
 
-    await service.backupIfMigrationPending(
-      stored: stored,
-      target: AppDatabase.currentSchemaVersion,
-      appVersion: appVersion,
-    );
+    try {
+      await service.backupIfMigrationPending(
+        stored: stored,
+        target: AppDatabase.currentSchemaVersion,
+        appVersion: appVersion,
+      );
+    } finally {
+      await lease?.release();
+    }
   }
 
   /// Re-runs backup → services → ready without the 1-second splash delay used
@@ -301,15 +1373,22 @@ class _StartupWrapperState extends State<StartupWrapper>
     });
     try {
       final dbPath = await widget.locationService.getDatabasePath();
-      final stored = DatabaseService.getStoredSchemaVersion(dbPath) ?? 0;
+      final stored =
+          DatabaseService.getStoredSchemaVersion(
+            dbPath,
+            keyHex: DatabaseService.instance.databaseKeyHex,
+          ) ??
+          0;
       await _runPreMigrationBackup(dbPath: dbPath, stored: stored);
       if (!mounted) return;
       final totalSteps = AppDatabase.migrationStepCount(stored);
+      _phase = StartupPhase.upgrading;
       setState(() {
         _state = _StartupState.migrating;
         _progress = MigrationProgress(currentStep: 0, totalSteps: totalSteps);
       });
       await _initializeServices();
+      await _markLocationVerified();
       if (!mounted) return;
       setState(() => _state = _StartupState.ready);
       _splashFadeController.forward();
@@ -321,21 +1400,657 @@ class _StartupWrapperState extends State<StartupWrapper>
         });
       }
     } catch (e) {
+      await _enterFailureState(e);
+    }
+  }
+
+  /// Finds a backup the diver could swap in, plus the folder it lives in.
+  ///
+  /// Reads the backup registry straight from [SharedPreferences], which is the
+  /// only reason this works at all: the database is closed and the router does
+  /// not exist yet, so the normal backup UI is out of reach.
+  ///
+  /// Best-effort and silent on failure. This runs on a screen the diver has
+  /// already reached because something went wrong; a second failure here must
+  /// degrade to the plain error screen, not replace one terminal state with
+  /// another.
+  Future<void> _loadRecoveryOptions() async {
+    // No restore can fix a build that cannot open a database at all, and
+    // offering one would repeat exactly the misdirection #1134 is about.
+    if (!_failureKind.dataIsAtRisk) return;
+
+    try {
+      final history = BackupPreferences(widget.prefs).getHistory();
+
+      // Prefer the automatic pre-migration safety copy, the newest snapshot
+      // of the database as it was before this launch touched it, then fall
+      // back to the newest local backup of any kind.
+      final candidates = [
+        ...history.where((r) => r.type == BackupType.preMigration),
+        ...history.where((r) => r.type != BackupType.preMigration),
+      ];
+
+      for (final record in candidates) {
+        final path = record.localPath;
+        // A SAF (content://) or cloud-only record cannot be swapped in by the
+        // plain file copy DatabaseService.restore performs.
+        if (path == null || isSafRef(path)) continue;
+        // Synchronous stat on purpose. The set is bounded (a handful of
+        // registry entries, read once, on a screen that is already terminal),
+        // so async buys nothing here; and empirically the async form left the
+        // widget tests covering this screen pumping until their timeout
+        // instead of settling.
+        if (!File(path).existsSync()) continue;
+        if (!mounted) return;
+        setState(() {
+          _recoveryBackup = record;
+          _backupsDirectory = p.dirname(path);
+        });
+        return;
+      }
+
+      // No usable backup, but the folder is still worth showing: the diver may
+      // have moved their backups somewhere this registry no longer knows about.
+      final fallbackDir = await BackupService.resolveDefaultBackupsDirectory();
+      if (!mounted) return;
+      setState(() => _backupsDirectory = fallbackDir);
+    } catch (e) {
+      debugPrint('Startup recovery options unavailable: $e');
+    }
+  }
+
+  /// Finds a pre-upgrade safety copy the diver could go BACK to, for the
+  /// schema-mismatch screen.
+  ///
+  /// Everything this needs is already in memory when the mismatch is raised:
+  /// `main.dart` loads SharedPreferences before it opens the database, and
+  /// the backup registry lives there precisely so it survives a database swap
+  /// (issue #1589). No restore UI is reachable from here -- it lives behind
+  /// the database that will not open.
+  ///
+  /// The registry only records what a copy CLAIMED to hold. Opening it is
+  /// what proves the claim, so each candidate is probed before it is offered:
+  /// a button that fails the same way the database just did would leave the
+  /// diver exactly where this screen already left them.
+  ///
+  /// Best-effort and silent on failure, like [_loadRecoveryOptions]: a second
+  /// failure here must degrade to the plain mismatch screen rather than
+  /// replace one terminal state with another.
+  Future<void> _loadDowngradeOption() async {
+    try {
+      final history = BackupPreferences(widget.prefs).getHistory();
+      final candidates = downgradeRestoreCandidates(
+        history,
+        supportedSchemaVersion: _appVersion,
+      );
+
+      for (final record in candidates) {
+        // Non-null by construction: downgradeRestoreCandidates drops records
+        // without a plain local path.
+        final path = record.localPath!;
+        // Synchronous stat, matching _loadRecoveryOptions: the set is a
+        // handful of registry entries read once on an already-terminal
+        // screen, and the async form left the widget tests covering this
+        // screen pumping until their timeout.
+        if (!File(path).existsSync()) continue;
+        final stored = _probeCandidateSchema(path);
+        if (stored == null) continue;
+
+        // Two separate questions, and the offer needs both.
+        //
+        // Can this build open the file at all? The selector already applied
+        // this bound to what the registry CLAIMS; re-applying it to what the
+        // file actually holds is what makes the claim load-bearing.
+        if (stored > _appVersion) continue;
+
+        // Is it the copy the card is about to describe? The card names
+        // record.fromSchemaVersion and toSchemaVersion, so a file whose own
+        // user_version disagrees with the claim would have the screen promise
+        // to undo one upgrade and restore a database from another. For a
+        // pre-migration copy the two are equal by construction: the service
+        // records fromSchemaVersion from the live file's user_version at copy
+        // time, and settling the journal mode does not change it. A
+        // discrepancy therefore means the registry and the file have come
+        // apart -- a replaced file, or a hand-edited registry -- and the
+        // honest move on a data-loss path is to offer nothing rather than
+        // something mislabelled.
+        if (stored != record.fromSchemaVersion) {
+          debugPrint(
+            'Skipping backup at $path: it holds schema v$stored but the '
+            'registry claims v${record.fromSchemaVersion}',
+          );
+          continue;
+        }
+
+        if (!mounted) return;
+        setState(() => _downgradeBackup = record);
+        return;
+      }
+    } catch (e) {
+      debugPrint('Startup downgrade options unavailable: $e');
+    }
+  }
+
+  /// Reads the schema version a candidate backup actually holds.
+  ///
+  /// The real work lives in [probeBackupSchemaVersion], which owns the
+  /// keyed-then-unkeyed fallback and is tested directly; this only supplies
+  /// the live key and the test seam.
+  int? _probeCandidateSchema(String path) {
+    final probeOverride = widget.downgradeCandidateProbeOverride;
+    if (probeOverride != null) return probeOverride(path);
+
+    return probeBackupSchemaVersion(
+      path,
+      keyHex: DatabaseService.instance.databaseKeyHex,
+      onDiagnostic: debugPrint,
+    );
+  }
+
+  /// Copies the newer-schema database into the backups folder and registers
+  /// it, BEFORE the downgrade restore swaps it away.
+  ///
+  /// [DatabaseService.restore] deletes its own `.pre-restore` copy once the
+  /// swap succeeds, so without this step accepting the offer would be the
+  /// moment every dive logged in the newer build stopped existing. A throw
+  /// here aborts the restore, which costs the diver nothing they had a
+  /// moment ago.
+  Future<void> _preserveNewerDatabase() async {
+    final prefs = BackupPreferences(widget.prefs);
+    final dbPath = await widget.locationService.getDatabasePath();
+
+    final PreDowngradeBackupService service;
+    final String appVersion;
+    BackupDirLease? lease;
+    if (widget.preDowngradeBackupFactory != null) {
+      service = widget.preDowngradeBackupFactory!(
+        livePath: dbPath,
+        preferences: prefs,
+      );
+      appVersion = '0.0.0.0';
+    } else {
+      final info = await PackageInfo.fromPlatform();
+      appVersion = formatAppVersion(info);
+      service = PreDowngradeBackupService(
+        livePathProvider: () async => dbPath,
+        // Resolved lazily inside the provider, for the same reason
+        // _runPreMigrationBackup does it: resolution touches the filesystem
+        // and can throw, and inside the provider that throw is recoverable
+        // through fallbackBackupsDirProvider.
+        backupsDirProvider: () async {
+          lease = await BackupService.resolveBackupsDirectoryLeased(prefs);
+          return lease!.path;
+        },
+        fallbackBackupsDirProvider:
+            BackupService.resolveDefaultBackupsDirectory,
+        preferences: prefs,
+        databaseKeyHexProvider: () => DatabaseService.instance.databaseKeyHex,
+      );
+    }
+
+    try {
+      await service.preserve(
+        storedSchemaVersion: _dbVersion,
+        appVersion: appVersion,
+      );
+    } finally {
+      await lease?.release();
+    }
+  }
+
+  /// Goes back to [_downgradeBackup], keeping the newer database first.
+  ///
+  /// The order is the whole point: preserve, then swap. A failure to preserve
+  /// leaves the diver on the mismatch screen with both files intact, which is
+  /// strictly better than a completed downgrade that lost the newer one.
+  Future<void> _restoreFromDowngradeBackup() => _restoreAtStartup(
+    _downgradeBackup?.localPath,
+    before: _preserveNewerDatabase,
+  );
+
+  /// Swaps [_recoveryBackup] in for the live database, then resumes startup.
+  ///
+  /// Safe here precisely because startup failed: the database is closed, so
+  /// [DatabaseService.restore] does its staged swap without contending with an
+  /// open connection, and it rolls the original file back if the swap fails.
+  Future<void> _restoreFromStartupBackup() {
+    if (_recoveryBusy) return Future<void>.value();
+    return _restoreAtStartup(_recoveryBackup?.localPath);
+  }
+
+  /// Shared body of both startup restores: swap [record] in, then resume
+  /// startup from the top.
+  ///
+  /// [before] runs while the screen already shows progress and before
+  /// anything is swapped, so a throw from it aborts with the live database
+  /// untouched.
+  Future<void> _restoreAtStartup(
+    String? path, {
+    Future<void> Function()? before,
+  }) async {
+    if (path == null) return;
+    if (_restoreStatus == StartupRestoreStatus.running) return;
+
+    setState(() {
+      _restoreStatus = StartupRestoreStatus.running;
+      _restoreError = null;
+    });
+
+    void onProgress(int currentStep, int totalSteps) {
       if (mounted) {
         setState(() {
-          _state = _StartupState.error;
-          _errorMessage = '$e';
+          _progress = MigrationProgress(
+            currentStep: currentStep,
+            totalSteps: totalSteps,
+          );
         });
       }
     }
+
+    try {
+      await before?.call();
+      // Recorded before the swap, as BackupService does: the marker holds the
+      // storage cleanup's cloud deletes back until a sync after the restore,
+      // and the restored database must not judge what in the media store is
+      // orphaned before then. A marker that cannot be recorded stops here.
+      await StorageGcStore.markRestored(widget.prefs, DateTime.now());
+      if (widget.restoreOverride != null) {
+        await widget.restoreOverride!(path, onProgress);
+      } else {
+        // [restore] resolves its destination through the location service,
+        // which a failed launch may never have registered. Without this the
+        // swap would target the DEFAULT path and miss a custom location.
+        DatabaseService.instance.adoptLocationService(widget.locationService);
+        await DatabaseService.instance.restore(
+          path,
+          onMigrationProgress: onProgress,
+        );
+      }
+      if (!mounted) return;
+      // The restored file carries an older schema, so the reopen inside
+      // restore() has already run the ladder. Resume startup from the top so
+      // the security gate and the remaining services run exactly as on a
+      // normal launch.
+      setState(() {
+        _restoreStatus = StartupRestoreStatus.idle;
+        _state = _StartupState.initializing;
+        _errorMessage = '';
+        _recoveryBackup = null;
+        _downgradeBackup = null;
+        // Cleared so the relaunch shows the splash rather than the screen the
+        // diver just acted on. The reopen re-raises the mismatch if the swap
+        // somehow left a newer file in place.
+        _isVersionMismatch = false;
+      });
+      await _runInitialization();
+    } catch (e) {
+      debugPrint('Startup restore failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _restoreStatus = StartupRestoreStatus.failed;
+        _restoreError = '$e';
+      });
+    }
   }
+
+  RestoreJournal _restoreJournal(String dbPath) =>
+      widget.restoreJournalFactory?.call(dbPath) ??
+      DatabaseService.instance.restoreJournalFor(dbPath);
+
+  /// Puts the database from before the interrupted restore back.
+  Future<void> _recoverInterruptedRestore() =>
+      _settleInterruptedRestore((journal) => journal.recover());
+
+  /// Keeps what is live now; the previous database stays on disk under a
+  /// timestamped name.
+  Future<void> _keepCurrentDatabase() =>
+      _settleInterruptedRestore((journal) => journal.keepCurrent());
+
+  /// Shared body of both interrupted-restore actions: run [action] with the
+  /// database closed, then resume startup from the top, like
+  /// [_restoreAtStartup], so the security gate, migrations and the
+  /// version-mismatch screen all run as on a normal launch. A failure keeps
+  /// the diver on this screen; neither action deletes a database file.
+  Future<void> _settleInterruptedRestore(
+    Future<void> Function(RestoreJournal journal) action,
+  ) async {
+    if (_restoreStatus == StartupRestoreStatus.running) return;
+    setState(() {
+      _restoreStatus = StartupRestoreStatus.running;
+      _restoreError = null;
+    });
+    try {
+      final dbPath = await widget.locationService.getDatabasePath();
+      await action(_restoreJournal(dbPath));
+      if (!mounted) return;
+      setState(() {
+        _restoreStatus = StartupRestoreStatus.idle;
+        _interruptedRestore = null;
+        _state = _StartupState.initializing;
+      });
+      await _runInitialization();
+    } catch (e) {
+      debugPrint('Interrupted restore could not be settled: $e');
+      if (!mounted) return;
+      setState(() {
+        _restoreStatus = StartupRestoreStatus.failed;
+        _restoreError = '$e';
+      });
+    }
+  }
+
+  /// True while one of the routes out of the failure screen is running.
+  ///
+  /// Not cosmetic. Every route acts on the diver's ONE database: a restore
+  /// copies over it, an adoption repoints at a different file, starting fresh
+  /// moves it and its sidecars away. Nothing stops a diver tapping a second
+  /// route while the first is still copying, because a restore leaves the
+  /// failure screen on display the whole time it runs (it sets
+  /// [_restoreStatus], not [_state]). Two routes racing the same files can
+  /// move one the other is mid-copy.
+  bool _recoveryBusy = false;
+
+  /// Whether any route, new or the restore card's, is in flight.
+  bool get _recoveryRoutesBusy =>
+      _recoveryBusy || _restoreStatus == StartupRestoreStatus.running;
+
+  /// Runs [action] as the one recovery route allowed to be in flight.
+  Future<void> _runRecoveryRoute(Future<void> Function() action) async {
+    if (_recoveryRoutesBusy) return;
+    setState(() => _recoveryBusy = true);
+    try {
+      // Every route moves or reopens the database. One that failed to close
+      // on the way to this screen gets another chance; one that still will
+      // not close stops the route rather than race the handle holding it.
+      final stuck = await _releaseDatabase();
+      if (stuck != null) {
+        await _reportRecoveryProblem(null, detail: '$stuck');
+        return;
+      }
+      await action();
+    } finally {
+      // The screen is often gone by now (a successful route relaunches
+      // startup), so the mounted check is the normal case, not the edge one.
+      if (mounted) setState(() => _recoveryBusy = false);
+    }
+  }
+
+  /// The ways out of the terminal failure screen, built on first use because
+  /// almost no launch ever reaches that screen.
+  late final StartupRecoveryService _recoveryService =
+      widget.recoveryServiceOverride ??
+      StartupRecoveryService(widget.locationService);
+
+  /// A context for the recovery dialogs.
+  ///
+  /// The splash owns its own Navigator precisely because the app router does
+  /// not exist yet, and every one of these routes is reached only from a
+  /// screen that exists because the router could not be built.
+  BuildContext? get _dialogContext {
+    final context = _splashNavigatorKey.currentContext;
+    return context != null && context.mounted ? context : null;
+  }
+
+  /// Switches to a dive log the diver keeps in another folder.
+  ///
+  /// The issue this answers (#2139) is a diver whose Mac database was damaged
+  /// on a fresh install: the backup registry was empty, so the screen offered
+  /// an empty folder and a Close button, while the dive log they actually use
+  /// sat in their iCloud Drive folder, reachable the whole time.
+  Future<void> _useAnotherFolder() async {
+    final String? folder;
+    try {
+      folder = (await widget.locationService.pickCustomFolder())?.path;
+    } catch (e) {
+      await _reportRecoveryProblem(null, detail: '$e');
+      return;
+    }
+    if (folder == null) return;
+
+    final inspection = await _recoveryService.inspectFolder(folder);
+    switch (inspection) {
+      // Naming both the file and the folder searched is deliberate: picking
+      // the folder ABOVE the one holding submersion.db is the mistake this
+      // step invites, and "nothing found" alone does not tell a diver that.
+      case NoDiveLogInFolder():
+        await _reportRecoveryProblem(
+          (l10n) => l10n.startup_recovery_noDiveLog_body(
+            DatabaseLocationService.databaseFilename,
+            folder!,
+          ),
+        );
+      case UnusableDiveLogInFolder():
+        await _reportRecoveryProblem(
+          (l10n) => l10n.startup_recovery_unusable_body(
+            p.join(folder!, DatabaseLocationService.databaseFilename),
+          ),
+        );
+      case final AdoptableDiveLog found:
+        final context = _dialogContext;
+        if (context == null || !context.mounted) return;
+        if (!await showAdoptDiveLogDialog(context, found)) return;
+        try {
+          await _recoveryService.adopt(found);
+        } catch (e) {
+          await _reportRecoveryProblem(null, detail: '$e');
+          return;
+        }
+        await _relaunchStartup();
+    }
+  }
+
+  /// Restores a backup file the diver picks by hand.
+  ///
+  /// The registry-backed card above can only offer backups THIS install took,
+  /// which on a fresh machine is none. A copy carried over from another
+  /// device is invisible to it however plainly it belongs to the diver.
+  Future<void> _restoreFromPickedFile() async {
+    final String? path;
+    try {
+      path = await _pickBackupFile();
+    } catch (e) {
+      await _reportRecoveryProblem(null, detail: '$e');
+      return;
+    }
+    if (path == null) return;
+
+    final choice = await _recoveryService.classifyBackupFile(
+      path,
+      widget.prefs,
+    );
+    switch (choice) {
+      // An encrypted backup is a VALID artifact that simply cannot be opened
+      // from here, so it gets its own message. Calling it damaged would send
+      // a diver looking for a corruption that does not exist.
+      case EncryptedBackupFile():
+        await _reportRecoveryProblem(
+          (l10n) => l10n.startup_recovery_encryptedBackup_body,
+        );
+      // Its OWN message, not the unusable-dive-log one: that text calls the
+      // path a dive log, which is wrong for a backup and sends the diver
+      // looking at the wrong file.
+      case UnusableBackupFile(:final path, :final reason):
+        await _reportRecoveryProblem(
+          (l10n) => l10n.startup_recovery_unusableBackup_body(path),
+          detail: reason,
+        );
+      case RestorableBackupFile(:final path):
+        await _restoreAtStartup(path);
+    }
+  }
+
+  /// The picked file's path, or null when the diver cancelled.
+  Future<String?> _pickBackupFile() async {
+    final override = widget.pickBackupFileOverride;
+    if (override != null) return override();
+    final picked = await FilePicker.pickFile(type: FileType.any);
+    return picked?.path;
+  }
+
+  /// Stops using the folder that cannot be reached and goes back to the app
+  /// default location, once the diver has said so.
+  ///
+  /// The same reset startup used to perform unasked on macOS and iOS (#2178).
+  /// Nothing in the folder is touched, so choosing it again from Settings >
+  /// Database Storage picks the dive log back up.
+  Future<void> _useDefaultLocation() async {
+    final folder = _unreachableFolder;
+    final context = _dialogContext;
+    if (folder == null || context == null || !context.mounted) return;
+    if (!await showUseDefaultLocationDialog(context, folder)) return;
+
+    try {
+      await _recoveryService.useDefaultLocation();
+    } catch (e) {
+      await _reportRecoveryProblem(null, detail: '$e');
+      return;
+    }
+    await _relaunchStartup();
+  }
+
+  /// Sets the database that will not open aside and starts an empty one.
+  ///
+  /// The last resort, and still worth having: an app that opens at all puts
+  /// Backup & Restore and Database Storage back within reach, and both of
+  /// those can do far more for the diver than this screen ever will.
+  Future<void> _startFresh() async {
+    final confirmContext = _dialogContext;
+    if (confirmContext == null || !confirmContext.mounted) return;
+    if (!await showStartFreshDialog(confirmContext)) return;
+
+    final String movedTo;
+    try {
+      movedTo = await _recoveryService.setAsideUnreadableDatabase();
+    } catch (e) {
+      await _reportRecoveryProblem(null, detail: '$e');
+      return;
+    }
+
+    // Before the relaunch, not after. Once the app is up it looks to the
+    // diver like every dive they ever logged is gone, and by then this screen
+    // (and the path on it) is unreachable.
+    final doneContext = _dialogContext;
+    if (doneContext != null && doneContext.mounted) {
+      await showStartFreshDoneDialog(doneContext, movedTo);
+    }
+    await _relaunchStartup();
+  }
+
+  /// Runs startup again from the top after a recovery route changed something.
+  ///
+  /// From the top rather than resuming: the security gate and the schema
+  /// probe both have to run against whatever file is live now, exactly as
+  /// they would on an ordinary launch.
+  Future<void> _relaunchStartup() async {
+    if (!mounted) return;
+    setState(() {
+      _state = _StartupState.initializing;
+      _errorMessage = '';
+      _unreachableFolder = null;
+      _recoveryBackup = null;
+      _backupsDirectory = null;
+      _restoreStatus = StartupRestoreStatus.idle;
+      _restoreError = null;
+      _unavailableDiveLog = null;
+      _unavailableFolder = null;
+    });
+    await _runInitialization();
+  }
+
+  /// Shows [message] over the failure screen, with optional raw [detail].
+  ///
+  /// Takes a builder rather than a string because the l10n lookup needs a
+  /// context that only exists once the dialog route does.
+  Future<void> _reportRecoveryProblem(
+    String Function(AppLocalizations l10n)? message, {
+    String? detail,
+  }) async {
+    final context = _dialogContext;
+    if (context == null || !context.mounted) return;
+    await showRecoveryProblemDialog(
+      context,
+      message: message?.call(context.l10n),
+      detail: detail,
+    );
+  }
+
+  /// True where "show me that folder" means something. Mobile file managers
+  /// have no addressable folder concept to hand off to.
+  bool get _canRevealBackupsFolder => HostPlatform.isDesktop;
+
+  Future<void> _showBackupsFolder() async {
+    final dir = _backupsDirectory;
+    if (dir == null) return;
+    // launchUrl signals a refused hand-off by RETURNING false as often as by
+    // throwing (no registered handler for a file:// directory is the common
+    // case here), so both have to be logged or the button is a silent no-op.
+    // Either way the path is on screen as selectable text, so the diver still
+    // has something to paste into a file manager.
+    try {
+      final launched = await launchUrl(Uri.directory(dir));
+      if (!launched) {
+        debugPrint('Could not open backups folder: launchUrl returned false');
+      }
+    } catch (e) {
+      debugPrint('Could not open backups folder: $e');
+    }
+  }
+
+  static final Uri _previousReleasesUri = Uri.parse(
+    StartupFailureView.previousReleasesUrl,
+  );
+
+  /// Hands [uri] to the browser, reporting both ways the hand-off can fail.
+  ///
+  /// Same reasoning as _showBackupsFolder: a refused hand-off shows up as a
+  /// false return at least as often as an exception, and an unlogged one makes
+  /// the button look broken. Every caller renders its address on screen too,
+  /// so the diver keeps a usable route either way, and leaving them on this
+  /// screen is the only safe fallback: the database is untouched and must stay
+  /// that way.
+  ///
+  /// [label] names the destination in the log line, since the three terminal
+  /// screens offer three different release pages.
+  Future<void> _openReleasePage(Uri uri, String label) async {
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        debugPrint('Could not open the $label page: launchUrl returned false');
+      }
+    } catch (e) {
+      debugPrint('Could not open the $label page: $e');
+    }
+  }
+
+  Future<void> _openPreviousReleases() =>
+      _openReleasePage(_previousReleasesUri, 'releases');
+
+  static final Uri _latestReleaseUri = Uri.parse(
+    VersionMismatchView.latestReleaseUrl,
+  );
+
+  Future<void> _openLatestRelease() =>
+      _openReleasePage(_latestReleaseUri, 'latest stable release');
+
+  static final Uri _betaReleasesUri = Uri.parse(
+    VersionMismatchView.betaReleasesUrl,
+  );
+
+  /// The other half of the version-mismatch screen's answer (#1588). When a
+  /// beta build wrote the file, the stable page above is the build that just
+  /// refused it; this is where the build that can open it actually lives.
+  Future<void> _openBetaReleases() =>
+      _openReleasePage(_betaReleasesUri, 'beta builds');
 
   void _quitApp() {
     if (widget.closeAppOverride != null) {
       widget.closeAppOverride!();
       return;
     }
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (HostPlatform.isIOS || HostPlatform.isAndroid) {
       SystemNavigator.pop();
     } else {
       exit(0);
@@ -357,7 +2072,7 @@ class _StartupWrapperState extends State<StartupWrapper>
       await LocalCacheDatabaseService.instance.close();
     } catch (_) {}
 
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (HostPlatform.isIOS || HostPlatform.isAndroid) {
       SystemNavigator.pop();
     } else {
       exit(0);
@@ -366,10 +2081,31 @@ class _StartupWrapperState extends State<StartupWrapper>
 
   @override
   Widget build(BuildContext context) {
-    final isDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
-    final backgroundColor = isDark ? const Color(0xFF121212) : Colors.white;
-    final textColor = isDark ? Colors.white : Colors.black87;
-    final subtitleColor = isDark ? Colors.white70 : Colors.black54;
+    final brightness = resolveStartupBrightness(
+      widget.prefs,
+      MediaQuery.platformBrightnessOf(context),
+    );
+    final isDark = brightness == Brightness.dark;
+
+    // Every themed descendant (the restore Card, the buttons, the progress
+    // indicators, the escape-hatch dialogs) reads Theme.of. A MaterialApp
+    // with no theme gets Flutter's default, which is always LIGHT: in dark
+    // mode that put a near-white card surface under white text and made the
+    // restore offer unreadable. The theme therefore has to follow the
+    // diver's brightness.
+    //
+    // The preset comes from the same pre-database mirror the brightness does,
+    // so a diver on Console or Deep is not handed an ocean-blue error screen.
+    final splashTheme = AppThemeRegistry.resolveTheme(
+      resolveStartupThemePreset(widget.prefs),
+      brightness,
+    );
+
+    // The error and recovery screens paint their plain text from the same
+    // theme, so it agrees with the restore card beneath it on every preset.
+    final backgroundColor = splashTheme.colorScheme.surface;
+    final textColor = splashTheme.colorScheme.onSurface;
+    final subtitleColor = splashTheme.colorScheme.onSurfaceVariant;
 
     final isReady = _state == _StartupState.ready;
 
@@ -388,17 +2124,52 @@ class _StartupWrapperState extends State<StartupWrapper>
               ),
               child: MaterialApp(
                 debugShowCheckedModeBanner: false,
+                navigatorKey: _splashNavigatorKey,
+                theme: splashTheme,
+                // The splash runs before the database (and therefore the
+                // diver's saved locale preference) is readable, so it can
+                // only resolve the system locale. Without these delegates
+                // the lock, migration and recovery screens would stay the
+                // last English-only surfaces in the app, and they are
+                // exactly the screens a diver meets when something is
+                // already wrong.
+                localizationsDelegates: AppLocalizations.localizationsDelegates,
+                supportedLocales: AppLocalizations.supportedLocales,
+                localeListResolutionCallback: (preferred, supported) =>
+                    resolveAppLocale(preferred, supported),
                 home:
                     (_state == _StartupState.error ||
-                        _state == _StartupState.backupFailed)
+                        _state == _StartupState.diveLogUnavailable ||
+                        _state == _StartupState.interruptedRestore ||
+                        _state == _StartupState.backupFailed ||
+                        _state == _StartupState.recoveryRequired ||
+                        _state == _StartupState.recovering ||
+                        _state == _StartupState.recoveryFailed)
                     ? Scaffold(
                         key: const ValueKey('error'),
                         backgroundColor: backgroundColor,
                         body: SafeArea(
                           child: Center(
-                            child: _buildErrorContent(textColor, subtitleColor),
+                            child: Builder(
+                              builder: (context) => _buildErrorContent(
+                                context,
+                                textColor,
+                                subtitleColor,
+                              ),
+                            ),
                           ),
                         ),
+                      )
+                    : _state == _StartupState.locked
+                    ? LockScreenView(
+                        key: const ValueKey('locked'),
+                        brightness: brightness,
+                        onSubmitSecret: _unlockWithPassword,
+                        onBiometric: _biometricAvailable
+                            ? _unlockWithBiometric
+                            : null,
+                        onUseRecoveryCode: _handleRecoveryUnlock,
+                        onStartFresh: _handleStartFresh,
                       )
                     : Scaffold(
                         // Use 'splash' key for both initializing and migrating
@@ -407,8 +2178,14 @@ class _StartupWrapperState extends State<StartupWrapper>
                         // Scaffold crossfade.
                         key: const ValueKey('splash'),
                         body: OceanBackground(
+                          brightness: brightness,
                           child: SafeArea(
-                            child: Center(child: _buildSplashContent(isDark)),
+                            child: Center(
+                              child: Builder(
+                                builder: (context) =>
+                                    _buildSplashContent(context, isDark),
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -429,7 +2206,7 @@ class _StartupWrapperState extends State<StartupWrapper>
     );
   }
 
-  Widget _buildSplashContent(bool isDark) {
+  Widget _buildSplashContent(BuildContext context, bool isDark) {
     if (_state == _StartupState.backingUp) {
       return const BackingUpView();
     }
@@ -470,8 +2247,10 @@ class _StartupWrapperState extends State<StartupWrapper>
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          'Upgrading database... '
-                          'step ${_progress.currentStep} of ${_progress.totalSteps}',
+                          context.l10n.startup_migrating_progress(
+                            _progress.currentStep,
+                            _progress.totalSteps,
+                          ),
                           style: TextStyle(
                             fontSize: 13,
                             color: Colors.white.withValues(alpha: 0.8),
@@ -480,6 +2259,30 @@ class _StartupWrapperState extends State<StartupWrapper>
                         ),
                       ],
                     )
+                  : _state == _StartupState.compacting
+                  ? Column(
+                      key: const ValueKey('startup-compacting'),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        LinearProgressIndicator(
+                          backgroundColor: Colors.white.withValues(alpha: 0.2),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          context.l10n.startup_compacting,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.white.withValues(alpha: 0.8),
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    )
+                  : _state == _StartupState.downloadingFromICloud
+                  ? const ICloudDownloadProgress()
                   : const SizedBox.shrink(),
             ),
           ),
@@ -488,7 +2291,46 @@ class _StartupWrapperState extends State<StartupWrapper>
     );
   }
 
-  Widget _buildErrorContent(Color textColor, Color subtitleColor) {
+  Widget _buildErrorContent(
+    BuildContext context,
+    Color textColor,
+    Color subtitleColor,
+  ) {
+    final unavailable = _unavailableDiveLog;
+    final unavailableFolder = _unavailableFolder;
+    if (_state == _StartupState.diveLogUnavailable &&
+        unavailable != null &&
+        unavailableFolder != null) {
+      return DiveLogUnavailableView(
+        availability: unavailable,
+        folderPath: unavailableFolder,
+        textColor: textColor,
+        subtitleColor: subtitleColor,
+        onTryAgain: () => _runRecoveryRoute(_relaunchStartup),
+        onUseAnotherFolder: () => _runRecoveryRoute(_useAnotherFolder),
+        onRestoreFromFile: () => _runRecoveryRoute(_restoreFromPickedFile),
+        onStartNew: () => _runRecoveryRoute(_startNewDiveLogHere),
+        onClose: _closeApp,
+        busy: _recoveryBusy,
+        restoreStatus: _restoreStatus,
+        restoreError: _restoreError,
+      );
+    }
+
+    final interrupted = _interruptedRestore;
+    if (_state == _StartupState.interruptedRestore && interrupted != null) {
+      return InterruptedRestoreView(
+        interrupted: interrupted,
+        textColor: textColor,
+        subtitleColor: subtitleColor,
+        onRecover: _recoverInterruptedRestore,
+        onKeepCurrent: _keepCurrentDatabase,
+        onClose: _closeApp,
+        status: _restoreStatus,
+        error: _restoreError,
+      );
+    }
+
     if (_state == _StartupState.backupFailed && _backupError != null) {
       return BackupFailedView(
         error: _backupError!,
@@ -497,16 +2339,75 @@ class _StartupWrapperState extends State<StartupWrapper>
       );
     }
 
+    if (_state == _StartupState.recoveryRequired ||
+        _state == _StartupState.recovering ||
+        _state == _StartupState.recoveryFailed) {
+      return _buildRecoveryContent(context, textColor, subtitleColor);
+    }
+
     if (_isVersionMismatch) {
+      return VersionMismatchView(
+        databaseVersion: _dbVersion,
+        appVersion: _appVersion,
+        textColor: textColor,
+        subtitleColor: subtitleColor,
+        onDownloadLatest: _openLatestRelease,
+        onOpenBetaBuilds: _openBetaReleases,
+        onClose: _closeApp,
+        restoreCandidate: _downgradeBackup,
+        onRestoreBackup: _downgradeBackup == null
+            ? null
+            : _restoreFromDowngradeBackup,
+        restoreStatus: _restoreStatus,
+        restoreError: _restoreError,
+      );
+    }
+
+    return StartupFailureView(
+      kind: _failureKind,
+      details: _errorMessage,
+      textColor: textColor,
+      subtitleColor: subtitleColor,
+      recoveryBackup: _recoveryBackup,
+      onRestoreBackup: _recoveryBackup == null
+          ? null
+          : _restoreFromStartupBackup,
+      restoreStatus: _restoreStatus,
+      restoreError: _restoreError,
+      backupsDirectory: _backupsDirectory,
+      onShowBackupsFolder: _backupsDirectory != null && _canRevealBackupsFolder
+          ? _showBackupsFolder
+          : null,
+      onViewPreviousReleases: _openPreviousReleases,
+      onUseAnotherFolder: () => _runRecoveryRoute(_useAnotherFolder),
+      onRestoreFromFile: () => _runRecoveryRoute(_restoreFromPickedFile),
+      onStartFresh: () => _runRecoveryRoute(_startFresh),
+      unreachableFolder: _unreachableFolder,
+      onUseDefaultLocation: () => _runRecoveryRoute(_useDefaultLocation),
+      recoveryBusy: _recoveryRoutesBusy,
+      onClose: _closeApp,
+    );
+  }
+
+  Widget _buildRecoveryContent(
+    BuildContext context,
+    Color textColor,
+    Color subtitleColor,
+  ) {
+    if (_state == _StartupState.recovering) {
       return Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.update, size: 64, color: Colors.orange),
+            const SizedBox(
+              width: 64,
+              height: 64,
+              child: CircularProgressIndicator(),
+            ),
             const SizedBox(height: 24),
             Text(
-              'Update Required',
+              context.l10n.startup_recovering_title,
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
@@ -516,35 +2417,83 @@ class _StartupWrapperState extends State<StartupWrapper>
             ),
             const SizedBox(height: 16),
             Text(
-              'Your dive data was saved by a newer version of '
-              'Submersion (schema v$_dbVersion). This version '
-              'only supports up to schema v$_appVersion.',
+              context.l10n.startup_recovering_body,
               style: TextStyle(fontSize: 14, color: subtitleColor),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 16),
-            Text(
-              'Please update Submersion to the latest version. '
-              'Your data is safe and has not been modified.',
-              style: TextStyle(fontSize: 14, color: subtitleColor),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            FilledButton(onPressed: _closeApp, child: const Text('Close')),
           ],
         ),
       );
     }
 
+    if (_state == _StartupState.recoveryFailed) {
+      final details = _errorMessage.isNotEmpty
+          ? _errorMessage
+          : (_readonlyError?.toString() ?? '');
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline, size: 64, color: Colors.orange),
+            const SizedBox(height: 24),
+            Text(
+              context.l10n.startup_recoveryFailed_title,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: textColor,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              context.l10n.startup_recoveryFailed_body,
+              style: TextStyle(fontSize: 14, color: subtitleColor),
+              textAlign: TextAlign.center,
+            ),
+            if (details.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                details,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: subtitleColor,
+                  fontFamily: 'monospace',
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+            const SizedBox(height: 24),
+            Wrap(
+              spacing: 12,
+              children: [
+                OutlinedButton(
+                  onPressed: _runRecovery,
+                  child: Text(context.l10n.common_action_tryAgain),
+                ),
+                FilledButton(
+                  onPressed: _closeApp,
+                  child: Text(context.l10n.common_action_close),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    // recoveryRequired
+    final code = _readonlyError?.extendedResultCode;
     return Padding(
       padding: const EdgeInsets.all(24),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.error_outline, size: 64, color: Colors.red),
+          const Icon(Icons.build_circle_outlined, size: 64, color: Colors.blue),
           const SizedBox(height: 24),
           Text(
-            'Database upgrade failed',
+            context.l10n.startup_recoveryRequired_title,
             style: TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.bold,
@@ -554,19 +2503,32 @@ class _StartupWrapperState extends State<StartupWrapper>
           ),
           const SizedBox(height: 16),
           Text(
-            _errorMessage,
+            context.l10n.startup_recoveryRequired_body,
             style: TextStyle(fontSize: 14, color: subtitleColor),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 16),
-          Text(
-            'Try restarting the app. If this persists, '
-            'reinstall or contact support.',
-            style: TextStyle(fontSize: 14, color: subtitleColor),
-            textAlign: TextAlign.center,
-          ),
+          if (code != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              context.l10n.startup_recovery_sqliteCode(code),
+              style: TextStyle(
+                fontSize: 12,
+                color: subtitleColor,
+                fontFamily: 'monospace',
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
           const SizedBox(height: 24),
-          FilledButton(onPressed: _closeApp, child: const Text('Close')),
+          FilledButton(
+            onPressed: _runRecovery,
+            child: Text(context.l10n.startup_recovery_action),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: _closeApp,
+            child: Text(context.l10n.startup_recovery_closeWithoutRecovering),
+          ),
         ],
       ),
     );

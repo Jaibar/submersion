@@ -1,0 +1,832 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_chunk.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/constants/pdf_templates.dart';
+import 'package:submersion/core/services/export/csv/codec/csv_export_units.dart';
+import 'package:submersion/core/services/export/export_service.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dives_extras.dart';
+import 'package:submersion/core/services/export/uddf/uddf_source_fetch.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_source_export.dart';
+import 'package:submersion/core/services/export/pdf/diver_photo_loader.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_profile_series.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_list_content.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/export_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank_pressure_export.dart';
+
+import '../../../../helpers/dive_participants.dart';
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
+import '../../../../helpers/test_app.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+
+Dive _dive(String id, {DiveSite? site}) {
+  final dt = DateTime(2026, 1, 1, id.hashCode % 12);
+  return Dive(id: id, dateTime: dt, entryTime: dt, site: site);
+}
+
+/// Records which delivery each bulk export chose.
+///
+/// Only the six methods the bulk sheet can reach are implemented; anything
+/// else throws via [noSuchMethod], so an unexpected call fails loudly rather
+/// than silently returning null.
+class _RecordingExportService implements ExportService {
+  final calls = <String>[];
+
+  /// The picker title the last CSV save was given.
+  String? csvSaveTitle;
+  List<DiveSite>? uddfSites;
+  UddfDivesExtras? uddfExtras;
+  UddfExportOptions? uddfOptions;
+  List<Dive>? uddfDives;
+  UddfDiveChunkLoader? uddfLoader;
+
+  /// Return value for every `save*ToFile`; null simulates a cancelled panel.
+  String? savePath = '/tmp/export_out';
+
+  /// When set, the next delivery throws this instead of returning.
+  Object? failure;
+
+  /// When set, deliveries block on this until the test completes it, so the
+  /// progress dialog is observable mid-flight.
+  Completer<void>? gate;
+
+  Future<String> _share(String label) async {
+    calls.add('share:$label');
+    await gate?.future;
+    if (failure != null) throw failure!;
+    return '/tmp/shared_$label';
+  }
+
+  /// The options the bulk sheet routed through, for assertions.
+  PdfExportOptions? pdfOptions;
+
+  /// The personalization the bulk sheet routed through, for assertions.
+  Diver? pdfDiver;
+  Uint8List? pdfDiverPhoto;
+
+  /// The dive types the last CSV or PDF export was handed (#1834).
+  Map<String, DiveTypeEntity>? diveTypesById;
+
+  Future<String?> _save(String label) async {
+    calls.add('save:$label');
+    await gate?.future;
+    if (failure != null) throw failure!;
+    return savePath;
+  }
+
+  @override
+  Future<String> exportDivesToPdf(
+    List<Dive> dives, {
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    PdfExportOptions options = const PdfExportOptions(),
+    String? title,
+    Map<String, PdfProfileSeries>? profiles,
+    List<Certification>? certifications,
+    CertificationCatalog? certificationCatalog,
+    Diver? diver,
+    Uint8List? diverPhoto,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+    required EquipmentArrangement gearArrangement,
+  }) {
+    pdfOptions = options;
+    pdfDiver = diver;
+    pdfDiverPhoto = diverPhoto;
+    this.diveTypesById = diveTypesById;
+    return _share('pdf');
+  }
+
+  @override
+  Future<String?> saveDivesToPdfFile(
+    List<Dive> dives, {
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    PdfExportOptions options = const PdfExportOptions(),
+    String? title,
+    Map<String, PdfProfileSeries>? profiles,
+    List<Certification>? certifications,
+    CertificationCatalog? certificationCatalog,
+    Diver? diver,
+    Uint8List? diverPhoto,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+    required EquipmentArrangement gearArrangement,
+  }) {
+    pdfOptions = options;
+    pdfDiver = diver;
+    pdfDiverPhoto = diverPhoto;
+    this.diveTypesById = diveTypesById;
+    return _save('pdf');
+  }
+
+  /// The dives the last CSV delivery was handed.
+  List<Dive>? csvDives;
+
+  /// The units the last CSV export was written in (#1813).
+  CsvExportUnits? csvUnits;
+
+  @override
+  Future<String> exportDivesToCsv(
+    List<Dive> dives, {
+    CsvExportUnits units = CsvExportUnits.metric,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+  }) {
+    csvDives = dives;
+    csvUnits = units;
+    this.diveTypesById = diveTypesById;
+    return _share('csv');
+  }
+
+  @override
+  Future<String?> saveDivesCsvToFile(
+    List<Dive> dives, {
+    required String dialogTitle,
+    CsvExportUnits units = CsvExportUnits.metric,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+  }) {
+    csvDives = dives;
+    csvSaveTitle = dialogTitle;
+    csvUnits = units;
+    this.diveTypesById = diveTypesById;
+    return _save('csv');
+  }
+
+  @override
+  Future<String> exportDivesToUddf(
+    List<Dive> dives, {
+    List<DiveSite>? sites,
+    Map<String, DiveTankPressureExport>? diveTankPressures,
+    List<DiveSourceExport>? dataSources,
+    CertificationCatalog? certificationCatalog,
+    UddfDivesExtras extras = const UddfDivesExtras.empty(),
+    UddfExportOptions options = const UddfExportOptions(),
+    UddfDiveChunkLoader? loadDiveChunk,
+  }) async {
+    uddfSites = sites;
+    uddfExtras = extras;
+    uddfOptions = options;
+    uddfDives = dives;
+    uddfLoader = loadDiveChunk;
+    return _share('uddf');
+  }
+
+  @override
+  Future<String?> saveDivesToUddfFile(
+    List<Dive> dives, {
+    List<DiveSite>? sites,
+    Map<String, DiveTankPressureExport>? diveTankPressures,
+    List<DiveSourceExport>? dataSources,
+    CertificationCatalog? certificationCatalog,
+    UddfDivesExtras extras = const UddfDivesExtras.empty(),
+    UddfExportOptions options = const UddfExportOptions(),
+    UddfDiveChunkLoader? loadDiveChunk,
+  }) async {
+    uddfSites = sites;
+    uddfExtras = extras;
+    uddfOptions = options;
+    uddfDives = dives;
+    uddfLoader = loadDiveChunk;
+    return _save('uddf');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Serves [byDive] as the junction; the real load is exercised in repository
+/// tests.
+class _FakeBuddyRepository extends BuddyRepository {
+  _FakeBuddyRepository([this.byDive = const {}]);
+  final Map<String, List<BuddyWithRole>> byDive;
+
+  @override
+  Future<Map<String, List<BuddyWithRole>>> getBuddiesForDives(
+    List<String> diveIds,
+  ) async => {
+    for (final id in diveIds)
+      if (byDive[id] != null) id: byDive[id]!,
+  };
+}
+
+class _FakeDiveRepository implements DiveRepository {
+  _FakeDiveRepository(this.dives);
+  final List<Dive> dives;
+
+  @override
+  Future<List<Dive>> getDivesByIds(List<String> ids) async =>
+      dives.where((d) => ids.contains(d.id)).toList();
+
+  @override
+  Future<List<Dive>> getDivesByIdsWithoutSamples(
+    List<String> ids, {
+    bool offUiIsolate = false,
+    int chunkSize = 50,
+  }) async {
+    withoutSamplesReads++;
+    offUiIsolateFlags.add(offUiIsolate);
+    return dives.where((d) => ids.contains(d.id)).toList();
+  }
+
+  int withoutSamplesReads = 0;
+
+  /// The offUiIsolate flag of each sample-free read, in call order.
+  final List<bool> offUiIsolateFlags = [];
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _MockPaginatedNotifier
+    extends StateNotifier<AsyncValue<PaginatedDiveListState>>
+    implements PaginatedDiveListNotifier {
+  _MockPaginatedNotifier(List<DiveSummary> dives)
+    : super(
+        AsyncValue.data(PaginatedDiveListState(dives: dives, hasMore: false)),
+      );
+
+  @override
+  Future<void> refresh() async {}
+
+  @override
+  Future<void> loadNextPage() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+Finder _tile(String id) =>
+    find.byWidgetPredicate((w) => w is DiveListTile && w.diveId == id);
+
+void main() {
+  late _RecordingExportService exportService;
+  late List<Dive> dives;
+  // Made on first use, so a test can change [dives] before it pumps.
+  _FakeDiveRepository? fakeRepository;
+  _FakeDiveRepository repository() =>
+      fakeRepository ??= _FakeDiveRepository(dives);
+  const extrasSentinel = UddfDivesExtras(diveBuddies: {'d1': []});
+  final extrasCalls = <(List<String>, UddfExportOptions)>[];
+
+  setUp(() {
+    exportService = _RecordingExportService();
+    fakeRepository = null;
+    extrasCalls.clear();
+    dives = [
+      _dive(
+        'd1',
+        site: const DiveSite(id: 's1', name: 'Aaa'),
+      ),
+      _dive('d2'),
+    ];
+  });
+
+  /// Pumps the list, selects both dives, and opens the bulk export sheet.
+  Future<void> pumpAndOpenExportSheet(
+    WidgetTester tester, {
+    Diver? diver,
+    DiverPhotoLoader? photoLoader,
+    Map<String, List<BuddyWithRole>> linkedBuddies = const {},
+    Future<List<DiveTypeEntity>>? diveTypes,
+  }) async {
+    final summaries = dives.map(DiveSummary.fromDive).toList();
+    final base = await getBaseOverrides();
+
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          diveListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+          paginatedDiveListProvider.overrideWith(
+            (ref) => _MockPaginatedNotifier(summaries),
+          ),
+          diveRepositoryProvider.overrideWithValue(repository()),
+          exportServiceProvider.overrideWithValue(exportService),
+          // These tests have no database. The real fetch would reach the
+          // repository, so the export would never be issued.
+          // No database: the export's custom agency names (#690).
+          allCustomCertificationsCatalogProvider.overrideWith(
+            (ref) async => CertificationCatalog.builtInOnly,
+          ),
+          uddfSourceFetchProvider.overrideWithValue(
+            (diveIds, options) async => const [],
+          ),
+          uddfDivesExtrasFetchProvider.overrideWithValue((
+            diveIds,
+            options,
+          ) async {
+            extrasCalls.add((diveIds, options));
+            return extrasSentinel;
+          }),
+          // The PDF route enriches the export with buddies, certifications
+          // and the diver. Those reach a database widget tests do not have,
+          // and the reads never settle, so stub them the way
+          // getBaseOverrides stubs preDiveSessionForDiveProvider.
+          buddyRepositoryProvider.overrideWithValue(
+            _FakeBuddyRepository(linkedBuddies),
+          ),
+          allCertificationsProvider.overrideWith((ref) async => const []),
+          currentDiverProvider.overrideWith((ref) async => diver),
+          // The real loader reads the file system, and a dart:io await never
+          // completes inside testWidgets' FakeAsync zone.
+          if (photoLoader != null)
+            diverPhotoLoaderProvider.overrideWithValue(photoLoader),
+          // The exports wait for the diver's dive types, which would
+          // otherwise reach the database these tests do not have.
+          diveTypesProvider.overrideWith(
+            (ref) => diveTypes ?? Future.value(const <DiveTypeEntity>[]),
+          ),
+        ],
+        child: const DiveListContent(showAppBar: false),
+        // Pinned: the finders below are English, and the host machine's
+        // locale would otherwise pick one of the 11 supported languages.
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await enterSelectionViaMenu(tester);
+    await tester.tap(_tile('d1'));
+    await tester.pumpAndSettle();
+    await tester.tap(_tile('d2'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export Selected'));
+    await tester.pumpAndSettle();
+  }
+
+  /// Picks [format] from the export sheet, then [destination] from the
+  /// Share/Save sheet that follows.
+  Future<void> chooseFormatAndDestination(
+    WidgetTester tester,
+    String format,
+    String destination,
+  ) async {
+    await tester.tap(find.text(format));
+    await tester.pumpAndSettle();
+    // PDF now asks which template to use before asking where to put it, so a
+    // bulk export is the same document a full-logbook export would produce.
+    if (format == 'PDF Logbook') {
+      await tester.tap(find.text('Export PDF'));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text(destination));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('bulk CSV export offers a save destination and uses it', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'CSV', 'Save to File');
+
+    expect(exportService.calls, ['save:csv']);
+    expect(exportService.csvSaveTitle, 'Save Dives CSV');
+    expect(find.text('Exported 2 dives successfully'), findsOneWidget);
+    // A completed export leaves selection mode.
+    expect(find.text('2 selected'), findsNothing);
+  });
+
+  testWidgets('bulk CSV export can still share', (tester) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'CSV', 'Share');
+
+    expect(exportService.calls, ['share:csv']);
+    expect(find.text('Exported 2 dives successfully'), findsOneWidget);
+  });
+
+  group('bulk CSV export carries the linked buddies (#1861)', () {
+    // getDivesByIds does not hydrate the dive_buddies junction, and the
+    // batched load only ran for PDF, so the CSV's Buddy and Dive Master
+    // columns came out empty for picker-linked teams.
+    final team = [
+      linkedParticipant('Ana', DiveRole.buddyId),
+      linkedParticipant('Mia', DiveRole.diveMasterId),
+    ];
+
+    for (final destination in ['Share', 'Save to File']) {
+      testWidgets('via $destination', (tester) async {
+        await pumpAndOpenExportSheet(tester, linkedBuddies: {'d1': team});
+        await chooseFormatAndDestination(tester, 'CSV', destination);
+
+        final byId = {for (final d in exportService.csvDives!) d.id: d};
+        expect(byId.keys, unorderedEquals(['d1', 'd2']));
+        expect(byId['d1']!.buddies, team);
+        expect(byId['d2']!.buddies, isEmpty);
+      });
+    }
+  });
+
+  testWidgets('bulk CSV export defaults to My units (#1813)', (tester) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'CSV', 'Share');
+
+    expect(exportService.csvUnits?.isMetric, isFalse);
+  });
+
+  testWidgets('the bulk CSV unit choice reaches the export (#1813)', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await tester.tap(find.text('CSV'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Metric'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save to File'));
+    await tester.pumpAndSettle();
+
+    expect(exportService.csvUnits, same(CsvExportUnits.metric));
+  });
+
+  group('names each dive type as the diver did (#1834)', () {
+    final custom = DiveTypeEntity(
+      id: 'search_recovery_1a2b3c4d',
+      diverId: 'me',
+      name: 'Search & Recovery',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    testWidgets('bulk CSV export passes the diver\'s dive types', (
+      tester,
+    ) async {
+      await pumpAndOpenExportSheet(tester, diveTypes: Future.value([custom]));
+      await chooseFormatAndDestination(tester, 'CSV', 'Save to File');
+
+      expect(exportService.diveTypesById, {custom.id: custom});
+    });
+
+    testWidgets('bulk PDF export passes the diver\'s dive types', (
+      tester,
+    ) async {
+      await pumpAndOpenExportSheet(tester, diveTypes: Future.value([custom]));
+      await chooseFormatAndDestination(tester, 'PDF Logbook', 'Share');
+
+      expect(exportService.diveTypesById, {custom.id: custom});
+    });
+
+    testWidgets('bulk CSV export waits for dive types still loading', (
+      tester,
+    ) async {
+      final load = Completer<List<DiveTypeEntity>>();
+      await pumpAndOpenExportSheet(tester, diveTypes: load.future);
+      await tester.tap(find.text('CSV'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save to File'));
+      await tester.pump();
+
+      load.complete([custom]);
+      await tester.pumpAndSettle();
+
+      expect(exportService.diveTypesById, {custom.id: custom});
+    });
+  });
+
+  testWidgets('bulk PDF export honours the chosen destination', (tester) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'PDF Logbook', 'Save to File');
+
+    expect(exportService.calls, ['save:pdf']);
+  });
+
+  testWidgets('bulk PDF export can still share', (tester) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'PDF Logbook', 'Share');
+
+    expect(exportService.calls, ['share:pdf']);
+    expect(
+      exportService.pdfOptions?.template,
+      PdfTemplate.detailed,
+      reason: 'the picker default must reach the export service',
+    );
+  });
+
+  group('diver portrait', () {
+    // The bulk route passed `diver` but never `diverPhoto`, so the Detailed
+    // front matter fell back to its placeholder frame on every path except
+    // the settings export.
+    final diver = Diver(
+      id: 'me',
+      name: 'Ada',
+      photoPath: '/portraits/ada.jpg',
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    final portrait = Uint8List.fromList([9, 8, 7]);
+
+    testWidgets('reaches the export service on share', (tester) async {
+      await pumpAndOpenExportSheet(
+        tester,
+        diver: diver,
+        photoLoader: (path) async =>
+            path == '/portraits/ada.jpg' ? portrait : null,
+      );
+      await chooseFormatAndDestination(tester, 'PDF Logbook', 'Share');
+
+      expect(exportService.pdfDiver?.id, 'me');
+      expect(exportService.pdfDiverPhoto, portrait);
+    });
+
+    testWidgets('reaches the export service on save', (tester) async {
+      await pumpAndOpenExportSheet(
+        tester,
+        diver: diver,
+        photoLoader: (path) async => portrait,
+      );
+      await chooseFormatAndDestination(tester, 'PDF Logbook', 'Save to File');
+
+      expect(exportService.pdfDiverPhoto, portrait);
+    });
+
+    testWidgets('an unreadable portrait still exports', (tester) async {
+      await pumpAndOpenExportSheet(
+        tester,
+        diver: diver,
+        photoLoader: (path) async => null,
+      );
+      await chooseFormatAndDestination(tester, 'PDF Logbook', 'Share');
+
+      expect(exportService.calls, ['share:pdf']);
+      expect(exportService.pdfDiverPhoto, isNull);
+      expect(
+        exportService.pdfDiver?.id,
+        'me',
+        reason: 'a missing portrait must not drop the diver as well',
+      );
+    });
+
+    testWidgets('uses the profile photo bytes, with no legacy path '
+        '(#4458)', (tester) async {
+      final bytes = Uint8List.fromList([5, 5, 5]);
+      await pumpAndOpenExportSheet(
+        tester,
+        diver: Diver(
+          id: 'me',
+          name: 'Ada',
+          photo: bytes,
+          createdAt: DateTime(2026, 1, 1),
+          updatedAt: DateTime(2026, 1, 1),
+        ),
+        photoLoader: (path) async => null,
+      );
+      await chooseFormatAndDestination(tester, 'PDF Logbook', 'Share');
+
+      expect(exportService.pdfDiverPhoto, same(bytes));
+    });
+  });
+
+  testWidgets('dismissing the PDF template picker exports nothing', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await tester.tap(find.text('PDF Logbook'));
+    await tester.pumpAndSettle();
+
+    // Cancelling the picker is not a failure, it just stops the export.
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, isEmpty);
+  });
+
+  testWidgets('bulk UDDF export can still share, with sites', (tester) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'UDDF', 'Share');
+
+    expect(exportService.calls, ['share:uddf']);
+    expect(exportService.uddfSites?.map((s) => s.id), ['s1']);
+  });
+
+  for (final destination in ['Share', 'Save to File']) {
+    testWidgets('bulk UDDF export ($destination) hands over the dives without '
+        'their samples, and a loader for each run', (tester) async {
+      // Issue #4249: every selected dive's samples were read and held before
+      // the file was built. Now the writer reads them a run at a time.
+      await pumpAndOpenExportSheet(tester);
+      await chooseFormatAndDestination(tester, 'UDDF', destination);
+
+      expect(repository().withoutSamplesReads, 1);
+      // A bulk read keeps decoding on the UI isolate: off-isolate decoding
+      // starts one isolate per dive at once (see offUiIsolate on
+      // DiveRepository.getDivesByIdsWithoutSamples).
+      expect(repository().offUiIsolateFlags, [false]);
+      expect(exportService.uddfDives?.map((d) => d.id), ['d1', 'd2']);
+      expect(
+        exportService.uddfDives?.map((d) => d.profile),
+        everyElement(isEmpty),
+      );
+      expect(exportService.uddfLoader, isNotNull);
+    });
+  }
+
+  testWidgets('bulk UDDF export passes the selected dives\' sites', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'UDDF', 'Save to File');
+
+    expect(exportService.calls, ['save:uddf']);
+    expect(exportService.uddfSites?.map((s) => s.id), ['s1']);
+  });
+
+  testWidgets('cancelling the save panel is not reported as success', (
+    tester,
+  ) async {
+    exportService.savePath = null;
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'CSV', 'Save to File');
+
+    expect(exportService.calls, ['save:csv']);
+    expect(find.textContaining('successfully'), findsNothing);
+    // Selection mode survives so the user can retry.
+    expect(find.text('2 selected'), findsOneWidget);
+  });
+
+  testWidgets('dismissing the destination sheet exports nothing', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await tester.tap(find.text('CSV'));
+    await tester.pumpAndSettle();
+
+    // Tap the scrim above the destination sheet.
+    await tester.tapAt(const Offset(400, 60));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, isEmpty);
+    expect(find.textContaining('successfully'), findsNothing);
+  });
+
+  testWidgets('a failed export reports the error', (tester) async {
+    exportService.failure = StateError('disk full');
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'CSV', 'Save to File');
+
+    expect(find.textContaining('disk full'), findsOneWidget);
+    expect(find.textContaining('successfully'), findsNothing);
+  });
+
+  testWidgets('sharing shows progress, and a failure dismisses it', (
+    tester,
+  ) async {
+    // Hold the delivery open so the progress dialog is observable, then fail
+    // it: the catch must dismiss the dialog it left up.
+    final gate = Completer<void>();
+    exportService.gate = gate;
+    exportService.failure = StateError('share broke');
+
+    await pumpAndOpenExportSheet(tester);
+    await tester.tap(find.text('CSV'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    await tester.pump();
+
+    expect(find.text('Exporting...'), findsOneWidget);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Exporting...'), findsNothing);
+    expect(find.textContaining('share broke'), findsOneWidget);
+  });
+
+  /// Same flow, but hosted the way master-detail layouts host it: inside a
+  /// nested navigator whose only route is the list.
+  ///
+  /// [testApp] puts the list straight under `MaterialApp.home`, where the local
+  /// and root navigators are one object, so it cannot catch a pop aimed at the
+  /// wrong navigator. Here the progress dialog goes to the root navigator
+  /// (`showDialog` defaults to `useRootNavigator: true`) while a bare
+  /// `Navigator.of(context)` would resolve to the shell's, emptying it.
+  Future<void> pumpInShellAndOpenExportSheet(WidgetTester tester) async {
+    final summaries = dives.map(DiveSummary.fromDive).toList();
+    final base = await getBaseOverrides();
+
+    await tester.pumpWidget(
+      testAppInShell(
+        // Pinned so the English menu and dialog labels this test taps do not
+        // depend on the host machine's locale, which flutter_test forwards.
+        locale: const Locale('en'),
+        overrides: [
+          ...base,
+          diveListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+          paginatedDiveListProvider.overrideWith(
+            (ref) => _MockPaginatedNotifier(summaries),
+          ),
+          diveRepositoryProvider.overrideWithValue(repository()),
+          exportServiceProvider.overrideWithValue(exportService),
+          // These tests have no database. The real fetch would reach the
+          // repository, so the export would never be issued.
+          // No database: the export's custom agency names (#690).
+          allCustomCertificationsCatalogProvider.overrideWith(
+            (ref) async => CertificationCatalog.builtInOnly,
+          ),
+          uddfSourceFetchProvider.overrideWithValue(
+            (diveIds, options) async => const [],
+          ),
+          uddfDivesExtrasFetchProvider.overrideWithValue(
+            (diveIds, options) async => const UddfDivesExtras.empty(),
+          ),
+        ],
+        child: const DiveListContent(showAppBar: false),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await enterSelectionViaMenu(tester);
+    await tester.tap(_tile('d1'));
+    await tester.pumpAndSettle();
+    await tester.tap(_tile('d2'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export Selected'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('bulk UDDF share leaves the list on screen in master-detail', (
+    tester,
+  ) async {
+    await pumpInShellAndOpenExportSheet(tester);
+    await tester.tap(find.text('UDDF'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    // Not pumpAndSettle: a stranded progress dialog spins forever.
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(exportService.calls, ['share:uddf']);
+    expect(find.text('Exporting...'), findsNothing);
+    expect(find.byType(DiveListContent), findsOneWidget);
+  });
+
+  testWidgets('bulk UDDF save leaves the list on screen in master-detail', (
+    tester,
+  ) async {
+    await pumpInShellAndOpenExportSheet(tester);
+    await tester.tap(find.text('UDDF'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save to File'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(exportService.calls, ['save:uddf']);
+    expect(find.text('Exporting...'), findsNothing);
+    expect(find.byType(DiveListContent), findsOneWidget);
+  });
+
+  testWidgets('a failed bulk export leaves the list on screen', (tester) async {
+    exportService.failure = StateError('disk full');
+    await pumpInShellAndOpenExportSheet(tester);
+    await tester.tap(find.text('UDDF'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.text('Exporting...'), findsNothing);
+    expect(find.byType(DiveListContent), findsOneWidget);
+  });
+
+  testWidgets('bulk UDDF export fetches extras for the selected dives', (
+    tester,
+  ) async {
+    await pumpAndOpenExportSheet(tester);
+    await chooseFormatAndDestination(tester, 'UDDF', 'Save to File');
+
+    expect(extrasCalls.single.$1.toSet(), {'d1', 'd2'});
+    expect(identical(exportService.uddfExtras, extrasSentinel), isTrue);
+  });
+}

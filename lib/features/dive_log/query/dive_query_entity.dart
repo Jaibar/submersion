@@ -1,0 +1,750 @@
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/query/registry/query_entity.dart';
+import 'package:submersion/core/query/registry/query_field.dart';
+import 'package:submersion/core/query/registry/query_relation.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
+import 'package:submersion/features/dive_log/data/sql/dive_weight_sql.dart';
+import 'package:submersion/features/dive_log/data/sql/gas_use_sql.dart';
+import 'package:submersion/features/dive_log/data/sql/multi_cylinder_sac_sql.dart';
+import 'package:submersion/features/dive_log/domain/entities/derived_metrics.dart';
+import 'package:submersion/features/dive_log/query/dive_child_query_entities.dart';
+import 'package:submersion/features/dive_log/query/dive_number_query.dart';
+import 'package:submersion/features/dive_log/query/dive_word_meanings.dart';
+import 'package:submersion/features/dive_roles/data/diver_role_set_sql.dart';
+import 'package:submersion/features/dive_types/query/dive_type_text_search.dart';
+import 'package:submersion/features/equipment/data/repositories/tank_regulator_sql.dart';
+import 'package:submersion/features/insights/data/dive_filter_sql.dart';
+import 'package:submersion/features/insights/data/repositories/site_entry_method_sql.dart';
+import 'package:submersion/features/insights/data/tank_configuration_sql.dart';
+import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
+import 'package:submersion/features/marine_life/query/sighting_text_search.dart';
+
+/// Every field and relation a dive query can name (#2365). This file is
+/// the ONLY place a dive filter axis is defined: the paginated list, its
+/// count, Statistics and the entity-backed views all compile from it.
+///
+/// SQL is written against `{r}`, the dive row's alias at whatever depth
+/// the compiler reaches it. Every fragment is a column, an expression or a
+/// correlated subquery; values are never interpolated.
+
+String _label(String key) => 'query_dives_$key';
+
+/// A dive with no role of the diver's own (#3622): the `role` field's
+/// empty form and, written against `{from}`, the `myRole` relation's
+/// (#4409), so `myRole:none` keeps meaning `role:none`.
+final _noRoleSql = diverRoleUnsetSql('{r}.diver_role');
+
+const _weekday =
+    "CAST(strftime('%w', {r}.dive_date_time / 1000, 'unixepoch') AS INTEGER)";
+const _year =
+    "CAST(strftime('%Y', {r}.dive_date_time / 1000, 'unixepoch') AS INTEGER)";
+const _month =
+    "CAST(strftime('%m', {r}.dive_date_time / 1000, 'unixepoch') AS INTEGER)";
+const _day =
+    "CAST(strftime('%d', {r}.dive_date_time / 1000, 'unixepoch') AS INTEGER)";
+
+/// No weight entry at all: neither a `dive_weights` row nor a positive legacy
+/// scalar, the one the edit form migrates into the table on load (#1392),
+/// nor lead carried as weights gear (#4442). ONE
+/// rule, read by the `weight` field and the `weights` relation so `weight:none`
+/// and `weights:none` cannot disagree, and defined as the NULL case of
+/// [recordedWeightKgSql] so neither can disagree with the value (#3914).
+final kDiveNoWeightSql = '(${recordedWeightKgSql('{r}')} IS NULL)';
+
+/// The gear union the equipment axes have always used: items linked
+/// through `dive_equipment`, cylinders the transmitter registry matched
+/// through `dive_tanks.equipment_id`, and the regulators on the dive's
+/// tanks, first and extra (issue #3375).
+final kDiveGearJoinSql =
+    '{to}.id IN (SELECT de.equipment_id FROM dive_equipment de '
+    'WHERE de.dive_id = {from}.id '
+    'UNION SELECT dt.equipment_id FROM dive_tanks dt '
+    'WHERE dt.dive_id = {from}.id AND dt.equipment_id IS NOT NULL '
+    'UNION ${tankRegulatorIdsOfDiveSql('{from}.id')})';
+
+const _gearWordMatchSql =
+    "SELECT teq.id FROM equipment teq WHERE search_fold(teq.name) LIKE ? "
+    "ESCAPE '\\' OR search_fold(teq.brand) LIKE ? ESCAPE '\\' "
+    "OR search_fold(teq.model) LIKE ? ESCAPE '\\'";
+
+/// A word that names gear a dive used: the same set as [kDiveGearJoinSql],
+/// walked from the matching gear to its dives, because that join is correlated
+/// and would read the equipment table once per dive.
+final _gearTextSearchSql =
+    '{r}.id IN (SELECT tde.dive_id FROM dive_equipment tde '
+    'WHERE tde.equipment_id IN ($_gearWordMatchSql) '
+    'UNION SELECT tdt.dive_id FROM dive_tanks tdt '
+    'WHERE tdt.equipment_id IN ($_gearWordMatchSql) '
+    'UNION SELECT dive_id FROM ($tankRegulatorPairsSql) '
+    'WHERE equipment_id IN ($_gearWordMatchSql))';
+
+/// A dive's effective water type: its own, else its site's (issue #3196).
+/// The SQL twin of `Dive.effectiveWaterType`, matching the insights water
+/// type chart, so a dive at a salt-water site is found by `waterType:salt`
+/// whether or not the value was ever copied onto the dive.
+final String _effectiveWaterType = diveEffectiveWaterTypeSql('{r}');
+
+/// A dive's effective entry method: its own, else its site's when the site
+/// lists exactly one (issue #3806). The SQL twin of
+/// `Dive.effectiveEntryMethod`, matching the insights entry method chart.
+final _effectiveEntryMethod =
+    "COALESCE(NULLIF({r}.entry_method, ''), "
+    "(SELECT ${singleSiteEntryMethodSql('s.entry_method')} FROM dive_sites s "
+    'WHERE s.id = {r}.site_id))';
+
+List<String> _names<T extends Enum>(List<T> values) => [
+  for (final v in values) v.name,
+];
+
+QueryField _num(
+  String key,
+  String sql, {
+  List<String> aliases = const [],
+  FieldDimension dimension = FieldDimension.none,
+  ({double min, double max})? sanity,
+  String? emptySql,
+  ({String low, String high})? rangeSql,
+  int? displayDecimals,
+  List<String> tables = const [],
+}) => QueryField(
+  key: key,
+  aliases: aliases,
+  type: FieldType.number,
+  dimension: dimension,
+  sql: sql,
+  emptySql: emptySql ?? '$sql IS NULL',
+  labelKey: _label(key),
+  sanity: sanity,
+  rangeSql: rangeSql,
+  displayDecimals: displayDecimals,
+  tables: tables,
+);
+
+QueryField _text(String key, String column) => QueryField(
+  key: key,
+  type: FieldType.text,
+  sql: '{r}.$column',
+  emptySql: "({r}.$column IS NULL OR TRIM({r}.$column) = '')",
+  labelKey: _label(key),
+);
+
+QueryField _enum(String key, String column, List<String> values) => QueryField(
+  key: key,
+  type: FieldType.enumName,
+  sql: '{r}.$column',
+  emptySql: '{r}.$column IS NULL',
+  labelKey: _label(key),
+  enumValues: values,
+);
+
+/// An enum read through [sql], a dive's value with its site as the fallback,
+/// so the query re-ticks when a site changes.
+QueryField _effectiveEnum(String key, String sql, List<String> values) =>
+    QueryField(
+      key: key,
+      type: FieldType.enumName,
+      sql: sql,
+      emptySql: '$sql IS NULL',
+      labelKey: _label(key),
+      enumValues: values,
+      tables: const ['dive_sites'],
+    );
+
+QueryField _bool(String key, String column) => QueryField(
+  key: key,
+  type: FieldType.bool,
+  sql: '{r}.$column',
+  emptySql: '0',
+  labelKey: _label(key),
+);
+
+/// One of a dive's tank configuration extras, a yes or no in the shape of
+/// `deco`. Its key is the [TankConfigurationExtra]'s name.
+QueryField _tankExtra(TankConfigurationExtra extra) => QueryField(
+  key: extra.name,
+  type: FieldType.bool,
+  sql: '',
+  emptySql: '0',
+  labelKey: _label(extra.name),
+  boolSql: (
+    whenTrue: tankConfigHasExtraSql('{r}', extra),
+    whenFalse: 'NOT (${tankConfigHasExtraSql('{r}', extra)})',
+  ),
+  tables: kTankConfigurationTables,
+);
+
+QueryRelation _fk(
+  String key,
+  QuerySubject target,
+  String column, {
+  List<String> aliases = const [],
+}) => QueryRelation(
+  key: key,
+  aliases: aliases,
+  target: target,
+  shape: RelationShape.fk,
+  joinSql: '{to}.id = {from}.$column',
+  isMany: false,
+  labelKey: _label(key),
+);
+
+QueryRelation _child(String key, QuerySubject target) => QueryRelation(
+  key: key,
+  target: target,
+  shape: RelationShape.child,
+  joinSql: '{to}.dive_id = {from}.id',
+  isMany: true,
+  labelKey: _label(key),
+);
+
+QueryRelation _junction(
+  String key,
+  QuerySubject target,
+  String junction,
+  String targetColumn, {
+  List<String> aliases = const [],
+  String? emptySql,
+}) => QueryRelation(
+  key: key,
+  aliases: aliases,
+  target: target,
+  shape: RelationShape.junction,
+  // `IN (subquery)` rather than a nested EXISTS: SQLite then probes the
+  // target by its primary key instead of scanning it and testing the
+  // junction per row (the EXPLAIN QUERY PLAN test pins this).
+  joinSql:
+      '{to}.id IN (SELECT j.$targetColumn FROM $junction j '
+      'WHERE j.dive_id = {from}.id)',
+  isMany: true,
+  labelKey: _label(key),
+  emptySql: emptySql,
+  tables: [junction],
+);
+
+/// The Explore derived metrics (#2195): a device-local table the derived
+/// metrics scheduler keeps current. A dive not yet swept has no row, so its
+/// derived fields are empty (`:none`) until the sweep reaches it.
+const kDiveDerivedMetricsTable = 'dive_derived_metrics';
+
+String _derived(String column) =>
+    '(SELECT m.$column FROM $kDiveDerivedMetricsTable m '
+    'WHERE m.dive_id = {r}.id)';
+
+/// SAC in bar per minute at the surface, by the formula the Insights SAC
+/// chart plots (`InsightsRepository.getSacPressurePerDive`): every breathed
+/// cylinder's drop in bar of the back gas (issue #3109) over the time
+/// underwater, normalised by the depth over it (issue #2930), so a search and
+/// the chart agree. Empty
+/// with no back-gas pressures, no drop to count (#3974), no runtime or no
+/// average depth, and on a CCR or SCR dive (issue #3673).
+final String kDiveSacSql =
+    '(CASE WHEN ${measuredRuntimeSecondsSql('{r}')} > 0 '
+    'AND {r}.avg_depth > 0 THEN ${diveSacPressureSql('{r}')} END)';
+
+/// [measuredRuntimeTables] as a field's table list (issue #3537).
+const List<String> _measuredRuntimeTables = [...measuredRuntimeTables];
+
+final QueryEntity diveQueryEntity = QueryEntity(
+  subject: QuerySubject.dives,
+  table: 'dives',
+  diverScopeColumn: 'diver_id',
+  scopesHopsToDiver: true,
+  textSearchSql: [
+    "search_fold({r}.notes) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.name) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.buddy) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.dive_master) LIKE ? ESCAPE '\\'",
+    // Shown on the dive since #3229, so a search finds them too.
+    "search_fold({r}.dive_operator) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.boat_name) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.boat_captain) LIKE ? ESCAPE '\\'",
+    "search_fold({r}.surface_conditions) LIKE ? ESCAPE '\\'",
+    'EXISTS (SELECT 1 FROM dive_sites ts WHERE ts.id = {r}.site_id '
+        "AND (search_fold(ts.name) LIKE ? ESCAPE '\\' OR search_fold(ts.country) LIKE ? ESCAPE '\\' "
+        "OR search_fold(ts.region) LIKE ? ESCAPE '\\'))",
+    'EXISTS (SELECT 1 FROM dive_centers tc WHERE tc.id = {r}.dive_center_id '
+        "AND search_fold(tc.name) LIKE ? ESCAPE '\\')",
+    'EXISTS (SELECT 1 FROM dive_buddies tdb JOIN buddies tb '
+        'ON tb.id = tdb.buddy_id WHERE tdb.dive_id = {r}.id '
+        "AND search_fold(tb.name) LIKE ? ESCAPE '\\')",
+    'EXISTS (SELECT 1 FROM dive_tags tdt JOIN tags tt ON tt.id = tdt.tag_id '
+        "WHERE tdt.dive_id = {r}.id AND search_fold(tt.name) LIKE ? ESCAPE '\\')",
+    'EXISTS (SELECT 1 FROM dive_custom_fields tcf WHERE tcf.dive_id = {r}.id '
+        "AND (search_fold(tcf.field_key) LIKE ? ESCAPE '\\' "
+        "OR search_fold(tcf.field_value) LIKE ? ESCAPE '\\'))",
+    // The stored name: a custom type's own, a built-in's English one. The
+    // translations are kDiveTypeTranslatedTextSearch (issue #2884).
+    'EXISTS (SELECT 1 FROM dive_dive_types tddt JOIN dive_types tdty '
+        'ON tdty.id = tddt.dive_type_id WHERE tddt.dive_id = {r}.id '
+        "AND search_fold(tdty.name) LIKE ? ESCAPE '\\')",
+    // What a dive carries, so a brand or a trip finds it (#3457). Each of
+    // these reads its matches once rather than once per dive, which keeps a
+    // word that matches nothing cheap on a long log.
+    _gearTextSearchSql,
+    "{r}.trip_id IN (SELECT ttrp.id FROM trips ttrp WHERE "
+        "search_fold(ttrp.name) LIKE ? ESCAPE '\\' "
+        "OR search_fold(ttrp.location) LIKE ? ESCAPE '\\' "
+        "OR search_fold(ttrp.resort_name) LIKE ? ESCAPE '\\' "
+        "OR search_fold(ttrp.liveaboard_name) LIKE ? ESCAPE '\\')",
+    '{r}.id IN (SELECT tsgt.dive_id FROM sightings tsgt WHERE tsgt.species_id '
+        'IN (SELECT tspc.id FROM species tspc WHERE '
+        "search_fold(tspc.common_name) LIKE ? ESCAPE '\\' "
+        "OR search_fold(tspc.scientific_name) LIKE ? ESCAPE '\\'))",
+    '{r}.id IN (SELECT tdcr.dive_id FROM dive_courses tdcr WHERE tdcr.course_id '
+        'IN (SELECT tcrs.id FROM courses tcrs WHERE '
+        "search_fold(tcrs.name) LIKE ? ESCAPE '\\' "
+        "OR search_fold(tcrs.location) LIKE ? ESCAPE '\\'))",
+    "search_fold({r}.dive_computer_model) LIKE ? ESCAPE '\\'",
+    "{r}.computer_id IN (SELECT tcmp.id FROM dive_computers tcmp "
+        "WHERE search_fold(tcmp.name) LIKE ? ESCAPE '\\' "
+        "OR search_fold(tcmp.manufacturer) LIKE ? ESCAPE '\\' "
+        "OR search_fold(tcmp.model) LIKE ? ESCAPE '\\')",
+  ],
+  textSearchTables: const [
+    'dive_sites',
+    'dive_centers',
+    'dive_buddies',
+    'buddies',
+    'dive_tags',
+    'tags',
+    'dive_custom_fields',
+    'dive_dive_types',
+    'dive_types',
+    'equipment',
+    'dive_equipment',
+    'dive_tanks',
+    'trips',
+    'sightings',
+    'species',
+    'dive_courses',
+    'courses',
+    'dive_computers',
+  ],
+  textSearchExpansions: [
+    kDiveTypeTranslatedTextSearch,
+    kDiveNumberTextSearch,
+    kSightingTranslatedTextSearch,
+    ...diveWordExpansions(
+      entryMethodSql: _effectiveEntryMethod,
+      waterTypeSql: _effectiveWaterType,
+    ),
+  ],
+  plainWords: kDivePlainWords,
+  fields: [
+    QueryField(
+      key: 'id',
+      type: FieldType.id,
+      sql: '{r}.id',
+      emptySql: '{r}.id IS NULL',
+      labelKey: _label('id'),
+    ),
+    _num(
+      'diveNumber',
+      '{r}.dive_number',
+      aliases: ['number'],
+      dimension: FieldDimension.count,
+    ),
+    _text('name', 'name'),
+    QueryField(
+      key: 'date',
+      type: FieldType.date,
+      sql: '{r}.dive_date_time',
+      emptySql: '{r}.dive_date_time IS NULL',
+      labelKey: _label('date'),
+    ),
+    _num(
+      'year',
+      _year,
+      dimension: FieldDimension.count,
+      emptySql: '{r}.dive_date_time IS NULL',
+    ),
+    // The calendar date's month and day of the month (#3127), for the
+    // Insights calendar-days cells; wall clock, like year and weekday.
+    _num(
+      'month',
+      _month,
+      dimension: FieldDimension.count,
+      sanity: (min: 1, max: 12),
+      emptySql: '{r}.dive_date_time IS NULL',
+    ),
+    _num(
+      'day',
+      _day,
+      dimension: FieldDimension.count,
+      sanity: (min: 1, max: 31),
+      emptySql: '{r}.dive_date_time IS NULL',
+    ),
+    QueryField(
+      key: 'weekday',
+      type: FieldType.enumName,
+      sql: _weekday,
+      emptySql: '{r}.dive_date_time IS NULL',
+      labelKey: _label('weekday'),
+      enumValues: const [
+        'monday',
+        'tuesday',
+        'wednesday',
+        'thursday',
+        'friday',
+        'saturday',
+        'sunday',
+      ],
+      enumSqlValues: const {
+        'monday': 1,
+        'tuesday': 2,
+        'wednesday': 3,
+        'thursday': 4,
+        'friday': 5,
+        'saturday': 6,
+        'sunday': 0,
+      },
+    ),
+    // Whole minutes, truncated, mirroring Duration.inMinutes in the old
+    // apply(); the list path used seconds * 60 and disagreed with the
+    // other two by up to 59 seconds.
+    _num(
+      'bottomTime',
+      '({r}.bottom_time / 60)',
+      aliases: ['time', 'duration'],
+      dimension: FieldDimension.minutes,
+      emptySql: '{r}.bottom_time IS NULL',
+    ),
+    // What the dive measured, like the Runtime column and every total: never
+    // a bottom time (issue #3304).
+    _num(
+      'runtime',
+      '(${measuredRuntimeSecondsSql('{r}')} / 60)',
+      dimension: FieldDimension.minutes,
+      tables: _measuredRuntimeTables,
+    ),
+    _num(
+      'depth',
+      '{r}.max_depth',
+      aliases: ['maxDepth'],
+      dimension: FieldDimension.depth,
+      sanity: (min: 0, max: 400),
+    ),
+    _num(
+      'avgDepth',
+      '{r}.avg_depth',
+      dimension: FieldDimension.depth,
+      sanity: (min: 0, max: 400),
+    ),
+    // The synced water temperature. dive_sensor_summaries.min_temperature
+    // is device-local and never synced, so it is not offered.
+    _num(
+      'waterTemp',
+      '{r}.water_temp',
+      aliases: ['temp'],
+      dimension: FieldDimension.temperature,
+      sanity: (min: -5, max: 45),
+    ),
+    _num(
+      'airTemp',
+      '{r}.air_temp',
+      dimension: FieldDimension.temperature,
+      sanity: (min: -40, max: 60),
+    ),
+    _num(
+      'visibility',
+      '{r}.visibility_meters',
+      dimension: FieldDimension.depth,
+      // Listed in whole metres or feet, not a depth's tenth.
+      displayDecimals: 0,
+      // A band pick stores a range instead (issue #3226).
+      rangeSql: (
+        low: '{r}.visibility_min_meters',
+        high: '{r}.visibility_max_meters',
+      ),
+      emptySql:
+          '({r}.visibility_meters IS NULL '
+          'AND {r}.visibility_min_meters IS NULL '
+          'AND {r}.visibility_max_meters IS NULL '
+          "AND ({r}.visibility IS NULL OR TRIM({r}.visibility) = ''))",
+    ),
+    _num(
+      'rating',
+      '{r}.rating',
+      dimension: FieldDimension.count,
+      sanity: (min: 0, max: 5),
+    ),
+    // The table's value (#2984): stored, else the gap from the previous
+    // dive, so what a diver sees in the column is what this field filters.
+    _num(
+      'surfaceInterval',
+      '(${diveSurfaceIntervalSecondsSql('{r}')} / 60)',
+      dimension: FieldDimension.minutes,
+      emptySql: '(${diveSurfaceIntervalSecondsSql('{r}')}) IS NULL',
+      // The profile span fallback also reads the series history, which is
+      // only written alongside a dive_profile_series row, so that tick
+      // covers it (issue #3537).
+      tables: _measuredRuntimeTables,
+    ),
+    _num(
+      'cnsEnd',
+      '{r}.cns_end',
+      aliases: ['cns'],
+      dimension: FieldDimension.percent,
+    ),
+    _num('otu', '{r}.otu', dimension: FieldDimension.count),
+    // Total lead in kg: the weights table when it has rows, else the
+    // legacy scalar the edit form retired (#1392), plus lead carried as
+    // weights gear (#4442). Empty means none of them.
+    _num(
+      'weight',
+      recordedWeightKgSql('{r}'),
+      aliases: ['lead'],
+      dimension: FieldDimension.weight,
+      emptySql: kDiveNoWeightSql,
+      tables: recordedWeightTables,
+    ),
+    _num(
+      'gasCount',
+      '(SELECT COUNT(*) FROM dive_tanks t WHERE t.dive_id = {r}.id)',
+      dimension: FieldDimension.count,
+      // A count is never unrecorded: `:none` is no tanks at all.
+      emptySql:
+          'NOT EXISTS (SELECT 1 FROM dive_tanks t WHERE t.dive_id = {r}.id)',
+      tables: ['dive_tanks'],
+    ),
+    QueryField(
+      key: 'tankConfig',
+      type: FieldType.enumName,
+      sql: tankConfigBaseSql('{r}'),
+      // The No tanks logged bar, not "no tank rows": a rebreather dive with
+      // none is still Rebreather, so `:none` leaves it out where
+      // `gasCount:none` finds it.
+      emptySql: "${tankConfigBaseSql('{r}')} = 'noTanks'",
+      labelKey: _label('tankConfig'),
+      enumValues: _names(TankBaseConfiguration.values),
+      tables: kTankConfigurationTables,
+    ),
+    for (final extra in TankConfigurationExtra.values) _tankExtra(extra),
+    _num(
+      'sac',
+      kDiveSacSql,
+      dimension: FieldDimension.pressureRate,
+      sanity: (min: 0, max: 20),
+      // dive_sites: a dive with no water of its own reads its site's;
+      // gasUseTables: the stored gas-use window (#2930).
+      tables: [
+        'dive_tanks',
+        'dive_sites',
+        ..._measuredRuntimeTables,
+        ...gasUseTables,
+      ],
+    ),
+    QueryField(
+      key: 'sacTrend',
+      type: FieldType.enumName,
+      sql: _derived('sac_trend'),
+      emptySql: '${_derived('sac_trend')} IS NULL',
+      labelKey: _label('sacTrend'),
+      enumValues: _names(SacTrend.values),
+      tables: const [kDiveDerivedMetricsTable],
+    ),
+    _num(
+      'sacChange',
+      _derived('sac_change_pct'),
+      dimension: FieldDimension.percent,
+      sanity: (min: -100, max: 1000),
+      tables: [kDiveDerivedMetricsTable],
+    ),
+    QueryField(
+      key: 'finalStop',
+      type: FieldType.enumName,
+      sql: _derived('final_stop_state'),
+      emptySql: '${_derived('final_stop_state')} IS NULL',
+      labelKey: _label('finalStop'),
+      enumValues: _names(FinalStopState.values),
+      tables: const [kDiveDerivedMetricsTable],
+    ),
+    // How far the diver strayed from the stop's depth for a tenth of the
+    // stop or more (the 90th percentile), not the single worst sample.
+    _num(
+      'finalStopExcursion',
+      _derived('final_stop_max_excursion_m'),
+      dimension: FieldDimension.depth,
+      sanity: (min: 0, max: 10),
+      tables: [kDiveDerivedMetricsTable],
+    ),
+    // Whole minutes, truncated, like bottomTime.
+    _num(
+      'finalStopDuration',
+      _derived('final_stop_duration_s / 60'),
+      dimension: FieldDimension.minutes,
+      tables: [kDiveDerivedMetricsTable],
+    ),
+    _text('notes', 'notes'),
+    // The legacy free-text buddy column (#757): the dive editor writes only
+    // dive_buddies, but old data still carries names here.
+    _text('legacyBuddy', 'buddy'),
+    // The diver's own role (#3622), present or not. A null or blank
+    // diver_role is no role whatever dive_diver_roles holds, as
+    // DiveRoleSet.resolve reads it. Named roles go through the `myRole`
+    // relation (#4409), which took this field's old `myRole` alias: fields
+    // resolve before relations, so the alias would have shadowed it.
+    QueryField(
+      key: 'role',
+      type: FieldType.text,
+      sql: '{r}.diver_role',
+      emptySql: _noRoleSql,
+      labelKey: _label('role'),
+      ops: const {QueryOp.isEmpty, QueryOp.isSet},
+    ),
+    _text('diveMaster', 'dive_master'),
+    _text('boatName', 'boat_name'),
+    _text('boatCaptain', 'boat_captain'),
+    _text('diveOperator', 'dive_operator'),
+    _text('surfaceConditions', 'surface_conditions'),
+    _enum(
+      'currentStrength',
+      'current_strength',
+      _names(CurrentStrength.values),
+    ),
+    _effectiveEnum('waterType', _effectiveWaterType, _names(WaterType.values)),
+    _effectiveEnum(
+      'entryMethod',
+      _effectiveEntryMethod,
+      _names(EntryMethod.values),
+    ),
+    _enum('exitMethod', 'exit_method', _names(EntryMethod.values)),
+    _enum('diveMode', 'dive_mode', _names(DiveMode.values)),
+    _bool('favorite', 'is_favorite'),
+    _bool('excludedFromStats', 'excluded_from_stats'),
+    _bool('planned', 'is_planned'),
+    _bool('draft', 'is_draft'),
+    QueryField(
+      key: 'deco',
+      type: FieldType.bool,
+      sql: '',
+      emptySql: '0',
+      labelKey: _label('deco'),
+      boolSql: (
+        whenTrue: decoSignalCondition(wantDeco: true, diveIdRef: '{r}.id'),
+        whenFalse: decoSignalCondition(wantDeco: false, diveIdRef: '{r}.id'),
+      ),
+      tables: const [
+        'dive_profile_series',
+        'dive_profile_events',
+        kDiveDecoStatusTable,
+      ],
+    ),
+    QueryField(
+      key: 'hasProfile',
+      type: FieldType.bool,
+      sql: '',
+      emptySql: '0',
+      labelKey: _label('hasProfile'),
+      boolSql: (
+        whenTrue:
+            'EXISTS (SELECT 1 FROM dive_profile_series s '
+            'WHERE s.dive_id = {r}.id)',
+        whenFalse:
+            'NOT EXISTS (SELECT 1 FROM dive_profile_series s '
+            'WHERE s.dive_id = {r}.id)',
+      ),
+      tables: const ['dive_profile_series'],
+    ),
+  ],
+  relations: [
+    _fk('site', QuerySubject.sites, 'site_id'),
+    _fk('trip', QuerySubject.trips, 'trip_id'),
+    _fk(
+      'center',
+      QuerySubject.centers,
+      'dive_center_id',
+      aliases: ['diveCenter'],
+    ),
+    _fk('computer', QuerySubject.computers, 'computer_id'),
+    // A dive's courses live in dive_courses (#2515); the key stays 'course'
+    // so saved queries keep working.
+    _junction(
+      'course',
+      QuerySubject.courses,
+      'dive_courses',
+      'course_id',
+      aliases: ['courses'],
+    ),
+    _junction(
+      'buddies',
+      QuerySubject.buddies,
+      'dive_buddies',
+      'buddy_id',
+      aliases: ['buddy'],
+      emptySql:
+          "(({from}.buddy IS NULL OR {from}.buddy = '') AND NOT EXISTS "
+          '(SELECT 1 FROM dive_buddies j WHERE j.dive_id = {from}.id))',
+    ),
+    _junction(
+      'tags',
+      QuerySubject.tags,
+      'dive_tags',
+      'tag_id',
+      aliases: ['tag'],
+    ),
+    _junction(
+      'types',
+      QuerySubject.diveTypes,
+      'dive_dive_types',
+      'dive_type_id',
+      aliases: ['type', 'diveType'],
+    ),
+    // The diver's own roles by name (#4409): the set DiveRoleSet.resolve
+    // reads, so a secondary role matches and a junction an older version's
+    // scalar outdates does not. `:none` is the `role` field's empty form.
+    QueryRelation(
+      key: 'myRole',
+      aliases: const ['myRoles'],
+      target: QuerySubject.diveRoles,
+      shape: RelationShape.custom,
+      joinSql:
+          '{to}.id IN (${diverRoleIdsOfDiveSql(diveId: '{from}.id', scalar: '{from}.diver_role')}) '
+          "AND ${diveRoleVisibleSql(role: '{to}', diveDiverId: '{from}.diver_id')}",
+      isMany: true,
+      labelKey: _label('myRole'),
+      emptySql: _noRoleSql.replaceAll('{r}', '{from}'),
+      tables: const ['dive_diver_roles'],
+    ),
+    QueryRelation(
+      key: 'gear',
+      aliases: const ['equipment'],
+      target: QuerySubject.equipment,
+      shape: RelationShape.custom,
+      joinSql: kDiveGearJoinSql,
+      isMany: true,
+      labelKey: _label('gear'),
+      tables: const ['dive_equipment', 'dive_tanks'],
+    ),
+    _child('tanks', QuerySubject.tanks),
+    QueryRelation(
+      key: 'weights',
+      target: QuerySubject.weights,
+      shape: RelationShape.child,
+      joinSql: '{to}.dive_id = {from}.id',
+      isMany: true,
+      labelKey: _label('weights'),
+      emptySql: kDiveNoWeightSql.replaceAll('{r}', '{from}'),
+      tables: recordedWeightTables,
+    ),
+    _child('customFields', QuerySubject.customFields),
+    _child('sightings', QuerySubject.sightings),
+    _child('media', QuerySubject.media),
+    // Live findings only: a dismissed finding is one the diver waved off,
+    // and one from an older engine is replaced when the dive is next
+    // reviewed. The filter rides on the hop, so no condition inside it (an
+    // empty rule, a negated rule) can reach a hidden finding.
+    QueryRelation(
+      key: 'findings',
+      aliases: const ['finding'],
+      target: QuerySubject.findings,
+      shape: RelationShape.child,
+      joinSql: '{to}.dive_id = {from}.id',
+      targetFilterSql: kLiveFindingSql,
+      isMany: true,
+      labelKey: _label('findings'),
+    ),
+  ],
+);

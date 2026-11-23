@@ -2,14 +2,27 @@ import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/services/catalogue_site_visibility.dart';
+import 'package:submersion/features/dive_sites/presentation/catalogue_site_display.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_catalogue_search_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/catalogue_import_site_card.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/rules/presentation/run_rules_flow.dart';
+import 'package:submersion/features/rules/domain/rule_subject.dart';
 
-/// Page for searching and importing dive sites from online sources.
+/// Page for searching the built-in site catalogue, reading about what it
+/// finds, and importing sites from it.
 class SiteImportPage extends ConsumerStatefulWidget {
-  const SiteImportPage({super.key});
+  const SiteImportPage({super.key, this.initialQuery});
+
+  /// A search to open with (`/sites/import?q=`): the Sites list hands over
+  /// what the diver typed in its own search field. Blank or null opens
+  /// the page empty, with the field focused.
+  final String? initialQuery;
 
   @override
   ConsumerState<SiteImportPage> createState() => _SiteImportPageState();
@@ -18,14 +31,22 @@ class SiteImportPage extends ConsumerStatefulWidget {
 class _SiteImportPageState extends ConsumerState<SiteImportPage> {
   final _searchController = TextEditingController();
   final _focusNode = FocusNode();
-  final Set<String> _importedIds = {};
 
   @override
   void initState() {
     super.initState();
-    // Auto-focus search field
+    final initial = widget.initialQuery?.trim() ?? '';
+    _searchController.text = initial;
+    // After the first frame: a provider cannot be written while the tree
+    // builds. With a search to run the results lead; otherwise the field
+    // takes the focus, ready to type in.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _focusNode.requestFocus();
+      if (!mounted) return;
+      if (initial.isEmpty) {
+        _focusNode.requestFocus();
+      } else {
+        _onSearch();
+      }
     });
   }
 
@@ -43,36 +64,46 @@ class _SiteImportPageState extends ConsumerState<SiteImportPage> {
     }
   }
 
-  Future<void> _importSite(ExternalDiveSite site) async {
+  Future<void> _importSite(CatalogueSite site) async {
     final notifier = ref.read(externalSiteSearchProvider.notifier);
-    final importedSite = await notifier.importSite(site);
+    // Read now: importing a site from the search is creating it by hand
+    // (#3513), and it gets its rules even if the diver leaves meanwhile.
+    final rulesAfterCreate = captureRulesAfterCreate(context, ref);
+    final adoption = await notifier.importSite(site);
+    final importedSite = adoption?.site;
 
-    if (!mounted) return;
-
-    if (importedSite != null) {
-      setState(() {
-        _importedIds.add(site.externalId);
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            context.l10n.diveSites_import_snackbar_imported(site.name),
+    if (mounted) {
+      if (importedSite != null) {
+        // The notifier marks the site as the diver's; no page state needed.
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              context.l10n.diveSites_import_snackbar_imported(site.name),
+            ),
+            persist: false,
+            action: SnackBarAction(
+              label: context.l10n.diveSites_import_snackbar_viewAction,
+              onPressed: () {
+                context.push('/sites/${importedSite.id}');
+              },
+            ),
           ),
-          action: SnackBarAction(
-            label: context.l10n.diveSites_import_snackbar_viewAction,
-            onPressed: () {
-              context.push('/sites/${importedSite.id}');
-            },
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(context.l10n.diveSites_import_snackbar_failed),
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.diveSites_import_snackbar_failed),
-          backgroundColor: Theme.of(context).colorScheme.error,
-        ),
+        );
+      }
+    }
+    // Only a site this import created: one the diver already had may have
+    // been edited since, and the rules would undo that.
+    if (adoption != null && adoption.created) {
+      await rulesAfterCreate(
+        subject: RuleSubject.sites,
+        ids: [adoption.site.id],
       );
     }
   }
@@ -194,6 +225,15 @@ class _SiteImportPageState extends ConsumerState<SiteImportPage> {
     ThemeData theme,
     ColorScheme colorScheme,
   ) {
+    final units = ref.watch(unitFormatterProvider);
+    // The diver's sites as they are now, beside the ids the search found
+    // linked when it ran: a site added from its own page since then, or
+    // from another screen, shows as imported without a new search.
+    final mine = [
+      ...?ref.watch(sitesWithCountsProvider).value?.map((entry) => entry.site),
+    ];
+    final linkedNow = linkedCatalogueIds(mine);
+
     // Error state
     if (state.hasError) {
       return Center(
@@ -356,12 +396,42 @@ class _SiteImportPageState extends ConsumerState<SiteImportPage> {
               ],
             ),
           ),
+          // The list stops at a fixed number of sites: say so, or a site
+          // whose name sorts late looks as if the catalogue lacks it.
+          if (state.isTruncated)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                context.l10n.diveSites_import_section_truncated(
+                  state.sites.length,
+                ),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           ...state.sites.map((site) {
-            final isImported = _importedIds.contains(site.externalId);
-            return _DiveSiteCard(
+            // Already one of the diver's sites, in this session or any
+            // earlier one: the link says so.
+            final isImported =
+                state.linkedCatalogueIds.contains(site.id) ||
+                linkedNow.contains(site.id);
+            return CatalogueImportSiteCard(
               site: site,
               isImported: isImported,
+              units: units,
               onImport: () => _importSite(site),
+              // The diver's own site when the record is already theirs,
+              // else the record's page. That page hands over to their site
+              // too, for a record whose owner is not known here yet.
+              onOpen: () {
+                final ownerId = catalogueOwnerSiteId(mine, site.id);
+                context.push(
+                  ownerId == null
+                      ? catalogueSitePath(site.id)
+                      : '/sites/$ownerId',
+                );
+              },
             );
           }),
         ],
@@ -524,329 +594,5 @@ class _LocalSiteCard extends StatelessWidget {
       parts.add(site.country!);
     }
     return parts.isNotEmpty ? parts.join(', ') : null;
-  }
-}
-
-class _DiveSiteCard extends StatelessWidget {
-  final ExternalDiveSite site;
-  final bool isImported;
-  final VoidCallback onImport;
-
-  const _DiveSiteCard({
-    required this.site,
-    required this.isImported,
-    required this.onImport,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Semantics(
-        button: true,
-        label: 'View details for ${site.name}',
-        child: InkWell(
-          onTap: () => _showDetails(context),
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Location icon
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: colorScheme.primaryContainer,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        Icons.scuba_diving,
-                        color: colorScheme.onPrimaryContainer,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-
-                    // Site info
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            site.name,
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _buildLocationText(),
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    // Import button
-                    if (isImported)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: colorScheme.primaryContainer,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.check,
-                              size: 16,
-                              color: colorScheme.primary,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Imported',
-                              style: theme.textTheme.labelMedium?.copyWith(
-                                color: colorScheme.primary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    else
-                      FilledButton.tonal(
-                        onPressed: onImport,
-                        child: const Text('Import'),
-                      ),
-                  ],
-                ),
-
-                // Features
-                if (site.features.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: site.features.take(4).map((feature) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: colorScheme.surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          feature,
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ],
-
-                // Depth and coordinates
-                if (site.maxDepth != null || site.hasCoordinates) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      if (site.maxDepth != null) ...[
-                        Icon(
-                          Icons.arrow_downward,
-                          size: 16,
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${site.maxDepth!.toStringAsFixed(0)}m',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                      ],
-                      if (site.hasCoordinates) ...[
-                        Icon(
-                          Icons.location_on,
-                          size: 16,
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'GPS',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _buildLocationText() {
-    final parts = <String>[];
-    if (site.region != null && site.region!.isNotEmpty) {
-      parts.add(site.region!);
-    }
-    if (site.country != null && site.country!.isNotEmpty) {
-      parts.add(site.country!);
-    }
-    if (site.ocean != null &&
-        site.ocean!.isNotEmpty &&
-        !parts.contains(site.ocean)) {
-      parts.add(site.ocean!);
-    }
-    return parts.isNotEmpty ? parts.join(', ') : 'Location unknown';
-  }
-
-  void _showDetails(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) {
-        return DraggableScrollableSheet(
-          initialChildSize: 0.6,
-          minChildSize: 0.4,
-          maxChildSize: 0.9,
-          expand: false,
-          builder: (context, scrollController) {
-            return SingleChildScrollView(
-              controller: scrollController,
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Handle
-                  Center(
-                    child: Container(
-                      width: 32,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: colorScheme.onSurfaceVariant.withValues(
-                          alpha: 0.4,
-                        ),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Title
-                  Text(
-                    site.name,
-                    style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _buildLocationText(),
-                    style: theme.textTheme.bodyLarge?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Description
-                  if (site.description != null &&
-                      site.description!.isNotEmpty) ...[
-                    Text(site.description!, style: theme.textTheme.bodyMedium),
-                    const SizedBox(height: 16),
-                  ],
-
-                  // Info chips
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      if (site.maxDepth != null)
-                        Chip(
-                          avatar: const Icon(Icons.arrow_downward, size: 18),
-                          label: Text(
-                            'Max ${site.maxDepth!.toStringAsFixed(0)}m',
-                          ),
-                        ),
-                      if (site.hasCoordinates)
-                        Chip(
-                          avatar: const Icon(Icons.location_on, size: 18),
-                          label: Text(
-                            '${site.latitude!.toStringAsFixed(4)}, '
-                            '${site.longitude!.toStringAsFixed(4)}',
-                          ),
-                        ),
-                      ...site.features.map((f) => Chip(label: Text(f))),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Source
-                  Text(
-                    'Source: ${site.source}',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Import button
-                  if (!isImported)
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                          onImport();
-                        },
-                        icon: const Icon(Icons.download),
-                        label: const Text('Import to My Sites'),
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.tonal(
-                        onPressed: null,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.check, color: colorScheme.primary),
-                            const SizedBox(width: 8),
-                            const Text('Already Imported'),
-                          ],
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
   }
 }

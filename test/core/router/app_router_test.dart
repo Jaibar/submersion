@@ -3,10 +3,83 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_detail_page.dart';
+import 'package:submersion/features/courses/presentation/pages/course_detail_page.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/documents/presentation/pages/document_detail_page.dart';
+import 'package:submersion/features/documents/presentation/pages/document_edit_routes.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_detail_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_edit_routes.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_set_detail_page.dart';
+import 'package:submersion/features/gps_log/presentation/pages/gps_track_detail_page.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_detail_page.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_edit_routes.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_align_page.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_detail_page.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_seascape_page.dart';
+import 'package:submersion/features/tracks/domain/track_kind.dart';
+import 'package:submersion/features/tracks/presentation/pages/tracks_map_page.dart';
+import 'package:submersion/features/tracks/presentation/pages/tracks_page.dart';
+import 'package:submersion/core/router/track_locations.dart';
+import 'package:submersion/core/router/training_locations.dart';
+import 'package:submersion/features/training/presentation/pages/training_page.dart';
+import 'package:submersion/core/constants/feature_flags.dart';
 import 'package:submersion/core/router/app_router.dart';
+import 'package:submersion/features/connections/presentation/connections_links.dart';
+import 'package:submersion/features/checklists/presentation/pages/checklist_template_edit_page.dart';
+import 'package:submersion/features/checklists/presentation/pages/checklist_templates_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_search_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/gas_calculators/presentation/gas_calculator_tools.dart';
+import 'package:submersion/features/planner/presentation/pages/plan_canvas_page.dart';
+import 'package:submersion/features/planning/presentation/widgets/planning_disclaimer_gate.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_page.dart';
+import 'package:submersion/features/safety/presentation/pages/incident_edit_page.dart';
+import 'package:submersion/features/safety/presentation/pages/incidents_list_page.dart';
+import 'package:submersion/features/safety/presentation/pages/cns_otu_page.dart';
+import 'package:submersion/features/safety/presentation/pages/no_fly_page.dart';
+import 'package:submersion/features/surface_interval_tool/presentation/pages/surface_interval_tool_page.dart';
+import 'package:submersion/features/settings/presentation/pages/manage_currency_rules_page.dart';
 import 'package:submersion/features/settings/presentation/pages/section_appearance_page.dart';
+import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/site_detail_sections_page.dart';
+import 'package:submersion/features/settings/presentation/widgets/appearance_settings_tiles.dart';
+import 'package:submersion/features/settings/presentation/widgets/unrecognized_backups_notice.dart';
 import 'package:submersion/features/settings/presentation/pages/column_config_page.dart';
+import 'package:submersion/features/settings/presentation/pages/data_settings_pane.dart';
+import 'package:submersion/features/settings/presentation/pages/lightroom_settings_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/connect_shared_library_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/shared_library_members_page.dart';
+import 'package:submersion/features/settings/presentation/pages/profile_metric_colors_page.dart';
+import 'package:submersion/features/settings/presentation/pages/raw_dive_data_page.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/dive_log/presentation/navigation/open_dive_list.dart';
+import 'package:submersion/features/trips/presentation/navigation/open_trip_list.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_list_page.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/dive_log/presentation/pages/bulk_dive_edit_page.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
+import 'package:submersion/core/router/shortcut_locations.dart';
+import 'package:submersion/features/import_wizard/presentation/pages/universal_import_wizard_route.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/leave_running_import_dialog.dart';
+import 'package:submersion/features/table_editor/presentation/pages/table_editor_page.dart';
+import 'package:submersion/shared/widgets/record_editing/record_sitting_exit_blocker.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_edit_routes.dart';
+import 'package:submersion/features/courses/presentation/pages/course_edit_routes.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_edit_routes.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
+import 'package:submersion/features/trips/domain/services/trip_draft.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_set_edit_routes.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_routes.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
 
 /// Finds a [GoRoute] by name in a route tree recursively.
 GoRoute? _findRouteByName(List<RouteBase> routes, String name) {
@@ -22,6 +95,38 @@ GoRoute? _findRouteByName(List<RouteBase> routes, String name) {
     }
   }
   return null;
+}
+
+/// Finds a [GoRoute] by its own path segment in a route tree recursively.
+GoRoute? _findRouteByPath(List<RouteBase> routes, String path) {
+  for (final route in routes) {
+    if (route is GoRoute) {
+      if (route.path == path) return route;
+      final found = _findRouteByPath(route.routes, path);
+      if (found != null) return found;
+    }
+    if (route is ShellRoute) {
+      final found = _findRouteByPath(route.routes, path);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+
+/// Collects every [ShellRoute] in a route tree recursively, however deeply
+/// nested (a [ShellRoute] inside another [ShellRoute]'s routes list).
+List<ShellRoute> _collectShellRoutes(List<RouteBase> routes) {
+  final shells = <ShellRoute>[];
+  for (final route in routes) {
+    if (route is ShellRoute) {
+      shells.add(route);
+      shells.addAll(_collectShellRoutes(route.routes));
+    }
+    if (route is GoRoute) {
+      shells.addAll(_collectShellRoutes(route.routes));
+    }
+  }
+  return shells;
 }
 
 /// Collects all named [GoRoute]s from a route tree recursively.
@@ -56,6 +161,41 @@ Set<String> _collectRoutePaths(List<RouteBase> routes) {
   return paths;
 }
 
+/// Route paths in declaration order, which [_collectRoutePaths] discards.
+List<String> _orderedRoutePaths(List<RouteBase> routes) => [
+  for (final route in routes) ...[
+    if (route is GoRoute) route.path,
+    ..._orderedRoutePaths(route.routes),
+  ],
+];
+
+/// The location a named route resolves to, assembled from its ancestors.
+///
+/// A nested GoRoute stores only its own segment, so a widget that pushes a
+/// hand-written absolute path can drift from the tree without any test
+/// noticing until the push fails at runtime.
+String? _locationOfRoute(
+  List<RouteBase> routes,
+  String name, [
+  String prefix = '',
+]) {
+  for (final route in routes) {
+    if (route is GoRoute) {
+      final here = route.path.startsWith('/')
+          ? route.path
+          : '${prefix == '/' ? '' : prefix}/${route.path}';
+      if (route.name == name) return here;
+      final found = _locationOfRoute(route.routes, name, here);
+      if (found != null) return found;
+    }
+    if (route is ShellRoute) {
+      final found = _locationOfRoute(route.routes, name, prefix);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+
 void main() {
   late GoRouter router;
   late ProviderContainer container;
@@ -71,7 +211,706 @@ void main() {
     container.dispose();
   });
 
+  group('universal import wizard (#4223)', () {
+    final garminLocation =
+        UniversalImportWizardRoute.garminDeviceImportLocationFor(
+          computerId: 'c1',
+          readAll: true,
+        );
+
+    Future<UniversalImportWizardRoute Function(String)> builderFor(
+      WidgetTester tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      return (location) =>
+          _findRouteByName(
+                router.configuration.routes,
+                'universalImport',
+              )!.builder!(
+                capturedContext,
+                GoRouterState(
+                  router.configuration,
+                  uri: Uri.parse(location),
+                  matchedLocation: Uri.parse(location).path,
+                  fullPath: '/transfer/import-wizard',
+                  pathParameters: const {},
+                  pageKey: ValueKey(location),
+                ),
+              )
+              as UniversalImportWizardRoute;
+    }
+
+    testWidgets(
+      'on desktop opens straight into the Garmin download the URL asks for',
+      (tester) async {
+        final build = await builderFor(tester);
+
+        final garmin = build(garminLocation);
+        expect(garmin.garminImport?.computerId, 'c1');
+        expect(garmin.garminImport?.readAll, isTrue);
+        expect(build('/transfer/import-wizard').garminImport, isNull);
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.windows,
+        TargetPlatform.macOS,
+        TargetPlatform.linux,
+      }),
+    );
+
+    testWidgets(
+      'on a phone a Garmin location opens the plain file import',
+      (tester) async {
+        final build = await builderFor(tester);
+
+        expect(build(garminLocation).garminImport, isNull);
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      }),
+    );
+  });
+
+  group('buddy card preview (#3728)', () {
+    testWidgets('without its card the preview goes to the buddy list', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'buddyCardPreview',
+      )!;
+      final redirect = route.redirect!(
+        capturedContext,
+        GoRouterState(
+          router.configuration,
+          uri: Uri.parse('/buddies/card'),
+          matchedLocation: '/buddies/card',
+          fullPath: '/buddies/card',
+          pathParameters: const {},
+          pageKey: const ValueKey('/buddies/card'),
+        ),
+      );
+      expect(await redirect, '/buddies');
+    });
+  });
+
+  group('site duplicate (#3575)', () {
+    test('openDuplicateSite pushes the newSite route', () {
+      // openDuplicateSite writes the path by hand; it must stay this route's.
+      expect(
+        _locationOfRoute(router.configuration.routes, 'newSite'),
+        '/sites/new',
+      );
+    });
+
+    testWidgets('newSite reads the site to duplicate from the URL', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      SiteDetailPage build(String location) =>
+          _findRouteByName(router.configuration.routes, 'newSite')!.builder!(
+                capturedContext,
+                GoRouterState(
+                  router.configuration,
+                  uri: Uri.parse(location),
+                  matchedLocation: Uri.parse(location).path,
+                  fullPath: '/sites/new',
+                  pathParameters: const {},
+                  pageKey: ValueKey(location),
+                ),
+              )
+              as SiteDetailPage;
+
+      expect(build('/sites/new?duplicateOf=s1').newSite?.duplicateOfId, 's1');
+      expect(build('/sites/new').newSite?.duplicateOfId, isNull);
+    });
+  });
+
+  // The sidebar leaves with go(), which no PopScope sees (#3422).
+  // A site's sitting is asked about before a `go` leaves it (issue #4527).
+  // The old site edit address opens the page unlocked (issue #4527).
+  test('the site edit address opens the page unlocked', () {
+    // A reader's suggestion (`?suggest=1`) as well: the page unlocks as the
+    // role allows (issue #4527, phase 2, plan 5).
+    expect(siteEditLocation('s1'), '/sites/s1?mode=edit');
+    final route = _findRouteByName(router.configuration.routes, 'editSite');
+    expect(route?.redirect, same(siteEditRedirect));
+  });
+
+  // The old dive centre, buddy and certification edit addresses open the
+  // page unlocked (issue #4527, phase 3).
+  test('the dive centre edit address opens the page unlocked', () {
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'editDiveCenter',
+    );
+    expect(route?.redirect, same(diveCenterEditRedirect));
+    final detail = _findRouteByName(
+      router.configuration.routes,
+      'diveCenterDetail',
+    );
+    expect(detail?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('the buddy edit address opens the page unlocked', () {
+    final route = _findRouteByName(router.configuration.routes, 'editBuddy');
+    expect(route?.redirect, same(buddyEditRedirect));
+    final detail = _findRouteByName(router.configuration.routes, 'buddyDetail');
+    expect(detail?.onExit, same(confirmLeaveRecordSitting));
+    final merge = _findRouteByName(router.configuration.routes, 'mergeBuddy');
+    expect(merge?.redirect, same(buddyMergeRedirect));
+  });
+
+  test('the certification edit address opens the page unlocked', () {
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'editCertification',
+    );
+    expect(route?.redirect, same(certificationEditRedirect));
+    final detail = _findRouteByName(
+      router.configuration.routes,
+      'certificationDetail',
+    );
+    expect(detail?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('the course edit address opens the page unlocked', () {
+    final route = _findRouteByName(router.configuration.routes, 'editCourse');
+    expect(route?.redirect, same(courseEditRedirect));
+    for (final name in const ['courses', 'courseDetail']) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route?.onExit, same(confirmLeaveRecordSitting), reason: name);
+    }
+  });
+
+  test('the trip edit address opens the page unlocked', () {
+    final route = _findRouteByName(router.configuration.routes, 'editTrip');
+    expect(route?.redirect, same(tripEditRedirect));
+    // The cylinder board has a lock of its own (issue #4527, plan 10).
+    for (final name in const ['trips', 'tripDetail', 'tripCylinders']) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route?.onExit, same(confirmLeaveRecordSitting), reason: name);
+    }
+  });
+
+  test('the equipment set edit address opens the page unlocked', () {
+    expect(equipmentSetEditLocation('s1'), '/equipment/sets/s1?mode=edit');
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'editEquipmentSet',
+    );
+    expect(route?.redirect, same(equipmentSetEditRedirect));
+    // The sets pane lives under the equipment list.
+    for (final name in const [
+      'equipment',
+      'equipmentSets',
+      'equipmentSetDetail',
+    ]) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route?.onExit, same(confirmLeaveRecordSitting), reason: name);
+    }
+  });
+
+  // Every phase 3 type's old edit address is a redirect with no builder:
+  // the page opens unlocked (issue #4527, plan 12).
+  test('every old edit address opens the page unlocked', () {
+    final redirects = <String, GoRouterRedirect>{
+      'editBuddy': buddyEditRedirect,
+      'editDiveCenter': diveCenterEditRedirect,
+      'editCertification': certificationEditRedirect,
+      'editCourse': courseEditRedirect,
+      'editDocument': documentEditRedirect,
+      'editEquipment': gearItemEditRedirect,
+      'editEquipmentSet': equipmentSetEditRedirect,
+      'editTrip': tripEditRedirect,
+      'editSpecies': speciesEditRedirect,
+    };
+    for (final MapEntry(key: name, value: redirect) in redirects.entries) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route, isNotNull, reason: name);
+      expect(route!.builder, isNull, reason: name);
+      expect(route.redirect, same(redirect), reason: name);
+    }
+    expect(buddyEditLocation('x1'), '/buddies/x1?mode=edit');
+    expect(diveCenterEditLocation('x1'), '/dive-centers/x1?mode=edit');
+    expect(certificationEditLocation('x1'), '/certifications/x1?mode=edit');
+    expect(courseEditLocation('x1'), '/courses/x1?mode=edit');
+    expect(documentEditLocation('x1'), '/documents/x1?mode=edit');
+    expect(gearItemEditLocation('x1'), '/equipment/x1?mode=edit');
+    expect(equipmentSetEditLocation('x1'), '/equipment/sets/x1?mode=edit');
+    expect(tripEditLocation('x1'), '/trips/x1?mode=edit');
+    expect(speciesEditLocation('x1'), '/species/x1?mode=edit');
+  });
+
+  // The merge address handed fewer than two sites goes back to the list
+  // (issue #4527, phase 2, plan 7).
+  test('the site merge address checks it was handed sites to merge', () {
+    final route = _findRouteByName(router.configuration.routes, 'mergeSite');
+    expect(route?.redirect, same(siteMergeRedirect));
+  });
+
+  test('leaving a site page goes through its sitting check', () {
+    // A new site with something entered asks too (issue #4527, plan 6).
+    for (final name in const ['sites', 'siteDetail', 'newSite']) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route?.onExit, same(confirmLeaveRecordSitting), reason: name);
+    }
+  });
+
+  // A new record opens on its own page (issue #4527, phase 3, plan 11).
+  test('a new document opens the page', () {
+    const query = {'ownerKind': 'trip', 'ownerId': 't1', 'type': 'permit'};
+    final page = newDocumentPage(query);
+    expect(page, isA<DocumentDetailPage>());
+    final request = (page as DocumentDetailPage).newDocument!;
+    expect(request.owner, const DocumentOwner(DocumentOwnerKind.trip, 't1'));
+    expect(request.type, DocumentType.permit);
+    final route = _findRouteByName(router.configuration.routes, 'newDocument');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new species opens the page', () {
+    final page = newSpeciesPage();
+    expect(page, isA<SpeciesDetailPage>());
+    expect((page as SpeciesDetailPage).newSpecies, isTrue);
+    final route = _findRouteByName(router.configuration.routes, 'newSpecies');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new buddy opens the page', () {
+    const extra = {'name': 'Kai', 'email': 'kai@example.com'};
+    final page = newBuddyPage(extra);
+    expect(page, isA<BuddyDetailPage>());
+    final seed = (page as BuddyDetailPage).newBuddy!.seed!;
+    expect(seed.name, 'Kai');
+    expect(seed.email, 'kai@example.com');
+    final route = _findRouteByName(router.configuration.routes, 'newBuddy');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+    // Still on the root navigator, over a dialog it is opened from.
+    expect(route?.parentNavigatorKey, isNotNull);
+  });
+
+  test('a new dive centre opens the page', () {
+    final page = newDiveCenterPage();
+    expect(page, isA<DiveCenterDetailPage>());
+    expect((page as DiveCenterDetailPage).newDiveCenter, isTrue);
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'newDiveCenter',
+    );
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new certification opens the page', () {
+    final page = newCertificationPage();
+    expect(page, isA<CertificationDetailPage>());
+    expect((page as CertificationDetailPage).newCertification, isTrue);
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'newCertification',
+    );
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new course opens the page', () {
+    final page = newCoursePage();
+    expect(page, isA<CourseDetailPage>());
+    expect((page as CourseDetailPage).newCourse, isTrue);
+    final route = _findRouteByName(router.configuration.routes, 'newCourse');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new gear item opens the page, every seed '
+      'carried', () {
+    const query = {
+      'type': 'computer',
+      'serial': 'S9',
+      'parent': 'host',
+      'cloneFrom': 'src',
+    };
+    final page = newGearItemPage(query);
+    expect(page, isA<EquipmentDetailPage>());
+    final request = (page as EquipmentDetailPage).newItem!;
+    expect(request.type, EquipmentType.computer);
+    expect(request.serial, 'S9');
+    expect(request.parentId, 'host');
+    expect(request.cloneFromId, 'src');
+    final route = _findRouteByName(router.configuration.routes, 'newEquipment');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new trip opens the page, a draft carried', () {
+    final draft = TripDraft(
+      trip: Trip(
+        id: '',
+        name: 'Bonaire',
+        startDate: DateTime(2030, 5, 1),
+        endDate: DateTime(2030, 5, 4),
+        createdAt: DateTime(2030),
+        updatedAt: DateTime(2030),
+      ),
+      diveIds: const ['a'],
+    );
+    final page = newTripPage(draft);
+    expect(page, isA<TripDetailPage>());
+    expect((page as TripDetailPage).newTrip?.draft, same(draft));
+    final blank = newTripPage(null) as TripDetailPage;
+    expect(blank.newTrip, isNotNull);
+    expect(blank.newTrip?.draft, isNull);
+    final route = _findRouteByName(router.configuration.routes, 'newTrip');
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  test('a new set opens the page, a clone carried', () {
+    final page = newEquipmentSetPage(cloneFromId: 's1');
+    expect(page, isA<EquipmentSetDetailPage>());
+    expect((page as EquipmentSetDetailPage).newSet?.cloneFromId, 's1');
+    final route = _findRouteByName(
+      router.configuration.routes,
+      'newEquipmentSet',
+    );
+    expect(route?.onExit, same(confirmLeaveRecordSitting));
+  });
+
+  // A track's sitting is asked about before a `go` leaves it (issue #4527,
+  // phase 3, plan 5).
+  test('leaving a track page goes through its sitting check', () {
+    for (final name in const [
+      'gpsTrackDetail',
+      'underwaterTrackDetail',
+      'underwaterTrackAlign',
+    ]) {
+      final route = _findRouteByName(router.configuration.routes, name);
+      expect(route?.onExit, same(confirmLeaveRecordSitting), reason: name);
+    }
+  });
+
+  test('leaving the table editor goes through its unsaved work check', () {
+    final route = _findRouteByName(router.configuration.routes, 'tableEditor');
+
+    expect(route?.onExit, confirmLeaveTableEditor);
+  });
+
+  group('tracks area', () {
+    test('every tracks page is a top-level sibling of /tracks', () {
+      // go_router builds one page per matched segment and /tracks has its
+      // own pageBuilder, so a nested detail would stack the landing page
+      // under it: two Back presses from a dive's track link.
+      final routes = router.configuration.routes;
+      final tracks = _findRouteByName(routes, 'tracks');
+      expect(tracks?.path, kTracksLocation);
+      expect(tracks!.routes, isEmpty);
+      for (final (name, path) in const [
+        ('tracksMap', '/tracks/map'),
+        ('gpsTrackDetail', '/tracks/gps/:id'),
+        ('underwaterTrackDetail', '/tracks/underwater/:id'),
+        ('underwaterTrackAlign', '/tracks/underwater/:id/align'),
+        ('underwaterTrackSeascape', '/tracks/underwater/:id/3d'),
+      ]) {
+        expect(_findRouteByName(routes, name)?.path, path, reason: name);
+      }
+    });
+
+    test('the location helpers match the route table', () {
+      final config = router.configuration;
+      for (final (location, fullPath) in [
+        (kTracksMapLocation, '/tracks/map'),
+        (gpsTrackLocation('abc'), '/tracks/gps/:id'),
+        (underwaterTrackLocation('abc'), '/tracks/underwater/:id'),
+        (underwaterTrackAlignLocation('abc'), '/tracks/underwater/:id/align'),
+        (underwaterTrackSeascapeLocation('abc'), '/tracks/underwater/:id/3d'),
+      ]) {
+        expect(
+          config.findMatch(Uri.parse(location)).fullPath,
+          fullPath,
+          reason: location,
+        );
+      }
+    });
+
+    test('static paths are declared before parameterised siblings', () {
+      // ':id' matches any single segment, so a static sibling declared after
+      // it would never match.
+      final paths = _orderedRoutePaths(router.configuration.routes);
+      expect(
+        paths.indexOf('/tracks/map'),
+        lessThan(paths.indexOf('/tracks/gps/:id')),
+      );
+      expect(paths.indexOf('/gps-log/map'), isNot(-1));
+      expect(
+        paths.indexOf('/gps-log/map'),
+        lessThan(paths.indexOf('/gps-log/:id')),
+      );
+    });
+
+    testWidgets('each tracks route builds its page with the path id', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      GoRouterState stateFor(
+        String fullPath,
+        String location, [
+        Map<String, String> params = const {},
+      ]) => GoRouterState(
+        router.configuration,
+        uri: Uri.parse(location),
+        matchedLocation: Uri.parse(location).path,
+        fullPath: fullPath,
+        pathParameters: params,
+        pageKey: ValueKey(location),
+      );
+      final routes = router.configuration.routes;
+      Widget build(String name, GoRouterState state) =>
+          _findRouteByName(routes, name)!.builder!(capturedContext, state);
+
+      final landing = _findRouteByName(routes, 'tracks')!.pageBuilder!(
+        capturedContext,
+        stateFor('/tracks', '/tracks?kind=underwater'),
+      );
+      expect(landing, isA<NoTransitionPage<void>>());
+      final tracksPage =
+          (landing as NoTransitionPage<void>).child as TracksPage;
+      expect(tracksPage.initialKind, TrackKindFilter.underwater);
+
+      expect(
+        build('tracksMap', stateFor('/tracks/map', '/tracks/map')),
+        isA<TracksMapPage>(),
+      );
+      final gps =
+          build(
+                'gpsTrackDetail',
+                stateFor('/tracks/gps/:id', '/tracks/gps/g1', {'id': 'g1'}),
+              )
+              as GpsTrackDetailPage;
+      expect(gps.trackId, 'g1');
+      final detail =
+          build(
+                'underwaterTrackDetail',
+                stateFor('/tracks/underwater/:id', '/tracks/underwater/u1', {
+                  'id': 'u1',
+                }),
+              )
+              as NavTrackDetailPage;
+      expect(detail.trackId, 'u1');
+      final align =
+          build(
+                'underwaterTrackAlign',
+                stateFor(
+                  '/tracks/underwater/:id/align',
+                  '/tracks/underwater/u1/align',
+                  {'id': 'u1'},
+                ),
+              )
+              as NavTrackAlignPage;
+      expect(align.routeId, 'u1');
+      final seascape =
+          build(
+                'underwaterTrackSeascape',
+                stateFor(
+                  '/tracks/underwater/:id/3d',
+                  '/tracks/underwater/u1/3d',
+                  {'id': 'u1'},
+                ),
+              )
+              as NavTrackSeascapePage;
+      expect(seascape.trackId, 'u1');
+    });
+
+    testWidgets('old GPS log and underwater route locations redirect into '
+        '/tracks', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      Future<String?> redirect(
+        String path,
+        String location, [
+        Map<String, String> params = const {},
+      ]) async {
+        final route = _findRouteByPath(router.configuration.routes, path);
+        expect(route?.redirect, isNotNull, reason: path);
+        return route!.redirect!(
+          capturedContext,
+          GoRouterState(
+            router.configuration,
+            uri: Uri.parse(location),
+            matchedLocation: location,
+            fullPath: path,
+            pathParameters: params,
+            pageKey: ValueKey(location),
+          ),
+        );
+      }
+
+      expect(await redirect('/gps-log', '/gps-log'), '/tracks');
+      expect(await redirect('/gps-log/map', '/gps-log/map'), '/tracks/map');
+      expect(
+        await redirect('/gps-log/:id', '/gps-log/abc', {'id': 'abc'}),
+        '/tracks/gps/abc',
+      );
+      expect(
+        await redirect('/nav-routes', '/nav-routes'),
+        '/tracks?kind=underwater',
+      );
+      expect(
+        await redirect('/nav-routes/:id', '/nav-routes/r1', {'id': 'r1'}),
+        '/tracks/underwater/r1',
+      );
+      expect(
+        await redirect('/nav-routes/:id/align', '/nav-routes/r1/align', {
+          'id': 'r1',
+        }),
+        '/tracks/underwater/r1/align',
+      );
+      expect(
+        await redirect('/nav-routes/:id/3d', '/nav-routes/r1/3d', {'id': 'r1'}),
+        '/tracks/underwater/r1/3d',
+      );
+      expect(await redirect('gps-logger', '/planning/gps-logger'), '/tracks');
+    });
+
+    testWidgets('Training opens on Certifications, and both tab addresses '
+        'build the one Training host (#3437)', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      GoRouterState stateAt(String path) => GoRouterState(
+        router.configuration,
+        uri: Uri.parse(path),
+        matchedLocation: path,
+        fullPath: path,
+        pathParameters: const {},
+        pageKey: ValueKey(path),
+      );
+
+      final training = _findRouteByPath(
+        router.configuration.routes,
+        kTrainingLocation,
+      );
+      expect(
+        await training!.redirect!(capturedContext, stateAt(kTrainingLocation)),
+        '/certifications',
+      );
+
+      for (final tab in TrainingTab.values) {
+        final route = _findRouteByPath(router.configuration.routes, tab.path);
+        final page = route!.pageBuilder!(capturedContext, stateAt(tab.path));
+        expect(page.key, kTrainingHostPageKey, reason: tab.path);
+        final child = (page as NoTransitionPage<void>).child;
+        expect(child, isA<TrainingPage>(), reason: tab.path);
+        expect((child as TrainingPage).tab, tab);
+      }
+    });
+
+    test('old planning gps-logger path is a redirect', () {
+      GoRoute? findByPath(List<RouteBase> routes) {
+        for (final route in routes) {
+          if (route is GoRoute) {
+            if (route.path == 'gps-logger') return route;
+            final found = findByPath(route.routes);
+            if (found != null) return found;
+          }
+          if (route is ShellRoute) {
+            final found = findByPath(route.routes);
+            if (found != null) return found;
+          }
+        }
+        return null;
+      }
+
+      final route = findByPath(router.configuration.routes);
+      expect(route, isNotNull);
+      expect(route!.redirect, isNotNull);
+      expect(route.builder, isNull);
+    });
+  });
+
   group('app_router route configuration', () {
+    test('connections lives under Insights and accepts query params', () {
+      final routes = router.configuration.routes;
+      expect(_findRouteByName(routes, 'connections'), isNotNull);
+      expect(_locationOfRoute(routes, 'connections'), kConnectionsLocation);
+      final match = router.configuration.findMatch(
+        Uri.parse('/insights/connections?mode=around&focus=buddy:abc'),
+      );
+      expect(match.fullPath, '/insights/connections');
+    });
+
+    test('observations live under Insights (#2381)', () {
+      final routes = router.configuration.routes;
+      expect(_findRouteByName(routes, 'insightsObservations'), isNotNull);
+      final match = router.configuration.findMatch(
+        Uri.parse('/insights/observations'),
+      );
+      expect(match.fullPath, '/insights/observations');
+    });
+
+    test('the cylinder passport nests under equipment detail', () {
+      final names = _collectRouteNames(router.configuration.routes);
+      expect(names, contains('equipmentPassport'));
+      expect(
+        _locationOfRoute(router.configuration.routes, 'equipmentPassport'),
+        '/equipment/:equipmentId/passport',
+      );
+    });
+
     test('contains universalImport route', () {
       final names = _collectRouteNames(router.configuration.routes);
       expect(names, contains('universalImport'));
@@ -194,6 +1033,14 @@ void main() {
               as GoRoute;
       expect(downloadRoute.path, equals('download'));
     });
+
+    test('a scanned foreign tag has its own route, not an equipment id', () {
+      final match = router.configuration.findMatch(
+        Uri.parse('/equipment/tag?t=x'),
+      );
+      expect(match.isError, isFalse);
+      expect(match.last.route.name, 'foreignPassport');
+    });
   });
 
   group('appearance section routes', () {
@@ -207,6 +1054,18 @@ void main() {
       expect(names, contains('appearanceDiveCenters'));
       expect(names, contains('appearanceCertifications'));
       expect(names, contains('appearanceCourses'));
+    });
+
+    // The phone Appearance page pushes these routes; the settings pane opens
+    // the same pages inline by key, so a key without a matching route would
+    // work on a tablet or desktop and fail only on a phone (#3095).
+    test('every Appearance section key resolves to its own route', () {
+      for (final key in appearanceSectionKeys) {
+        final location = appearanceSectionRoute(key);
+        final match = router.configuration.findMatch(Uri.parse(location));
+        expect(match.isError, isFalse, reason: location);
+        expect(match.fullPath, location, reason: location);
+      }
     });
 
     test('columnConfig route exists under appearance', () {
@@ -304,7 +1163,599 @@ void main() {
       );
       final columnWidget = columnRoute!.builder!(context, columnState);
       expect(columnWidget, isA<ColumnConfigPage>());
+
+      // Metric colors route (issue #3012)
+      final colorsRoute = _findRouteByName(config.routes, 'metricColors');
+      expect(colorsRoute, isNotNull);
+      final colorsState = GoRouterState(
+        config,
+        uri: Uri.parse('/settings/metric-colors'),
+        matchedLocation: '/settings/metric-colors',
+        fullPath: '/settings/metric-colors',
+        pathParameters: const {},
+        pageKey: const ValueKey('/settings/metric-colors'),
+      );
+      expect(
+        colorsRoute!.builder!(context, colorsState),
+        isA<ProfileMetricColorsPage>(),
+      );
     });
+  });
+
+  group('app_router media routes', () {
+    test('contains mediaSources route', () {
+      final names = _collectRouteNames(router.configuration.routes);
+      expect(names, contains('mediaSources'));
+    });
+
+    test('mediaSources route path is /settings/media-sources', () {
+      final paths = _collectRoutePaths(router.configuration.routes);
+      expect(paths, contains('media-sources'));
+    });
+
+    testWidgets('mediaSources route builder returns MediaSourcesPage', (
+      tester,
+    ) async {
+      final config = router.configuration;
+      final route = _findRouteByName(config.routes, 'mediaSources');
+      expect(route, isNotNull);
+
+      // Capture a real BuildContext so we can invoke the builder.
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse('/settings/media-sources'),
+        matchedLocation: '/settings/media-sources',
+        fullPath: '/settings/media-sources',
+        pathParameters: const {},
+        pageKey: const ValueKey('/settings/media-sources'),
+      );
+      final widget = route!.builder!(capturedContext, state);
+      // Use a String comparison so this test does not need to import the
+      // MediaSourcesPage class (avoids over-coupling the router test).
+      expect(widget.runtimeType.toString(), 'MediaSourcesPage');
+    });
+
+    test('cloudSync route path is /settings/cloud-sync', () {
+      final paths = _collectRoutePaths(router.configuration.routes);
+      expect(paths, contains('cloud-sync'));
+    });
+
+    testWidgets('cloudSync route builder returns CloudSyncPage', (
+      tester,
+    ) async {
+      final config = router.configuration;
+      final route = _findRouteByName(config.routes, 'cloudSync');
+      expect(route, isNotNull);
+
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse('/settings/cloud-sync'),
+        matchedLocation: '/settings/cloud-sync',
+        fullPath: '/settings/cloud-sync',
+        pathParameters: const {},
+        pageKey: const ValueKey('/settings/cloud-sync'),
+      );
+      final widget = route!.builder!(capturedContext, state);
+      expect(widget.runtimeType.toString(), 'CloudSyncPage');
+    });
+  });
+
+  // Settings > Data > Data tools > Raw dive computer data (issue #4590).
+  testWidgets('rawDiveData builds the raw dive computer data page at '
+      '/settings/raw-dive-data', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    final context = tester.element(find.byType(SizedBox));
+    final config = router.configuration;
+    final route = _findRouteByName(config.routes, 'rawDiveData');
+    expect(route, isNotNull);
+    expect(route!.path, 'raw-dive-data');
+
+    final state = GoRouterState(
+      config,
+      uri: Uri.parse('/settings/raw-dive-data'),
+      matchedLocation: '/settings/raw-dive-data',
+      fullPath: '/settings/raw-dive-data',
+      pathParameters: const {},
+      pageKey: const ValueKey('/settings/raw-dive-data'),
+    );
+    expect(route.builder!(context, state), isA<RawDiveDataPage>());
+  });
+
+  group('app_router checklist templates routes', () {
+    testWidgets(
+      'newChecklistTemplate and editChecklistTemplate builders return '
+      'ChecklistTemplateEditPage with the expected templateId',
+      (tester) async {
+        await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+        final context = tester.element(find.byType(SizedBox));
+        final config = router.configuration;
+
+        final listRoute = _findRouteByName(config.routes, 'checklistTemplates');
+        expect(listRoute, isNotNull);
+        final listState = GoRouterState(
+          config,
+          uri: Uri.parse('/checklist-templates'),
+          matchedLocation: '/checklist-templates',
+          fullPath: '/checklist-templates',
+          pathParameters: const {},
+          pageKey: const ValueKey('/checklist-templates'),
+        );
+        expect(
+          listRoute!.builder!(context, listState),
+          isA<ChecklistTemplatesPage>(),
+        );
+
+        final newRoute = _findRouteByName(
+          config.routes,
+          'newChecklistTemplate',
+        );
+        expect(newRoute, isNotNull);
+        final newState = GoRouterState(
+          config,
+          uri: Uri.parse('/checklist-templates/new'),
+          matchedLocation: '/checklist-templates/new',
+          fullPath: '/checklist-templates/new',
+          pathParameters: const {},
+          pageKey: const ValueKey('/checklist-templates/new'),
+        );
+        final newWidget =
+            newRoute!.builder!(context, newState) as ChecklistTemplateEditPage;
+        expect(newWidget.templateId, isNull);
+
+        final editRoute = _findRouteByName(
+          config.routes,
+          'editChecklistTemplate',
+        );
+        expect(editRoute, isNotNull);
+        final editState = GoRouterState(
+          config,
+          uri: Uri.parse('/checklist-templates/tpl-1/edit'),
+          matchedLocation: '/checklist-templates/tpl-1/edit',
+          fullPath: '/checklist-templates/tpl-1/edit',
+          pathParameters: const {'templateId': 'tpl-1'},
+          pageKey: const ValueKey('/checklist-templates/tpl-1/edit'),
+        );
+        final editWidget =
+            editRoute!.builder!(context, editState)
+                as ChecklistTemplateEditPage;
+        expect(editWidget.templateId, 'tpl-1');
+      },
+    );
+  });
+
+  group('app_router near-miss incident routes', () {
+    testWidgets(
+      'incidents, incidentNew, and incidentEdit builders return the right '
+      'pages and thread through the dive/incident ids',
+      (tester) async {
+        await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+        final context = tester.element(find.byType(SizedBox));
+        final config = router.configuration;
+
+        final listRoute = _findRouteByName(config.routes, 'incidents');
+        expect(listRoute, isNotNull);
+        expect(listRoute!.path, '/incidents');
+        final listState = GoRouterState(
+          config,
+          uri: Uri.parse('/incidents'),
+          matchedLocation: '/incidents',
+          fullPath: '/incidents',
+          pathParameters: const {},
+          pageKey: const ValueKey('/incidents'),
+        );
+        expect(
+          listRoute.builder!(context, listState),
+          isA<IncidentsListPage>(),
+        );
+
+        // A new incident prefilled from a dive carries the diveId query param.
+        final newRoute = _findRouteByName(config.routes, 'incidentNew');
+        expect(newRoute, isNotNull);
+        final newState = GoRouterState(
+          config,
+          uri: Uri.parse('/incidents/new?diveId=dive-9'),
+          matchedLocation: '/incidents/new',
+          fullPath: '/incidents/new',
+          pathParameters: const {},
+          pageKey: const ValueKey('/incidents/new'),
+        );
+        final newWidget =
+            newRoute!.builder!(context, newState) as IncidentEditPage;
+        expect(newWidget.incidentId, isNull);
+        expect(newWidget.diveId, 'dive-9');
+
+        // Editing an existing incident threads the path param through.
+        final editRoute = _findRouteByName(config.routes, 'incidentEdit');
+        expect(editRoute, isNotNull);
+        final editState = GoRouterState(
+          config,
+          uri: Uri.parse('/incidents/inc-1'),
+          matchedLocation: '/incidents/inc-1',
+          fullPath: '/incidents/:incidentId',
+          pathParameters: const {'incidentId': 'inc-1'},
+          pageKey: const ValueKey('/incidents/inc-1'),
+        );
+        final editWidget =
+            editRoute!.builder!(context, editState) as IncidentEditPage;
+        expect(editWidget.incidentId, 'inc-1');
+        expect(editWidget.diveId, isNull);
+      },
+    );
+  });
+
+  group('dive planner back-navigation (editPlan not nested)', () {
+    // Regression: opening a saved plan navigated to
+    // /planning/dive-planner/:planId, which was declared as a CHILD of the
+    // 'dive-planner' route. go_router builds one page per matched route
+    // segment, so the stack became [PlanningPage, PlanCanvasPage(),
+    // PlanCanvasPage(planId)] -- two canvas pages. Both read the same shared
+    // divePlanNotifierProvider, so the first Back press only revealed the
+    // identical parent canvas, forcing a second press. The fix makes editPlan
+    // a SIBLING of divePlanner (path 'dive-planner/:planId') so exactly one
+    // canvas page is built.
+
+    test('editPlan is a sibling of divePlanner, not a nested child', () {
+      final planning = _findRouteByName(
+        router.configuration.routes,
+        'planning',
+      );
+      expect(planning, isNotNull);
+
+      // editPlan lives directly under /planning (sibling of divePlanner).
+      final editPlan = planning!.routes.whereType<GoRoute>().firstWhere(
+        (r) => r.name == 'editPlan',
+        orElse: () =>
+            throw StateError('editPlan not a direct child of planning'),
+      );
+      expect(editPlan.path, 'dive-planner/:planId');
+
+      // The divePlanner subtree must NOT contain the plan-id route anymore.
+      final divePlanner = _findRouteByName(
+        router.configuration.routes,
+        'divePlanner',
+      );
+      expect(divePlanner, isNotNull);
+      final nestedNames = _collectRouteNames(divePlanner!.routes);
+      expect(nestedNames, isNot(contains('editPlan')));
+      final nestedPaths = _collectRoutePaths(divePlanner.routes);
+      expect(nestedPaths, isNot(contains(':planId')));
+    });
+
+    test('opening a saved plan matches only editPlan (single canvas page)', () {
+      final match = router.configuration.findMatch(
+        Uri.parse('/planning/dive-planner/plan-123'),
+      );
+      expect(match.fullPath, '/planning/dive-planner/:planId');
+    });
+
+    test('static sub-routes still win over the :planId sibling', () {
+      // Precedence guard: 'compare' / 'chart' remain children of divePlanner
+      // and must resolve before the dynamic sibling.
+      expect(
+        router.configuration
+            .findMatch(Uri.parse('/planning/dive-planner/compare?ids=a,b'))
+            .fullPath,
+        '/planning/dive-planner/compare',
+      );
+      expect(
+        router.configuration
+            .findMatch(Uri.parse('/planning/dive-planner/chart'))
+            .fullPath,
+        '/planning/dive-planner/chart',
+      );
+    });
+
+    test('no-fly is a direct child of /planning (matches the hub tile)', () {
+      // Regression: the "Flying after diving" hub tile navigates to
+      // '/planning/no-fly'. The route used to live under 'dive-planner'
+      // (so its real path was '/planning/dive-planner/no-fly'), leaving the
+      // tile's target unmatched and throwing "no routes for location".
+      expect(
+        router.configuration.findMatch(Uri.parse('/planning/no-fly')).fullPath,
+        '/planning/no-fly',
+      );
+
+      final noFly = _findRouteByName(router.configuration.routes, 'noFly');
+      expect(noFly, isNotNull);
+      final divePlanner = _findRouteByName(
+        router.configuration.routes,
+        'divePlanner',
+      );
+      expect(divePlanner, isNotNull);
+      final nestedNames = _collectRouteNames(divePlanner!.routes);
+      expect(nestedNames, isNot(contains('noFly')));
+    });
+
+    testWidgets('surfaceInterval route builds the SurfaceIntervalToolPage', (
+      tester,
+    ) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+
+      final surfaceInterval = _findRouteByName(
+        router.configuration.routes,
+        'surfaceInterval',
+      );
+      expect(surfaceInterval, isNotNull);
+      final state = GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/planning/surface-interval'),
+        matchedLocation: '/planning/surface-interval',
+        fullPath: '/planning/surface-interval',
+        pathParameters: const {},
+        pageKey: const ValueKey('/planning/surface-interval'),
+      );
+      expect(
+        surfaceInterval!.builder!(context, state),
+        isA<SurfaceIntervalToolPage>(),
+      );
+    });
+
+    testWidgets('noFly route builds the NoFlyPage', (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+
+      final noFly = _findRouteByName(router.configuration.routes, 'noFly');
+      expect(noFly, isNotNull);
+      final state = GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/planning/no-fly'),
+        matchedLocation: '/planning/no-fly',
+        fullPath: '/planning/no-fly',
+        pathParameters: const {},
+        pageKey: const ValueKey('/planning/no-fly'),
+      );
+      expect(noFly!.builder!(context, state), isA<NoFlyPage>());
+    });
+
+    testWidgets('cnsOtu route builds the CnsOtuPage', (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+
+      final cnsOtu = _findRouteByName(router.configuration.routes, 'cnsOtu');
+      expect(cnsOtu, isNotNull);
+      final state = GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/planning/cns-otu'),
+        matchedLocation: '/planning/cns-otu',
+        fullPath: '/planning/cns-otu',
+        pathParameters: const {},
+        pageKey: const ValueKey('/planning/cns-otu'),
+      );
+      expect(cnsOtu!.builder!(context, state), isA<CnsOtuPage>());
+    });
+
+    testWidgets(
+      'editPlan builder threads planId; divePlanner builds a new plan',
+      (tester) async {
+        await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+        final context = tester.element(find.byType(SizedBox));
+        final config = router.configuration;
+
+        final editPlan = _findRouteByName(config.routes, 'editPlan');
+        final editState = GoRouterState(
+          config,
+          uri: Uri.parse('/planning/dive-planner/plan-123'),
+          matchedLocation: '/planning/dive-planner/plan-123',
+          fullPath: '/planning/dive-planner/:planId',
+          pathParameters: const {'planId': 'plan-123'},
+          pageKey: const ValueKey('/planning/dive-planner/plan-123'),
+        );
+        final editWidget =
+            editPlan!.builder!(context, editState) as PlanCanvasPage;
+        expect(editWidget.planId, 'plan-123');
+
+        final divePlanner = _findRouteByName(config.routes, 'divePlanner');
+        final newState = GoRouterState(
+          config,
+          uri: Uri.parse('/planning/dive-planner'),
+          matchedLocation: '/planning/dive-planner',
+          fullPath: '/planning/dive-planner',
+          pathParameters: const {},
+          pageKey: const ValueKey('/planning/dive-planner'),
+        );
+        final newWidget =
+            divePlanner!.builder!(context, newState) as PlanCanvasPage;
+        expect(newWidget.planId, isNull);
+      },
+    );
+  });
+
+  group('planning disclaimer gate (issue #3120)', () {
+    // Regression: the gate used to live inside PlanningPage's and
+    // GasCalculatorsPage's own build() methods. A plain GoRoute only renders
+    // its own exact-match page, so a deep link straight to a leaf route below
+    // them (the deco calculator, a gas calculator detail page, ...) replaced
+    // those pages outright and never reached the gate. It now lives in a
+    // ShellRoute around the whole /planning subtree, so whichever leaf route
+    // matched is still wrapped.
+
+    // The MOST SPECIFIC (innermost) shell containing [routeName]: a nested
+    // ShellRoute's ancestor shells all transitively "contain" it too, and
+    // _collectShellRoutes lists an ancestor before the descendants nested
+    // inside it, so the last match is the innermost one -- the gate actually
+    // responsible for that route, not just some outer shell it happens to
+    // live under (e.g. the app-wide MainScaffold shell).
+    ShellRoute shellContaining(String routeName) {
+      final shells = _collectShellRoutes(router.configuration.routes);
+      return shells.lastWhere(
+        (shell) => _findRouteByName(shell.routes, routeName) != null,
+        orElse: () =>
+            throw StateError('$routeName is not inside any ShellRoute'),
+      );
+    }
+
+    // The gate's own shell: the one declaring the /planning hub as a DIRECT
+    // child. Membership checks must be made against this shell, not "any
+    // shell", since the app-wide MainScaffold shell contains every route and
+    // would pass them for a route declared outside the gate.
+    ShellRoute gatedShell() =>
+        _collectShellRoutes(router.configuration.routes).singleWhere(
+          (shell) =>
+              shell.routes.any((r) => r is GoRoute && r.name == 'planning'),
+        );
+
+    test('deco-calculator and the gas calculators share one gated shell', () {
+      final decoShell = shellContaining('decoCalculator');
+      final gasShell = shellContaining('gasCalculators');
+      expect(decoShell, same(gatedShell()));
+      expect(
+        decoShell,
+        same(gasShell),
+        reason:
+            'One shell must cover the whole /planning subtree, not a '
+            'separate one per route -- otherwise a route added later could '
+            'be declared outside it by mistake.',
+      );
+    });
+
+    testWidgets('the gated shell wraps whichever child route matched in '
+        'PlanningDisclaimerGate', (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+
+      final shell = shellContaining('decoCalculator');
+      final state = GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/planning/deco-calculator'),
+        matchedLocation: '/planning/deco-calculator',
+        fullPath: '/planning/deco-calculator',
+        pathParameters: const {},
+        pageKey: const ValueKey('/planning/deco-calculator'),
+      );
+      const leaf = SizedBox(key: Key('leaf'));
+      // A NoTransitionPage, like every other top-level tab: a builder-only
+      // ShellRoute gets a platform MaterialPage/CupertinoPage in the
+      // MainScaffold navigator, so switching to Planning would animate.
+      final page = shell.pageBuilder!(context, state, leaf);
+
+      expect(page, isA<NoTransitionPage<void>>());
+      final wrapped = (page as NoTransitionPage<void>).child;
+      expect(wrapped, isA<PlanningDisclaimerGate>());
+      expect((wrapped as PlanningDisclaimerGate).child, same(leaf));
+    });
+
+    test('every tool under /planning is inside the gated shell', () {
+      // Each of these is reachable by a direct deep link that bypasses
+      // PlanningPage/GasCalculatorsPage entirely, so each needs its OWN
+      // membership checked rather than trusting that one being gated implies
+      // the rest are.
+      const names = [
+        'planning',
+        'divePlanner',
+        'editPlan',
+        'decoCalculator',
+        'gasCalculators',
+        'weightCalculator',
+        'surfaceInterval',
+        'noFly',
+        'cnsOtu',
+      ];
+      final gated = gatedShell();
+      for (final name in names) {
+        expect(
+          _findRouteByName(gated.routes, name),
+          isNotNull,
+          reason: '$name is reachable directly but not inside the gated shell',
+        );
+      }
+      // Each calculator id (mod, best-mix, ...) is a path under
+      // gas-calculators, not a name of its own; check it by path within the
+      // shell that gates the hub, rather than by name.
+      final gasCalculatorPaths = _collectRoutePaths(gated.routes);
+      for (final id in kGasCalculatorIds) {
+        expect(
+          gasCalculatorPaths,
+          contains(id),
+          reason: 'gas calculator "$id" is not inside the gated shell',
+        );
+      }
+    });
+  });
+
+  // The GaugeStrip widget test navigates through a stub router, so a chip
+  // pointing at a path that does not exist in the real app would still pass
+  // there. These assert the destinations resolve against the real config.
+  group('home status light and header destinations resolve', () {
+    const destinations = <String>[
+      '/equipment',
+      '/equipment/new',
+      // Gear chips and urgent-banner lines deep-link to one item (issue #816).
+      '/equipment/e1',
+      '/settings/diver-profile/insurance',
+      '/planning/no-fly',
+      '/dives',
+      '/certifications',
+      // Documents (issue #2613): list, filters, one document.
+      '/documents',
+      '/documents?type=insurance',
+      '/documents?filter=expiring',
+      '/documents/x',
+      '/documents/new',
+      '/documents/x/edit',
+      '/trips',
+      '/pre-dive-sessions/session-7',
+      '/courses/c1',
+      '/settings/photos-media/uploads',
+      '/settings/backup',
+      '/settings/cloud-sync',
+      '/dives/quality',
+      // Home header actions and its More menu (issue #4824).
+      '/dives/new',
+      '/planning/dive-planner',
+      '/settings/diver-profile/emergency-card',
+      '/buddies/swap',
+      '/trips/t1',
+      // Home panel destinations (issue #4824).
+      '/insights',
+      '/sites',
+      '/buddies',
+      '/species',
+      '/certifications/c1',
+      '/transfer/import-wizard',
+      '/settings/appearance/home/key-numbers',
+    ];
+
+    for (final destination in destinations) {
+      test('$destination matches a route', () {
+        final match = router.configuration.findMatch(Uri.parse(destination));
+        expect(
+          match.isError,
+          isFalse,
+          reason: '$destination does not resolve to any route',
+        );
+      });
+    }
   });
 
   group('app_router initialLocation', () {
@@ -318,6 +1769,987 @@ void main() {
       );
       // The GoRouter initialLocation is /dashboard
       // which is resolved via the shell route
+    });
+  });
+
+  group('newBuddy route escapes to the root navigator', () {
+    // Regression: bulk-editing dives opens "Add buddies" via showDialog
+    // (useRootNavigator: true by default), then BuddyPicker opens a
+    // showModalBottomSheet (which resolves to that same root navigator,
+    // since its default useRootNavigator: false picks the nearest
+    // navigator ancestor -- the dialog's). Tapping "Add New Buddy" pushes
+    // 'newBuddy', which -- absent a parentNavigatorKey -- mounts on the
+    // ShellRoute's nested navigator instead. That nested navigator's
+    // overlay paints underneath the root navigator's, so the new-buddy
+    // screen renders hidden behind the still-open dialog and bottom sheet
+    // until both are dismissed. See buddy_picker_navigation_render_test.dart
+    // for the full render-level reproduction, including confirmation that
+    // the dialog/sheet correctly reappear (with state intact) once the
+    // new-buddy page is popped -- pushing onto the root navigator does not
+    // evict them, it only elides their (harmless, Flutter-standard)
+    // rendering while a fully opaque route covers them.
+    test('newBuddy has parentNavigatorKey set to the root navigator', () {
+      final route = _findRouteByName(router.configuration.routes, 'newBuddy');
+      expect(route, isNotNull);
+      expect(
+        route!.parentNavigatorKey,
+        same(rootNavigatorKey),
+        reason:
+            'Without this, "Add New Buddy" pushed from the bulk-edit '
+            'dialog renders underneath it instead of in the foreground.',
+      );
+    });
+  });
+
+  group('manageServiceTypes route escapes to the root navigator', () {
+    // Regression: the Add/Edit Service Record dialog opens via showDialog
+    // (useRootNavigator: true by default) and its "Manage Service Types"
+    // link pushes 'manageServiceTypes'. Absent a parentNavigatorKey, that
+    // page mounts on the ShellRoute's nested navigator, which paints under
+    // the root navigator's overlay, so the page opened hidden behind the
+    // still-open dialog. See service_record_dialog_manage_types_nav_test.dart
+    // for the render-level round trip.
+    test('manageServiceTypes has parentNavigatorKey set to the root '
+        'navigator', () {
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'manageServiceTypes',
+      );
+      expect(route, isNotNull);
+      expect(
+        route!.parentNavigatorKey,
+        same(rootNavigatorKey),
+        reason:
+            'Without this, "Manage Service Types" pushed from the service '
+            'record dialog renders underneath it instead of in the '
+            'foreground.',
+      );
+    });
+  });
+
+  group('app_router lightroom route (pending Adobe review)', () {
+    test('lightroom route stays defined so navigation degrades gracefully', () {
+      // The route is intentionally kept (not removed) while the UI is hidden so
+      // deep links and PendingSetupService's '/settings/lightroom' target
+      // redirect instead of hitting an unknown-route error screen.
+      final route = _findRouteByName(router.configuration.routes, 'lightroom');
+      expect(route, isNotNull);
+      expect(route!.path, 'lightroom');
+      expect(route.redirect, isNotNull);
+    });
+
+    testWidgets('redirects to media sources when lightroomUiEnabled is false, '
+        'and passes through when true', (tester) async {
+      final config = router.configuration;
+      final route = _findRouteByName(config.routes, 'lightroom');
+      expect(route, isNotNull);
+
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse('/settings/lightroom'),
+        matchedLocation: '/settings/lightroom',
+        fullPath: '/settings/lightroom',
+        pathParameters: const {},
+        pageKey: const ValueKey('/settings/lightroom'),
+      );
+
+      addTearDown(() => lightroomUiEnabled = false);
+
+      lightroomUiEnabled = false;
+      expect(
+        await route!.redirect!(capturedContext, state),
+        '/settings/media-sources',
+      );
+
+      lightroomUiEnabled = true;
+      expect(await route.redirect!(capturedContext, state), isNull);
+    });
+  });
+
+  group('settings sections are pushed as animated child routes', () {
+    // Settings sub-sections used to navigate two different ways. Sections
+    // with a dedicated route (Appearance -> /settings/appearance) push a
+    // child GoRoute, which go_router wraps in a platform-adaptive
+    // MaterialPage, so they slide in. Sections without one (About, Units,
+    // Data, ...) pushed '/settings?selected=<id>', which re-matches the
+    // '/settings' route itself -- a bottom-nav tab root whose pageBuilder
+    // returns a NoTransitionPage. Correct for switching tabs, but it made
+    // those sections snap into place with no animation.
+    //
+    // The fix gives them a real child route. It deliberately does not make
+    // '/settings' itself animate when '?selected=' is present: the desktop
+    // master-detail pane navigates with go() (a stable pageKey), so swapping
+    // the page type under the same key would fail Page.canUpdate's
+    // runtimeType check and slide the whole split view on every click.
+    test('equipment condition settings live under the safety route', () {
+      // Equipment condition is reached from Settings > Safety, not from the
+      // settings root, so its route nests under /settings/safety.
+      expect(
+        router.namedLocation('equipmentConditionSettings'),
+        '/settings/safety/equipment-condition',
+      );
+    });
+
+    testWidgets('the equipment condition route builds its settings page', (
+      tester,
+    ) async {
+      final config = router.configuration;
+      final route = _findRouteByName(
+        config.routes,
+        'equipmentConditionSettings',
+      );
+      expect(route, isNotNull);
+
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse('/settings/safety/equipment-condition'),
+        matchedLocation: '/settings/safety/equipment-condition',
+        fullPath: '/settings/safety/equipment-condition',
+        pathParameters: const {},
+        pageKey: const ValueKey('/settings/safety/equipment-condition'),
+      );
+      final widget = route!.builder!(capturedContext, state);
+      expect(widget.runtimeType.toString(), 'EquipmentConditionSettingsPage');
+    });
+
+    test('the Safety sub-pages live under the safety route', () {
+      expect(router.namedLocation('safetySettings'), '/settings/safety');
+      expect(
+        router.namedLocation('safetyReviewSettings'),
+        '/settings/safety/review',
+      );
+      expect(
+        router.namedLocation('decompressionSettings'),
+        '/settings/safety/decompression',
+      );
+    });
+
+    testWidgets('the Safety routes build the hub and its sub-pages', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      String built(String name, String location) {
+        final route = _findRouteByName(router.configuration.routes, name);
+        expect(route, isNotNull, reason: name);
+        final state = GoRouterState(
+          router.configuration,
+          uri: Uri.parse(location),
+          matchedLocation: location,
+          fullPath: location,
+          pathParameters: const {},
+          pageKey: ValueKey(location),
+        );
+        return route!.builder!(capturedContext, state).runtimeType.toString();
+      }
+
+      expect(built('safetySettings', '/settings/safety'), 'SafetyHubPage');
+      expect(
+        built('safetyReviewSettings', '/settings/safety/review'),
+        'SafetyReviewSettingsPage',
+      );
+      expect(
+        built('decompressionSettings', '/settings/safety/decompression'),
+        'DecompressionSettingsPage',
+      );
+    });
+
+    testWidgets('on a desktop window the old Decompression section link opens '
+        'in the Safety pane', (tester) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'settingsSection',
+      );
+      final target = await route!.redirect!(
+        capturedContext,
+        GoRouterState(
+          router.configuration,
+          uri: Uri.parse('/settings/section/decompression'),
+          matchedLocation: '/settings/section/decompression',
+          fullPath: '/settings/section/:sectionId',
+          pathParameters: const {'sectionId': 'decompression'},
+          pageKey: const ValueKey('/settings/section/decompression'),
+        ),
+      );
+
+      expect(target, '/settings?selected=safety&safetyPage=decompression');
+    });
+
+    test('a section child route exists under /settings', () {
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'settingsSection',
+      );
+      expect(route, isNotNull);
+      expect(route!.path, 'section/:sectionId');
+    });
+
+    test('the section route uses builder, so go_router animates it', () {
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'settingsSection',
+      );
+      expect(route, isNotNull);
+      expect(
+        route!.builder,
+        isNotNull,
+        reason:
+            'builder lets go_router pick the platform-adaptive MaterialPage, '
+            'which is what makes /settings/appearance slide in.',
+      );
+      expect(
+        route.pageBuilder,
+        isNull,
+        reason:
+            'a custom pageBuilder here would risk reintroducing the '
+            'NoTransitionPage that suppressed the animation.',
+      );
+    });
+
+    testWidgets('the section route redirects ids that have a page of their '
+        'own', (tester) async {
+      // SettingsSectionDetailPage supplies a Scaffold and an AppBar, so a
+      // deep link to /settings/section/safety would stack a second app bar
+      // on top of SafetyHubPage's. Fixing only the list tile leaves the
+      // URL reachable; the route itself has to normalize it.
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'settingsSection',
+      );
+      expect(route, isNotNull);
+      expect(route!.redirect, isNotNull);
+
+      Future<String?> redirectFor(String sectionId) async {
+        return route.redirect!(
+          capturedContext,
+          GoRouterState(
+            router.configuration,
+            uri: Uri.parse('/settings/section/$sectionId'),
+            matchedLocation: '/settings/section/$sectionId',
+            fullPath: '/settings/section/:sectionId',
+            pathParameters: {'sectionId': sectionId},
+            pageKey: ValueKey('/settings/section/$sectionId'),
+          ),
+        );
+      }
+
+      // Sections whose content is its own Scaffold with its own AppBar.
+      expect(await redirectFor('safety'), '/settings/safety');
+      // Decompression moved under Safety (#3395); old links follow it.
+      expect(
+        await redirectFor('decompression'),
+        '/settings/safety/decompression',
+      );
+      expect(await redirectFor('debug'), '/settings/debug-logs');
+      expect(await redirectFor('profile'), '/settings/diver-profile');
+      // Has a dedicated page too, so the route stays canonical.
+      expect(await redirectFor('appearance'), '/settings/appearance');
+
+      // Genuine section content belongs in the wrapper and must not redirect.
+      expect(await redirectFor('about'), isNull);
+      expect(await redirectFor('units'), isNull);
+      expect(
+        await redirectFor('security'),
+        isNull,
+        reason:
+            'SecuritySettingsPage returns plain content and relies on the '
+            "wrapper's Scaffold for its snackbars",
+      );
+    });
+
+    testWidgets('the section route passes its path parameter through', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final route = _findRouteByName(
+        router.configuration.routes,
+        'settingsSection',
+      );
+      expect(route, isNotNull);
+
+      final widget = route!.builder!(
+        capturedContext,
+        GoRouterState(
+          router.configuration,
+          uri: Uri.parse('/settings/section/about'),
+          matchedLocation: '/settings/section/about',
+          fullPath: '/settings/section/:sectionId',
+          pathParameters: const {'sectionId': 'about'},
+          pageKey: const ValueKey('/settings/section/about'),
+        ),
+      );
+
+      expect(widget, isA<SettingsSectionDetailPage>());
+      expect((widget as SettingsSectionDetailPage).sectionId, 'about');
+    });
+
+    testWidgets('the settings tab root itself still has no transition', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final route = _findRouteByName(router.configuration.routes, 'settings');
+      expect(route, isNotNull);
+      expect(route!.pageBuilder, isNotNull);
+
+      final page = route.pageBuilder!(
+        capturedContext,
+        GoRouterState(
+          router.configuration,
+          uri: Uri.parse('/settings'),
+          matchedLocation: '/settings',
+          fullPath: '/settings',
+          pathParameters: const {},
+          pageKey: const ValueKey('/settings'),
+        ),
+      );
+
+      expect(
+        page,
+        isA<NoTransitionPage<dynamic>>(),
+        reason:
+            '/settings is a bottom-nav destination; switching tabs must not '
+            'animate, matching every other tab root.',
+      );
+    });
+  });
+
+  group('explore route', () {
+    test('is registered under the dive list', () {
+      final route = _findRouteByName(router.configuration.routes, 'explore');
+      expect(route, isNotNull);
+      expect(route!.path, 'explore');
+    });
+  });
+
+  // #2773: Advanced Search became the Refine panel; an old link or a
+  // bookmark lands on the dive list with its search row open, including on
+  // a cold start, when the redirect runs while the tree builds.
+  group('diveSearch route redirects to the dive list', () {
+    for (final (name, path, location) in [
+      ('diveSearch', 'search', '/dives/search'),
+      ('diveSearch', 'search', '/dives/search?section=query'),
+      ('explore', 'explore', '/dives/explore'),
+    ]) {
+      testWidgets('a cold start at $location opens the search row', (
+        tester,
+      ) async {
+        final route = _findRouteByName(router.configuration.routes, name)!;
+        expect(route.redirect, same(redirectRetiredDiveSearch));
+        final coldStart = GoRouter(
+          initialLocation: location,
+          routes: [
+            GoRoute(
+              path: '/dives',
+              builder: (context, _) => Consumer(
+                builder: (context, ref, _) =>
+                    Text('open=${ref.watch(diveSearchBarOpenProvider)}'),
+              ),
+              routes: [
+                GoRoute(path: path, redirect: redirectRetiredDiveSearch),
+              ],
+            ),
+          ],
+        );
+        addTearDown(coldStart.dispose);
+        await tester.pumpWidget(
+          ProviderScope(child: MaterialApp.router(routerConfig: coldStart)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('open=true'), findsOneWidget);
+      });
+    }
+  });
+  group('species routes', () {
+    test('the Species page is registered at /species', () {
+      final route = _findRouteByName(router.configuration.routes, 'species');
+      expect(route, isNotNull);
+      expect(route!.path, '/species');
+    });
+
+    test('the catalog manager is the manage child, declared before the '
+        'species id parameter', () {
+      final species = _findRouteByName(router.configuration.routes, 'species');
+      final paths = _orderedRoutePaths(species!.routes);
+      expect(paths, contains('manage'));
+      expect(paths.indexOf('manage'), lessThan(paths.indexOf(':speciesId')));
+
+      final manage = _findRouteByName(species.routes, 'speciesManage');
+      expect(manage, isNotNull);
+      expect(manage!.path, 'manage');
+    });
+
+    test('the species route lives inside the nav shell', () {
+      final shells = router.configuration.routes.whereType<ShellRoute>();
+      expect(shells, isNotEmpty);
+      expect(
+        shells.any(
+          (shell) => _findRouteByName(shell.routes, 'species') != null,
+        ),
+        isTrue,
+        reason:
+            'Species is a nav destination, so its page must render inside '
+            'MainScaffold rather than replacing the rail and bottom bar.',
+      );
+    });
+
+    testWidgets('the species route has no transition', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final route = _findRouteByName(router.configuration.routes, 'species');
+      expect(route, isNotNull);
+      expect(route!.pageBuilder, isNotNull);
+
+      final page = route.pageBuilder!(
+        capturedContext,
+        GoRouterState(
+          router.configuration,
+          uri: Uri.parse('/species'),
+          matchedLocation: '/species',
+          fullPath: '/species',
+          pathParameters: const {},
+          pageKey: const ValueKey('/species'),
+        ),
+      );
+
+      expect(
+        page,
+        isA<NoTransitionPage<dynamic>>(),
+        reason:
+            '/species is a nav destination reached with go, so switching to '
+            'it must not animate the way a pushed page does.',
+      );
+      expect((page as NoTransitionPage).child, isA<SpeciesPage>());
+    });
+  });
+
+  group('storage usage', () {
+    test('the unrecognized backups page is reachable at the pushed path', () {
+      // UnrecognizedBackupsNotice pushes an absolute location. Nothing else
+      // ties that string to the route tree, so a rename on either side is a
+      // runtime "no routes for location" and nothing before that.
+      expect(
+        _locationOfRoute(router.configuration.routes, 'unrecognizedBackups'),
+        UnrecognizedBackupsNotice.routeLocation,
+      );
+    });
+  });
+
+  group('certification currency rules route', () {
+    test('resolves to the path the Manage tile pushes', () {
+      expect(
+        _locationOfRoute(router.configuration.routes, 'currencyRules'),
+        '/currency-rules',
+      );
+    });
+
+    testWidgets('builds the certification currency rules page', (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+      final config = router.configuration;
+      final route = _findRouteByName(config.routes, 'currencyRules');
+      expect(route, isNotNull);
+
+      const location = '/currency-rules';
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse(location),
+        matchedLocation: location,
+        fullPath: location,
+        pathParameters: const {},
+        pageKey: const ValueKey(location),
+      );
+      expect(route!.builder!(context, state), isA<ManageCurrencyRulesPage>());
+    });
+  });
+
+  group('site detail sections route', () {
+    test('resolves to the path the Sites appearance row pushes', () {
+      expect(
+        _locationOfRoute(router.configuration.routes, 'siteDetailSections'),
+        '/settings/site-detail-sections',
+      );
+    });
+
+    testWidgets('builds the site detail sections page', (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final context = tester.element(find.byType(SizedBox));
+      final config = router.configuration;
+      final route = _findRouteByName(config.routes, 'siteDetailSections');
+      expect(route, isNotNull);
+
+      const location = '/settings/site-detail-sections';
+      final state = GoRouterState(
+        config,
+        uri: Uri.parse(location),
+        matchedLocation: location,
+        fullPath: location,
+        pathParameters: const {},
+        pageKey: const ValueKey(location),
+      );
+      expect(route!.builder!(context, state), isA<SiteDetailSectionsPage>());
+    });
+  });
+
+  group('dives route (#3292)', () {
+    testWidgets('hands a pushed list its return snapshot', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      GoRouterState stateFor(Object? extra) => GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/dives'),
+        matchedLocation: '/dives',
+        fullPath: '/dives',
+        pathParameters: const {},
+        extra: extra,
+        pageKey: const ValueKey('/dives'),
+      );
+      DiveListPage pageFor(Object? extra) {
+        final page = _findRouteByName(
+          router.configuration.routes,
+          'dives',
+        )!.pageBuilder!(capturedContext, stateFor(extra));
+        return (page as NoTransitionPage<void>).child as DiveListPage;
+      }
+
+      const ret = DiveListReturn(
+        filter: DiveFilterState(siteId: 's1'),
+        highlightedDiveId: 'd1',
+      );
+      expect(pageFor(ret).returnTo, same(ret));
+      expect(pageFor(null).returnTo, isNull);
+      expect(pageFor('unrelated').returnTo, isNull);
+    });
+  });
+
+  group('trips route (#3350)', () {
+    testWidgets('hands a pushed list its return snapshot', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      GoRouterState stateFor(Object? extra) => GoRouterState(
+        router.configuration,
+        uri: Uri.parse('/trips'),
+        matchedLocation: '/trips',
+        fullPath: '/trips',
+        pathParameters: const {},
+        extra: extra,
+        pageKey: const ValueKey('/trips'),
+      );
+      TripListPage pageFor(Object? extra) {
+        final page = _findRouteByName(
+          router.configuration.routes,
+          'trips',
+        )!.pageBuilder!(capturedContext, stateFor(extra));
+        return (page as NoTransitionPage<void>).child as TripListPage;
+      }
+
+      const ret = TripListReturn(
+        filter: TripFilterState(equipmentId: 'e1'),
+        highlightedTripId: 't1',
+      );
+      expect(pageFor(ret).returnTo, same(ret));
+      expect(pageFor(null).returnTo, isNull);
+      expect(pageFor('unrelated').returnTo, isNull);
+    });
+  });
+
+  group('bulk edit route (#3292)', () {
+    testWidgets('return=pop tells the form to pop on save', (tester) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      BulkDiveEditPage pageAt(String location) {
+        final state = GoRouterState(
+          router.configuration,
+          uri: Uri.parse(location),
+          matchedLocation: Uri.parse(location).path,
+          fullPath: '/dives/bulk-edit',
+          pathParameters: const {},
+          extra: const ['d1'],
+          pageKey: ValueKey(location),
+        );
+        return _findRouteByName(
+              router.configuration.routes,
+              'bulkEditDives',
+            )!.builder!(capturedContext, state)
+            as BulkDiveEditPage;
+      }
+
+      expect(pageAt('/dives/bulk-edit?return=pop').popOnSave, isTrue);
+      expect(pageAt('/dives/bulk-edit').popOnSave, isFalse);
+    });
+  });
+
+  group('the old dive edit address (issue #4527, plan 11)', () {
+    late BuildContext capturedContext;
+
+    GoRouterState stateAt(String location, String fullPath) => GoRouterState(
+      router.configuration,
+      uri: Uri.parse(location),
+      matchedLocation: Uri.parse(location).path,
+      fullPath: fullPath,
+      pathParameters: const {'diveId': 'd1'},
+      pageKey: ValueKey(location),
+    );
+
+    Future<void> capture(WidgetTester tester) => tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) {
+            capturedContext = context;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    testWidgets('/dives/<id>/edit redirects to /dives/<id>?mode=edit', (
+      tester,
+    ) async {
+      await capture(tester);
+      final edit = _findRouteByName(router.configuration.routes, 'editDive')!;
+
+      expect(
+        await edit.redirect!(
+          capturedContext,
+          stateAt('/dives/d1/edit', '/dives/:diveId/edit'),
+        ),
+        '/dives/d1?mode=edit',
+      );
+    });
+
+    testWidgets('/dives/<id>?mode=edit builds the dive page unlocked', (
+      tester,
+    ) async {
+      await capture(tester);
+      final detail = _findRouteByName(
+        router.configuration.routes,
+        'diveDetail',
+      )!;
+      DiveDetailPage pageAt(String location) =>
+          detail.builder!(capturedContext, stateAt(location, '/dives/:diveId'))
+              as DiveDetailPage;
+
+      expect(pageAt('/dives/d1?mode=edit').openUnlocked, isTrue);
+      expect(pageAt('/dives/d1').openUnlocked, isFalse);
+    });
+  });
+
+  group('Settings > Data pane (#3467)', () {
+    // Every page reached from Settings > Data. The pane builds these from its
+    // own table, so each must build the same page the router does.
+    const locations = [
+      '/settings/backup',
+      '/settings/cloud-sync',
+      '/settings/cloud-sync/nearby-pair',
+      '/settings/shared-libraries',
+      '/settings/shared-libraries/connect?prefix=club',
+      '/settings/shared-libraries/lib1',
+      '/settings/shared-libraries/lib1/members',
+      '/settings/shared-libraries/lib1/suggestions',
+      '/settings/shared-libraries/lib1/backups',
+      '/settings/shared-libraries/lib1/connection',
+      '/settings/photos-media',
+      '/settings/photos-media/uploads',
+      '/settings/media-sources',
+      '/settings/media-sources/network-sources',
+      '/settings/marine-life-identification',
+      '/settings/connected-accounts',
+      '/settings/connected-accounts/acct1',
+      '/settings/storage',
+      '/settings/storage-usage',
+      '/settings/storage-usage/unrecognized-backups',
+      '/settings/offline-maps',
+      '/settings/fix-dive-times',
+      '/settings/link-buddy-names',
+      '/settings/retype-other-gear',
+      '/settings/data-quality',
+      '/settings/import-options',
+      '/settings/data-tools',
+      '/settings/agent-access',
+      '/settings/setup',
+      '/settings/setup?step=sync',
+      '/settings/setup?again=true',
+    ];
+
+    testWidgets('each location builds the page its route builds', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      for (final location in locations) {
+        final uri = Uri.parse(location);
+        final match = router.configuration.findMatch(uri);
+        expect(match.isError, isFalse, reason: location);
+        final route = match.last.route;
+        final routed = route.builder!(
+          capturedContext,
+          GoRouterState(
+            router.configuration,
+            uri: uri,
+            matchedLocation: match.last.matchedLocation,
+            fullPath: match.fullPath,
+            pathParameters: match.pathParameters,
+            pageKey: ValueKey(location),
+          ),
+        );
+        final pane = dataPanePage(uri);
+        expect(pane, isNotNull, reason: location);
+        expect(pane.runtimeType, routed.runtimeType, reason: location);
+      }
+    });
+
+    // Issue #3482 phase 4: Media Storage merged into Photos & videos. Old
+    // links and pushes still land somewhere real.
+    testWidgets('the old Media Storage routes redirect to Photos & videos', (
+      tester,
+    ) async {
+      late BuildContext capturedContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedContext = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      for (final (from, to) in const [
+        ('/settings/media-storage', '/settings/photos-media'),
+        ('/settings/media-storage/transfers', '/settings/photos-media/uploads'),
+      ]) {
+        final uri = Uri.parse(from);
+        final match = router.configuration.findMatch(uri);
+        expect(match.isError, isFalse, reason: from);
+        final redirect = match.last.route.redirect;
+        expect(redirect, isNotNull, reason: from);
+        final target = await redirect!(
+          capturedContext,
+          GoRouterState(
+            router.configuration,
+            uri: uri,
+            matchedLocation: match.last.matchedLocation,
+            fullPath: match.fullPath,
+            pathParameters: match.pathParameters,
+            pageKey: ValueKey(from),
+          ),
+        );
+        expect(target, to, reason: from);
+        // A push inside the desktop pane lands on the same pages.
+        expect(dataPanePage(uri), isNotNull, reason: from);
+      }
+    });
+
+    test('Lightroom opens in the pane only while its UI is enabled', () {
+      addTearDown(() => lightroomUiEnabled = false);
+      final lightroom = Uri.parse('/settings/lightroom');
+
+      lightroomUiEnabled = false;
+      expect(dataPanePage(lightroom), isNull);
+
+      lightroomUiEnabled = true;
+      expect(dataPanePage(lightroom), isA<LightroomSettingsPage>());
+      expect(
+        router.configuration.findMatch(lightroom).fullPath,
+        '/settings/lightroom',
+      );
+    });
+
+    test('pages read their parameters from the location', () {
+      final library =
+          dataPanePage(Uri.parse('/settings/shared-libraries/lib1/members'))
+              as SharedLibraryMembersPage;
+      expect(library.libraryId, 'lib1');
+      final connect =
+          dataPanePage(
+                Uri.parse('/settings/shared-libraries/connect?prefix=club'),
+              )
+              as ConnectSharedLibraryPage;
+      expect(connect.initialPrefix, 'club');
+    });
+
+    test('pages outside Settings > Data are not in the pane', () {
+      for (final location in [
+        '/settings/appearance',
+        '/settings/safety/review',
+        '/settings/debug-logs',
+        '/settings',
+        '/dives/abc',
+      ]) {
+        expect(dataPanePage(Uri.parse(location)), isNull, reason: location);
+      }
+    });
+  });
+
+  group('import wizards (#3554)', () {
+    test('every import wizard route asks before leaving a running import', () {
+      for (final name in const [
+        'universalImport',
+        'importFromCloudSuunto',
+        'importFromFileSuunto',
+        'importFromCloudGarmin',
+        'importFromCloudDivelogs',
+        'wearableImport',
+        'discoverDevice',
+        'computerDownload',
+      ]) {
+        final route = _findRouteByName(router.configuration.routes, name);
+        expect(route?.onExit, same(confirmLeaveRunningImport), reason: name);
+      }
+    });
+
+    test('the import wizard as a nav shortcut asks too', () {
+      final shortcut = _findRouteByPath(
+        router.configuration.routes,
+        '$kShortcutLocationPrefix/:id',
+      );
+      expect(shortcut?.onExit, isNotNull);
     });
   });
 }

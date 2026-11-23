@@ -1,0 +1,516 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/constants/card_color.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/data/visibility/item_sharing.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/presentation/widgets/compact_buddy_list_tile.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_list_content.dart';
+import 'package:submersion/features/courses/presentation/widgets/course_card.dart';
+import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
+import 'package:submersion/features/dive_centers/presentation/widgets/compact_dive_center_list_tile.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/dive_type_label_resolver.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_list_item.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/compact_site_list_tile.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/presentation/document_l10n.dart';
+import 'package:submersion/features/documents/presentation/widgets/document_tile.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_row_labels_of.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_list_content.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_set_tile.dart';
+import 'package:submersion/features/global_search/domain/global_search_models.dart';
+import 'package:submersion/features/global_search/presentation/providers/global_search_providers.dart';
+import 'package:submersion/features/global_search/presentation/providers/global_search_record_providers.dart';
+import 'package:submersion/features/gps_log/presentation/widgets/gps_track_list_tile.dart';
+import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/features/marine_life/presentation/widgets/seen_species_tile.dart';
+import 'package:submersion/features/marine_life/presentation/widgets/species_catalog_tile.dart';
+import 'package:submersion/features/nav_track/presentation/widgets/nav_track_list_row.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart';
+import 'package:submersion/features/planner/domain/utils/saved_plan_rows.dart';
+import 'package:submersion/features/planner/presentation/widgets/saved_plans_list.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/widgets/compact_trip_list_tile.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// A section's records (#3882), each drawn by the row its own list draws and
+/// read by its list's own query narrowed to the ids shown (#4247), so a
+/// result looks like the list it came from, refreshes when it does, and
+/// costs a handful of records rather than the whole list. Compact where a
+/// list offers the choice: search shows several types at once.
+class GlobalSearchRows extends ConsumerWidget {
+  const GlobalSearchRows({
+    super.key,
+    required this.kind,
+    required this.ids,
+    required this.onOpen,
+  });
+
+  final GlobalSearchKind kind;
+
+  /// In the order to show them.
+  final List<String> ids;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
+    final idsKey = globalSearchIdsKey(ids);
+    return switch (kind) {
+      GlobalSearchKind.dives => _rows(
+        ref.watch(globalSearchDivesProvider(idsKey)),
+        (dive) => dive.id,
+        (dives) => _DiveRows(dives: dives, onOpen: onOpen),
+      ),
+      GlobalSearchKind.sites => _each(
+        ref.watch(globalSearchSitesProvider(idsKey)),
+        (entry) => entry.site.id,
+        (entry, onTap) => _SiteRow(entry: entry, onTap: onTap),
+      ),
+      GlobalSearchKind.trips => _each(
+        ref.watch(globalSearchTripsProvider(idsKey)),
+        (entry) => entry.trip.id,
+        (entry, onTap) => _TripRow(entry: entry, onTap: onTap),
+      ),
+      GlobalSearchKind.equipment => _rows(
+        ref.watch(globalSearchEquipmentProvider(idsKey)),
+        (item) => item.id,
+        (items) => _EquipmentRows(items: items, onOpen: onOpen),
+      ),
+      GlobalSearchKind.equipmentSets => _each(
+        ref.watch(globalSearchEquipmentSetsProvider(idsKey)),
+        (set) => set.id,
+        (set, onTap) => EquipmentSetTile(set: set, onTap: onTap),
+      ),
+      GlobalSearchKind.buddies => _each(
+        ref.watch(globalSearchBuddiesProvider(idsKey)),
+        (entry) => entry.buddy.id,
+        (entry, onTap) => CompactBuddyListTile(entry: entry, onTap: onTap),
+      ),
+      GlobalSearchKind.diveCenters => _each(
+        _alongside(ref.watch(globalSearchDiveCentersProvider(idsKey)), [
+          ref.watch(globalSearchDiveCenterCountsProvider(idsKey)),
+        ]),
+        (center) => center.id,
+        (center, onTap) =>
+            _DiveCenterRow(center: center, idsKey: idsKey, onTap: onTap),
+      ),
+      GlobalSearchKind.certifications => _each(
+        ref.watch(globalSearchCertificationsProvider(idsKey)),
+        (certification) => certification.id,
+        (certification, onTap) =>
+            CertificationListTile(certification: certification, onTap: onTap),
+      ),
+      GlobalSearchKind.courses => _each(
+        ref.watch(globalSearchCoursesProvider(idsKey)),
+        (course) => course.id,
+        (course, onTap) => CourseCard(course: course, onTap: onTap),
+      ),
+      GlobalSearchKind.species => _each(
+        _alongside(ref.watch(globalSearchSpeciesProvider(idsKey)), [
+          ref.watch(globalSearchSeenSpeciesProvider(idsKey)),
+          ref.watch(globalSearchSpeciesCoversProvider(idsKey)),
+        ]),
+        (species) => species.id,
+        (species, onTap) =>
+            _SpeciesRow(species: species, idsKey: idsKey, onTap: onTap),
+      ),
+      GlobalSearchKind.documents => _each(
+        _alongside(ref.watch(globalSearchDocumentsProvider(idsKey)), [
+          ref.watch(globalSearchDocumentTagsProvider(idsKey)),
+        ]),
+        (entry) => entry.document.id,
+        (entry, onTap) =>
+            _DocumentRow(entry: entry, idsKey: idsKey, onTap: onTap),
+      ),
+      GlobalSearchKind.divePlans => _planRows(
+        ref.watch(globalSearchDivePlansProvider(idsKey)),
+        units,
+      ),
+      GlobalSearchKind.gpsTracks => _each(
+        ref.watch(globalSearchGpsTracksProvider(idsKey)),
+        (track) => track.id,
+        (track, onTap) => GpsTrackListTile(track: track, onTap: onTap),
+      ),
+      GlobalSearchKind.underwaterRoutes => _each(
+        ref.watch(globalSearchUnderwaterRoutesProvider(idsKey)),
+        (route) => route.id,
+        (route, onTap) =>
+            NavTrackListRow(route: route, units: units, onTap: onTap),
+      ),
+    };
+  }
+
+  /// [records], still loading until each of [extras] (what a row shows
+  /// beside its record) has first settled, so a row is drawn once rather
+  /// than redrawn as they arrive. Watched here, they are also read with the
+  /// records, not after them. A failed extra leaves its row without it.
+  static AsyncValue<List<T>> _alongside<T>(
+    AsyncValue<List<T>> records,
+    List<AsyncValue<Object?>> extras,
+  ) => records.hasValue && extras.any((e) => !e.hasValue && !e.hasError)
+      ? AsyncLoading<List<T>>()
+      : records;
+
+  /// [records] in [ids]' order, for [build] to draw. A record the search
+  /// found and the list no longer holds is left out: it has just gone.
+  Widget _rows<T>(
+    AsyncValue<List<T>> records,
+    String Function(T record) idOf,
+    Widget Function(List<T> shown) build,
+  ) {
+    final Widget? rows;
+    if (records.hasError) {
+      rows = const _RowsFailed();
+    } else if (records.hasValue) {
+      final byId = {for (final r in records.requireValue) idOf(r): r};
+      rows = build([for (final id in ids) ?byId[id]]);
+    } else {
+      rows = null;
+    }
+    return _HeldRows(rows: rows, count: ids.length);
+  }
+
+  /// The plans found, each saved series once (issue #3565): its first dive
+  /// found stands for it, with every dive of the series in its row, and
+  /// opens the series on that dive. [plans] holds the series' other dives
+  /// too, so [ids] picks the ones found.
+  Widget _planRows(
+    AsyncValue<List<DivePlanSummary>> plans,
+    UnitFormatter units,
+  ) => _rows(
+    plans,
+    (plan) => plan.id,
+    (shown) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final row in collapseSeries(shown, all: plans.requireValue))
+          KeyedSubtree(
+            key: globalSearchRowKey(kind, row.plan.id),
+            child: SavedPlanTile(
+              plan: row.plan,
+              dives: row.dives,
+              units: units,
+              onTap: () => onOpen(row.plan.id),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  /// [_rows], one record's tile at a time.
+  Widget _each<T>(
+    AsyncValue<List<T>> records,
+    String Function(T record) idOf,
+    Widget Function(T record, VoidCallback onTap) tile,
+  ) => _rows(
+    records,
+    idOf,
+    (shown) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final record in shown)
+          KeyedSubtree(
+            key: globalSearchRowKey(kind, idOf(record)),
+            child: tile(record, () => onOpen(idOf(record))),
+          ),
+      ],
+    ),
+  );
+}
+
+/// Finds a result's row, for tests.
+Key globalSearchRowKey(GlobalSearchKind kind, String id) =>
+    ValueKey('global-search-hit-${kind.name}-$id');
+
+/// [rows] once drawn, and the last rows drawn while the next ones load
+/// (null): a new search's records arrive a moment after its ids, and a blank
+/// section in between would flicker with every keystroke. With nothing
+/// drawn yet, it holds the rows' place.
+class _HeldRows extends StatefulWidget {
+  const _HeldRows({required this.rows, required this.count});
+
+  final Widget? rows;
+  final int count;
+
+  @override
+  State<_HeldRows> createState() => _HeldRowsState();
+}
+
+class _HeldRowsState extends State<_HeldRows> {
+  late Widget? _shown = widget.rows;
+
+  @override
+  void didUpdateWidget(_HeldRows oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _shown = widget.rows ?? _shown;
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _shown ?? _RowsLoading(count: widget.count);
+}
+
+/// Holds the rows' place while their first records load, so what is below
+/// them does not jump. Empty: a handful of records loads at once, and a
+/// spinner would only flash.
+class _RowsLoading extends StatelessWidget {
+  const _RowsLoading({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(height: count * 72.0);
+}
+
+class _RowsFailed extends StatelessWidget {
+  const _RowsFailed();
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: const Icon(Icons.error_outline),
+    title: Text(context.l10n.globalSearch_failed),
+  );
+}
+
+/// As the Dives list: the card colours spread across the rows on show.
+class _DiveRows extends ConsumerWidget {
+  const _DiveRows({required this.dives, required this.onOpen});
+
+  final List<DiveSummary> dives;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final (attribute, preset, customStart, customEnd) = ref.watch(
+      settingsProvider.select(
+        (s) => (
+          s.cardColorAttribute,
+          s.cardColorGradientPreset,
+          s.cardColorGradientStart,
+          s.cardColorGradientEnd,
+        ),
+      ),
+    );
+    final values = dives
+        .map((d) => getCardColorValue(d, attribute))
+        .whereType<double>()
+        .toList();
+    final minValue = values.isEmpty
+        ? null
+        : values.reduce((a, b) => a < b ? a : b);
+    final maxValue = values.isEmpty
+        ? null
+        : values.reduce((a, b) => a > b ? a : b);
+    final gradient = resolveGradientColors(
+      presetName: preset,
+      customStart: customStart,
+      customEnd: customEnd,
+    );
+    final label = watchDiveTypeLabelResolver(ref, context.l10n);
+    final shortLabel = watchDiveTypeShortLabelResolver(ref, context.l10n);
+    final listed = watchDiveTypeListVisibilityPredicate(ref);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final (index, dive) in dives.indexed)
+          DiveListItem(
+            key: globalSearchRowKey(GlobalSearchKind.dives, dive.id),
+            summary: dive,
+            viewMode: ListViewMode.compact,
+            diveNumber: dive.diveNumber ?? index + 1,
+            diveTypeLabelResolver: label,
+            diveTypeShortLabelResolver: shortLabel,
+            diveTypeListVisibilityPredicate: listed,
+            colorValue: getCardColorValue(dive, attribute),
+            minValueInList: minValue,
+            maxValueInList: maxValue,
+            gradientStartColor: gradient.start,
+            gradientEndColor: gradient.end,
+            onTap: () => onOpen(dive.id),
+          ),
+      ],
+    );
+  }
+}
+
+/// As the Equipment list: the rows are labelled as one list, so two identical
+/// items read differently from each other (#1549). Compact, so no tag chips.
+class _EquipmentRows extends ConsumerWidget {
+  const _EquipmentRows({required this.items, required this.onOpen});
+
+  final List<EquipmentItem> items;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final labels = equipmentRowLabelsOf(context, ref, items);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final item in items)
+          EquipmentListTile(
+            key: globalSearchRowKey(GlobalSearchKind.equipment, item.id),
+            item: item,
+            label: labels[item.id],
+            onTap: () => onOpen(item.id),
+          ),
+      ],
+    );
+  }
+}
+
+/// Whether the shared badge shows, as on the lists: only a household of
+/// divers has anyone to share with.
+bool _showsSharedBadge(
+  WidgetRef ref,
+  SharedItemKind kind, {
+  required String id,
+  required bool everyone,
+}) {
+  final divers = ref.watch(allDiversProvider).value?.length ?? 0;
+  final named =
+      ref.watch(itemIdsWithSharesProvider(kind)).value ?? const <String>{};
+  return divers >= 2 &&
+      isSharedWithAnyone(id: id, everyone: everyone, namedShares: named);
+}
+
+class _SiteRow extends ConsumerWidget {
+  const _SiteRow({required this.entry, required this.onTap});
+
+  final SiteWithDiveCount entry;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => CompactSiteListTile(
+    entry: entry,
+    onTap: onTap,
+    showSharedBadge: _showsSharedBadge(
+      ref,
+      SharedItemKind.site,
+      id: entry.site.id,
+      everyone: entry.site.isShared,
+    ),
+  );
+}
+
+class _TripRow extends ConsumerWidget {
+  const _TripRow({required this.entry, required this.onTap});
+
+  final TripWithStats entry;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => CompactTripListTile(
+    tripWithStats: entry,
+    onTap: onTap,
+    showSharedBadge: _showsSharedBadge(
+      ref,
+      SharedItemKind.trip,
+      id: entry.trip.id,
+      everyone: entry.trip.isShared,
+    ),
+  );
+}
+
+class _DiveCenterRow extends ConsumerWidget {
+  const _DiveCenterRow({
+    required this.center,
+    required this.idsKey,
+    required this.onTap,
+  });
+
+  final DiveCenter center;
+
+  /// The section's ids, whose counts are read together.
+  final String idsKey;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) =>
+      CompactDiveCenterListTile(
+        center: center,
+        diveCount:
+            ref
+                .watch(globalSearchDiveCenterCountsProvider(idsKey))
+                .value?[center.id] ??
+            0,
+        onTap: onTap,
+      );
+}
+
+/// A species the diver has logged reads as the logbook does, with its
+/// sightings; any other as the catalog does, having none to show.
+class _SpeciesRow extends ConsumerWidget {
+  const _SpeciesRow({
+    required this.species,
+    required this.idsKey,
+    required this.onTap,
+  });
+
+  final Species species;
+
+  /// The section's ids, whose sightings and covers are read together.
+  final String idsKey;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final seen = ref
+        .watch(globalSearchSeenSpeciesProvider(idsKey))
+        .value?[species.id];
+    if (seen == null) {
+      return SpeciesCatalogTile(species: species, onTap: onTap);
+    }
+    return SeenSpeciesTile(
+      entry: seen,
+      cover: ref
+          .watch(globalSearchSpeciesCoversProvider(idsKey))
+          .value?[species.id],
+      onTap: onTap,
+    );
+  }
+}
+
+class _DocumentRow extends ConsumerWidget {
+  const _DocumentRow({
+    required this.entry,
+    required this.idsKey,
+    required this.onTap,
+  });
+
+  final DocumentListEntry entry;
+
+  /// The section's ids, whose tags are read together.
+  final String idsKey;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tags = ref.watch(globalSearchDocumentTagsProvider(idsKey)).value;
+    final shown = withCertificationOwnerTitle(
+      entry,
+      context.l10n,
+      catalog: ref.watch(certificationCatalogSyncProvider),
+    );
+    return DocumentTile(
+      document: entry.document,
+      ownerLabel: shown.ownerText(ref.watch(unitFormatterProvider)),
+      tags: tags?[entry.document.id] ?? const [],
+      onTap: onTap,
+    );
+  }
+}

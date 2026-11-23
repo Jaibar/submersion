@@ -1,0 +1,404 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric_palette.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+import 'package:submersion/features/dive_log/presentation/utils/gas_switch_format.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/counterdiffusion_overlay.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/legend_candidates.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/o2_cell_readout.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_legend_config.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_metric_colors.dart';
+
+/// One read-only entry of the inline legend: a metric that is currently drawn
+/// on the chart, with the colour it is drawn in.
+@immutable
+class ActiveLegendEntry {
+  final String label;
+  final Color color;
+
+  /// The second colour of a line drawn in two (the buoyancy line, #4593).
+  final Color? secondColor;
+
+  const ActiveLegendEntry({
+    required this.label,
+    required this.color,
+    this.secondColor,
+  });
+}
+
+/// The metrics currently drawn on the chart, in the order the options dialog
+/// lists them.
+///
+/// Mirrors the catalog in `ChartOptionsDialog`: an entry appears when the
+/// dive has the data ([config]) and the user has the metric switched on
+/// ([state]). Colours come from the diver's [palette] (issue #3012) so the
+/// dash beside each label matches both the chart line and the dialog swatch.
+///
+/// Depth always leads the list, since it is the trace the chart is built
+/// around. On a multi-source dive (see [ProfileLegendConfig.overlays]) every
+/// metric an overlaid computer can draw gets one entry per computer, suffixed
+/// with the computer's name and coloured like that computer's trace (see
+/// [overlayTint]), so the two depth traces can be told apart. The gas strip
+/// and display behaviours have no single line colour and are never listed.
+List<ActiveLegendEntry> activeLegendEntries(
+  BuildContext context, {
+  required ProfileLegendConfig config,
+  required ProfileLegendState state,
+  required ProfileMetricPalette palette,
+}) {
+  final l10n = context.l10n;
+  final colorScheme = Theme.of(context).colorScheme;
+  final entries = <ActiveLegendEntry>[];
+  final multiSource = config.overlays.isNotEmpty;
+  // A chosen pressure colour draws a single-tank dive's line and threshold
+  // markers; several tanks keep their gas colours.
+  final singleTankColor = palette.pressureLineColor(
+    pressureSeries: config.tankPressures?.length ?? 0,
+    tankCount: config.tanks?.length ?? 0,
+  );
+
+  /// A metric drawn only for the active source.
+  void add(
+    bool present,
+    bool active,
+    String label,
+    Color color, {
+    Color? secondColor,
+  }) {
+    if (present && active) {
+      entries.add(
+        ActiveLegendEntry(label: label, color: color, secondColor: secondColor),
+      );
+    }
+  }
+
+  /// A metric every source can draw: the active source's entry first, then
+  /// one per overlay that has the data, each in that overlay's colour.
+  void addPerSource(
+    LegendMetric metric,
+    bool present,
+    bool active,
+    String label,
+    Color color, {
+    String Function(LegendOverlaySource overlay)? overlayLabel,
+  }) {
+    if (!active) return;
+    if (present) {
+      final name = config.activeSourceName;
+      entries.add(
+        ActiveLegendEntry(
+          label: multiSource && name != null ? '$label · $name' : label,
+          color: color,
+        ),
+      );
+    }
+    for (var i = 0; i < config.overlays.length; i++) {
+      final overlay = config.overlays[i];
+      if (!overlay.metrics.contains(metric)) continue;
+      entries.add(
+        ActiveLegendEntry(
+          label: '${overlayLabel?.call(overlay) ?? label} · ${overlay.name}',
+          color: overlay.tintByMetric ? overlayTint(color, i) : overlay.color,
+        ),
+      );
+    }
+  }
+
+  // Depth leads the legend and is always listed: it is the trace the chart is
+  // built around, so naming its colour is what lets every other entry be read
+  // against it. On a multi-source dive each computer's depth trace gets its
+  // own suffixed entry.
+  addPerSource(
+    LegendMetric.depth,
+    true,
+    true,
+    l10n.diveLog_legend_label_depth,
+    palette.colorOf(ProfileMetric.depth),
+  );
+
+  // Overlays
+  addPerSource(
+    LegendMetric.temperature,
+    config.hasTemperatureData,
+    state.showTemperature,
+    l10n.diveLog_legend_label_temp,
+    palette.colorOf(ProfileMetric.temperature),
+  );
+  add(
+    config.hasPressureData && !config.hasMultiTankPressure,
+    state.showPressure,
+    l10n.diveLog_legend_label_pressure,
+    palette.colorOf(ProfileMetric.pressure),
+  );
+  add(
+    config.hasEvents,
+    state.showEvents,
+    l10n.diveLog_legend_label_events,
+    ProfileMetricColors.events,
+  );
+  // Only meaningful when the dive carries both the computer's own events and
+  // the app's auto-detected ones; otherwise the plain "Events" toggle covers
+  // everything (issue #1523).
+  add(
+    config.hasSplitEvents,
+    state.showComputedEvents,
+    l10n.diveLog_legend_label_computedEvents,
+    Colors.amber.shade200,
+  );
+  add(
+    config.hasAnnotations,
+    state.showAnnotations,
+    l10n.diveLog_legend_label_annotations,
+    ProfileMetricColors.annotation,
+  );
+  add(
+    config.hasHeartRateData,
+    state.showHeartRate,
+    l10n.diveLog_legend_label_heartRate,
+    palette.colorOf(ProfileMetric.heartRate),
+  );
+  add(
+    config.hasSacCurve,
+    state.showSac,
+    l10n.diveLog_legend_label_sacRate,
+    palette.colorOf(ProfileMetric.sac),
+  );
+  // One entry for the two-coloured line (#4593).
+  add(
+    config.hasBuoyancyLine,
+    state.showBuoyancy,
+    l10n.diveLog_legend_label_buoyancy,
+    ProfileMetricColors.buoyancyBuoyant,
+    secondColor: ProfileMetricColors.buoyancyHeavy,
+  );
+  // The computer's Avelo values (#4664).
+  add(
+    config.hasAveloBuoyancy,
+    state.showAveloBuoyancy,
+    l10n.diveLog_legend_label_aveloBuoyancy,
+    palette.colorOf(ProfileMetric.aveloBuoyancy),
+  );
+  add(
+    config.hasAveloGasRemaining,
+    state.showAveloGasRemaining,
+    l10n.diveLog_legend_label_aveloGasRemaining,
+    palette.colorOf(ProfileMetric.aveloGasRemaining),
+  );
+  add(
+    config.hasComputerRmv,
+    state.showComputerRmv,
+    l10n.diveLog_legend_label_computerRmv,
+    palette.colorOf(ProfileMetric.computerRmv),
+  );
+  add(
+    config.hasAscentRates,
+    state.showAscentRateColors,
+    l10n.diveLog_legend_label_ascentRate,
+    ProfileMetricColors.ascentRateColors,
+  );
+  add(
+    config.hasAscentRates,
+    state.showAscentRateLine,
+    l10n.diveLog_legend_label_ascentRateLine,
+    ProfileMetricColors.ascentRateLine,
+  );
+
+  // Markers
+  add(
+    config.hasMaxDepthMarker,
+    state.showMaxDepthMarker,
+    l10n.diveLog_legend_label_maxDepth,
+    palette.colorOf(ProfileMetric.maxDepth),
+  );
+  add(
+    config.hasPressureMarkers,
+    state.showPressureMarkers,
+    l10n.diveLog_legend_label_pressureThresholds,
+    singleTankColor ?? ProfileMetricColors.pressureMarkers,
+  );
+  add(
+    config.hasGasSwitches,
+    state.showGasSwitchMarkers,
+    l10n.diveLog_legend_label_gasSwitches,
+    GasColors.nitrox,
+  );
+  add(
+    config.hasLateGasSwitches,
+    state.showLateGasSwitches,
+    l10n.diveLog_legend_label_lateGasSwitches,
+    lateSwitchLegendColor,
+  );
+  add(
+    config.hasCounterdiffusion,
+    state.showCounterdiffusion,
+    l10n.diveLog_legend_label_counterdiffusion,
+    counterdiffusionIcdColor,
+  );
+  add(
+    config.hasPhotoMarkers,
+    state.showPhotoMarkers,
+    l10n.diveLog_legend_label_photoMarkers,
+    colorScheme.primary,
+  );
+
+  // Tank pressures
+  if (config.hasMultiTankPressure && config.tankPressures != null) {
+    final sortedTankIds = sortTankIdsByOrder(
+      config.tankPressures!.keys,
+      config.tanks,
+    );
+    for (var i = 0; i < sortedTankIds.length; i++) {
+      final tankId = sortedTankIds[i];
+      final tank = _tankById(config.tanks, tankId);
+      final baseLabel = tank != null
+          ? tankLegendLabel(context, tank, fallbackIndex: i + 1)
+          : l10n.diveLog_tank_title(i + 1);
+      add(
+        true,
+        state.isTankPressureVisible(tankId),
+        config.estimatedTankIds.contains(tankId)
+            ? '$baseLabel ${l10n.diveLog_pressure_estimatedSuffix}'
+            : baseLabel,
+        singleTankColor ??
+            (tank != null
+                ? GasColors.forGasMix(tank.gasMix)
+                : tankFallbackColor(i)),
+      );
+    }
+  }
+
+  // Decompression
+  addPerSource(
+    LegendMetric.decoStops,
+    config.hasDecoStopCurve,
+    state.showDecoStops,
+    l10n.diveLog_legend_label_decoStops,
+    ProfileMetricColors.decoStops,
+  );
+  addPerSource(
+    LegendMetric.ceiling,
+    config.hasCeilingCurve,
+    state.showCeiling,
+    ceilingLegendLabel(context, calculated: config.labelCeilingAsCalculated),
+    palette.colorOf(ProfileMetric.ceiling),
+    overlayLabel: (overlay) => ceilingLegendLabel(
+      context,
+      calculated: overlay.labelCeilingAsCalculated,
+    ),
+  );
+  addPerSource(
+    LegendMetric.ndl,
+    config.hasNdlData,
+    state.showNdl,
+    l10n.diveLog_legend_label_ndl,
+    palette.colorOf(ProfileMetric.ndl),
+  );
+  addPerSource(
+    LegendMetric.tts,
+    config.hasTtsData,
+    state.showTts,
+    l10n.diveLog_legend_label_tts,
+    palette.colorOf(ProfileMetric.tts),
+  );
+  addPerSource(
+    LegendMetric.gtr,
+    config.hasGtrData,
+    state.showGtr,
+    l10n.diveLog_legend_label_gtr,
+    palette.colorOf(ProfileMetric.gtr),
+  );
+  addPerSource(
+    LegendMetric.cns,
+    config.hasCnsData,
+    state.showCns,
+    l10n.diveLog_legend_label_cns,
+    palette.colorOf(ProfileMetric.cns),
+  );
+  addPerSource(
+    LegendMetric.otu,
+    config.hasOtuData,
+    state.showOtu,
+    l10n.diveLog_legend_label_otu,
+    palette.colorOf(ProfileMetric.otu),
+  );
+
+  // Gas analysis
+  addPerSource(
+    LegendMetric.ppO2,
+    config.hasPpO2Data,
+    state.showPpO2,
+    l10n.diveLog_legend_label_ppO2,
+    palette.colorOf(ProfileMetric.ppO2),
+  );
+  addPerSource(
+    LegendMetric.ppN2,
+    config.hasPpN2Data,
+    state.showPpN2,
+    l10n.diveLog_legend_label_ppN2,
+    palette.colorOf(ProfileMetric.ppN2),
+  );
+  addPerSource(
+    LegendMetric.ppHe,
+    config.hasPpHeData,
+    state.showPpHe,
+    l10n.diveLog_legend_label_ppHe,
+    palette.colorOf(ProfileMetric.ppHe),
+  );
+  add(
+    config.hasO2CellData,
+    state.showO2Cells,
+    l10n.diveLog_legend_label_o2Cells,
+    o2CellColor(0),
+  );
+  addPerSource(
+    LegendMetric.mod,
+    config.hasModData,
+    state.showMod,
+    l10n.diveLog_legend_label_mod,
+    palette.colorOf(ProfileMetric.mod),
+  );
+  addPerSource(
+    LegendMetric.density,
+    config.hasDensityData,
+    state.showDensity,
+    l10n.diveLog_legend_label_gasDensity,
+    palette.colorOf(ProfileMetric.density),
+  );
+
+  // Other
+  addPerSource(
+    LegendMetric.gf,
+    config.hasGfData,
+    state.showGf,
+    l10n.diveLog_legend_label_gfPercent,
+    palette.colorOf(ProfileMetric.gf),
+  );
+  addPerSource(
+    LegendMetric.surfaceGf,
+    config.hasSurfaceGfData,
+    state.showSurfaceGf,
+    l10n.diveLog_legend_label_surfaceGf,
+    palette.colorOf(ProfileMetric.surfaceGf),
+  );
+  addPerSource(
+    LegendMetric.meanDepth,
+    config.hasMeanDepthData,
+    state.showMeanDepth,
+    l10n.diveLog_legend_label_meanDepth,
+    palette.colorOf(ProfileMetric.meanDepth),
+  );
+
+  return entries;
+}
+
+DiveTank? _tankById(List<DiveTank>? tanks, String tankId) {
+  if (tanks == null) return null;
+  for (final tank in tanks) {
+    if (tank.id == tankId) return tank;
+  }
+  return null;
+}

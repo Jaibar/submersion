@@ -1,0 +1,64 @@
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/setup_wizard/domain/setup_wizard_models.dart';
+
+/// Draft state for one wizard session, keyed by mode.
+final setupWizardProvider = StateNotifierProvider.autoDispose
+    .family<SetupWizardNotifier, SetupWizardDraft, SetupWizardMode>(
+      (ref, mode) => SetupWizardNotifier(ref, mode),
+    );
+
+class SetupWizardNotifier extends StateNotifier<SetupWizardDraft> {
+  final Ref _ref;
+
+  SetupWizardNotifier(this._ref, SetupWizardMode mode)
+    : super(_initialDraft(_ref, mode)) {
+    if (mode == SetupWizardMode.settings) {
+      // Seed the units from live state so re-entry edits start from what
+      // the diver already has, and Finish without a change re-applies them
+      // rather than resetting them to defaults.
+      state = state.copyWith(settings: _ref.read(settingsProvider));
+    }
+  }
+
+  /// A browser's first run opens on the connect step: the existing-data
+  /// path with cloud sync chosen, no fork before it (issue #4121). The draft
+  /// says browser in every mode, since the assistant in Settings drops the
+  /// same steps.
+  static SetupWizardDraft _initialDraft(Ref ref, SetupWizardMode mode) {
+    final browser = ref.read(deviceCapabilitiesProvider).isBrowser;
+    if (browser && mode == SetupWizardMode.firstRun) {
+      return SetupWizardDraft(
+        mode: mode,
+        browser: true,
+        path: SetupPath.existingData,
+        source: ExistingDataSource.cloudSync,
+      );
+    }
+    return SetupWizardDraft(mode: mode, browser: browser);
+  }
+
+  void choosePath(SetupPath path) => state = state.copyWith(path: path);
+
+  void chooseSource(ExistingDataSource source) =>
+      state = state.copyWith(source: source);
+
+  void requestSkip() =>
+      state = state.copyWith(path: SetupPath.fresh, skipRequested: true);
+
+  void setName(String name) => state = state.copyWith(name: name.trim());
+
+  void applyUnitPreset(UnitPreset preset) =>
+      state = state.applyingUnitPreset(preset);
+
+  void updateSettings(AppSettings settings) =>
+      state = state.copyWith(settings: settings);
+
+  /// Finish found no diver and no name: ask for the profile first.
+  void requireProfile() => state = state.copyWith(needsProfile: true);
+
+  /// Offers the species model step (issue #4881). Never withdrawn.
+  void offerSpeciesModel() => state = state.copyWith(speciesModelOffered: true);
+}

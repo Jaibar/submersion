@@ -1,85 +1,43 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
-import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:sqlite3/common.dart' as sqlite3;
 
 import 'package:submersion/core/domain/entities/storage_config.dart';
 import 'package:submersion/core/services/database_location_service.dart';
+import 'package:submersion/core/services/database_migration_models.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/same_folder_probe.dart';
+import 'package:submersion/core/services/security/database_security_sidecar.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 
-/// Result of a database migration operation
-class MigrationResult {
-  final bool success;
-  final String? errorMessage;
-  final String? oldPath;
-  final String? newPath;
-  final String? backupPath;
+export 'package:submersion/core/services/database_migration_models.dart';
 
-  const MigrationResult._({
-    required this.success,
-    this.errorMessage,
-    this.oldPath,
-    this.newPath,
-    this.backupPath,
-  });
-
-  factory MigrationResult.success({
-    required String oldPath,
-    required String newPath,
-    String? backupPath,
-  }) {
-    return MigrationResult._(
-      success: true,
-      oldPath: oldPath,
-      newPath: newPath,
-      backupPath: backupPath,
-    );
-  }
-
-  factory MigrationResult.failure(String errorMessage) {
-    return MigrationResult._(success: false, errorMessage: errorMessage);
-  }
-}
-
-/// Information about an existing database found at a location
-class ExistingDatabaseInfo {
-  final String path;
-  final int userCount;
-  final int diveCount;
-  final int siteCount;
-  final int tripCount;
-  final int buddyCount;
-  final int fileSize;
-  final DateTime? lastModified;
-
-  const ExistingDatabaseInfo({
-    required this.path,
-    required this.userCount,
-    required this.diveCount,
-    required this.siteCount,
-    required this.tripCount,
-    required this.buddyCount,
-    required this.fileSize,
-    this.lastModified,
-  });
-
-  String get formattedFileSize {
-    if (fileSize < 1024) return '$fileSize B';
-    if (fileSize < 1024 * 1024) {
-      return '${(fileSize / 1024).toStringAsFixed(1)} KB';
-    }
-    return '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
-  }
-}
+part 'database_migration_folder_checks.dart';
 
 /// Service for safely migrating the database between storage locations
+///
+/// Each move runs as a [SyncCoordinator] turn, so a sync still merging
+/// finishes before the database closes rather than being cut off, or
+/// carrying on into the moved file (issue #3798).
 class DatabaseMigrationService {
   final DatabaseService _dbService;
   final DatabaseLocationService _locationService;
 
-  DatabaseMigrationService(this._dbService, this._locationService);
+  DatabaseMigrationService(
+    this._dbService,
+    this._locationService, {
+    @visibleForTesting Duration folderTimeout = folderProbeTimeout,
+  }) : _folderTimeout = folderTimeout;
+
+  /// How long one check of a folder may take: see [folderProbeTimeout].
+  final Duration _folderTimeout;
 
   static const Duration _functionalCheckTimeout = Duration(seconds: 10);
   static const Duration _infoQueryTimeout = Duration(seconds: 5);
@@ -105,17 +63,30 @@ class DatabaseMigrationService {
     final dbPath = p.join(folderPath, DatabaseLocationService.databaseFilename);
     final file = File(dbPath);
 
-    if (!await file.exists()) {
-      return null;
-    }
-
     try {
+      // Bounded like the probe: a share that has stopped answering must not
+      // leave the folder change waiting forever (issue #4834). A timeout
+      // lands in the catch below, as an unreadable folder does, and reads as
+      // nothing there: the plain move then refuses a folder that holds a dive
+      // log after all, so this can never become an overwrite.
+      final exists = await _withTimeout(
+        file.exists(),
+        'Folder check',
+        timeout: _folderTimeout,
+      );
+      if (!exists) return null;
+
       final currentPath = await _dbService.databasePath;
-      if (currentPath == dbPath) {
+      final identity = await _compareToCurrent(currentPath, folderPath);
+      if (identity == FolderIdentity.same) {
         return await getCurrentDatabaseInfo();
       }
 
-      final stat = await file.stat();
+      final stat = await _withTimeout(
+        file.stat(),
+        'Folder check',
+        timeout: _folderTimeout,
+      );
       final fileSize = stat.size;
       final lastModified = stat.modified;
 
@@ -128,10 +99,15 @@ class DatabaseMigrationService {
         buddyCount: 0,
       );
 
-      try {
-        counts = await _fetchDatabaseCounts(dbPath);
-      } catch (e) {
-        // Could not read database, but file exists
+      // Opened only when it is certainly another file: an unknown identity
+      // may be the live database under a second name (issue #4834), so it is
+      // described from its file alone, like one that cannot be read.
+      if (identity == FolderIdentity.different) {
+        try {
+          counts = await _fetchDatabaseCounts(dbPath);
+        } catch (e) {
+          // Could not read database, but file exists
+        }
       }
 
       return ExistingDatabaseInfo(
@@ -154,12 +130,21 @@ class DatabaseMigrationService {
     final currentPath = await _dbService.databasePath;
     final file = File(currentPath);
 
-    if (!await file.exists()) {
-      return null;
-    }
-
     try {
-      final stat = await file.stat();
+      // Bounded: the live log may sit on a share that has stopped answering
+      // (issue #4834), and a timeout lands in the catch below.
+      final exists = await _withTimeout(
+        file.exists(),
+        'Folder check',
+        timeout: _folderTimeout,
+      );
+      if (!exists) return null;
+
+      final stat = await _withTimeout(
+        file.stat(),
+        'Folder check',
+        timeout: _folderTimeout,
+      );
       final fileSize = stat.size;
       final lastModified = stat.modified;
 
@@ -216,23 +201,34 @@ class DatabaseMigrationService {
   /// 3. Verify the copy's integrity
   /// 4. Update the storage configuration
   /// 5. Reinitialize the database from the new location
-  Future<MigrationResult> migrateToCustomFolder(String folderPath) async {
+  Future<MigrationResult> migrateToCustomFolder(String folderPath) =>
+      SyncCoordinator.join(() => _migrateToCustomFolder(folderPath));
+
+  /// [replacing] is for [replaceExistingDatabase], which has already backed
+  /// up the dive log in [folderPath] that this overwrites.
+  Future<MigrationResult> _migrateToCustomFolder(
+    String folderPath, {
+    bool replacing = false,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.databaseFile);
     final currentPath = await _dbService.databasePath;
     final newPath = p.join(
       folderPath,
       DatabaseLocationService.databaseFilename,
     );
 
-    // Don't migrate if paths are the same
-    if (currentPath == newPath) {
-      return MigrationResult.failure('Database is already at this location');
-    }
+    // Don't migrate onto the database itself, however the folder is named:
+    // the copy would overwrite the very file it reads from.
+    final refusal = await _refuseUnlessElsewhere(currentPath, folderPath);
+    if (refusal != null) return refusal;
 
-    // Verify destination folder is writable
-    if (!await _locationService.verifyFolderAccessible(folderPath)) {
-      return MigrationResult.failure(
-        'Cannot write to the selected folder. Please check permissions.',
-      );
+    // Verify destination folder is writable, and is still answering
+    final unwritable = await _refuseUnlessWritable(folderPath);
+    if (unwritable != null) return unwritable;
+
+    if (!replacing) {
+      final occupied = await _refuseIfOccupied(folderPath);
+      if (occupied != null) return occupied;
     }
 
     String? backupPath;
@@ -246,8 +242,10 @@ class DatabaseMigrationService {
       await _checkpointWal();
 
       // Step 1: Close the current database FIRST to release file locks
-      // This is critical on macOS/iOS where WAL mode locks the -shm file
-      await _dbService.close();
+      // This is critical on macOS/iOS where WAL mode locks the -shm file.
+      // Strict: a timed-out close must throw (caught below -> rollback)
+      // rather than let the copy read a still-locked file.
+      await _dbService.close(strict: true);
 
       // Small delay to ensure file locks are fully released
       await Future.delayed(const Duration(milliseconds: 100));
@@ -322,7 +320,11 @@ class DatabaseMigrationService {
   }
 
   /// Migrate the database back to the default app location
-  Future<MigrationResult> migrateToDefault() async {
+  Future<MigrationResult> migrateToDefault() =>
+      SyncCoordinator.join(() => _migrateToDefault());
+
+  Future<MigrationResult> _migrateToDefault() async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.databaseFile);
     final currentPath = await _dbService.databasePath;
     final defaultDir = await _locationService.getDefaultDatabaseDirectory();
     final newPath = p.join(
@@ -330,12 +332,18 @@ class DatabaseMigrationService {
       DatabaseLocationService.databaseFilename,
     );
 
-    // Don't migrate if already at default
-    if (currentPath == newPath) {
-      // Just update config
+    // Don't migrate if already at default, however either folder is named
+    final identity = await _compareToCurrent(currentPath, defaultDir);
+    if (identity == FolderIdentity.unknown) {
+      return MigrationResult.failure(_cannotCompareDefault);
+    }
+    if (identity == FolderIdentity.same) {
+      // Just update config, and drop the custom folder's bookmark as the full
+      // move below does
       await _locationService.saveStorageConfig(
         const StorageConfig(mode: StorageLocationMode.appDefault),
       );
+      await _locationService.clearStoredBookmark();
       return MigrationResult.success(oldPath: currentPath, newPath: newPath);
     }
 
@@ -349,8 +357,10 @@ class DatabaseMigrationService {
       // inconsistent database state.
       await _checkpointWal();
 
-      // Step 1: Close current database FIRST to release file locks
-      await _dbService.close();
+      // Step 1: Close current database FIRST to release file locks.
+      // Strict: a timed-out close throws (caught below -> rollback) rather
+      // than let the copy read a still-locked file.
+      await _dbService.close(strict: true);
 
       // Small delay to ensure file locks are fully released
       await Future.delayed(const Duration(milliseconds: 100));
@@ -419,15 +429,32 @@ class DatabaseMigrationService {
   ///
   /// This does NOT copy the current database - it just switches to using
   /// the database that already exists at the target location.
-  Future<MigrationResult> switchToExistingDatabase(String folderPath) async {
+  Future<MigrationResult> switchToExistingDatabase(String folderPath) =>
+      SyncCoordinator.join(() => _switchToExistingDatabase(folderPath));
+
+  Future<MigrationResult> _switchToExistingDatabase(String folderPath) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.databaseFile);
     final currentPath = await _dbService.databasePath;
     final newPath = p.join(
       folderPath,
       DatabaseLocationService.databaseFilename,
     );
 
-    // Verify the target database exists
-    if (!await File(newPath).exists()) {
+    // Verify the target database exists. Bounded, since the share may have
+    // stopped answering since the folder was checked (issue #4834); a
+    // metadata query, not an open, as the file may be the live one under a
+    // second name.
+    final bool found;
+    try {
+      found = await _withTimeout(
+        File(newPath).exists(),
+        'Folder check',
+        timeout: _folderTimeout,
+      );
+    } on TimeoutException {
+      return MigrationResult.failure(_unanswered);
+    }
+    if (!found) {
       return MigrationResult.failure(
         'No database found at the selected location',
       );
@@ -444,8 +471,10 @@ class DatabaseMigrationService {
       await _checkpointWal();
 
       // Close current database FIRST to release file locks
-      // This is critical on macOS/iOS where WAL mode locks the -shm file
-      await _dbService.close();
+      // This is critical on macOS/iOS where WAL mode locks the -shm file.
+      // Strict: a timed-out close throws (caught below -> rollback) rather
+      // than let the copy read a still-locked file.
+      await _dbService.close(strict: true);
 
       // Small delay to ensure file locks are fully released
       await Future.delayed(const Duration(milliseconds: 100));
@@ -474,6 +503,10 @@ class DatabaseMigrationService {
 
       // Create security-scoped bookmark for persistent access (macOS)
       await _locationService.createAndStoreBookmark(folderPath);
+
+      // Another dive log is about to open: the storage cleanup must not
+      // judge the cloud media store by sync knowledge about this one.
+      await _locationService.markDatabaseSwitched();
 
       // Open the new database
       await _dbService.reinitializeAtPath(newPath);
@@ -504,22 +537,25 @@ class DatabaseMigrationService {
   }
 
   /// Replace an existing database with the current database
-  Future<MigrationResult> replaceExistingDatabase(String folderPath) async {
+  Future<MigrationResult> replaceExistingDatabase(String folderPath) =>
+      SyncCoordinator.join(() => _replaceExistingDatabase(folderPath));
+
+  Future<MigrationResult> _replaceExistingDatabase(String folderPath) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.databaseFile);
     // This is essentially the same as migrateToCustomFolder,
     // but it will overwrite the existing database
-    final newPath = p.join(
+    final refusal = await _refuseUnlessElsewhere(
+      await _dbService.databasePath,
       folderPath,
-      DatabaseLocationService.databaseFilename,
     );
+    if (refusal != null) return refusal;
 
-    // Create backup of the existing database at target before overwriting
-    final existingFile = File(newPath);
-    if (await existingFile.exists()) {
-      final existingBackupPath = _generateBackupPath(newPath);
-      await existingFile.copy(existingBackupPath);
-    }
+    // Back up the existing database at target before overwriting it
+    final notReady = await _backUpBeforeReplacing(folderPath);
+    if (notReady != null) return notReady;
 
-    return migrateToCustomFolder(folderPath);
+    // Already inside this turn's SyncCoordinator.join
+    return _migrateToCustomFolder(folderPath, replacing: true);
   }
 
   /// Verify database integrity using SQLite PRAGMA
@@ -540,8 +576,12 @@ class DatabaseMigrationService {
       debugInfo?.writeln('DEBUG: File exists, size: $fileSize bytes');
 
       // Use sqlite3 directly to avoid Drift's migration system triggering
-      // when opening a database with a different schema version
-      final db = sqlite3.sqlite3.open(dbPath);
+      // when opening a database with a different schema version. openRaw
+      // applies the cipher key when the live database is encrypted.
+      final db = DatabaseService.openRaw(
+        dbPath,
+        keyHex: DatabaseService.instance.databaseKeyHex,
+      );
       try {
         // Run integrity check (quick_check is faster and avoids long stalls)
         final result = db.select('PRAGMA quick_check');
@@ -567,7 +607,7 @@ class DatabaseMigrationService {
         debugInfo?.writeln('DEBUG: Parsed status: "$status"');
         return status == 'ok';
       } finally {
-        db.dispose();
+        db.close();
         // Small delay to ensure SQLite fully releases the file lock
         await Future.delayed(const Duration(milliseconds: 50));
       }
@@ -620,6 +660,14 @@ class DatabaseMigrationService {
     if (await walSource.exists()) {
       await walSource.copy('$destPath-wal');
     }
+
+    // The security keyslot sidecar must travel with the database: without it
+    // a keychain wipe at the new location would leave the encrypted file
+    // permanently unopenable (the sidecar is the durable wrapped key copy).
+    final sidecarSource = File(DatabaseSecuritySidecar.pathFor(sourcePath));
+    if (await sidecarSource.exists()) {
+      await sidecarSource.copy(DatabaseSecuritySidecar.pathFor(destPath));
+    }
   }
 
   /// Verify that the database is functional by running a simple query
@@ -663,7 +711,15 @@ class DatabaseMigrationService {
     String originalPath,
     String? backupPath,
   ) async {
-    // Close any open connection
+    // Close any open connection. Best-effort (non-strict) on purpose: this
+    // is a recovery path that must reopen the original no matter what. A
+    // strict close would defeat that twice over — it would throw on a stuck
+    // connection AND keep _database non-null, so the reinitializeAtPath
+    // below (which starts with its own strict close) would re-hit the same
+    // stuck connection and abort the rollback, leaving the app with no open
+    // database and config already reset. Non-strict nulls _database so the
+    // reopen can proceed; the abandoned connection's locks are on the failed
+    // path, not the original being reopened.
     await _dbService.close();
 
     // Reset configuration to default or previous
@@ -675,8 +731,12 @@ class DatabaseMigrationService {
 
   Future<_DatabaseCounts> _fetchDatabaseCounts(String dbPath) async {
     // Use sqlite3 directly to avoid Drift's migration system triggering
-    // when opening a database with a different schema version
-    final db = sqlite3.sqlite3.open(dbPath);
+    // when opening a database with a different schema version. openRaw
+    // applies the cipher key when the live database is encrypted.
+    final db = DatabaseService.openRaw(
+      dbPath,
+      keyHex: DatabaseService.instance.databaseKeyHex,
+    );
     try {
       // Query each table individually to handle missing tables gracefully
       // (older database versions may not have all tables)
@@ -694,13 +754,13 @@ class DatabaseMigrationService {
         buddyCount: buddyCount,
       );
     } finally {
-      db.dispose();
+      db.close();
       await Future.delayed(const Duration(milliseconds: 50));
     }
   }
 
   /// Safely count rows in a table, returning 0 if the table doesn't exist
-  int _safeTableCount(sqlite3.Database db, String tableName) {
+  int _safeTableCount(sqlite3.CommonDatabase db, String tableName) {
     try {
       final result = db.select('SELECT COUNT(*) AS count FROM $tableName');
       if (result.isEmpty) return 0;

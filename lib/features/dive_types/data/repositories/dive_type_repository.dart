@@ -2,7 +2,10 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/app_sql_functions.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/dive_stats_scope.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
@@ -18,6 +21,11 @@ class DiveTypeRepository {
   // ============================================================================
   // CRUD Operations
   // ============================================================================
+
+  /// Emits whenever the `dive_types` table changes so list providers can
+  /// refresh after a sync or any other write.
+  Stream<void> watchDiveTypesChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.diveTypes));
 
   /// Get all dive types, ordered by sort order then name
   /// Returns built-in types plus custom types for the specified diver
@@ -126,8 +134,12 @@ class DiveTypeRepository {
   /// Get a dive type by name (case-insensitive)
   Future<domain.DiveTypeEntity?> getDiveTypeByName(String name) async {
     try {
+      // No index keeps names unique, so two can fold equal; the lowest id
+      // wins rather than a "too many elements" throw.
       final query = _db.select(_db.diveTypes)
-        ..where((t) => t.name.lower().equals(name.toLowerCase()));
+        ..where((t) => t.name.unicodeLower().equals(name.toLowerCase()))
+        ..orderBy([(t) => OrderingTerm.asc(t.id)])
+        ..limit(1);
       final row = await query.getSingleOrNull();
       return row != null ? _mapRowToDiveType(row) : null;
     } catch (e, stackTrace) {
@@ -187,6 +199,9 @@ class DiveTypeRepository {
               ),
               createdAt: Value(now),
               updatedAt: Value(now),
+              shortName: Value(diveType.shortName),
+              showInDetailHeader: Value(diveType.showInDetailHeader),
+              showInListView: Value(diveType.showInListView),
             ),
           );
 
@@ -235,6 +250,9 @@ class DiveTypeRepository {
           name: Value(diveType.name),
           sortOrder: Value(diveType.sortOrder),
           updatedAt: Value(now),
+          shortName: Value(diveType.shortName),
+          showInDetailHeader: Value(diveType.showInDetailHeader),
+          showInListView: Value(diveType.showInListView),
         ),
       );
       await _syncRepository.markRecordPending(
@@ -254,8 +272,51 @@ class DiveTypeRepository {
     }
   }
 
+  /// Set which badge rows a type's badge appears in. Unlike [updateDiveType],
+  /// this is allowed on built-in types too: badge-row visibility is a
+  /// per-diver display preference, not part of the type's core definition
+  /// (name/shortName/sortOrder), which built-ins still protect from edits.
+  Future<void> setDiveTypeVisibility(
+    String id, {
+    required bool showInDetailHeader,
+    required bool showInListView,
+  }) async {
+    try {
+      _log.info('Setting dive type visibility: $id');
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      await (_db.update(_db.diveTypes)..where((t) => t.id.equals(id))).write(
+        DiveTypesCompanion(
+          updatedAt: Value(now),
+          showInDetailHeader: Value(showInDetailHeader),
+          showInListView: Value(showInListView),
+        ),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: 'diveTypes',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+      _log.info('Set dive type visibility: $id');
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to set dive type visibility: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Delete a custom dive type (built-in types cannot be deleted)
-  Future<void> deleteDiveType(String id) async {
+  Future<void> deleteDiveType(String id) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.deletedRecord,
+    body: () => _deleteDiveTypeInner(id),
+  );
+
+  Future<void> _deleteDiveTypeInner(String id) async {
     try {
       // Check if it's a built-in type
       final existing = await getDiveTypeById(id);
@@ -290,15 +351,25 @@ class DiveTypeRepository {
   }) async {
     try {
       final String whereClause;
+      final String diverJoinFilter;
       final List<Variable> variables;
 
       if (diverId != null) {
+        // Count only this diver's dives (built-in types are shared, but their
+        // per-diver count must exclude other divers' dives). The diver filter
+        // sits in the dives join, before the WHERE, so its placeholder binds
+        // first.
+        diverJoinFilter = 'AND d.diver_id = ?';
         // Built-in types OR (custom types for this diver)
         whereClause =
             'WHERE dt.is_built_in = 1 OR (dt.is_built_in = 0 AND dt.diver_id = ?)';
-        variables = [Variable.withString(diverId)];
+        variables = [
+          Variable.withString(diverId),
+          Variable.withString(diverId),
+        ];
       } else {
         // No diver specified - only show built-in types
+        diverJoinFilter = '';
         whereClause = 'WHERE dt.is_built_in = 1';
         variables = [];
       }
@@ -306,7 +377,9 @@ class DiveTypeRepository {
       final result = await _db.customSelect('''
         SELECT dt.*, COUNT(d.id) as dive_count
         FROM dive_types dt
-        LEFT JOIN dives d ON dt.id = d.dive_type
+        LEFT JOIN dive_dive_types ddt ON dt.id = ddt.dive_type_id
+        LEFT JOIN dives d ON d.id = ddt.dive_id $diverJoinFilter
+                         ${DiveStatsScope.and(alias: 'd')}
         $whereClause
         GROUP BY dt.id
         ORDER BY dt.sort_order, dt.name
@@ -327,6 +400,10 @@ class DiveTypeRepository {
                 updatedAt: DateTime.fromMillisecondsSinceEpoch(
                   row.data['updated_at'] as int,
                 ),
+                shortName: row.data['short_name'] as String?,
+                showInDetailHeader:
+                    (row.data['show_in_detail_header'] as int) == 1,
+                showInListView: (row.data['show_in_list_view'] as int) == 1,
               ),
               diveCount: row.data['dive_count'] as int,
             ),
@@ -348,7 +425,10 @@ class DiveTypeRepository {
       final result = await _db
           .customSelect(
             '''
-        SELECT COUNT(*) as count FROM dives WHERE dive_type = ?
+        -- stats-scope-exempt: deletion guard. Must see EVERY referencing
+        -- dive, excluded ones included, or deleting this type would strand
+        -- a foreign key on a dive the diver still has.
+        SELECT COUNT(*) as count FROM dive_dive_types WHERE dive_type_id = ?
       ''',
             variables: [Variable.withString(id)],
           )
@@ -384,6 +464,9 @@ class DiveTypeRepository {
       sortOrder: row.sortOrder,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      shortName: row.shortName,
+      showInDetailHeader: row.showInDetailHeader,
+      showInListView: row.showInListView,
     );
   }
 }

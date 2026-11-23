@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+
+import 'package:submersion/core/presentation/widgets/frame_budget_watch.dart';
 
 /// Specification for a single animated bubble.
 class BubbleSpec {
@@ -49,10 +54,18 @@ class OceanBackground extends StatefulWidget {
   final Widget child;
   final BorderRadius borderRadius;
 
+  /// Forces the gradient/effect palette to a specific brightness instead of
+  /// following the ambient theme. The startup splash renders bright (its
+  /// throwaway MaterialApp defaults to a light theme), so screens that follow
+  /// it — like the setup wizard — pass [Brightness.light] to stay as bright as
+  /// the splash rather than stepping down to the dark-theme palette.
+  final Brightness? brightness;
+
   const OceanBackground({
     super.key,
     required this.child,
     this.borderRadius = BorderRadius.zero,
+    this.brightness,
   });
 
   @override
@@ -60,39 +73,127 @@ class OceanBackground extends StatefulWidget {
 }
 
 class _OceanBackgroundState extends State<OceanBackground>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ticker;
-  final _stopwatch = Stopwatch();
+    with WidgetsBindingObserver {
+  /// Elapsed animation time; paused whenever the effects are frozen so they
+  /// resume from where they stopped instead of jumping ahead. Built from
+  /// [clock] so tests can drive it with fake time.
+  final _stopwatch = clock.stopwatch();
+
+  /// Animation position in cycles, read by the painter.
+  final _animationValue = ValueNotifier<double>(0);
+
+  /// Drives repaints at [_frameInterval]. A vsync ticker would request a frame
+  /// on every display refresh (60 to 120 times a second) for bubbles that take
+  /// seconds to rise, keeping an idle app busy (#3044).
+  Timer? _frameTimer;
+
+  AppLifecycleState? _lifecycleState;
+  bool _tickersEnabled = true;
+  bool _disableAnimations = false;
+
+  /// Trips when the frames this animation drives keep running over budget,
+  /// and the effects then hold still for good (#4177).
+  final _frameBudget = FrameBudgetWatch();
+
+  /// Whether [_onFrameTimings] is registered, which it is only while the
+  /// effects animate.
+  bool _watchingFrames = false;
 
   /// Seconds for one conceptual animation cycle (controls bubble rise speed).
   static const _cyclePeriod = 10.0;
 
+  /// 30 frames per second.
+  static const _frameInterval = Duration(microseconds: 33334);
+
   @override
   void initState() {
     super.initState();
-    _stopwatch.start();
-    _ticker = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    )..repeat();
+    _lifecycleState = WidgetsBinding.instance.lifecycleState;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _tickersEnabled = TickerMode.valuesOf(context).enabled;
+    _disableAnimations = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    _syncAnimation();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
+    _syncAnimation();
+  }
+
+  /// Animates only while the effects can be seen and are wanted: the app is
+  /// focused in the foreground (a null state means the platform has not
+  /// reported one yet), the route is not covered, reduce motion is off, and
+  /// the device has kept up with the frames so far.
+  bool get _shouldAnimate =>
+      (_lifecycleState == null ||
+          _lifecycleState == AppLifecycleState.resumed) &&
+      _tickersEnabled &&
+      !_disableAnimations &&
+      !_frameBudget.tripped;
+
+  void _syncAnimation() {
+    if (_shouldAnimate) {
+      _watchFrames(true);
+      if (_frameTimer != null) return;
+      _stopwatch.start();
+      _frameTimer = Timer.periodic(_frameInterval, (_) => _onFrame());
+    } else {
+      _watchFrames(false);
+      _frameTimer?.cancel();
+      _frameTimer = null;
+      _stopwatch.stop();
+    }
+  }
+
+  void _watchFrames(bool watch) {
+    if (watch == _watchingFrames) return;
+    _watchingFrames = watch;
+    if (watch) {
+      _frameBudget.restartCadence();
+      SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
+    } else {
+      SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);
+    }
+  }
+
+  void _onFrameTimings(List<FrameTiming> timings) {
+    if (_frameBudget.record(timings)) {
+      _syncAnimation();
+    }
+  }
+
+  void _onFrame() {
+    _animationValue.value =
+        _stopwatch.elapsedMicroseconds / (_cyclePeriod * 1000000);
   }
 
   @override
   void dispose() {
-    _ticker.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _watchFrames(false);
+    _frameTimer?.cancel();
     _stopwatch.stop();
+    _animationValue.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark =
+        (widget.brightness ?? Theme.of(context).brightness) == Brightness.dark;
 
     final gradientColors = isDark
         ? [
-            const Color(0xFF00838F),
-            const Color(0xFF00838F).withValues(alpha: 0.9),
-            const Color(0xFF00796B).withValues(alpha: 0.85),
+            // Abyss Blue: the deep-ocean dark palette.
+            const Color(0xFF0B2540),
+            const Color(0xFF08243A).withValues(alpha: 0.9),
+            const Color(0xFF041220).withValues(alpha: 0.85),
           ]
         : [
             const Color(0xFF00ACC1),
@@ -120,11 +221,9 @@ class _OceanBackgroundState extends State<OceanBackground>
           children: [
             Positioned.fill(
               child: RepaintBoundary(
-                child: AnimatedBuilder(
-                  animation: _ticker,
-                  builder: (context, _) {
-                    final t =
-                        _stopwatch.elapsedMilliseconds / (_cyclePeriod * 1000);
+                child: ValueListenableBuilder<double>(
+                  valueListenable: _animationValue,
+                  builder: (context, t, _) {
                     return CustomPaint(
                       painter: OceanEffectPainter(
                         animationValue: t,
@@ -162,33 +261,42 @@ class OceanEffectPainter extends CustomPainter {
     _paintBubbles(canvas, size);
   }
 
+  /// Each patch fills only its own square: the gradient is transparent
+  /// beyond its radius, and a browser drawing without WebGL rasterises every
+  /// picture on every frame, so a full-screen fill cost it two full-screen
+  /// passes whenever anything animated (#4186).
   void _paintCaustics(Canvas canvas, Size size) {
     final t = animationValue * 2 * math.pi;
     final dx = math.sin(t) * 8;
     final dy = math.cos(t) * 4;
-    final rect = Offset.zero & size;
 
     // First caustic patch (upper-left area)
-    final center1 = Offset(size.width * 0.3 + dx, size.height * 0.4 + dy);
+    final patch1 = Rect.fromCircle(
+      center: Offset(size.width * 0.3 + dx, size.height * 0.4 + dy),
+      radius: 80,
+    );
     final paint1 = Paint()
       ..shader = RadialGradient(
         colors: [
           Colors.white.withValues(alpha: causticOpacity),
           Colors.transparent,
         ],
-      ).createShader(Rect.fromCircle(center: center1, radius: 80));
-    canvas.drawRect(rect, paint1);
+      ).createShader(patch1);
+    canvas.drawRect(patch1, paint1);
 
     // Second caustic patch (lower-right area)
-    final center2 = Offset(size.width * 0.7 - dx, size.height * 0.6 - dy);
+    final patch2 = Rect.fromCircle(
+      center: Offset(size.width * 0.7 - dx, size.height * 0.6 - dy),
+      radius: 60,
+    );
     final paint2 = Paint()
       ..shader = RadialGradient(
         colors: [
           Colors.white.withValues(alpha: causticOpacity * 0.67),
           Colors.transparent,
         ],
-      ).createShader(Rect.fromCircle(center: center2, radius: 60));
-    canvas.drawRect(rect, paint2);
+      ).createShader(patch2);
+    canvas.drawRect(patch2, paint2);
   }
 
   void _paintBubbles(Canvas canvas, Size size) {

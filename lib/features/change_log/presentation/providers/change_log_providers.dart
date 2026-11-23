@@ -1,0 +1,315 @@
+import 'dart:math';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/conflict_reference.dart';
+import 'package:submersion/features/change_log/data/repositories/change_log_preferences.dart';
+import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/features/change_log/data/services/change_log_maintenance.dart';
+import 'package:submersion/features/change_log/data/services/change_log_revert_service.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_event.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_filter.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_operation.dart';
+import 'package:submersion/features/change_log/domain/entities/change_log_revert_plan.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+const int kChangeLogPageSize = 50;
+
+final _log = LoggerService.forClass(ChangeLogFeedNotifier);
+
+final changeLogRepositoryProvider = Provider<ChangeLogRepository>(
+  (ref) => ChangeLogRepository(),
+);
+
+/// Every revert in the app goes through this service, so it re-arms the
+/// reminders of the documents a revert restores or edits (#4607).
+final changeLogRevertServiceProvider = Provider<ChangeLogRevertService>(
+  (ref) => ChangeLogRevertService(
+    rearmDocuments: (documents) =>
+        ref.read(documentMutationsProvider).rearmReminders(documents),
+  ),
+);
+
+final changeLogMaintenanceProvider = Provider<ChangeLogMaintenance>((ref) {
+  final prefs = ref.watch(sharedPreferencesProvider);
+  return ChangeLogMaintenance(
+    preferences: ChangeLogPreferences(prefs),
+    prefs: prefs,
+  );
+});
+
+/// What the log takes up, for the Storage usage page.
+final changeLogStorageBytesProvider = FutureProvider.autoDispose<int>((ref) {
+  final repository = ref.watch(changeLogRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchChanges());
+  return repository.storageBytes();
+});
+
+/// The pages of the feed loaded so far.
+class ChangeLogFeedState {
+  const ChangeLogFeedState({
+    this.operations = const [],
+    this.previews = const {},
+    this.references = const {},
+    this.recordCounts = const {},
+    this.hasMore = false,
+    this.isLoadingMore = false,
+  });
+
+  final List<ChangeLogOperation> operations;
+  final Map<String, ChangeLogPreview> previews;
+
+  /// The records the previews' values point at, for the formatter.
+  final Map<String, List<ConflictReference>> references;
+
+  /// How many records each bulk entry touched.
+  final Map<String, int> recordCounts;
+  final bool hasMore;
+  final bool isLoadingMore;
+
+  ChangeLogFeedState copyWith({
+    List<ChangeLogOperation>? operations,
+    Map<String, ChangeLogPreview>? previews,
+    Map<String, List<ConflictReference>>? references,
+    Map<String, int>? recordCounts,
+    bool? hasMore,
+    bool? isLoadingMore,
+  }) => ChangeLogFeedState(
+    operations: operations ?? this.operations,
+    previews: previews ?? this.previews,
+    references: references ?? this.references,
+    recordCounts: recordCounts ?? this.recordCounts,
+    hasMore: hasMore ?? this.hasMore,
+    isLoadingMore: isLoadingMore ?? this.isLoadingMore,
+  );
+}
+
+/// The feed for one filter and the active diver. Opening it settles what is
+/// waiting first, so the newest change is there.
+class ChangeLogFeedNotifier extends AsyncNotifier<ChangeLogFeedState> {
+  ChangeLogFeedNotifier(this.filter);
+
+  final ChangeLogFilter filter;
+
+  String? _diverId;
+
+  @override
+  Future<ChangeLogFeedState> build() async {
+    final repository = ref.watch(changeLogRepositoryProvider);
+    ref.invalidateSelfWhen(repository.watchChanges());
+    // A rebuild is usually a settle while the log is open, so it reads back
+    // as much as was showing rather than collapsing a scrolled list. Read
+    // before the first wait: a settle of several passes announces each one,
+    // and the rebuild that starts disposes this one mid-wait (#4186).
+    final showing = state.value?.operations.length ?? 0;
+    final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+    _diverId = diverId;
+    if (diverId == null) return const ChangeLogFeedState();
+    await repository.settleAll();
+    // Settling announced its entries, and the rebuild that started reads
+    // the feed; this one would read it for nothing.
+    if (!ref.mounted) return const ChangeLogFeedState();
+    return _nextPage(
+      repository,
+      diverId,
+      const ChangeLogFeedState(),
+      limit: max(kChangeLogPageSize, showing),
+    );
+  }
+
+  Future<ChangeLogFeedState> _nextPage(
+    ChangeLogRepository repository,
+    String diverId,
+    ChangeLogFeedState current, {
+    int limit = kChangeLogPageSize,
+  }) async {
+    final page = await repository.getFeed(
+      diverId: diverId,
+      filter: filter,
+      after: current.operations.isEmpty
+          ? null
+          : ChangeLogPageCursor.after(current.operations.last),
+      limit: limit,
+    );
+    final previews = await repository.getPreviewFields([
+      for (final operation in page)
+        if (!operation.isBulk) operation,
+    ]);
+    final references = await repository.resolveReferences([
+      for (final preview in previews.values) ...preview.fields,
+    ]);
+    final recordCounts = await repository.getRecordCounts([
+      for (final operation in page)
+        if (operation.isBulk) operation.id,
+    ]);
+    return ChangeLogFeedState(
+      operations: [...current.operations, ...page],
+      previews: {...current.previews, ...previews},
+      references: {...current.references, ...references},
+      recordCounts: {...current.recordCounts, ...recordCounts},
+      hasMore: page.length == limit,
+    );
+  }
+
+  /// Loads the next page, once, however often the list asks.
+  Future<void> loadMore() async {
+    final current = state.value;
+    final diverId = _diverId;
+    if (current == null ||
+        diverId == null ||
+        !current.hasMore ||
+        current.isLoadingMore) {
+      return;
+    }
+    state = AsyncData(current.copyWith(isLoadingMore: true));
+    // A rebuild replaces the list, and already shows as much as this page
+    // would add, so a page built on the old list is dropped.
+    bool isCurrent() =>
+        ref.mounted && identical(state.value?.operations, current.operations);
+    try {
+      final next = await _nextPage(
+        ref.read(changeLogRepositoryProvider),
+        diverId,
+        current,
+      );
+      if (isCurrent()) state = AsyncData(next);
+    } catch (error, stackTrace) {
+      _log.warning(
+        'Could not load more of the change log',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (isCurrent()) state = AsyncData(current);
+    }
+  }
+}
+
+final changeLogFeedNotifierProvider = AsyncNotifierProvider.autoDispose
+    .family<ChangeLogFeedNotifier, ChangeLogFeedState, ChangeLogFilter>(
+      ChangeLogFeedNotifier.new,
+    );
+
+/// The most records an entry's page lists.
+const int kChangeLogDetailLimit = 500;
+
+/// Everything an entry's page shows.
+class ChangeLogEntryDetail {
+  const ChangeLogEntryDetail({
+    required this.operation,
+    required this.events,
+    required this.references,
+    required this.rootNames,
+    required this.rootExists,
+    required this.eventCount,
+    this.plan,
+    this.namingFields = const {},
+  });
+
+  final ChangeLogOperation operation;
+
+  /// Oldest first, up to [kChangeLogDetailLimit].
+  final List<ChangeLogEvent> events;
+  final Map<String, List<ConflictReference>> references;
+  final Map<ChangeLogRoot, ConflictReference> rootNames;
+
+  /// Whether the entry's one record still exists. False for a bulk entry.
+  final bool rootExists;
+
+  /// How many records the entry lists, which can be more than [events].
+  final int eventCount;
+
+  /// What a revert would do. Worked out for one record's entry, where each
+  /// field shows its own state, and left for a bulk action until it is asked
+  /// for, since it can touch thousands of records.
+  final ChangeLogRevertPlan? plan;
+
+  /// By event id, the field that says which record an added or deleted
+  /// link row was ([changeLogNamingColumns]): from nothing to it for an
+  /// addition, from it to nothing for a deletion.
+  final Map<int, ChangeLogFieldChange> namingFields;
+}
+
+/// For a row that only links two records, the column naming the record it
+/// links. Adding such a row records no field and its delete copy changes no
+/// one field, so without it an entry's child row said only that a row was
+/// added, not which dive type.
+const changeLogNamingColumns = <String, String>{
+  'dive_dive_types': 'dive_type_id',
+};
+
+Future<Map<int, ChangeLogFieldChange>> _namingFields(
+  ChangeLogRepository repository,
+  List<ChangeLogEvent> events,
+) async {
+  final fields = <int, ChangeLogFieldChange>{};
+  for (final event in events) {
+    final column = changeLogNamingColumns[event.table];
+    if (column == null) continue;
+    final deleted = event.action == ChangeLogAction.delete;
+    final value = switch (event.action) {
+      ChangeLogAction.update => null,
+      ChangeLogAction.delete =>
+        event.fields.where((f) => f.column == column).firstOrNull?.oldValue,
+      // Null once the row has gone again: nothing is left to name it by.
+      ChangeLogAction.insert => await repository.liveValue(
+        event.table,
+        event.recordId,
+        column,
+      ),
+    };
+    if (value == null) continue;
+    fields[event.id] = ChangeLogFieldChange(
+      table: event.table,
+      column: column,
+      oldValue: deleted ? value : null,
+      newValue: deleted ? null : value,
+    );
+  }
+  return fields;
+}
+
+final changeLogEntryDetailProvider = FutureProvider.autoDispose
+    .family<ChangeLogEntryDetail?, String>((ref, id) async {
+      final repository = ref.watch(changeLogRepositoryProvider);
+      final service = ref.watch(changeLogRevertServiceProvider);
+      ref.invalidateSelfWhen(repository.watchChanges());
+      final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+      if (diverId == null) return null;
+      final operation = await repository.getVisibleOperation(id, diverId);
+      if (operation == null) return null;
+      final shown = operation.shownRoots;
+      final events = await repository.getEvents(
+        id,
+        limit: kChangeLogDetailLimit,
+        onlyRoots: shown,
+      );
+      final rootTable = operation.rootTable;
+      final rootId = operation.rootId;
+      final plan = operation.isBulk || operation.isSummary
+          ? null
+          : await service.planOperation(id, onlyRoots: shown);
+      final namingFields = await _namingFields(repository, events);
+      return ChangeLogEntryDetail(
+        operation: operation,
+        events: events,
+        references: await repository.resolveReferences([
+          for (final event in events)
+            if (event.action == ChangeLogAction.update) ...event.fields,
+          ...namingFields.values,
+        ]),
+        namingFields: namingFields,
+        rootNames: operation.isBulk
+            ? await repository.describeRoots({
+                for (final event in events) event.root,
+              })
+            : const {},
+        rootExists:
+            rootTable != null &&
+            rootId != null &&
+            await repository.recordExists(rootTable, rootId),
+        eventCount: await repository.countEvents(id, onlyRoots: shown),
+        plan: plan,
+      );
+    });

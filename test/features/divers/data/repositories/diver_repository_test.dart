@@ -1,17 +1,22 @@
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
 import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
 
 import '../../../../helpers/test_database.dart';
 
 void main() {
   late DiverRepository repository;
+  late ProfileSeriesRepository profileSeries;
   late AppDatabase db;
 
   setUp(() async {
     db = await setUpTestDatabase();
     repository = DiverRepository();
+    profileSeries = ProfileSeriesRepository();
   });
 
   tearDown(() async {
@@ -151,26 +156,6 @@ void main() {
         );
   }
 
-  Future<void> insertDiveProfile(
-    String id, {
-    required String diveId,
-    String? computerId,
-    int timestamp = 0,
-    double depth = 10.0,
-  }) async {
-    await db
-        .into(db.diveProfiles)
-        .insert(
-          DiveProfilesCompanion(
-            id: Value(id),
-            diveId: Value(diveId),
-            computerId: Value(computerId),
-            timestamp: Value(timestamp),
-            depth: Value(depth),
-          ),
-        );
-  }
-
   Future<void> insertDiveDataSource(
     String id, {
     required String diveId,
@@ -210,9 +195,6 @@ void main() {
   Future<List<DiverSetting>> getDiverSettings() =>
       db.select(db.diverSettings).get();
 
-  Future<List<DiveProfile>> getDiveProfiles() =>
-      db.select(db.diveProfiles).get();
-
   Future<List<DiveDataSourcesData>> getDiveDataSources() =>
       db.select(db.diveDataSources).get();
 
@@ -242,6 +224,62 @@ void main() {
       final dives = await getDives();
       expect(dives, isEmpty);
     });
+
+    test('deletes custom site types and keeps the built-ins', () async {
+      await insertDiver('d1');
+      await insertDiverSettings('d1');
+      await db.customStatement(
+        "INSERT INTO site_types (id, diver_id, name, is_built_in, "
+        "created_at, updated_at) VALUES ('mine', 'd1', 'Mine', 0, 0, 0)",
+      );
+
+      await repository.deleteDiver('d1');
+
+      final rows = await db
+          .customSelect('SELECT id, is_built_in FROM site_types')
+          .get();
+      expect(rows.any((r) => r.read<String>('id') == 'mine'), isFalse);
+      expect(rows, isNotEmpty);
+      expect(rows.every((r) => r.read<int>('is_built_in') == 1), isTrue);
+    });
+
+    test(
+      "drops and tombstones links to its custom site types on another diver's "
+      'site',
+      () async {
+        await insertDiver('d1');
+        await insertDiverSettings('d1');
+        await insertDiver('d2');
+        await db.customStatement(
+          "INSERT INTO site_types (id, diver_id, name, is_built_in, "
+          "created_at, updated_at) VALUES ('mine', 'd1', 'Mine', 0, 0, 0)",
+        );
+        // d2's site survives the delete; nothing cascades its link to d1's
+        // type, because site_site_types.site_type_id has no foreign key.
+        await db.customStatement(
+          "INSERT INTO dive_sites (id, diver_id, name, is_shared, created_at, "
+          "updated_at) VALUES ('s2', 'd2', 'Shared', 1, 0, 0)",
+        );
+        await db.customStatement(
+          "INSERT INTO site_site_types (id, site_id, site_type_id, created_at) "
+          "VALUES ('link', 's2', 'mine', 0), ('keep', 's2', 'lake', 0)",
+        );
+
+        await repository.deleteDiver('d1');
+
+        final links = await db.select(db.siteSiteTypes).get();
+        expect(links.map((l) => l.id), ['keep']);
+        final logged = await db
+            .customSelect('SELECT entity_type, record_id FROM deletion_log')
+            .get();
+        expect(
+          logged.map(
+            (r) => (r.read<String>('entity_type'), r.read<String>('record_id')),
+          ),
+          containsAll([('siteSiteTypes', 'link'), ('siteTypes', 'mine')]),
+        );
+      },
+    );
 
     test('deletes associated dive computers', () async {
       await insertDiver('d1');
@@ -320,26 +358,30 @@ void main() {
       expect(dives.first.computerId, isNull);
     });
 
-    test('nulls cross-diver computer references in dive_profiles', () async {
-      await insertDiver('diver-a');
-      await insertDiver('diver-b');
-      await insertDiverSettings('diver-a');
-      await insertDiverSettings('diver-b');
-      await insertDiveComputer('comp-a', diverId: 'diver-a');
-      await insertDive('dive-b', diverId: 'diver-b');
-      await insertDiveProfile(
-        'profile-b',
-        diveId: 'dive-b',
-        computerId: 'comp-a',
-      );
+    test(
+      'nulls cross-diver computer references in the profile series',
+      () async {
+        await insertDiver('diver-a');
+        await insertDiver('diver-b');
+        await insertDiverSettings('diver-a');
+        await insertDiverSettings('diver-b');
+        await insertDiveComputer('comp-a', diverId: 'diver-a');
+        await insertDive('dive-b', diverId: 'diver-b');
+        final seriesId = await profileSeries.insertSeries(
+          diveId: 'dive-b',
+          computerId: 'comp-a',
+          samples: const [ProfileSample(timestamp: 0, depth: 10.0)],
+          now: 1000,
+        );
 
-      await repository.deleteDiver('diver-a');
+        await repository.deleteDiver('diver-a');
 
-      final profiles = await getDiveProfiles();
-      expect(profiles, hasLength(1));
-      expect(profiles.first.id, equals('profile-b'));
-      expect(profiles.first.computerId, isNull);
-    });
+        final series = (await profileSeries.getRowsForDives([
+          'dive-b',
+        ])).firstWhere((r) => r.id == seriesId);
+        expect(series.computerId, isNull);
+      },
+    );
 
     test(
       'nulls cross-diver computer references in dive_data_sources',
@@ -451,4 +493,46 @@ void main() {
       },
     );
   });
+
+  group('getDiveCountsByDiver', () {
+    test('counts each profile\'s dives and skips profiles with none', () async {
+      await insertDiver('a');
+      await insertDiver('b');
+      await insertDiver('c');
+      await insertDive('d1', diverId: 'a');
+      await insertDive('d2', diverId: 'a');
+      await insertDive('d3', diverId: 'b');
+      await insertDive('d4');
+
+      final counts = await repository.getDiveCountsByDiver();
+
+      expect(counts, {'a': 2, 'b': 1});
+    });
+  });
+
+  test('watchDiveCountChanges ticks when a dive is written', () async {
+    await insertDiver('a');
+    final tick = repository.watchDiveCountChanges().first;
+    await insertDive('d1', diverId: 'a');
+    await expectLater(tick, completes);
+  });
+
+  test(
+    'watchDiveCountChanges coalesces a burst of writes into one tick',
+    () async {
+      await insertDiver('a');
+      var ticks = 0;
+      final sub = repository.watchDiveCountChanges().listen((_) => ticks++);
+      addTearDown(sub.cancel);
+
+      await insertDive('d1', diverId: 'a');
+      await insertDive('d2', diverId: 'a');
+      await insertDive('d3', diverId: 'a');
+      await Future<void>.delayed(
+        DiveRepository.changeTickDebounce + const Duration(milliseconds: 200),
+      );
+
+      expect(ticks, 1);
+    },
+  );
 }

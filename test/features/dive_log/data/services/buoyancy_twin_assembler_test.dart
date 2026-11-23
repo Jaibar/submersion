@@ -1,0 +1,677 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/buoyancy/body_composition.dart';
+import 'package:submersion/core/buoyancy/buoyancy_twin.dart';
+import 'package:submersion/core/buoyancy/weight_observation.dart';
+import 'package:submersion/core/buoyancy/weight_prediction_engine.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/data/services/buoyancy_twin_assembler.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+
+void main() {
+  FittedWeightModel emptyModel() => WeightPredictionEngine.fit(
+    observations: const [],
+    gearById: (_) => null,
+    bodyWeightKg: 75,
+  );
+
+  // 5 mm signal lives in the name; gear_feature parses thickness from the name
+  // when no thickness attribute is present (thickness is a curated attribute
+  // in the equipment-attributes model, not a scalar field).
+  const wetsuit = EquipmentItem(
+    id: 'suit1',
+    name: 'Wetsuit 5mm',
+    type: EquipmentType.wetsuit,
+  );
+  const drysuit = EquipmentItem(
+    id: 'dry1',
+    name: 'Drysuit',
+    type: EquipmentType.drysuit,
+  );
+  const mask = EquipmentItem(
+    id: 'mask1',
+    name: 'Mask',
+    type: EquipmentType.mask,
+  );
+
+  DiveTank tank(String id) => DiveTank(
+    id: id,
+    volume: 11.0,
+    workingPressure: 207,
+    startPressure: 200,
+    endPressure: 50,
+    material: TankMaterial.aluminum,
+    presetName: 'al80',
+    gasMix: const GasMix(o2: 21),
+  );
+
+  Dive diveWith({
+    List<DiveTank> tanks = const [],
+    List<EquipmentItem> equipment = const [],
+    List<DiveWeight> weights = const [],
+    double? weightAmount,
+    WeightType? weightType,
+  }) => Dive(
+    id: 'd1',
+    dateTime: DateTime(2024, 1, 1),
+    tanks: tanks,
+    gear: looseGear(equipment),
+    weights: weights,
+    weightAmount: weightAmount,
+    weightType: weightType,
+    waterType: WaterType.salt,
+  );
+
+  group('BuoyancyTwinAssembler.assemble', () {
+    test('assembles lead, droppable lead, suit, and static terms', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1'), tank('t2')],
+          equipment: [wetsuit],
+          weights: const [
+            DiveWeight(
+              id: 'w1',
+              diveId: 'd1',
+              weightType: WeightType.belt,
+              amountKg: 4.0,
+            ),
+            DiveWeight(
+              id: 'w2',
+              diveId: 'd1',
+              weightType: WeightType.trimWeights,
+              amountKg: 2.0,
+            ),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+
+      expect(input, isNotNull);
+      expect(input!.leadKg, closeTo(6.0, 1e-9));
+      expect(input.droppableLeadKg, closeTo(4.0, 1e-9)); // belt only
+      expect(input.tanks.length, 2);
+      expect(input.tanks.first.pressureSeries, isNull);
+      expect(input.suit.kind, TwinSuitKind.wetsuit);
+      expect(input.suit.anchorKg, closeTo(5.0, 1e-9)); // 5 mm type prior
+      expect(input.staticTerms.any((t) => t.label == 'personal'), isTrue);
+      expect(input.staticTerms.any((t) => t.label == 'water'), isTrue);
+    });
+
+    test('unnamed tank falls back to the localizable "tank" key', () {
+      // A tank with neither a preset nor a user name must not carry a
+      // hardcoded English 'Tank' label (which would leak into localized UIs);
+      // it uses the 'tank' key that the breakdown widget localizes.
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: const [
+            DiveTank(
+              id: 't1',
+              volume: 11.0,
+              workingPressure: 207,
+              startPressure: 200,
+              endPressure: 50,
+              material: TankMaterial.aluminum,
+              gasMix: GasMix(o2: 21),
+            ),
+          ],
+          equipment: [wetsuit],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+
+      expect(input!.tanks.single.label, 'tank');
+    });
+
+    test('returns null when there is nothing to model', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(equipment: [mask]),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input, isNull);
+    });
+
+    test('maps a drysuit to the drysuit suit kind', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(tanks: [tank('t1')], equipment: [drysuit]),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input!.suit.kind, TwinSuitKind.drysuit);
+    });
+
+    test('falls back to the legacy scalar weight when no rows exist', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit],
+          weightAmount: 7.0,
+          weightType: WeightType.integrated,
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input!.leadKg, closeTo(7.0, 1e-9));
+      expect(
+        input.droppableLeadKg,
+        closeTo(7.0, 1e-9),
+      ); // integrated is droppable
+    });
+
+    test('maps measured tank pressures into a series', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(tanks: [tank('t1')], equipment: [wetsuit]),
+        tankPressures: const {
+          't1': [
+            TankPressurePoint(tankId: 't1', timestamp: 0, pressure: 200),
+            TankPressurePoint(tankId: 't1', timestamp: 600, pressure: 80),
+          ],
+        },
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input!.tanks.first.pressureSeries, isNotNull);
+      expect(input.tanks.first.pressureSeries!.length, 2);
+    });
+  });
+
+  group('BuoyancyTwinAssembler.isModelable', () {
+    test('false with no tanks and no suit', () {
+      expect(BuoyancyTwinAssembler.isModelable(diveWith()), isFalse);
+    });
+
+    test('true with a tank', () {
+      expect(
+        BuoyancyTwinAssembler.isModelable(diveWith(tanks: [tank('t1')])),
+        isTrue,
+      );
+    });
+
+    test('false when an Avelo Hydrotank is breathed (#4657)', () {
+      // Its pressure is the water pumped in, not gas, and the water ballast
+      // that sets the diver's buoyancy is not modelled: no line rather than
+      // a wrong one, as for the dive's SAC.
+      final hydrotank = tank(
+        'h',
+      ).copyWith(role: TankRole.hydrotank, presetName: null);
+      final dive = diveWith(tanks: [hydrotank], equipment: [wetsuit]);
+      expect(BuoyancyTwinAssembler.isModelable(dive), isFalse);
+      expect(
+        BuoyancyTwinAssembler.assemble(
+          dive: dive,
+          tankPressures: const {},
+          model: emptyModel(),
+          bodyWeightKg: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('true with an exposure suit and no tank', () {
+      expect(
+        BuoyancyTwinAssembler.isModelable(diveWith(equipment: [wetsuit])),
+        isTrue,
+      );
+    });
+  });
+
+  group('BuoyancyTwinAssembler.droppableLeadKg', () {
+    test('sums only belt and integrated rows', () {
+      final dive = diveWith(
+        weights: const [
+          DiveWeight(
+            id: 'w1',
+            diveId: 'd1',
+            weightType: WeightType.integrated,
+            amountKg: 5.0,
+          ),
+          DiveWeight(
+            id: 'w2',
+            diveId: 'd1',
+            weightType: WeightType.backplate,
+            amountKg: 3.0,
+          ),
+        ],
+      );
+      expect(BuoyancyTwinAssembler.droppableLeadKg(dive), closeTo(5.0, 1e-9));
+    });
+
+    // A negative legacy scalar is no lead in the carried total (issue
+    // #4442), so it cannot be droppable lead either: the ditch check would
+    // otherwise read less than nothing.
+    test('a non-positive legacy scalar is no droppable lead', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit],
+          weightAmount: -5.0,
+          weightType: WeightType.belt,
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input!.leadKg, closeTo(0.0, 1e-9));
+      expect(input.droppableLeadKg, closeTo(0.0, 1e-9));
+    });
+  });
+
+  group('BuoyancyTwinAssembler.droppableLeadFromPlacement', () {
+    test('counts only belt and integrated placements', () {
+      final droppable = BuoyancyTwinAssembler.droppableLeadFromPlacement({
+        WeightType.belt.name: 4.0,
+        WeightType.integrated.name: 2.0,
+        WeightType.backplate.name: 3.0,
+        WeightType.trimWeights.name: 1.0,
+      });
+      expect(droppable, closeTo(6.0, 1e-9)); // belt + integrated only
+    });
+
+    test('ignores unrecognized placement keys', () {
+      final droppable = BuoyancyTwinAssembler.droppableLeadFromPlacement({
+        WeightType.belt.name: 5.0,
+        'nonsense': 10.0,
+      });
+      expect(droppable, closeTo(5.0, 1e-9));
+    });
+  });
+
+  group('gear-carried lead (issue #1103)', () {
+    EquipmentItem lead(
+      String id, {
+      double? dryWeightKg,
+      double? buoyancyKg,
+      String? style,
+    }) => EquipmentItem(
+      id: id,
+      name: id,
+      type: EquipmentType.weights,
+      attributes: [
+        if (dryWeightKg != null)
+          EquipmentAttribute.curated(
+            equipmentId: id,
+            key: EquipmentAttrKeys.dryWeightKg,
+            valueNum: dryWeightKg,
+          ),
+        if (buoyancyKg != null)
+          EquipmentAttribute.curated(
+            equipmentId: id,
+            key: EquipmentAttrKeys.buoyancyKg,
+            valueNum: buoyancyKg,
+          ),
+        if (style != null)
+          EquipmentAttribute.curated(
+            equipmentId: id,
+            key: EquipmentAttrKeys.weightStyle,
+            valueText: style,
+          ),
+      ],
+    );
+
+    test('ballast built into the rig counts as lead', () {
+      // The reporter's rig: every pound of lead lives in weighted gear and
+      // the dive's Weights section is empty. Before #1103 leadKg was 0.
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [
+            drysuit,
+            lead('dump', dryWeightKg: 3.63, buoyancyKg: -3.63),
+            lead('sta', dryWeightKg: 4.17),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.leadKg, closeTo(7.8, 1e-9));
+    });
+
+    test('typed weight rows and gear ballast are additive', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit, lead('sta', dryWeightKg: 2.0)],
+          weights: const [
+            DiveWeight(
+              id: 'w1',
+              diveId: 'd1',
+              weightType: WeightType.belt,
+              amountKg: 4.0,
+            ),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.leadKg, closeTo(6.0, 1e-9));
+    });
+
+    test('gear ballast adds to the legacy scalar too', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit, lead('sta', dryWeightKg: 2.0)],
+          weightAmount: 5.0,
+          weightType: WeightType.backplate,
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.leadKg, closeTo(7.0, 1e-9));
+      // Backplate lead is fixed, and the unstyled gear ballast is too.
+      expect(input.droppableLeadKg, closeTo(0.0, 1e-9));
+    });
+
+    test('weights gear with no declared mass changes nothing', () {
+      final bare = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit, lead('unspecified')],
+          weights: const [
+            DiveWeight(
+              id: 'w1',
+              diveId: 'd1',
+              weightType: WeightType.belt,
+              amountKg: 4.0,
+            ),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(bare.leadKg, closeTo(4.0, 1e-9));
+      expect(bare.droppableLeadKg, closeTo(4.0, 1e-9));
+    });
+
+    test('only ballast styled belt or integrated is droppable', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [
+            wetsuit,
+            lead('dump', dryWeightKg: 3.0, style: 'belt'),
+            lead('trim', dryWeightKg: 1.0, style: 'trim'),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.leadKg, closeTo(4.0, 1e-9));
+      expect(input.droppableLeadKg, closeTo(3.0, 1e-9));
+    });
+
+    test('weights gear never becomes a static buoyancy term', () {
+      // Double-counting guard: ballast belongs to leadKg alone.
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit, lead('dump', dryWeightKg: 3.0)],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.staticTerms.map((t) => t.label), isNot(contains('dump')));
+    });
+  });
+
+  group('equipment attributes reach the logged-dive rig (issue #1103)', () {
+    test('drysuit shell material sets the suit anchor, as in the planner', () {
+      // The assembler used to build features without traits, so a trilaminate
+      // drysuit fell back to the flat 10 kg type default here while the
+      // Weight Planner used the 9 kg attribute prior for the same item.
+      const trilam = EquipmentItem(
+        id: 'dry1',
+        name: 'Drysuit',
+        type: EquipmentType.drysuit,
+        attributes: [
+          EquipmentAttribute(
+            id: 'a1',
+            equipmentId: 'dry1',
+            key: EquipmentAttrKeys.shellMaterial,
+            valueText: 'trilaminate',
+          ),
+        ],
+      );
+
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(tanks: [tank('t1')], equipment: [trilam]),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.suit.kind, TwinSuitKind.drysuit);
+      expect(input.suit.anchorKg, closeTo(9.0, 1e-9));
+    });
+  });
+
+  group('drysuit layers are their own lead term (issue #1537)', () {
+    EquipmentItem layer(String id, EquipmentType type, String insulation) =>
+        EquipmentItem(
+          id: id,
+          name: 'Undergarment',
+          type: type,
+          attributes: [
+            EquipmentAttribute(
+              id: 'a-$id',
+              equipmentId: id,
+              key: EquipmentAttrKeys.insulationLevel,
+              valueText: insulation,
+            ),
+          ],
+        );
+
+    test('the undersuit rides beside the drysuit, not instead of it', () {
+      // The point of the issue: logging the garment as `other` gave it a
+      // 0 kg prior, so swapping a light undersuit for a heavy one moved the
+      // diver's lead without moving the model.
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [drysuit, layer('u1', EquipmentType.undersuit, 'heavy')],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      // The drysuit still owns the suit slot.
+      expect(input.suit.kind, TwinSuitKind.drysuit);
+      final undergarment = input.staticTerms.firstWhere(
+        (t) => t.label == 'Undergarment',
+      );
+      expect(undergarment.kg, closeTo(2.5, 1e-9));
+    });
+
+    test('a vest listed first rides beside the wetsuit (#3108)', () {
+      // The vest is a layer: even ahead of the suit in the gear list, the
+      // wetsuit keeps the suit slot and the vest adds a term of its own.
+      const vest = EquipmentItem(
+        id: 'vest1',
+        name: 'Ice vest',
+        type: EquipmentType.vest,
+      );
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(tanks: [tank('t1')], equipment: const [vest, wetsuit]),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!;
+
+      expect(input.suit.kind, TwinSuitKind.wetsuit);
+      expect(input.suit.anchorKg, closeTo(5.0, 1e-9));
+      final term = input.staticTerms.firstWhere((t) => t.label == 'Ice vest');
+      expect(term.kg, closeTo(1.0, 1e-9));
+    });
+
+    test('warmth moves the term', () {
+      double termFor(String insulation) => BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [
+            drysuit,
+            layer('u1', EquipmentType.undersuit, insulation),
+          ],
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      )!.staticTerms.firstWhere((t) => t.label == 'Undergarment').kg;
+
+      expect(termFor('extreme') - termFor('light'), closeTo(2.8, 1e-9));
+    });
+  });
+
+  group('BuoyancyTwinAssembler.composeRigTerms body composition', () {
+    RigTerms compose(FittedWeightModel model, {double? heightCm}) =>
+        BuoyancyTwinAssembler.composeRigTerms(
+          items: const [wetsuit],
+          tanks: const [],
+          model: model,
+          waterType: WaterType.salt,
+          bodyWeightKg: 80,
+          heightCm: heightCm,
+        );
+
+    test('mirrors the engine bmi term when a height is given', () {
+      final rig = compose(emptyModel(), heightCm: 165);
+      final term = rig.staticTerms.singleWhere((t) => t.label == 'bmi');
+      expect(
+        term.kg,
+        closeTo(
+          BodyComposition.leadTermKg(bodyMassKg: 80, heightCm: 165),
+          1e-9,
+        ),
+      );
+      expect(term.source, TermSource.bodyComposition);
+    });
+
+    test('falls back to the height the model was fitted with', () {
+      final model = WeightPredictionEngine.fit(
+        observations: const [],
+        gearById: (_) => null,
+        bodyWeightKg: 75,
+        heightCm: 160,
+      );
+      final rig = compose(model);
+      expect(rig.staticTerms.any((t) => t.label == 'bmi'), isTrue);
+    });
+
+    test('omits the term when the model was calibrated on history without '
+        'a height', () {
+      final model = WeightPredictionEngine.fit(
+        observations: [
+          for (var i = 0; i < 5; i++)
+            WeightObservation(
+              diveId: 'd$i',
+              diveDateTime: DateTime(2026, 1, 1 + i),
+              waterType: WaterType.salt,
+              carriedKg: 8,
+              equipmentIds: const [],
+              tanks: const [],
+            ),
+        ],
+        gearById: (_) => null,
+        bodyWeightKg: 80,
+      );
+      final rig = compose(model, heightCm: 165);
+      expect(rig.staticTerms.any((t) => t.label == 'bmi'), isFalse);
+    });
+
+    test('omits the term without any height', () {
+      final rig = compose(emptyModel());
+      expect(rig.staticTerms.any((t) => t.label == 'bmi'), isFalse);
+    });
+
+    test('labels a measured body fat term bodyFat (issue #4525)', () {
+      final rig = BuoyancyTwinAssembler.composeRigTerms(
+        items: const [wetsuit],
+        tanks: const [],
+        model: emptyModel(),
+        waterType: WaterType.salt,
+        bodyWeightKg: 80,
+        bodyFatPercent: 30,
+      );
+      final term = rig.staticTerms.singleWhere((t) => t.label == 'bodyFat');
+      expect(
+        term.kg,
+        closeTo(
+          BodyComposition.leadTermKg(
+            bodyMassKg: 80,
+            heightCm: null,
+            bodyFatPercent: 30,
+          ),
+          1e-9,
+        ),
+      );
+      expect(rig.staticTerms.any((t) => t.label == 'bmi'), isFalse);
+    });
+
+    test('falls back to the body fat, sex and age the model was fitted '
+        'with (issue #4525)', () {
+      final model = WeightPredictionEngine.fit(
+        observations: const [],
+        gearById: (_) => null,
+        bodyWeightKg: 80,
+        heightCm: 175,
+        ageYears: 40,
+        sex: DiverSex.male,
+      );
+      final term = compose(
+        model,
+      ).staticTerms.singleWhere((t) => t.label == 'bmi');
+      expect(term.kg, closeTo(-80 * 0.2 * 5.4 / 100, 1e-9));
+    });
+  });
+
+  group('BuoyancyTwinAssembler.composeRigTerms salinity', () {
+    double waterTerm({WaterType? waterType, double? salinityPpt}) =>
+        BuoyancyTwinAssembler.composeRigTerms(
+          items: const [wetsuit],
+          tanks: const [],
+          model: emptyModel(),
+          waterType: waterType,
+          salinityPpt: salinityPpt,
+          bodyWeightKg: 80,
+        ).staticTerms.singleWhere((t) => t.label == 'water').kg;
+
+    test('a custom salinity overrides the salt default', () {
+      // A custom-salinity plan carries waterType salt as its fallback; the
+      // water term must still follow the salinity, not the fallback.
+      expect(
+        waterTerm(waterType: WaterType.salt, salinityPpt: 0),
+        closeTo(waterTerm(waterType: WaterType.fresh), 1e-9),
+      );
+    });
+
+    test('sea salinity matches the salt baseline', () {
+      expect(
+        waterTerm(waterType: WaterType.salt, salinityPpt: 35),
+        closeTo(waterTerm(waterType: WaterType.salt), 1e-9),
+      );
+    });
+  });
+}

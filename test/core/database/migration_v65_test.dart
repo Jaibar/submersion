@@ -4,6 +4,8 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/database/database.dart';
 
+import 'test_fixtures.dart';
+
 Map<String, dynamic> _detailedConfig(String stat2Field) {
   return {
     'mode': 'detailed',
@@ -40,15 +42,22 @@ void main() {
               updated_at INTEGER NOT NULL
             )
           ''');
-          rawDb.execute("INSERT INTO divers (id, name) VALUES ('d1', 'Alice')");
-
-          for (final r in rows) {
+          // One diver per row: a real v64 database carries the v62 unique
+          // index on (diver_id, view_mode), and the beforeOpen backstop
+          // collapses two rows for one diver's view (issue #3343).
+          for (var i = 0; i < rows.length; i++) {
+            final r = rows[i];
+            rawDb.execute(
+              "INSERT INTO divers (id, name) VALUES ('d$i', 'Diver $i')",
+            );
             rawDb.execute(
               "INSERT INTO view_configs (id, diver_id, view_mode, config_json, updated_at)"
-              " VALUES ('${r.$1}', 'd1', '${r.$2}', ?, 0)",
+              " VALUES ('${r.$1}', 'd$i', '${r.$2}', ?, 0)",
               [r.$3],
             );
           }
+
+          createV71MediaTableRaw(rawDb);
         },
       );
     }

@@ -1,0 +1,565 @@
+#include "submersion_transcoder_plugin.h"
+
+#include "color_encoder.h"
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Graphics.Imaging.h>
+#include <winrt/Windows.Media.Editing.h>
+#include <winrt/Windows.Media.MediaProperties.h>
+#include <winrt/Windows.Media.Transcoding.h>
+#include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.FileProperties.h>
+#include <winrt/Windows.Storage.Search.h>
+#include <winrt/Windows.Storage.Streams.h>
+
+#include <flutter/event_stream_handler_functions.h>
+#include <flutter/method_channel.h>
+#include <flutter/plugin_registrar_windows.h>
+#include <flutter/standard_method_codec.h>
+
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace submersion_transcoder {
+
+namespace {
+using flutter::EncodableMap;
+using flutter::EncodableValue;
+
+std::string Utf8(const std::wstring& w) {
+  if (w.empty()) return {};
+  int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                static_cast<int>(w.size()), nullptr, 0, nullptr,
+                                nullptr);
+  std::string out(len, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                      out.data(), len, nullptr, nullptr);
+  return out;
+}
+
+std::wstring Wide(const std::string& s) {
+  if (s.empty()) return {};
+  int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                static_cast<int>(s.size()), nullptr, 0);
+  std::wstring out(len, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                      out.data(), len);
+  return out;
+}
+
+// Reads video properties on a worker thread (WinRT async must not block the
+// STA platform thread). Responds null when the file is not a readable video.
+void ProbeOnWorker(
+    std::string path,
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> result) {
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    auto file = winrt::Windows::Storage::StorageFile::GetFileFromPathAsync(
+                    winrt::hstring(Wide(path)))
+                    .get();
+    auto props = file.Properties().GetVideoPropertiesAsync().get();
+    const int32_t w = static_cast<int32_t>(props.Width());
+    const int32_t h = static_cast<int32_t>(props.Height());
+    if (w == 0 || h == 0) {
+      result->Success(EncodableValue());
+      return;
+    }
+    const int32_t durationMs = static_cast<int32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(props.Duration())
+            .count());
+    // Overall bitrate (bits/s) -> kbps. When the metadata bitrate is unknown
+    // (0), estimate from file size / duration so the ceiling rule doesn't read a
+    // high-bitrate clip as 0 and skip transcoding. Mirrors the Darwin/Linux
+    // probes.
+    int64_t bps = static_cast<int64_t>(props.Bitrate());
+    if (bps <= 0 && durationMs > 0) {
+      const uint64_t sizeBytes = file.GetBasicPropertiesAsync().get().Size();
+      if (sizeBytes > 0) {
+        bps = static_cast<int64_t>(sizeBytes) * 8 * 1000 / durationMs;
+      }
+    }
+    const int32_t kbps = static_cast<int32_t>(bps / 1000);
+    result->Success(EncodableValue(EncodableMap{
+        {EncodableValue("width"), EncodableValue(w)},
+        {EncodableValue("height"), EncodableValue(h)},
+        {EncodableValue("durationMs"), EncodableValue(durationMs)},
+        {EncodableValue("overallBitrateKbps"), EncodableValue(kbps)},
+    }));
+  } catch (...) {
+    result->Success(EncodableValue());
+  }
+}
+
+// Reads JPEG frames at each time in `times_ms` on a worker thread, for the
+// app's per-moment colour correction (issue #3520). Read-only. Responds with
+// one entry per time: the JPEG bytes, or null for a time that failed (or for
+// every time when the file cannot be opened as a video).
+void ExtractFramesOnWorker(
+    std::string path, std::vector<int32_t> times_ms, int32_t max_dimension,
+    bool exact,
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> result) {
+  namespace WME = winrt::Windows::Media::Editing;
+  namespace WSS = winrt::Windows::Storage::Streams;
+  flutter::EncodableList frames(times_ms.size(), EncodableValue());
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    auto file = winrt::Windows::Storage::StorageFile::GetFileFromPathAsync(
+                    winrt::hstring(Wide(path)))
+                    .get();
+    auto clip = WME::MediaClip::CreateFromFileAsync(file).get();
+    WME::MediaComposition composition;
+    composition.Clips().Append(clip);
+    // Only the width is asked for: with one dimension GetThumbnailAsync
+    // keeps the composition's own aspect ratio. The encoding properties are
+    // the stored (unrotated) size, so asking for both would squash a
+    // portrait phone clip stored landscape with a rotation tag. The width
+    // that fits the stored size inside max_dimension square; a frame that
+    // comes back portrait is taller than that, never distorted.
+    auto props = clip.GetVideoEncodingProperties();
+    const double w = props.Width() > 0 ? props.Width() : 16.0;
+    const double h = props.Height() > 0 ? props.Height() : 9.0;
+    const double scale = static_cast<double>(max_dimension) / (w > h ? w : h);
+    const int32_t out_w = static_cast<int32_t>(w * scale) > 0
+                              ? static_cast<int32_t>(w * scale)
+                              : 1;
+    for (size_t i = 0; i < times_ms.size(); ++i) {
+      try {
+        const winrt::Windows::Foundation::TimeSpan at{
+            std::chrono::milliseconds(times_ms[i])};
+        // A nearby keyframe is close enough for colour statistics, and far
+        // faster; a white-point pick needs the paused frame itself.
+        auto stream = composition
+                          .GetThumbnailAsync(
+                              at, out_w, 0,
+                              exact ? WME::VideoFramePrecision::NearestFrame
+                                    : WME::VideoFramePrecision::NearestKeyFrame)
+                          .get();
+        const auto size = static_cast<uint32_t>(stream.Size());
+        WSS::DataReader reader(stream);
+        reader.LoadAsync(size).get();
+        std::vector<uint8_t> bytes(size);
+        reader.ReadBytes(bytes);
+        frames[i] = EncodableValue(bytes);
+      } catch (...) {
+        frames[i] = EncodableValue();
+      }
+    }
+  } catch (...) {
+    // Not a readable video here: every frame stays null.
+  }
+  result->Success(EncodableValue(frames));
+}
+
+// Transcodes on a worker thread. Progress is routed through `dispatcher`, which
+// marshals each event onto the platform thread (EventSink::Success must not be
+// called from this worker thread).
+void TranscodeOnWorker(
+    std::string source, std::string output, int max_height, int video_kbps,
+    int /*audio_kbps*/, std::string progress_id,
+    std::shared_ptr<ProgressDispatcher> dispatcher,
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> result) {
+  namespace WS = winrt::Windows::Storage;
+  namespace WMP = winrt::Windows::Media::MediaProperties;
+  namespace WMT = winrt::Windows::Media::Transcoding;
+  // The transcode writes to "<output>.tmp" and renames on success. Any failure
+  // path must remove it so we never leave a partial temp behind (matches the
+  // darwin/android engines). Best-effort: a missing file just throws + is
+  // swallowed.
+  const std::wstring tmp_path = Wide(output) + L".tmp";
+  auto delete_tmp = [&tmp_path] {
+    try {
+      WS::StorageFile::GetFileFromPathAsync(winrt::hstring(tmp_path))
+          .get()
+          .DeleteAsync()
+          .get();
+    } catch (...) {
+    }
+  };
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+
+    auto src_file =
+        WS::StorageFile::GetFileFromPathAsync(winrt::hstring(Wide(source)))
+            .get();
+
+    // Never upscale: clamp the target height to the source height.
+    auto vprops = src_file.Properties().GetVideoPropertiesAsync().get();
+    const int32_t src_h = static_cast<int32_t>(vprops.Height());
+    const int32_t src_w = static_cast<int32_t>(vprops.Width());
+    int32_t out_h = max_height < src_h ? max_height : src_h;
+    if (out_h <= 0) out_h = src_h;
+    // Preserve aspect ratio, keep both dimensions even.
+    int32_t out_w = src_h > 0
+                        ? static_cast<int32_t>((int64_t)src_w * out_h / src_h)
+                        : src_w;
+    out_w -= (out_w % 2);
+    out_h -= (out_h % 2);
+    // A tiny target (or an odd 1px source) can round to 0, which MediaEncoding
+    // rejects. Clamp to the smallest valid even dimension.
+    if (out_w < 2) out_w = 2;
+    if (out_h < 2) out_h = 2;
+
+    // Destination folder + <name>.tmp file (replace any stale temp).
+    std::wstring wout = Wide(output);
+    size_t slash = wout.find_last_of(L"\\/");
+    std::wstring dir = slash == std::wstring::npos ? L"" : wout.substr(0, slash);
+    // A drive-root output ("C:\\out.mp4") leaves dir == "C:"; GetFolderFromPath
+    // needs the trailing separator ("C:\\") to resolve the root folder.
+    if (!dir.empty() && dir.back() == L':') dir.push_back(L'\\');
+    std::wstring name =
+        slash == std::wstring::npos ? wout : wout.substr(slash + 1);
+    auto folder =
+        WS::StorageFolder::GetFolderFromPathAsync(winrt::hstring(dir)).get();
+    auto tmp_file =
+        folder
+            .CreateFileAsync(winrt::hstring(name + L".tmp"),
+                             WS::CreationCollisionOption::ReplaceExisting)
+            .get();
+
+    auto profile =
+        WMP::MediaEncodingProfile::CreateMp4(WMP::VideoEncodingQuality::Auto);
+    profile.Video().Width(static_cast<uint32_t>(out_w));
+    profile.Video().Height(static_cast<uint32_t>(out_h));
+    profile.Video().Bitrate(static_cast<uint32_t>(video_kbps) * 1000);
+
+    WMT::MediaTranscoder transcoder;
+    auto prep =
+        transcoder.PrepareFileTranscodeAsync(src_file, tmp_file, profile).get();
+    if (!prep.CanTranscode()) {
+      delete_tmp();
+      result->Error("transcode_failed", "source cannot be transcoded");
+      return;
+    }
+
+    auto op = prep.TranscodeAsync();
+    op.Progress([dispatcher, progress_id](auto const&, double percent) {
+      dispatcher->Emit(EncodableValue(EncodableMap{
+          {EncodableValue("progressId"), EncodableValue(progress_id)},
+          {EncodableValue("fraction"), EncodableValue(percent / 100.0)},
+      }));
+    });
+    op.get();  // blocks until complete or throws on failure
+
+    // Success: rename <name>.tmp -> <name>.
+    tmp_file
+        .RenameAsync(winrt::hstring(name),
+                     WS::NameCollisionOption::ReplaceExisting)
+        .get();
+    dispatcher->Emit(EncodableValue(EncodableMap{
+        {EncodableValue("progressId"), EncodableValue(progress_id)},
+        {EncodableValue("fraction"), EncodableValue(1.0)},
+    }));
+    result->Success(EncodableValue());
+  } catch (winrt::hresult_error const& e) {
+    delete_tmp();
+    result->Error("transcode_failed", Utf8(std::wstring(e.message())));
+  } catch (...) {
+    delete_tmp();
+    result->Error("transcode_failed", "unknown transcode error");
+  }
+}
+
+}  // namespace
+
+// static
+void SubmersionTranscoderPlugin::RegisterWithRegistrar(
+    flutter::PluginRegistrarWindows* registrar) {
+  auto methods = std::make_unique<flutter::MethodChannel<EncodableValue>>(
+      registrar->messenger(), "submersion_transcoder/methods",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  auto progress = std::make_unique<flutter::EventChannel<EncodableValue>>(
+      registrar->messenger(), "submersion_transcoder/progress",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  auto plugin = std::make_unique<SubmersionTranscoderPlugin>(registrar);
+
+  methods->SetMethodCallHandler(
+      [p = plugin.get()](const auto& call, auto result) {
+        p->HandleMethodCall(call, std::move(result));
+      });
+
+  progress->SetStreamHandler(
+      std::make_unique<flutter::StreamHandlerFunctions<EncodableValue>>(
+          [p = plugin.get()](
+              const EncodableValue*,
+              std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
+              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+            p->dispatcher_->SetSink(
+                std::shared_ptr<flutter::EventSink<EncodableValue>>(
+                    std::move(events)));
+            return nullptr;
+          },
+          [p = plugin.get()](const EncodableValue*)
+              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+            p->dispatcher_->SetSink(nullptr);
+            return nullptr;
+          }));
+
+  registrar->AddPlugin(std::move(plugin));
+}
+
+SubmersionTranscoderPlugin::SubmersionTranscoderPlugin(
+    flutter::PluginRegistrarWindows* registrar)
+    : registrar_(registrar) {
+  // The transcode worker signals progress with PostMessage to the platform
+  // window; capture its HWND so ProgressDispatcher::Emit can reach it. The
+  // view's own HWND is a child window, and the delegate below only sees
+  // messages sent to the top-level one, so post to the root window.
+  if (auto* view = registrar_->GetView()) {
+    dispatcher_->SetWindow(GetAncestor(view->GetNativeWindow(), GA_ROOT));
+  }
+  // Drain queued progress on the platform thread whenever the worker signals.
+  window_proc_delegate_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
+      [this](HWND, UINT message, WPARAM, LPARAM) -> std::optional<LRESULT> {
+        if (message == WM_APP_TRANSCODE_PROGRESS) {
+          dispatcher_->Drain();
+          return 0;
+        }
+        return std::nullopt;
+      });
+}
+
+SubmersionTranscoderPlugin::~SubmersionTranscoderPlugin() {
+  // A detached transcode worker may still hold the dispatcher. Once the window
+  // proc delegate is gone nothing can drain queued events, so stop the worker
+  // from emitting (null HWND makes Emit() drop) and release the sink first.
+  dispatcher_->SetWindow(nullptr);
+  dispatcher_->SetSink(nullptr);
+  registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_delegate_id_);
+}
+
+void SubmersionTranscoderPlugin::HandleMethodCall(
+    const flutter::MethodCall<EncodableValue>& method_call,
+    std::unique_ptr<flutter::MethodResult<EncodableValue>> result) {
+  const std::string& method = method_call.method_name();
+  if (method == "isAvailable") {
+    result->Success(EncodableValue(true));
+    return;
+  }
+  if (method == "probe") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    const std::string* path = nullptr;
+    if (args) {
+      auto it = args->find(EncodableValue("path"));
+      if (it != args->end()) path = std::get_if<std::string>(&it->second);
+    }
+    if (!path) {
+      result->Success(EncodableValue());
+      return;
+    }
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> shared(
+        std::move(result));
+    std::thread(ProbeOnWorker, *path, shared).detach();
+    return;
+  }
+  if (method == "extractFrames") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    const std::string* path = nullptr;
+    const flutter::EncodableList* times = nullptr;
+    int32_t max_dimension = 160;
+    bool exact = false;
+    if (args) {
+      auto e = args->find(EncodableValue("exact"));
+      if (e != args->end()) {
+        if (const auto* v = std::get_if<bool>(&e->second)) exact = *v;
+      }
+      auto p = args->find(EncodableValue("path"));
+      if (p != args->end()) path = std::get_if<std::string>(&p->second);
+      auto t = args->find(EncodableValue("timesMs"));
+      if (t != args->end()) {
+        times = std::get_if<flutter::EncodableList>(&t->second);
+      }
+      auto m = args->find(EncodableValue("maxDimension"));
+      if (m != args->end()) {
+        if (const auto* v = std::get_if<int32_t>(&m->second)) {
+          max_dimension = *v < 16 ? 16 : (*v > 2048 ? 2048 : *v);
+        }
+      }
+    }
+    if (!path || !times) {
+      result->Success(EncodableValue());
+      return;
+    }
+    std::vector<int32_t> times_ms;
+    for (const auto& value : *times) {
+      if (const auto* ms = std::get_if<int32_t>(&value)) {
+        times_ms.push_back(*ms);
+      } else if (const auto* ms64 = std::get_if<int64_t>(&value)) {
+        times_ms.push_back(static_cast<int32_t>(*ms64));
+      } else {
+        times_ms.push_back(0);
+      }
+    }
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> shared(
+        std::move(result));
+    std::thread(ExtractFramesOnWorker, *path, times_ms, max_dimension, exact,
+                shared)
+        .detach();
+    return;
+  }
+  if (method == "encodeWithColor") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    auto get = [&](const char* k) -> const EncodableValue* {
+      if (!args) return nullptr;
+      auto it = args->find(EncodableValue(k));
+      return it == args->end() ? nullptr : &it->second;
+    };
+    const auto* source = get("source") ? std::get_if<std::string>(get("source"))
+                                       : nullptr;
+    const auto* output = get("output") ? std::get_if<std::string>(get("output"))
+                                       : nullptr;
+    const auto* progress_id =
+        get("progressId") ? std::get_if<std::string>(get("progressId"))
+                          : nullptr;
+    const auto* timeline =
+        get("timeline") ? std::get_if<flutter::EncodableList>(get("timeline"))
+                        : nullptr;
+    if (!source || !output || !progress_id || !timeline) {
+      result->Error("bad_args",
+                    "encodeWithColor requires: source, output, timeline, "
+                    "progressId");
+      return;
+    }
+    auto number = [](const EncodableValue& v) -> double {
+      if (const auto* d = std::get_if<double>(&v)) return *d;
+      if (const auto* i = std::get_if<int32_t>(&v)) return *i;
+      if (const auto* l = std::get_if<int64_t>(&v)) return static_cast<double>(*l);
+      return 0;
+    };
+    std::vector<TimelineKey> keys;
+    for (const auto& entry : *timeline) {
+      const auto* map = std::get_if<EncodableMap>(&entry);
+      if (!map) continue;
+      auto t = map->find(EncodableValue("t"));
+      auto m = map->find(EncodableValue("m"));
+      if (t == map->end() || m == map->end()) continue;
+      const auto* values = std::get_if<flutter::EncodableList>(&m->second);
+      if (!values || values->size() != 20) continue;
+      TimelineKey key;
+      key.time_ms = number(t->second);
+      for (size_t i = 0; i < 20; ++i) {
+        key.matrix[i] = static_cast<float>(number((*values)[i]));
+      }
+      keys.push_back(key);
+    }
+    auto flag = std::make_shared<EncodeState>();
+    {
+      std::lock_guard<std::mutex> lock(cancel_flags_->mutex);
+      cancel_flags_->flags[*progress_id] = flag;
+    }
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> shared(
+        std::move(result));
+    std::thread([source = *source, output = *output, id = *progress_id, keys,
+                 flag, flags = cancel_flags_, dispatcher = dispatcher_,
+                 shared] {
+      const ColorEncodeResult outcome = EncodeWithColor(
+          Wide(source), Wide(output), keys,
+          [&](double fraction) {
+            flag->fraction.store(fraction);
+            dispatcher->Emit(EncodableValue(EncodableMap{
+                {EncodableValue("progressId"), EncodableValue(id)},
+                {EncodableValue("fraction"), EncodableValue(fraction)},
+            }));
+          },
+          flag->cancelled);
+      {
+        std::lock_guard<std::mutex> lock(flags->mutex);
+        flags->flags.erase(id);
+      }
+      switch (outcome.outcome) {
+        case ColorEncodeOutcome::kOk:
+          shared->Success(EncodableValue());
+          break;
+        case ColorEncodeOutcome::kCancelled:
+          shared->Error("cancelled", outcome.message);
+          break;
+        case ColorEncodeOutcome::kUnsupported:
+          shared->Error("unsupported", outcome.message);
+          break;
+        case ColorEncodeOutcome::kFailed:
+          shared->Error("transcode_failed", outcome.message);
+          break;
+      }
+    }).detach();
+    return;
+  }
+  if (method == "colorEncodeProgress") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    if (args) {
+      auto it = args->find(EncodableValue("progressId"));
+      if (it != args->end()) {
+        if (const auto* id = std::get_if<std::string>(&it->second)) {
+          std::lock_guard<std::mutex> lock(cancel_flags_->mutex);
+          auto found = cancel_flags_->flags.find(*id);
+          if (found != cancel_flags_->flags.end()) {
+            result->Success(EncodableValue(found->second->fraction.load()));
+            return;
+          }
+        }
+      }
+    }
+    result->Success(EncodableValue());
+    return;
+  }
+  if (method == "cancelEncode") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    if (args) {
+      auto it = args->find(EncodableValue("progressId"));
+      if (it != args->end()) {
+        if (const auto* id = std::get_if<std::string>(&it->second)) {
+          std::lock_guard<std::mutex> lock(cancel_flags_->mutex);
+          auto found = cancel_flags_->flags.find(*id);
+          if (found != cancel_flags_->flags.end()) {
+            found->second->cancelled.store(true);
+          }
+        }
+      }
+    }
+    result->Success(EncodableValue());
+    return;
+  }
+  if (method == "transcode") {
+    const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+    if (!args) {
+      result->Error("bad_args", "missing transcode arguments");
+      return;
+    }
+    auto get_str = [&](const char* k) -> const std::string* {
+      auto it = args->find(EncodableValue(k));
+      return it == args->end() ? nullptr
+                               : std::get_if<std::string>(&it->second);
+    };
+    auto get_int = [&](const char* k) -> const int32_t* {
+      auto it = args->find(EncodableValue(k));
+      return it == args->end() ? nullptr : std::get_if<int32_t>(&it->second);
+    };
+    const auto* source = get_str("source");
+    const auto* output = get_str("output");
+    const auto* max_height = get_int("maxHeight");
+    const auto* video_kbps = get_int("videoBitrateKbps");
+    const auto* audio_kbps = get_int("audioBitrateKbps");
+    const auto* progress_id = get_str("progressId");
+    if (!source || !output || !max_height || !video_kbps || !audio_kbps ||
+        !progress_id) {
+      result->Error("bad_args", "missing transcode arguments");
+      return;
+    }
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> shared(
+        std::move(result));
+    std::thread(TranscodeOnWorker, *source, *output, *max_height, *video_kbps,
+                *audio_kbps, *progress_id, dispatcher_, shared)
+        .detach();
+    return;
+  }
+  result->NotImplemented();
+}
+
+}  // namespace submersion_transcoder

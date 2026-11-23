@@ -4,26 +4,50 @@ import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/features/courses/domain/constants/course_field.dart';
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/table_selection_owner.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 import 'package:submersion/features/courses/presentation/widgets/course_list_content.dart';
 import 'package:submersion/features/courses/presentation/widgets/course_summary_widget.dart';
 import 'package:submersion/features/courses/presentation/pages/course_detail_page.dart';
-import 'package:submersion/features/courses/presentation/pages/course_edit_page.dart';
+import 'package:submersion/features/courses/presentation/pages/course_edit_routes.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/courses/presentation/providers/course_query_providers.dart';
+import 'package:submersion/features/courses/query/course_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
+import 'package:submersion/features/courses/presentation/providers/course_list_count_provider.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/shared/widgets/section_header_title.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
-class CourseListPage extends ConsumerWidget {
-  const CourseListPage({super.key});
+class CourseListPage extends ConsumerStatefulWidget {
+  const CourseListPage({super.key, this.headerTitle});
+
+  /// Replaces every layout's header title, as Training's tab switch does
+  /// (#3437).
+  final SectionHeaderTitle? headerTitle;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CourseListPage> createState() => _CourseListPageState();
+}
+
+class _CourseListPageState extends ConsumerState<CourseListPage>
+    with TableSelectionOwner {
+  @override
+  Widget build(BuildContext context) {
+    ref.watch(certificationCatalogSyncProvider);
     final fab = FloatingActionButton.extended(
       onPressed: () {
         final isDesktop = ResponsiveBreakpoints.isMasterDetail(context);
@@ -33,7 +57,7 @@ class CourseListPage extends ConsumerWidget {
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/courses/new');
+          openNewCourse(context);
         }
       },
       tooltip: context.l10n.courses_action_add,
@@ -41,15 +65,33 @@ class CourseListPage extends ConsumerWidget {
       label: Text(context.l10n.courses_action_add),
     );
 
+    resetTableSelectionOffTable(courseListViewModeProvider);
+
     // Table mode: use shared TableModeLayout for full-width table with
     // optional detail pane.
     final viewMode = ref.watch(courseListViewModeProvider);
     if (viewMode == ListViewMode.table) {
+      final countLabel = courseListCountLabel(context, ref);
       return FocusTraversalGroup(
         child: TableModeLayout(
           sectionKey: 'courses',
+          rememberedSelectedId: ref.watch(rememberedCourseIdProvider),
           appBarTitle: context.l10n.nav_courses,
-          tableContent: const CourseListContent(showAppBar: false),
+          appBarSubtitle: countLabel,
+          appBarTitleWidget: widget.headerTitle?.build(
+            context,
+            SectionHeaderSlot.table,
+            countLabel,
+          ),
+          appBarToolbarHeight: widget.headerTitle?.appBarHeight(
+            context,
+            countLabel,
+          ),
+          phoneAppBarPin: widget.headerTitle?.pinAppBar,
+          tableContent: CourseListContent(
+            showAppBar: false,
+            selectionController: tableSelection,
+          ),
           detailBuilder: (context, courseId) => CourseDetailPage(
             courseId: courseId,
             embedded: true,
@@ -59,38 +101,46 @@ class CourseListPage extends ConsumerWidget {
             },
           ),
           summaryBuilder: (context) => const CourseSummaryWidget(),
-          editBuilder: (context, courseId, onSaved, onCancel) => CourseEditPage(
-            courseId: courseId,
-            embedded: true,
-            onSaved: () => onSaved(courseId),
-            onCancel: onCancel,
+          // The page opened unlocked (issue #4527).
+          editBuilder: (context, courseId, onSaved, onCancel) => courseEditPane(
+            context,
+            courseId,
+            onSaved,
+            onCancel,
+            onDeleted: () => context.go(GoRouterState.of(context).uri.path),
           ),
-          createBuilder: (context, onSaved, onCancel) => CourseEditPage(
-            embedded: true,
-            onSavedWithId: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new course (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newCoursePane(context, onSaved, onCancel),
           selectedId: ref.watch(highlightedCourseIdProvider),
           onEntitySelected: (id) {
             ref.read(highlightedCourseIdProvider.notifier).state = id;
           },
           columnSettingsAction: IconButton(
             icon: const Icon(Icons.view_column_outlined),
-            tooltip: 'Column settings',
-            onPressed: () {
-              final config = ref.read(courseTableConfigProvider);
-              final notifier = ref.read(courseTableConfigProvider.notifier);
-              showEntityTableColumnPicker<CourseField>(
-                context,
-                config: config,
-                adapter: CourseFieldAdapter.instance,
-                onToggleColumn: notifier.toggleColumn,
-                onReorderColumn: notifier.reorderColumn,
-                onTogglePin: notifier.togglePin,
-              );
-            },
+            tooltip: context.l10n.columnConfig_tooltip_columnSettings,
+            onPressed: () => showEntityTableColumnPicker<CourseField>(
+              context,
+              configProvider: courseTableConfigProvider,
+              adapter: CourseFieldAdapter.withCatalog(
+                context.certificationCatalog,
+              ),
+            ),
           ),
           appBarActions: [
+            Consumer(
+              builder: (context, ref, _) => QueryFilterButton(
+                active: ref.watch(courseFilterProvider).query != null,
+                compact: true,
+                onPressed: () => showQueryFilterSheet(
+                  context,
+                  subject: QuerySubject.courses,
+                  root: courseQueryEntity,
+                  initial: ref.read(courseFilterProvider).query,
+                  onApply: setCourseQuery,
+                ),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.sort, size: 20),
               tooltip: context.l10n.courses_action_sort,
@@ -102,13 +152,15 @@ class CourseListPage extends ConsumerWidget {
                   currentField: sort.field,
                   currentDirection: sort.direction,
                   fields: CourseSortField.values,
-                  getFieldDisplayName: (field) => field.displayName,
+                  getFieldDisplayName: (field) =>
+                      field.localizedName(context.l10n),
                   getFieldIcon: (field) => field.icon,
                   onSortChanged: (field, direction) {
-                    ref.read(courseSortProvider.notifier).state = SortState(
-                      field: field,
-                      direction: direction,
-                    );
+                    ref
+                        .read(settingsProvider.notifier)
+                        .setCourseSort(
+                          SortState(field: field, direction: direction),
+                        );
                   },
                 );
               },
@@ -120,12 +172,15 @@ class CourseListPage extends ConsumerWidget {
                   final mode = ListViewMode.fromName(
                     value.replaceFirst('view_', ''),
                   );
-                  ref.read(courseListViewModeProvider.notifier).state = mode;
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setCourseListViewMode(mode);
                 }
               },
               itemBuilder: (context) {
                 final currentMode = ref.read(courseListViewModeProvider);
                 return [
+                  ...tableSelectItemsEntries(context),
                   ...ListViewModeToggle.menuItems(
                     context,
                     currentMode: currentMode,
@@ -143,12 +198,14 @@ class CourseListPage extends ConsumerWidget {
     // Desktop: Use master-detail layout
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
       return MasterDetailScaffold(
-        sectionId: 'courses',
+        sectionId: RecordListSection.courses,
+        rememberedSelectedId: ref.watch(rememberedCourseIdProvider),
         masterBuilder: (context, onItemSelected, selectedId) =>
             CourseListContent(
               onItemSelected: onItemSelected,
               selectedId: selectedId,
               showAppBar: false,
+              headerTitle: widget.headerTitle,
             ),
         detailBuilder: (context, courseId) => CourseDetailPage(
           courseId: courseId,
@@ -159,24 +216,28 @@ class CourseListPage extends ConsumerWidget {
           },
         ),
         summaryBuilder: (context) => const CourseSummaryWidget(),
-        editBuilder: (context, courseId, onSaved, onCancel) => CourseEditPage(
-          courseId: courseId,
-          embedded: true,
-          onSaved: () => onSaved(courseId),
-          onCancel: onCancel,
+        // The page opened unlocked (issue #4527).
+        editBuilder: (context, courseId, onSaved, onCancel) => courseEditPane(
+          context,
+          courseId,
+          onSaved,
+          onCancel,
+          onDeleted: () => context.go(GoRouterState.of(context).uri.path),
         ),
-        createBuilder: (context, onSaved, onCancel) => CourseEditPage(
-          embedded: true,
-          onSavedWithId: onSaved,
-          onCancel: onCancel,
-        ),
+        // The page on a new course (plan 11).
+        createBuilder: (context, onSaved, onCancel) =>
+            newCoursePane(context, onSaved, onCancel),
         floatingActionButton: fab,
       );
     }
 
     // Mobile: Use list content with full scaffold
     return FocusTraversalGroup(
-      child: CourseListContent(showAppBar: true, floatingActionButton: fab),
+      child: CourseListContent(
+        showAppBar: true,
+        floatingActionButton: fab,
+        headerTitle: widget.headerTitle,
+      ),
     );
   }
 }

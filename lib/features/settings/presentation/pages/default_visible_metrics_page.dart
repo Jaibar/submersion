@@ -39,6 +39,13 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             onChanged: notifier.setDefaultShowPressure,
           ),
           SwitchListTile(
+            title: Text(
+              context.l10n.settings_appearance_metric_estimatedTankPressure,
+            ),
+            value: settings.defaultShowEstimatedTankPressure,
+            onChanged: notifier.setDefaultShowEstimatedTankPressure,
+          ),
+          SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_heartRate),
             value: settings.defaultShowHeartRate,
             onChanged: notifier.setDefaultShowHeartRate,
@@ -49,9 +56,37 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             onChanged: notifier.setDefaultShowSac,
           ),
           SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_buoyancy),
+            value: settings.defaultShowBuoyancy,
+            onChanged: notifier.setDefaultShowBuoyancy,
+          ),
+          // The three values Shearwater's Avelo mode logs (issue #4664).
+          SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_aveloBuoyancy),
+            value: settings.defaultShowAveloBuoyancy,
+            onChanged: notifier.setDefaultShowAveloBuoyancy,
+          ),
+          SwitchListTile(
+            title: Text(
+              context.l10n.settings_appearance_metric_aveloGasRemaining,
+            ),
+            value: settings.defaultShowAveloGasRemaining,
+            onChanged: notifier.setDefaultShowAveloGasRemaining,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_computerRmv),
+            value: settings.defaultShowComputerRmv,
+            onChanged: notifier.setDefaultShowComputerRmv,
+          ),
+          SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_events),
             value: settings.defaultShowEvents,
             onChanged: notifier.setDefaultShowEvents,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_photoMarkers),
+            value: settings.defaultShowPhotoMarkers,
+            onChanged: notifier.setDefaultShowPhotoMarkers,
           ),
           const Divider(),
           _buildSectionHeader(
@@ -64,11 +99,19 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             onChanged: notifier.setShowCeilingOnProfile,
           ),
           SwitchListTile(
-            title: Text(
-              context.l10n.settings_appearance_metric_ascentRateColors,
-            ),
+            title: Text(context.l10n.diveLog_legend_label_decoStops),
+            value: settings.showDecoStopsOnProfile,
+            onChanged: notifier.setShowDecoStopsOnProfile,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.diveLog_legend_label_ascentRate),
             value: settings.showAscentRateColors,
             onChanged: notifier.setShowAscentRateColors,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.diveLog_legend_label_ascentRateLine),
+            value: settings.defaultShowAscentRateLine,
+            onChanged: notifier.setDefaultShowAscentRateLine,
           ),
           SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_ndl),
@@ -79,6 +122,11 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             title: Text(context.l10n.settings_appearance_metric_tts),
             value: settings.defaultShowTts,
             onChanged: notifier.setDefaultShowTts,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_gtr),
+            value: settings.defaultShowGtr,
+            onChanged: notifier.setDefaultShowGtr,
           ),
           SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_cns),
@@ -111,9 +159,21 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             onChanged: notifier.setDefaultShowPpHe,
           ),
           SwitchListTile(
+            title: Text(
+              context.l10n.settings_appearance_metric_counterdiffusion,
+            ),
+            value: settings.defaultShowCounterdiffusion,
+            onChanged: notifier.setDefaultShowCounterdiffusion,
+          ),
+          SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_gasDensity),
             value: settings.defaultShowGasDensity,
             onChanged: notifier.setDefaultShowGasDensity,
+          ),
+          SwitchListTile(
+            title: Text(context.l10n.diveLog_legend_label_o2Cells),
+            value: settings.defaultShowO2CellMv,
+            onChanged: notifier.setDefaultShowO2CellMv,
           ),
           const Divider(),
           _buildSectionHeader(

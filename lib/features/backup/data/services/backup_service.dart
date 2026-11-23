@@ -1,49 +1,105 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:sqlite3/common.dart' as sqlite3;
 import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/constants/app_directories.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/backup_bookmark_service.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
-import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/cloud_storage/deferred_write_provider.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/security/database_security_sidecar.dart'
+    show isEncryptedDatabaseFile;
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_dir.dart';
+import 'package:submersion/core/services/sync/crypto/encryption_key_store.dart';
+import 'package:submersion/core/services/sync/library_epoch_store.dart';
+import 'package:submersion/core/services/sync/library_replace_intent.dart';
+import 'package:submersion/core/services/sync/post_restore_sync_store.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/core/services/sync/sync_device_metadata.dart';
+import 'package:submersion/core/services/sync/sync_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_copy_guard.dart';
+import 'package:submersion/core/database/database_image_header.dart';
+import 'package:submersion/features/backup/data/services/backup_crypto.dart';
+import 'package:submersion/features/backup/data/services/backup_crypto_image.dart';
+import 'package:submersion/features/backup/data/services/backup_image_inspection.dart';
+import 'package:submersion/features/backup/data/services/backup_note_stamp.dart';
+import 'package:submersion/features/backup/data/services/backup_encryption_key_store.dart';
+import 'package:submersion/core/services/database_service.dart'
+    show DatabaseService, DatabaseServiceBrowserRestore;
+import 'package:submersion/features/backup/domain/exceptions/backup_encrypted_exception.dart';
+import 'package:submersion/features/backup/data/services/backup_attribution.dart';
+import 'package:submersion/features/backup/data/services/backup_pin_markers.dart';
+import 'package:submersion/features/backup/data/services/cross_device_retention.dart';
+import 'package:submersion/features/backup/data/services/extra_copy_destination.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/marine_life/data/services/builtin_species_seed_version_store.dart';
+import 'package:submersion/features/backup/data/services/backup_database_adapter.dart';
+import 'package:submersion/features/backup/data/services/backup_saf_port.dart';
+import 'package:submersion/features/backup/data/services/backup_target.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
 import 'package:submersion/features/backup/domain/entities/backup_type.dart';
+import 'package:submersion/features/backup/domain/entities/extra_cloud_copy.dart';
+import 'package:submersion/features/backup/domain/entities/restore_mode.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 
-/// Thin interface for the database operations BackupService needs.
-///
-/// Allows injecting a fake in tests without depending on the
-/// [DatabaseService] singleton directly.
-abstract class BackupDatabaseAdapter {
-  Future<void> backup(String destinationPath);
-  Future<void> restore(String backupPath);
-  Future<String> get databasePath;
-  AppDatabase get database;
+// BackupDatabaseAdapter + DefaultBackupDatabaseAdapter live in
+// backup_database_adapter.dart; re-exported so existing importers
+// (background_service, providers, tests) keep resolving these types from
+// backup_service.dart after the extraction that broke the backup_target cycle.
+export 'package:submersion/features/backup/data/services/backup_database_adapter.dart';
+
+part 'backup_service_cloud_copy.dart';
+part 'backup_service_copy_out.dart';
+part 'backup_service_extra_copies.dart';
+part 'backup_service_image_restore.dart';
+part 'backup_service_pruning.dart';
+part 'backup_service_retention.dart';
+
+/// A backups directory ready to write into, plus [release] to call when the
+/// caller is done -- which stops any security-scoped access that was armed to
+/// reach a custom Apple location. For the default/sandbox location the release
+/// is a no-op.
+class BackupDirLease {
+  final String path;
+  final Future<void> Function() _release;
+  const BackupDirLease(this.path, this._release);
+
+  Future<void> release() => _release();
 }
 
-/// Default adapter that delegates to [DatabaseService.instance].
-class DefaultBackupDatabaseAdapter implements BackupDatabaseAdapter {
-  final DatabaseService _dbAdapter;
+/// Narrow seam over [BackupBookmarkService] so the leased resolver can be
+/// tested without a native channel.
+abstract class BackupBookmarkPort {
+  Future<BackupBookmarkLease?> resolve(Uint8List data);
+  Future<void> release(String ref);
+  Future<Uint8List?> createBookmark(String path);
+}
 
-  const DefaultBackupDatabaseAdapter(this._dbAdapter);
-
-  @override
-  Future<void> backup(String destinationPath) =>
-      _dbAdapter.backup(destinationPath);
-
-  @override
-  Future<void> restore(String backupPath) => _dbAdapter.restore(backupPath);
+class _DefaultBackupBookmarkPort implements BackupBookmarkPort {
+  const _DefaultBackupBookmarkPort();
 
   @override
-  Future<String> get databasePath => _dbAdapter.databasePath;
+  Future<BackupBookmarkLease?> resolve(Uint8List data) =>
+      BackupBookmarkService.resolveBookmark(data);
 
   @override
-  AppDatabase get database => _dbAdapter.database;
+  Future<void> release(String ref) => BackupBookmarkService.release(ref);
+
+  @override
+  Future<Uint8List?> createBookmark(String path) =>
+      BackupBookmarkService.createBookmark(path);
 }
 
 /// Core backup service handling backup creation, restore, pruning, and cloud upload.
@@ -51,22 +107,141 @@ class DefaultBackupDatabaseAdapter implements BackupDatabaseAdapter {
 /// Dependencies are constructor-injected for testability.
 /// Cloud provider is optional — backups work locally without it.
 class BackupService {
+  /// Why a protected-database copy failed to open with the live key. The
+  /// file cannot say which of these it is: a key from another install and a
+  /// corrupt file fail the keyed open the same way.
+  static const String lockedCopyWrongKeyMessage =
+      'This copy came from a protected database that this install has no key '
+      'for (another device, or protection was turned off and on again since), '
+      'or the file is corrupt.';
+
+  /// Why an encrypted-looking file could not be checked: there is no live
+  /// key to open it with. Restore from file opts every file into this check,
+  /// so it names no particular kind of backup.
+  static const String unreadableCopyNoKeyMessage =
+      'This file is not a plain Submersion database. It may be a copy of a '
+      'protected database whose key this install does not have, or it may be '
+      'corrupt.';
+
   final BackupDatabaseAdapter _dbAdapter;
   final BackupPreferences _preferences;
   final CloudStorageProvider? _cloudProvider;
+  final SyncRepository _syncRepository;
+
+  /// Library epoch persistence for restore Replace mode. Nullable so existing
+  /// constructions keep working; Replace mode is a no-op without it.
+  final LibraryEpochStore? _epochStore;
+
+  /// Set on a Merge restore so the next launch forces one reconciling sync.
+  /// Nullable so existing constructions keep working.
+  final PostRestoreSyncStore? _postRestoreSyncStore;
+
+  /// Told when a restore is about to replace the database, so the storage
+  /// cleanup defers cloud deletes and runs its post-restore pass (storage GC
+  /// design, Coordinator).
+  final Future<void> Function(DateTime at)? _onRestoring;
+
+  /// End-to-end encryption deps: when the sync-encryption flag is on and a
+  /// key + keyslot mirror are available, cloud uploads become framed .sbe
+  /// artifacts and encrypted restores can decrypt silently. Both nullable so
+  /// existing constructions keep working (plaintext behavior).
+  final EncryptionKeyStore? _encryptionKeyStore;
+  final SyncPreferences? _syncPreferences;
+
+  /// Backup-encryption key (issue #580). When the backupEncryptionEnabled flag
+  /// is on and this + a mirror are present, every backup write is a framed
+  /// `.sbe`. Nullable so existing constructions keep working (plaintext). Every
+  /// real construction path that can run with backup encryption enabled must
+  /// inject one (the providers do; the mobile background isolate does too) --
+  /// `_activeBackupKey` fails closed when the flag is on but the store is null.
+  final BackupEncryptionKeyStore? _backupEncryptionKeyStore;
+
+  /// Cleared after a restore so the next launch re-applies the bundled
+  /// species catalog to the restored rows.
+  final BuiltInSpeciesSeedVersionStore? _seedVersionStore;
+
+  /// The account the copy is pinned to, fixed with [_cloudProvider] when
+  /// this service is built so the two cannot disagree mid-backup; null
+  /// while the copy follows sync (or is off).
+  final String? _pinnedCopyAccountId;
+
+  /// The accounts each backup is also copied to (issue #3782), fixed with
+  /// [_cloudProvider] when this service is built.
+  final List<ExtraCopyDestination> _extraCopies;
+
+  /// SAF write/read/delete seam for Android custom (`content://`) backup
+  /// locations. Defaults to the real platform channel; injectable for tests.
+  final BackupSafPort _safPort;
+
+  /// A browser's swap of its library for a backup's bytes (issue #4121),
+  /// which returns the replaced library's path for [_retireLibrary].
+  final Future<String> Function(
+    Uint8List image, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  })
+  _restoreImage;
+
+  /// Moves a browser's other tabs onto the restored library and deletes the
+  /// one it replaced.
+  final Future<void> Function(String replacedPath) _retireLibrary;
+
+  /// How long a prune waits for the cloud backup folder's listing before it
+  /// carries on without one (issue #4572). Injectable for tests.
+  final Duration _cloudListingTimeout;
+
+  /// The default for [_cloudListingTimeout]: generous for a slow mobile
+  /// network, and well inside the 10 minutes Android gives a background
+  /// worker after its upload.
+  static const Duration defaultCloudListingTimeout = Duration(seconds: 60);
   final _log = LoggerService.forClass(BackupService);
   final _uuid = const Uuid();
 
-  static const String _localBackupFolder = 'Submersion/Backups';
+  static const List<String> _localBackupFolder = [
+    kAppDocumentsFolder,
+    'Backups',
+  ];
   static const String _cloudBackupFolder = 'Submersion Backups';
 
   BackupService({
     required BackupDatabaseAdapter dbAdapter,
     required BackupPreferences preferences,
     CloudStorageProvider? cloudProvider,
+    SyncRepository? syncRepository,
+    LibraryEpochStore? epochStore,
+    PostRestoreSyncStore? postRestoreSyncStore,
+    Future<void> Function(DateTime at)? onRestoring,
+    BackupSafPort? safPort,
+    EncryptionKeyStore? encryptionKeyStore,
+    SyncPreferences? syncPreferences,
+    BackupEncryptionKeyStore? backupEncryptionKeyStore,
+    BuiltInSpeciesSeedVersionStore? seedVersionStore,
+    String? copyAccountId,
+    List<ExtraCopyDestination> extraCopies = const [],
+    Future<String> Function(
+      Uint8List image, {
+      void Function(int currentStep, int totalSteps)? onMigrationProgress,
+    })?
+    restoreImage,
+    Future<void> Function(String replacedPath)? retireLibrary,
+    Duration cloudListingTimeout = defaultCloudListingTimeout,
   }) : _dbAdapter = dbAdapter,
        _preferences = preferences,
-       _cloudProvider = cloudProvider;
+       _cloudProvider = cloudProvider,
+       _syncRepository = syncRepository ?? SyncRepository(),
+       _epochStore = epochStore,
+       _postRestoreSyncStore = postRestoreSyncStore,
+       _onRestoring = onRestoring,
+       _safPort = safPort ?? const MethodChannelBackupSafPort(),
+       _encryptionKeyStore = encryptionKeyStore,
+       _syncPreferences = syncPreferences,
+       _backupEncryptionKeyStore = backupEncryptionKeyStore,
+       _seedVersionStore = seedVersionStore,
+       _pinnedCopyAccountId = copyAccountId,
+       _extraCopies = List.unmodifiable(extraCopies),
+       _restoreImage = restoreImage ?? DatabaseService.instance.restoreImage,
+       _retireLibrary =
+           retireLibrary ?? DatabaseService.instance.retireWebLibrary,
+       _cloudListingTimeout = cloudListingTimeout;
 
   // ===========================================================================
   // Backup
@@ -77,59 +252,194 @@ class BackupService {
   /// Returns the [BackupRecord] describing the created backup.
   /// If cloud provider is available and cloud backup is enabled,
   /// the backup is also uploaded to cloud storage.
-  Future<BackupRecord> performBackup({bool isAutomatic = false}) async {
+  ///
+  /// [note] is the diver's optional description: it is stamped into the file
+  /// and kept on the record. An automatic backup never carries one, so it is
+  /// ignored when [isAutomatic] is set.
+  ///
+  /// [pin] records the backup pinned from the start, so no prune, this one's
+  /// included, can remove it (issue #4535). Ignored for an automatic backup.
+  Future<BackupRecord> performBackup({
+    bool isAutomatic = false,
+    String? note,
+    bool pin = false,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.backup);
     _log.info('Starting backup (automatic: $isAutomatic)');
+    // Resolve where the backup goes (filesystem dir or Android SAF tree) and
+    // arm any security-scoped access; release it once the write+prune are done.
+    final lease = await BackupService.resolveBackupTargetLeased(
+      _preferences,
+      saf: _safPort,
+    );
+    // Read right after resolving, so a dead folder grant the resolver just
+    // reset counts as the default, and a folder change during the write
+    // cannot relabel the copy this target receives.
+    final toChosenFolder = _preferences.getSettings().backupLocation != null;
+    try {
+      return await _performBackupInto(
+        lease.target,
+        isAutomatic: isAutomatic,
+        note: isAutomatic ? null : normalizeBackupNote(note),
+        pin: pin && !isAutomatic,
+        toChosenFolder: toChosenFolder,
+      );
+    } finally {
+      await lease.release();
+    }
+  }
 
-    final filename = _generateFilename();
-    final localDir = await getBackupsDirectory();
-    final localPath = p.join(localDir, filename);
-
-    // Copy the database file
-    await _dbAdapter.backup(localPath);
-
-    // Get file size
-    final backupFile = File(localPath);
-    final sizeBytes = await backupFile.length();
-
-    // Get dive and site counts
-    final counts = await _getDiveSiteCounts();
-
-    // Attempt cloud upload
-    String? cloudFileId;
-    var location = BackupLocation.local;
-
+  Future<BackupRecord> _performBackupInto(
+    BackupTarget target, {
+    required bool isAutomatic,
+    required bool toChosenFolder,
+    String? note,
+    bool pin = false,
+  }) async {
+    final filename = await _generateFilename();
+    final encKey = await _activeBackupKey();
     final settings = _preferences.getSettings();
-    if (settings.cloudBackupEnabled && _cloudProvider != null) {
+    // The cloud copy and a backup folder are independent (#3482): the copy
+    // uploads from a filesystem file holding the stored bytes, never from
+    // the folder's ref, which on Android is a content:// URI.
+    final wantsCopy = settings.cloudBackupEnabled && _cloudProvider != null;
+    // Extra copies (issue #3782) ride on the main copy's switch, and run
+    // even when the main copy's own account cannot be reached.
+    final wantsExtras = settings.cloudBackupEnabled && _extraCopies.isNotEmpty;
+    ({String? fileId, String? accountId, bool needsSignIn}) copy = (
+      fileId: null,
+      accountId: null,
+      needsSignIn: false,
+    );
+    ({List<ExtraCloudCopy> copies, List<String> missed}) extras = (
+      copies: const [],
+      missed: const [],
+    );
+    // Every copy uploads the same stored bytes from [path] as [name].
+    Future<void> copyOut(String path, String name) => _withSharedUploadSource(
+      path,
+      name,
+      share: wantsExtras,
+      upload: (path, name) async {
+        if (wantsCopy) copy = await _copyToCloud(path, name);
+        if (wantsExtras) extras = await _copyToExtras(path, name);
+      },
+    );
+
+    final String ref;
+    final int sizeBytes;
+    final String storedName;
+    if (encKey == null) {
+      storedName = filename;
+      // Write the backup; ref is a filesystem path or a content:// document
+      // URI, and the size comes back with it. A SAF ref has no File length to
+      // ask, and the live database file's length is not the answer either: the
+      // export is compacted and folds in rows that were still in the WAL.
+      final written = await target.write(
+        _dbAdapter,
+        filename,
+        note: note,
+        whileWritten: wantsCopy || wantsExtras
+            ? (path) => copyOut(path, filename)
+            : null,
+      );
+      ref = written.ref;
+      sizeBytes = written.sizeBytes;
+    } else {
+      // Backup encryption on: encrypt to a temp .sbe off to the side, then
+      // write that into the target (filesystem copy or SAF stream).
+      storedName =
+          p.basenameWithoutExtension(filename) + BackupCrypto.fileExtension;
+      final tempDir = await resolveSyncTempDir();
+      // Per-invocation prefix so a foreground backup/share and the scheduled
+      // background backup cannot collide on the shared temp dir within the same
+      // second (the filename has only second precision). The final stored name
+      // stays `storedName`.
+      final tempPrefix = _uuid.v4();
+      final tempPlain = p.join(tempDir.path, '$tempPrefix-$filename');
+      final tempSbe = p.join(tempDir.path, '$tempPrefix-$storedName');
       try {
-        cloudFileId = await _uploadToCloud(localPath, filename);
-        location = BackupLocation.both;
-        _log.info('Backup uploaded to cloud: $cloudFileId');
-      } catch (e, stack) {
-        _log.error(
-          'Cloud upload failed, backup is local-only',
-          error: e,
-          stackTrace: stack,
+        await _dbAdapter.backup(tempPlain, note: note);
+        await BackupCrypto.encryptFile(
+          inPath: tempPlain,
+          outPath: tempSbe,
+          mlk: encKey.mlk,
+          libraryKeyId: encKey.libraryKeyId,
+          keyslotBytes: encKey.keyslotBytes,
         );
-        // Local backup still succeeded — continue with local-only
+        ref = await target.writeSource(tempSbe, storedName);
+        sizeBytes = await File(tempSbe).length();
+        await copyOut(tempSbe, storedName);
+      } finally {
+        for (final t in [tempPlain, tempSbe]) {
+          final f = File(t);
+          if (await f.exists()) {
+            try {
+              await f.delete();
+            } catch (_) {
+              // best-effort temp cleanup
+            }
+          }
+        }
       }
     }
 
+    // Get dive and site counts
+    final counts = await _getDiveSiteCounts();
+    final cloudFileId = copy.fileId;
+    final uploadAccountId = copy.accountId;
+    final location = cloudFileId != null
+        ? BackupLocation.both
+        : BackupLocation.local;
+
     final record = BackupRecord(
       id: _uuid.v4(),
-      filename: filename,
+      filename: storedName,
       timestamp: DateTime.now(),
       sizeBytes: sizeBytes,
       location: location,
       diveCount: counts.diveCount,
       siteCount: counts.siteCount,
       cloudFileId: cloudFileId,
-      localPath: localPath,
+      cloudAccountId: cloudFileId == null ? null : uploadAccountId,
+      localPath: ref,
       isAutomatic: isAutomatic,
+      pinned: pin,
+      note: note,
+      extraCloudCopies: extras.copies,
     );
 
     // Persist record and update last backup time
     await _preferences.addRecord(record);
     await _preferences.setLastBackupTime(record.timestamp);
+    // Settings > Data health: a cloud copy the diver asked for and did not
+    // get. Every backup overwrites it, so one that uploads clears it.
+    await _preferences.setLastCloudCopyMissing(
+      settings.cloudBackupEnabled && location == BackupLocation.local,
+    );
+    await _preferences.setLastCloudCopyNeedsSignIn(copy.needsSignIn);
+    await _preferences.setLastExtraCopyMissingIds(extras.missed);
+    // An extra copy (issue #3782) puts the backup off the device too, when
+    // the main copy did not.
+    final reachedAccountId = location == BackupLocation.both
+        ? uploadAccountId
+        : extras.copies.firstOrNull?.accountId;
+    final offDevice =
+        location == BackupLocation.both || extras.copies.isNotEmpty;
+    await _preferences.setLastBackupDestination(
+      offDevice
+          ? LastBackupDestination.cloud
+          : toChosenFolder
+          ? LastBackupDestination.folder
+          : LastBackupDestination.device,
+      cloudAccountId: offDevice ? reachedAccountId : null,
+    );
+
+    // Other devices see a pin only through its marker (issue #3503). Written
+    // after the bookkeeping above, which a slow upload must not hold up, and
+    // before the prune, whose marker reconcile then finds it in place. Never
+    // throws; reconciliation repairs a marker that did not land.
+    if (pin) await _writePinMarker(record);
 
     // Prune old backups
     await pruneOldBackups(settings.retentionCount);
@@ -141,10 +451,44 @@ class BackupService {
   /// Export a backup to a user-specified file path.
   ///
   /// Records the export in backup history with the actual destination path.
-  Future<BackupRecord> exportBackupToPath(String destinationPath) async {
+  /// [note] is stamped into the file and kept on the record.
+  Future<BackupRecord> exportBackupToPath(
+    String destinationPath, {
+    String? note,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.backup);
     _log.info('Exporting backup to: $destinationPath');
+    final normalizedNote = normalizeBackupNote(note);
 
-    await _dbAdapter.backup(destinationPath);
+    final encKey = await _activeBackupKey();
+    if (encKey == null) {
+      await _dbAdapter.backup(destinationPath, note: normalizedNote);
+    } else {
+      final tempDir = await resolveSyncTempDir();
+      final plainPath = p.join(tempDir.path, 'export_${_uuid.v4()}.db');
+      try {
+        // Inside the try so a failed/partial backup still gets its plaintext
+        // temp cleaned up in the finally -- never leave an unencrypted DB behind
+        // when encryption is enabled.
+        await _dbAdapter.backup(plainPath, note: normalizedNote);
+        await BackupCrypto.encryptFile(
+          inPath: plainPath,
+          outPath: destinationPath,
+          mlk: encKey.mlk,
+          libraryKeyId: encKey.libraryKeyId,
+          keyslotBytes: encKey.keyslotBytes,
+        );
+      } finally {
+        final plain = File(plainPath);
+        if (await plain.exists()) {
+          try {
+            await plain.delete();
+          } catch (_) {
+            // best-effort temp cleanup
+          }
+        }
+      }
+    }
 
     final filename = p.basename(destinationPath);
     final counts = await _getDiveSiteCounts();
@@ -162,10 +506,12 @@ class BackupService {
       diveCount: counts.diveCount,
       siteCount: counts.siteCount,
       localPath: destinationPath,
+      note: normalizedNote,
     );
 
     await _preferences.addRecord(record);
     await _preferences.setLastBackupTime(record.timestamp);
+    await _preferences.setLastBackupDestination(LastBackupDestination.file);
 
     _log.info('Export completed: $filename');
     return record;
@@ -175,25 +521,319 @@ class BackupService {
   ///
   /// The file is NOT recorded in backup history since its destination
   /// is ephemeral (share sheet, AirDrop, email, etc.).
-  /// Returns the temporary [File] for use with share sheet.
-  Future<File> exportBackupToTemp() async {
+  /// Returns the temporary [File] for use with share sheet. [note] is
+  /// stamped into the file, the only place it is kept for a share.
+  Future<File> exportBackupToTemp({String? note}) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.backup);
     _log.info('Exporting backup to temp for sharing');
+    final normalizedNote = normalizeBackupNote(note);
 
-    final filename = _generateFilename();
-    final tempDir = await getTemporaryDirectory();
-    final tempPath = p.join(tempDir.path, filename);
+    final encKey = await _activeBackupKey();
+    final filename = await _generateFilename();
+    final tempDir = await resolveSyncTempDir();
 
-    await _dbAdapter.backup(tempPath);
+    if (encKey == null) {
+      final tempPath = p.join(tempDir.path, filename);
+      await _dbAdapter.backup(tempPath, note: normalizedNote);
+      _log.info('Temp export completed: $filename');
+      return File(tempPath);
+    }
 
-    _log.info('Temp export completed: $filename');
-    return File(tempPath);
+    final plainPath = p.join(tempDir.path, filename);
+    final sbeName =
+        p.basenameWithoutExtension(filename) + BackupCrypto.fileExtension;
+    final sbePath = p.join(tempDir.path, sbeName);
+    try {
+      // Inside the try so a failed/partial backup still gets its plaintext temp
+      // cleaned up in the finally -- never leave an unencrypted DB behind when
+      // encryption is enabled.
+      await _dbAdapter.backup(plainPath, note: normalizedNote);
+      await BackupCrypto.encryptFile(
+        inPath: plainPath,
+        outPath: sbePath,
+        mlk: encKey.mlk,
+        libraryKeyId: encKey.libraryKeyId,
+        keyslotBytes: encKey.keyslotBytes,
+      );
+    } finally {
+      final plain = File(plainPath);
+      if (await plain.exists()) {
+        try {
+          await plain.delete();
+        } catch (_) {
+          // best-effort temp cleanup
+        }
+      }
+    }
+    _log.info('Encrypted temp export completed: $sbeName');
+    return File(sbePath);
+  }
+
+  /// Rewrite every plaintext local backup in history as an encrypted `.sbe`,
+  /// re-uploading its cloud copy when present. Idempotent: already-encrypted
+  /// artifacts are skipped by magic, so an interrupted run is safe to resume;
+  /// an extra copy an earlier run left plaintext is replaced then.
+  /// SAF (`content://`) and cloud-only records are skipped (logged).
+  /// Best-effort per record. Requires backup encryption to be enabled.
+  Future<({int reencrypted, int skipped, int failed})>
+  reencryptExistingBackups() async {
+    final encKey = await _activeBackupKey();
+    if (encKey == null) {
+      throw const BackupException('Backup encryption must be enabled first');
+    }
+    var reencrypted = 0;
+    var skipped = 0;
+    var failed = 0;
+    // Records whose plaintext cloud copy was replaced, whether or not the
+    // record then succeeded: that copy is gone only once a backend that
+    // defers deletes or keeps history (Git) has pushed the delete and reset
+    // its history.
+    final replacedInCloud = <String>{};
+    // The same for extra copies (issue #3782): each account an old extra
+    // copy was deleted from, with the records it held, flushed and reset
+    // once at the end like the main copy's, whether the record succeeded or
+    // not. Only the records counted as rewritten can still be moved to
+    // failed.
+    final extraDeletesByAccount =
+        Map<CloudStorageProvider, Set<String>>.identity();
+    final rewritten = <String>{};
+    for (final record in _preferences.getHistory()) {
+      final localPath = record.localPath;
+      if (localPath == null || isSafRef(localPath)) {
+        // SAF (content://) and path-less records cannot be re-encrypted in
+        // place here, so they stay plaintext. Count them as FAILURES (not
+        // silent skips) so the migration summary discloses the remaining
+        // exposure to the user instead of implying everything is protected.
+        _log.info(
+          'Re-encrypt unsupported for non-filesystem backup: ${record.filename}',
+        );
+        failed++;
+        continue;
+      }
+      try {
+        final file = File(localPath);
+        if (!await file.exists()) {
+          // History keeps such a record for its extra copies (issue #3782),
+          // which stay plaintext: disclosed as a failure, not skipped.
+          if (record.extraCloudCopies.isNotEmpty) {
+            failed++;
+          } else {
+            skipped++;
+          }
+          continue;
+        }
+        if (await BackupCrypto.isEncryptedBackup(localPath)) {
+          if (!record.extraCloudCopies.any((c) => c.plaintext)) {
+            skipped++;
+          } else if (await _reencryptPlaintextExtras(
+            record,
+            touched: extraDeletesByAccount,
+          )) {
+            reencrypted++;
+            rewritten.add(record.id);
+          } else {
+            failed++;
+          }
+          continue;
+        }
+        final dir = p.dirname(localPath);
+        final newName =
+            p.basenameWithoutExtension(localPath) + BackupCrypto.fileExtension;
+        final newPath = p.join(dir, newName);
+        final tempDir = await resolveSyncTempDir();
+        final tempSbe = p.join(tempDir.path, 'reenc_${_uuid.v4()}.sbe');
+        try {
+          await BackupCrypto.encryptFile(
+            inPath: localPath,
+            outPath: tempSbe,
+            mlk: encKey.mlk,
+            libraryKeyId: encKey.libraryKeyId,
+            keyslotBytes: encKey.keyslotBytes,
+          );
+          await File(tempSbe).copy(newPath);
+        } finally {
+          // Always remove the per-record temp .sbe, even on an encrypt/copy
+          // failure, so repeated retries (e.g. after a disk-full error) don't
+          // accumulate large files in the shared temp dir.
+          final t = File(tempSbe);
+          if (await t.exists()) {
+            try {
+              await t.delete();
+            } catch (_) {
+              // best-effort temp cleanup
+            }
+          }
+        }
+
+        // Upload the new .sbe BEFORE committing history. If the upload throws,
+        // the record still points at the intact plaintext .db and its old cloud
+        // object, so the next run re-encrypts it -- resumability is preserved.
+        String? newCloudFileId = record.cloudFileId;
+        if (record.cloudFileId != null) {
+          // The record has a cloud copy that must be re-encrypted too. If the
+          // provider is unavailable (signed out, or a custom local folder makes
+          // it null), fail THIS record rather than commit a local .sbe while the
+          // cloud copy stays plaintext -- otherwise the success tally would
+          // falsely imply that copy is protected.
+          if (!await _cloudCopyHere(record)) {
+            throw const BackupException(
+              'Cloud copy cannot be re-encrypted: its account is not reachable',
+            );
+          }
+          newCloudFileId = await _uploadToCloud(newPath, newName);
+          // A null result means the folder could not be created; treat it as a
+          // failed migration. Committing here would (via copyWith's null-keeps-
+          // old semantics) leave history on the OLD id while the delete branch
+          // removes that object -- a dangling pointer. Bail so the record stays
+          // fully intact and resumable.
+          if (newCloudFileId == null) {
+            throw const BackupException(
+              'Cloud re-upload returned no file id during re-encrypt',
+            );
+          }
+        }
+
+        // The extra copies (issue #3782) are replaced the same way: the new
+        // .sbe goes up before the record is committed.
+        final extras = await _reuploadExtras(
+          record,
+          newPath,
+          newName,
+          touched: extraDeletesByAccount,
+        );
+
+        // Commit the record to the on-disk .sbe (which now exists) BEFORE
+        // deleting the old plaintext/cloud artifacts. A failed delete below is
+        // then a best-effort leak, never a dangling history pointer or data
+        // loss.
+        await _preferences.updateRecord(
+          record.copyWith(
+            filename: newName,
+            localPath: newPath,
+            sizeBytes: await File(newPath).length(),
+            cloudFileId: newCloudFileId,
+            extraCloudCopies: extras.copies,
+          ),
+        );
+
+        // The new .sbe is committed and protected. If an OLD plaintext/cloud
+        // copy cannot be removed it is a residual exposure, so count the record
+        // as a failure (disclosed to the user) rather than a clean success --
+        // without rolling back the committed encrypted record.
+        var residualExposure =
+            await _deleteReplacedExtras(
+              record.id,
+              extras.replaced,
+              touched: extraDeletesByAccount,
+            ) ||
+            extras.residual;
+        if (newPath != localPath) {
+          try {
+            await file.delete();
+          } catch (e, stack) {
+            residualExposure = true;
+            _log.error(
+              'Re-encrypt: old plaintext .db could not be deleted, still on '
+              'disk: ${record.filename}',
+              error: e,
+              stackTrace: stack,
+            );
+          }
+        }
+        // Delete the old cloud object only when the upload produced a DIFFERENT
+        // id. Path-based providers (S3/Dropbox/iCloud) reuse the id for the same
+        // name, so an unconditional delete would remove the object we just
+        // uploaded.
+        if (record.cloudFileId != null &&
+            _cloudProvider != null &&
+            newCloudFileId != record.cloudFileId) {
+          try {
+            await _cloudProvider.deleteFile(record.cloudFileId!);
+          } catch (e, stack) {
+            residualExposure = true;
+            _log.error(
+              'Re-encrypt: old cloud object could not be deleted, still '
+              'present: ${record.filename}',
+              error: e,
+              stackTrace: stack,
+            );
+          }
+        }
+        if (record.cloudFileId != null) replacedInCloud.add(record.id);
+        if (residualExposure) {
+          failed++;
+        } else {
+          reencrypted++;
+          rewritten.add(record.id);
+        }
+      } catch (e, stack) {
+        _log.error(
+          'Re-encrypt failed for ${record.filename}',
+          error: e,
+          stackTrace: stack,
+        );
+        failed++;
+      }
+    }
+    // The replaced plaintext copies would stay readable in a Git backend's
+    // history, and its deletes above were only recorded. If either fails,
+    // those records are disclosed as failures, like any residual exposure.
+    final provider = _cloudProvider;
+    if (replacedInCloud.isNotEmpty && provider != null) {
+      try {
+        await flushDeferredWrites(provider);
+        await resetHistoryNowIfSupported(provider);
+      } catch (e, stack) {
+        _log.error(
+          'Re-encrypt: old plaintext copies stay in the cloud or its history',
+          error: e,
+          stackTrace: stack,
+        );
+        // Only the records counted as rewritten; the others are already
+        // failures, and are not counted twice below.
+        final exposed = replacedInCloud.intersection(rewritten);
+        reencrypted -= exposed.length;
+        failed += exposed.length;
+        rewritten.removeAll(exposed);
+      }
+    }
+    // Only the records whose own account failed to push or reset.
+    final exposed = (await _resetExtraHistories(
+      extraDeletesByAccount,
+    )).intersection(rewritten);
+    reencrypted -= exposed.length;
+    failed += exposed.length;
+    _log.info(
+      'Re-encrypt done: $reencrypted rewritten, $skipped skipped, $failed failed',
+    );
+    return (reencrypted: reencrypted, skipped: skipped, failed: failed);
   }
 
   /// Validate whether a file is a valid Submersion backup.
   ///
   /// Checks: file exists, has correct extension, is a valid SQLite database,
   /// and contains expected Submersion tables.
-  Future<BackupValidationResult> validateBackupFile(String filePath) async {
+  ///
+  /// [allowLiveDatabaseEncryption] opts into the one artifact kind that may
+  /// legitimately be SQLCipher ciphertext: a [BackupType.preMigration] or
+  /// [BackupType.preDowngrade] copy, which is a raw byte copy of the live
+  /// database and so carries the live
+  /// database's encryption. Such a file is deep-checked with the live key
+  /// instead of being rejected. Restore from file opts in too, so such a copy
+  /// saved or shared from the history restores on this install (issue
+  /// #3650). Without the live key, or with a different one, an
+  /// encrypted-looking file still fails loudly: portable backups are
+  /// decrypted on export precisely so they restore on a device where the
+  /// database password is unknown.
+  ///
+  /// [requireBackupExtension] is false only for a database copy the restore
+  /// journal set aside, whose name ends in a timestamp rather than an
+  /// extension. Its deep check is otherwise the same.
+  Future<BackupValidationResult> validateBackupFile(
+    String filePath, {
+    bool allowLiveDatabaseEncryption = false,
+    bool requireBackupExtension = true,
+  }) async {
     final file = File(filePath);
 
     // Check file exists
@@ -203,9 +843,25 @@ class BackupService {
 
     // Check extension
     final ext = p.extension(filePath).toLowerCase();
-    if (ext != '.sqlite' && ext != '.db') {
+    if (requireBackupExtension &&
+        ext != '.sqlite' &&
+        ext != '.db' &&
+        ext != BackupCrypto.fileExtension) {
       return BackupValidationResult.invalid(
-        'Invalid file extension "$ext". Expected .db or .sqlite',
+        'Invalid file extension "$ext". Expected .db, .sqlite, or '
+        '${BackupCrypto.fileExtension}',
+      );
+    }
+
+    // An encrypted artifact cannot be opened as SQLite here; the magic check
+    // admits it and deep validation runs on the decrypted copy during
+    // restore (see restoreFromFile / restoreFromBackup).
+    if (await BackupCrypto.isEncryptedBackup(filePath)) {
+      return BackupValidationResult.valid(sizeBytes: await file.length());
+    }
+    if (ext == BackupCrypto.fileExtension) {
+      return const BackupValidationResult.invalid(
+        'File is not a valid encrypted backup',
       );
     }
 
@@ -215,13 +871,40 @@ class BackupService {
       return const BackupValidationResult.invalid('File is empty');
     }
 
+    // A pre-migration copy of a protected database is SQLCipher ciphertext,
+    // so the deep check below needs the live key. With one, a keyed open
+    // settles the question: it succeeds on a real encrypted copy and fails
+    // on anything else, which lands in the generic invalid-database result.
+    //
+    // Without one there is nothing to open the file with, and nothing a
+    // restore could do with it either, since the key is the only way back to
+    // the data. The report must stay honest about WHY, though: a corrupt
+    // plaintext database and an encrypted one are indistinguishable at the
+    // header, so isEncryptedDatabaseFile alone must never conclude
+    // "encrypted" (see DatabaseSecuritySidecar.existsFor, which is the
+    // corroborating signal the startup gate and schema probe use). That
+    // signal is unavailable here: the sidecar lives next to the live
+    // database and is never copied into the backups directory. So name both
+    // possibilities rather than asserting one the file cannot prove.
+    String? deepCheckKeyHex;
+    if (allowLiveDatabaseEncryption && isEncryptedDatabaseFile(filePath)) {
+      deepCheckKeyHex = _dbAdapter.databaseKeyHex;
+      if (deepCheckKeyHex == null) {
+        return const BackupValidationResult.invalid(unreadableCopyNoKeyMessage);
+      }
+    }
+
     // Use sqlite3 directly in read-only mode to avoid Drift's migration
     // system triggering ALTER TABLE on older-schema backups. The backup file
     // may also be in a read-only sandboxed directory (iOS/macOS file picker).
+    // Keyless unless the caller opted in above: backup artifacts are portable
+    // plaintext by design, and an encrypted-looking file should fail
+    // validation loudly.
     try {
-      final testDb = sqlite3.sqlite3.open(
+      final testDb = DatabaseService.openRaw(
         filePath,
         mode: sqlite3.OpenMode.readOnly,
+        keyHex: deepCheckKeyHex,
       );
       try {
         // Verify it's a valid SQLite database
@@ -234,15 +917,47 @@ class BackupService {
 
         if (tables.isEmpty) {
           return const BackupValidationResult.invalid(
-            'File does not appear to be a Submersion backup (missing expected tables)',
+            _notSubmersionBackupMessage,
+          );
+        }
+
+        // Reject a backup written by a NEWER schema before restore can swap
+        // it in; the post-swap open guard would otherwise fire with the file
+        // already live (issue #1089). Read from this already-open read-only
+        // handle rather than reopening: DatabaseService.getStoredSchemaVersion
+        // opens read-write, which fails on the sandboxed read-only backup
+        // directories this method is documented to accept. An older schema is
+        // fine and stays valid; the reopen runs the migration ladder.
+        final storedSchema = testDb.select('PRAGMA user_version');
+        final backupSchema = storedSchema.isEmpty
+            ? null
+            : storedSchema.first.values.first as int?;
+        if (backupSchema != null &&
+            backupSchema > AppDatabase.currentSchemaVersion) {
+          return BackupValidationResult.invalid(
+            'This backup was created by a newer version of Submersion '
+            '(database v$backupSchema; this app supports up to '
+            'v${AppDatabase.currentSchemaVersion}). Update Submersion, then '
+            'restore.',
           );
         }
 
         return BackupValidationResult.valid(sizeBytes: sizeBytes);
       } finally {
-        testDb.dispose();
+        testDb.close();
       }
-    } catch (e) {
+    } catch (e, stack) {
+      // A keyed open that fails says the live key is not this file's, or the
+      // file is broken; the raw SQLite error says neither, so it goes to the
+      // log rather than the message.
+      if (deepCheckKeyHex != null) {
+        _log.warning(
+          'Keyed open of ${p.basename(filePath)} failed',
+          error: e,
+          stackTrace: stack,
+        );
+        return const BackupValidationResult.invalid(lockedCopyWrongKeyMessage);
+      }
       return BackupValidationResult.invalid('File is not a valid database: $e');
     }
   }
@@ -255,31 +970,94 @@ class BackupService {
   ///
   /// Creates a full backup of the current database first (saved to the
   /// configured backup location with a history entry), then replaces
-  /// the database with the backup.
-  Future<void> restoreFromBackup(BackupRecord record) async {
-    _log.info('Starting restore from: ${record.filename}');
+  /// the database with the backup. [RestoreMode.replace] additionally mints
+  /// a pending replace intent (see [RestoreMode]).
+  Future<void> restoreFromBackup(
+    BackupRecord record, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.restore);
+    _log.info('Starting restore from: ${record.filename} (mode: $mode)');
 
-    // Create a proper backup before restoring so the user can find it
-    // in their configured backup location and in the history list.
-    await performBackup();
-
-    // Determine backup source path
-    String sourcePath;
-    if (record.localPath != null && await File(record.localPath!).exists()) {
-      sourcePath = record.localPath!;
-    } else if (record.cloudFileId != null && _cloudProvider != null) {
-      // Download from cloud to a temp location
-      _log.info('Downloading backup from cloud');
-      sourcePath = await _downloadFromCloud(
-        record.cloudFileId!,
-        record.filename,
+    // A SAF (content://) ref or a cloud copy is fetched to a temp file first,
+    // since SQLite open + validation need a real filesystem path. Nothing
+    // else ever deletes that copy, so the finally does (storage GC design,
+    // leak 1).
+    final source = await _resolveBackupSource(record);
+    try {
+      await _restoreFromSource(
+        record,
+        source.path,
+        mode: mode,
+        encryptionSecret: encryptionSecret,
+        onMigrationProgress: onMigrationProgress,
       );
-    } else {
-      throw const BackupException('Backup file not found locally or in cloud');
+    } finally {
+      await source.discard();
     }
+  }
 
-    // Restore using DatabaseService (handles close/copy/reinitialize)
-    await _dbAdapter.restore(sourcePath);
+  /// A temp name for the copy a restore makes, unique per restore. The
+  /// record's own name would collide with a share-sheet export of the same
+  /// backup, which [exportBackupToTemp] writes to the same folder; the
+  /// RestoreTempSweep matches this prefix for copies a killed restore left.
+  String _restoreCopyName(String filename) => 'restore-${_uuid.v4()}-$filename';
+
+  Future<void> _restoreFromSource(
+    BackupRecord record,
+    String sourcePath, {
+    required RestoreMode mode,
+    String? encryptionSecret,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    // An encrypted cloud artifact must be decrypted BEFORE validation (the
+    // SQLite deep-check needs plaintext).
+    final materialized = await _materializePlaintextBackup(
+      sourcePath,
+      encryptionSecret: encryptionSecret,
+    );
+    try {
+      // Parity with the file-picker path: the file on disk (or the fresh
+      // download) may have been corrupted since the record was written.
+      //
+      // A pre-migration or pre-downgrade copy is the one kind that may
+      // legitimately be SQLCipher ciphertext (a raw copy of the live file,
+      // taken with the database closed), so it is deep-checked with the live
+      // key rather than rejected (issue #3650). DatabaseService.restore
+      // already handles such a source: it detects the encrypted header and
+      // skips the re-encryption it would otherwise apply.
+      final validation = await validateBackupFile(
+        materialized.path,
+        allowLiveDatabaseEncryption:
+            record.type == BackupType.preMigration ||
+            record.type == BackupType.preDowngrade,
+      );
+      if (!validation.isValid) {
+        throw BackupException(
+          validation.error ?? 'Backup file failed validation',
+        );
+      }
+
+      // Create a proper backup before restoring so the user can find it
+      // in their configured backup location and in the history list. Runs
+      // only after decryption + validation succeeded, so a wrong passphrase
+      // or corrupt artifact aborts the flow without side effects (parity
+      // with restoreFromFile).
+      await performBackup();
+
+      // Restore using DatabaseService (handles close/copy/reinitialize), then
+      // re-baseline sync so the restored data syncs cleanly instead of
+      // replaying the backup's stale sync position.
+      await _replaceDatabaseAndRebaselineSync(
+        materialized.path,
+        onMigrationProgress: onMigrationProgress,
+      );
+    } finally {
+      await materialized.discard();
+    }
+    await _armPostRestoreSync(mode);
 
     _log.info('Restore completed from: ${record.filename}');
   }
@@ -288,24 +1066,298 @@ class BackupService {
   ///
   /// Creates a full backup of the current database first (saved to the
   /// configured backup location with a history entry), then replaces
-  /// the database with the specified file.
+  /// the database with the specified file. [RestoreMode.replace] additionally
+  /// mints a pending replace intent (see [RestoreMode]).
   /// Throws [BackupException] if the file is not found.
-  Future<void> restoreFromFile(String filePath) async {
-    _log.info('Starting restore from file: $filePath');
+  Future<void> restoreFromFile(
+    String filePath, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.restore);
+    _log.info('Starting restore from file: $filePath (mode: $mode)');
 
     final file = File(filePath);
     if (!await file.exists()) {
       throw const BackupException('Backup file not found');
     }
 
-    // Create a proper backup before restoring so the user can find it
-    // in their configured backup location and in the history list.
-    await performBackup();
+    // Decrypt an encrypted artifact BEFORE the pre-restore backup runs, so a
+    // wrong passphrase aborts the flow without side effects.
+    final materialized = await _materializePlaintextBackup(
+      filePath,
+      encryptionSecret: encryptionSecret,
+    );
+    try {
+      // Refuse a newer-schema backup here, before performBackup and before
+      // any swap, so the refusal has zero side effects. This runs on the
+      // MATERIALIZED plaintext, which is the only place an encrypted
+      // artifact's schema is readable at all (issue #1089). The copy is
+      // always plaintext, so no key is needed.
+      //
+      // The read is best-effort BY DESIGN. getStoredSchemaVersion rethrows on
+      // a corrupt or unreadable file so its startup callers can route to
+      // corruption recovery or the unlock screen; neither concerns this
+      // guard, whose only job is to refuse a schema it can positively read as
+      // newer. Anything unreadable falls through to the existing restore
+      // path, which surfaces the real failure exactly as it did before this
+      // guard existed.
+      int? restoredSchema;
+      try {
+        restoredSchema = DatabaseService.getStoredSchemaVersion(
+          materialized.path,
+        );
+      } catch (_) {
+        restoredSchema = null;
+      }
+      if (restoredSchema != null &&
+          restoredSchema > AppDatabase.currentSchemaVersion) {
+        throw BackupNewerSchemaException(
+          backupSchemaVersion: restoredSchema,
+          supportedSchemaVersion: AppDatabase.currentSchemaVersion,
+        );
+      }
 
-    // Restore using DatabaseService
-    await _dbAdapter.restore(filePath);
+      // A decrypted copy has had no deep check: the caller could only
+      // validate the envelope. "Encrypt existing backups" also wraps
+      // pre-update safety copies, whose plaintext is SQLCipher under the
+      // live key, so the same rule as a history row applies (issue #3650).
+      // Swapping in a copy this install cannot open would leave it unable
+      // to start.
+      if (materialized.isTemp) {
+        final validation = await validateBackupFile(
+          materialized.path,
+          allowLiveDatabaseEncryption: true,
+        );
+        if (!validation.isValid) {
+          throw BackupException(
+            validation.error ?? 'Backup file failed validation',
+          );
+        }
+      }
+
+      // Create a proper backup before restoring so the user can find it
+      // in their configured backup location and in the history list.
+      await performBackup();
+
+      // Restore using DatabaseService, then re-baseline sync (see
+      // _replaceDatabaseAndRebaselineSync).
+      await _replaceDatabaseAndRebaselineSync(
+        materialized.path,
+        onMigrationProgress: onMigrationProgress,
+      );
+    } finally {
+      await materialized.discard();
+    }
+    await _armPostRestoreSync(mode);
 
     _log.info('Restore from file completed: ${p.basename(filePath)}');
+  }
+
+  /// A browser's restore of a backup held in memory (issue #4121); see
+  /// `_BackupServiceImageRestore._restoreFromImage` for the order of steps.
+  Future<void> restoreFromImage(
+    Uint8List bytes, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+    Future<void> Function()? safetyCopy,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) => _restoreFromImage(
+    bytes,
+    mode: mode,
+    encryptionSecret: encryptionSecret,
+    safetyCopy: safetyCopy,
+    onMigrationProgress: onMigrationProgress,
+  );
+
+  /// Restore the database from a copy the restore journal set aside next to
+  /// the live database (issue #1923).
+  ///
+  /// Such a copy is a raw database file, not a backup artifact: its name
+  /// ends in a timestamp rather than an extension, it may be SQLCipher
+  /// ciphertext under the live key, and it may still have a `-wal` holding
+  /// its latest transactions. So it is validated with the live key and
+  /// without the extension rule, and its journal is folded in before the
+  /// swap, which stages only the main file.
+  ///
+  /// Otherwise it is an ordinary restore: a safety backup of the current
+  /// database first, then the swap and the sync re-baseline. The copy itself
+  /// is left where it is; deleting it is the diver's call.
+  ///
+  /// Throws [BackupException] when the copy is gone or this build cannot
+  /// open it, before anything else has happened.
+  Future<void> restoreFromDatabaseCopy(
+    String path, {
+    RestoreMode mode = RestoreMode.merge,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.restore);
+    _log.info('Starting restore from database copy: ${p.basename(path)}');
+
+    final validation = await validateBackupFile(
+      path,
+      allowLiveDatabaseEncryption: true,
+      requireBackupExtension: false,
+    );
+    if (!validation.isValid) {
+      throw BackupException(
+        validation.error ?? 'Database copy failed validation',
+      );
+    }
+
+    // After validation, so a copy that cannot be restored is left exactly as
+    // it was found. Folding rewrites the file, but only with transactions it
+    // had already committed.
+    try {
+      await _checkpointOnWorker(
+        path,
+        isEncryptedDatabaseFile(path) ? _dbAdapter.databaseKeyHex : null,
+      );
+    } catch (e) {
+      throw BackupException('Could not prepare the database copy: $e');
+    }
+
+    await performBackup();
+    await _replaceDatabaseAndRebaselineSync(
+      path,
+      onMigrationProgress: onMigrationProgress,
+    );
+    await _armPostRestoreSync(mode);
+
+    _log.info('Restore from database copy completed: ${p.basename(path)}');
+  }
+
+  /// Folds a database copy's -wal in on a worker isolate: the checkpoint is
+  /// synchronous SQLite work that can take a while for a large log, and on
+  /// the UI isolate it would freeze the restore barrier's progress. Static,
+  /// so the [Isolate.run] closure's scope holds only the two strings it
+  /// sends. Errors cross back to the caller.
+  static Future<void> _checkpointOnWorker(String path, String? keyHex) =>
+      Isolate.run(
+        () => DatabaseService.checkpointWriteAheadLog(path, keyHex: keyHex),
+        debugName: 'restore-wal-fold',
+      );
+
+  /// What a completed restore leaves for the next sync. [RestoreMode.replace]
+  /// mints a pending replace intent; a merge arms a one-shot reconciling sync.
+  Future<void> _armPostRestoreSync(RestoreMode mode) async {
+    if (mode == RestoreMode.replace) {
+      await _mintPendingReplace();
+    } else {
+      // Merge: the restore dialog's choice is the consent. Arm a one-shot
+      // intent so the next launch forces a gate-bypassing reconciling sync.
+      await _postRestoreSyncStore?.setPending();
+    }
+  }
+
+  /// Replace the database with [sourcePath], then re-baseline sync.
+  ///
+  /// A restore swaps in the backup's entire database — including its stale sync
+  /// metadata (device id, HLC clock, last-sync timestamp, cursors) and deletion
+  /// log. Without re-baselining, the rewound `lastSync` makes the merge treat
+  /// almost every restored row as a conflict, so sync stalls and deletes
+  /// resurrect from a peer's still-live copy. This preserves the live device
+  /// identity (captured before the swap) and clears the sync position so the
+  /// next sync cleanly reconciles the restored data.
+  Future<void> _replaceDatabaseAndRebaselineSync(
+    String sourcePath, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) => _replaceAndRebaselineSync(
+    () => _dbAdapter.restore(
+      sourcePath,
+      onMigrationProgress: onMigrationProgress,
+    ),
+  );
+
+  /// Runs [swap], which replaces the live database, between capturing the
+  /// live sync identity and re-baselining it; see
+  /// [_replaceDatabaseAndRebaselineSync].
+  Future<void> _replaceAndRebaselineSync(Future<void> Function() swap) async {
+    // Marked BEFORE the replace: the marker is what holds the storage
+    // cleanup's cloud deletes back until a sync after the restore has run,
+    // so it must exist even if the app dies between the replace and the
+    // steps after it. A restore that then fails only defers cleanup until
+    // the next pull, which is the safe direction. A marker that cannot be
+    // recorded stops the restore here, before the live database is touched.
+    await _onRestoring?.call(DateTime.now());
+    String liveDeviceId;
+    try {
+      liveDeviceId = await _syncRepository.getDeviceId();
+    } catch (e, st) {
+      // Fall back to a fresh device id rather than letting the restore adopt
+      // the backup's id. Adopting it would make this install impersonate the
+      // device that produced the backup (colliding per-device sync file and
+      // HLC node identity). A fresh id keeps this install distinct; the
+      // launch-time reconcile realigns it to the mirrored identity if one
+      // exists.
+      liveDeviceId = const Uuid().v4();
+      _log.warning(
+        "Could not capture device id before restore; preserving a fresh "
+        "device id instead of adopting the backup's",
+        error: e,
+        stackTrace: st,
+      );
+    }
+
+    // Capture the live library epoch alongside the device id: the restored
+    // DB carries the backup's stale epoch, which without this would wrongly
+    // re-prompt this device to adopt its own current library.
+    String? liveEpochId;
+    try {
+      liveEpochId =
+          await _syncRepository.getLastAcceptedEpochId() ??
+          _epochStore?.lastAcceptedEpochId;
+    } catch (_) {
+      liveEpochId = _epochStore?.lastAcceptedEpochId;
+    }
+
+    await swap();
+
+    // The restored file carries whatever built-in species rows its backup
+    // had; forgetting the applied catalog version makes the next launch run
+    // the upgrade pass again (diver-edited rows keep their hlc and are
+    // skipped by it).
+    try {
+      await _seedVersionStore?.clear();
+    } catch (e, st) {
+      _log.warning(
+        'Could not clear the built-in species seed version after restore',
+        error: e,
+        stackTrace: st,
+      );
+    }
+
+    try {
+      await _syncRepository.rebaselineAfterRestore(
+        preserveDeviceId: liveDeviceId,
+        preserveEpochId: liveEpochId,
+      );
+    } catch (e, st) {
+      // Non-fatal: the data restore itself succeeded. If re-baselining failed,
+      // the user can recover by running "Reset Sync State" manually.
+      _log.error(
+        'Failed to re-baseline sync after restore',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  /// Mint and persist the pending-replace intent. The cloud side executes on
+  /// the next sync (typically the post-restart launch sync); until it lands,
+  /// the intent fences off merging.
+  Future<void> _mintPendingReplace() async {
+    final store = _epochStore;
+    if (store == null) {
+      _log.warning('Replace mode requested but no epoch store is configured');
+      return;
+    }
+    final marker = await LibraryReplaceIntent(
+      SyncDeviceMetadata(_syncRepository).resolve,
+      store,
+    ).mint();
+    _log.info('Minted pending library replace (epoch ${marker.epochId})');
   }
 
   // ===========================================================================
@@ -323,17 +1375,26 @@ class BackupService {
   /// Checks each record's local file existence. Removes records where:
   /// - localPath is set but file no longer exists
   /// - AND there is no cloud backup (cloudFileId is null)
+  /// - AND there are no extra copies (issue #3782)
   ///
-  /// Records with no localPath (legacy) or with cloud backups are kept.
+  /// Records with no localPath (legacy), a cloud backup or an extra copy are
+  /// kept.
   Future<List<BackupRecord>> getValidatedBackupHistory() async {
     final history = _preferences.getHistory();
     final validRecords = <BackupRecord>[];
     var pruned = false;
 
     for (final record in history) {
-      if (record.localPath != null && record.cloudFileId == null) {
-        final file = File(record.localPath!);
-        if (!await file.exists()) {
+      // Extra copies (issue #3782) keep a record too: they may be the only
+      // copies left.
+      if (record.localPath != null &&
+          record.cloudFileId == null &&
+          record.extraCloudCopies.isEmpty) {
+        final ref = record.localPath!;
+        final stillThere = isSafRef(ref)
+            ? await _safPort.exists(ref)
+            : await File(ref).exists();
+        if (!stillThere) {
           _log.info('Pruning stale backup record: ${record.filename}');
           pruned = true;
           continue;
@@ -351,28 +1412,43 @@ class BackupService {
   }
 
   /// Delete a specific backup (local file + cloud file + metadata).
-  Future<void> deleteBackup(BackupRecord record) async {
+  Future<void> deleteBackup(BackupRecord record) =>
+      _deleteBackup(record, deleteCloud: true);
+
+  /// [deleteBackup]. Without [deleteCloud] the cloud copy is left to the
+  /// caller, which has already deleted it (pruning batches those deletes).
+  /// With [extraFlushes], the extra copies' deletes are left for the caller
+  /// to push, as [_deleteExtraCopies] says.
+  Future<void> _deleteBackup(
+    BackupRecord record, {
+    required bool deleteCloud,
+    Set<CloudStorageProvider>? extraFlushes,
+  }) async {
     _log.info('Deleting backup: ${record.filename}');
 
-    // Delete local file
-    if (record.localPath != null) {
-      final file = File(record.localPath!);
-      if (await file.exists()) {
-        await file.delete();
-        _log.info('Deleted local file: ${record.localPath}');
-      }
-    }
+    await _deleteLocalCopy(record);
 
-    // Delete cloud file
-    if (record.cloudFileId != null && _cloudProvider != null) {
+    // Delete cloud file; a copy in another account is left where it is.
+    if (deleteCloud && await _cloudCopyHere(record)) {
       try {
-        await _cloudProvider.deleteFile(record.cloudFileId!);
+        await _cloudProvider!.deleteFile(record.cloudFileId!);
+        // A backend that batches deletes (Git) has only recorded it so far.
+        await flushDeferredWrites(_cloudProvider);
         _log.info('Deleted cloud file: ${record.cloudFileId}');
       } catch (e, stack) {
         _log.error('Failed to delete cloud file', error: e, stackTrace: stack);
-        // Continue with removing the record even if cloud delete fails
+        // A cloud backup the history does not track (a row listed from the
+        // cloud folder, issue #3214) has nothing else to delete: carrying on
+        // would report success while the file stays. A tracked record is
+        // still removed even if cloud delete fails.
+        final tracked = _preferences.getHistory().any((r) => r.id == record.id);
+        if (record.localPath == null && !tracked) rethrow;
       }
     }
+
+    // Extra copies go with the record whoever removes it: pruning batches
+    // only the main copy's deletes (issue #3782).
+    await _deleteExtraCopies(record, deferFlushTo: extraFlushes);
 
     // Remove from history
     await _preferences.removeRecord(record.id);
@@ -385,6 +1461,69 @@ class BackupService {
   /// Unpin a backup record so it is subject to automatic pruning again.
   Future<void> unpinBackup(String id) => _setPinned(id, false);
 
+  /// Pin [record], adopting it into history first when it is a cloud backup
+  /// the history has no record of (a row from `mergeCloudBackups`, issue
+  /// #3214). Adopted pinned, it stays exempt from retention.
+  ///
+  /// Only a record whose cloud copy still exists is adopted: an unknown local
+  /// record is one that has since been deleted or pruned, and a cloud file
+  /// another device deleted after the listing would become a pinned record
+  /// that can never be restored or pruned.
+  Future<void> pinRecord(BackupRecord record) async {
+    final tracked = _preferences.getHistory().any((r) => r.id == record.id);
+    if (tracked) return pinBackup(record.id);
+    final cloudFileId = record.cloudFileId;
+    final provider = _cloudProvider;
+    if (cloudFileId == null || provider == null) return;
+    if (!await _cloudCopyHere(record)) return;
+    if (!await provider.fileExists(cloudFileId)) return;
+    // Listed through this provider, so it is in the copy's account now.
+    final adopted = record.copyWith(
+      pinned: true,
+      cloudAccountId: record.cloudAccountId ?? await _copyAccountIdOrNull(),
+    );
+    await _preferences.addRecord(adopted);
+    await _writePinMarker(adopted);
+  }
+
+  /// [record] as a real file to save or share, its bytes untouched (issue
+  /// #3650). Throws [BackupException] when it is nowhere to be found, and
+  /// [BackupCopyInOtherAccountException] when its only copy is in another
+  /// cloud account. See backup_service_copy_out.dart.
+  Future<PreparedBackupFile> prepareBackupCopy(
+    BackupRecord record, {
+    required BackupCopyPurpose purpose,
+  }) => _prepareBackupCopy(record, purpose: purpose);
+
+  /// Whether [record] is a safety copy of a protected database, which
+  /// restores only on this install.
+  Future<bool> isDeviceLockedSafetyCopy(BackupRecord record) =>
+      _isDeviceLockedSafetyCopy(record);
+
+  /// Whether deleting [record] may destroy another device's only copy.
+  ///
+  /// True for a cloud-only backup whose name does not prove this device wrote
+  /// it: the backup folder is shared by every device on the account, and after
+  /// a reinstall the diver's own earlier backups carry the old install's
+  /// device tag. Deletion stays allowed (on Google Drive the folder is hidden,
+  /// so the app is the only way to remove them), but the confirmation says so.
+  /// An unreadable device id counts as not proven.
+  Future<bool> mayBeAnotherDevicesCopy(BackupRecord record) async {
+    if (record.localPath != null || record.cloudFileId == null) return false;
+    String deviceId;
+    try {
+      deviceId = await _syncRepository.getDeviceId();
+    } catch (e) {
+      _log.warning('Device id unavailable for backup ownership: $e');
+      return true;
+    }
+    return classifyBackupFile(
+          filename: record.filename,
+          thisDeviceId: deviceId,
+        ) !=
+        BackupOwnership.thisDevice;
+  }
+
   Future<void> _setPinned(String id, bool pinned) async {
     final history = _preferences.getHistory();
     BackupRecord? match;
@@ -396,31 +1535,11 @@ class BackupService {
     }
     if (match == null) return;
     await _preferences.updateRecord(match.copyWith(pinned: pinned));
-  }
-
-  /// Remove old backups beyond the retention count.
-  ///
-  /// Only prunes manual, unpinned records. Pre-migration records have their
-  /// own retention managed by PreMigrationBackupService. Pinned records are
-  /// exempt from all automatic retention.
-  ///
-  /// Keeps the [keepCount] most recent unpinned manual backups and deletes
-  /// the rest.
-  Future<void> pruneOldBackups(int keepCount) async {
-    final history = getBackupHistory(); // Already sorted newest-first
-
-    final eligible = history
-        .where((r) => r.type == BackupType.manual && !r.pinned)
-        .toList();
-    if (eligible.length <= keepCount) return;
-
-    final toDelete = eligible.sublist(keepCount);
-    _log.info(
-      'Pruning ${toDelete.length} old manual backups (keeping $keepCount)',
-    );
-
-    for (final record in toDelete) {
-      await deleteBackup(record);
+    // Other devices see a pin only through its marker (issue #3503).
+    if (pinned) {
+      await _writePinMarker(match);
+    } else {
+      await _deletePinMarker(match);
     }
   }
 
@@ -429,10 +1548,16 @@ class BackupService {
   // ===========================================================================
 
   /// List backup files available in cloud storage.
+  ///
+  /// Empty when no provider is connected or it is signed out: the history
+  /// page calls this on every load (issue #3214), and a provider chosen but
+  /// not yet reconnected after a reinstall must not turn that into a failed
+  /// request.
   Future<List<CloudFileInfo>> getCloudBackups() async {
     if (_cloudProvider == null) return [];
 
     try {
+      if (!await _cloudProvider.isAuthenticated()) return [];
       final folderId = await _getOrCreateCloudBackupFolder();
       if (folderId == null) return [];
 
@@ -468,12 +1593,173 @@ class BackupService {
       }
       return customDir.path;
     }
-    final appDir = await getApplicationDocumentsDirectory();
-    final backupDir = Directory(p.join(appDir.path, _localBackupFolder));
+    return resolveDefaultBackupsDirectory();
+  }
+
+  /// The default backups directory inside the app's sandbox documents dir.
+  ///
+  /// Always writable (it lives inside the app container), so it doubles as the
+  /// safe fallback when a user-chosen custom location is unreachable -- see
+  /// PreMigrationBackupService. Unlike [resolveBackupsDirectory] this ignores
+  /// any configured custom location by design.
+  static Future<String> resolveDefaultBackupsDirectory() async {
+    final backupDir = Directory(await defaultBackupsDirectoryPath());
     if (!await backupDir.exists()) {
       await backupDir.create(recursive: true);
     }
     return backupDir.path;
+  }
+
+  /// Where the sandbox backups directory would be, without creating it.
+  ///
+  /// [resolveDefaultBackupsDirectory] creates it, which is right for a caller
+  /// about to write a backup and wrong for one that only wants to look. Both
+  /// read the folder name from the same constant so a reader cannot end up
+  /// looking somewhere the writer does not use.
+  static Future<String> defaultBackupsDirectoryPath() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    return p.joinAll([appDir.path, ..._localBackupFolder]);
+  }
+
+  /// The bookmark port production uses. Exposed so a read-only resolver can
+  /// arm the same security-scoped access without reaching for a private type.
+  static const BackupBookmarkPort defaultBookmarkPort =
+      _DefaultBackupBookmarkPort();
+
+  /// Resolves the backups directory and arms any security-scoped access needed
+  /// to write into it, returning a [BackupDirLease]. Callers MUST call
+  /// [BackupDirLease.release] when finished writing.
+  ///
+  /// On Apple platforms a custom location is only reachable through its
+  /// security-scoped bookmark. If the bookmark is missing or cannot be
+  /// resolved (e.g. an iCloud folder whose access was revoked), the location is
+  /// reset to the sandbox default rather than left broken -- this is what
+  /// self-heals an already-stored dead path. On other platforms, and for the
+  /// default location, the path is returned directly with a no-op release.
+  static Future<BackupDirLease> resolveBackupsDirectoryLeased(
+    BackupPreferences preferences, {
+    BackupBookmarkPort? bookmarks,
+  }) async {
+    final custom = preferences.getSettings().backupLocation;
+    if (custom == null) {
+      return BackupDirLease(await resolveDefaultBackupsDirectory(), _noRelease);
+    }
+    if (isSafRef(custom)) {
+      // An Android SAF location is a content:// URI, not a filesystem path.
+      // This leased directory is consumed by the pre-migration safety copy,
+      // which writes with dart:io -- and Directory('content://...').create
+      // treats the URI as a relative path and throws
+      // "FileSystemException: Creation failed, path = 'content:'" against the
+      // read-only app working directory, bricking startup on the "Database
+      // upgrade failed" screen (issue #505). Route the filesystem copy to the
+      // always-writable sandbox default. The SAF location is left intact and
+      // still used for normal backups via resolveBackupTargetLeased.
+      return BackupDirLease(await resolveDefaultBackupsDirectory(), _noRelease);
+    }
+    if (!BackupBookmarkService.isSupported) {
+      // Non-Apple platforms (desktop Linux/Windows, and Android with a plain
+      // filesystem path -- SAF content:// locations were already handled
+      // above). Security-scoped bookmarks are an Apple-only concept, so a bare
+      // custom filesystem path here persists and works without scoping.
+      try {
+        return BackupDirLease(await _ensureDir(custom), _noRelease);
+      } on FileSystemException {
+        // The stored path is not a directory this process can create or reach:
+        // an ejected SD card or unmounted network share, or a path fabricated
+        // by file_picker from a SAF tree whose document id has no
+        // "volume:path" shape. A Google Drive pick yields
+        // "/storage/emulated/0/acc=2;doc=encoded=...", which is not a
+        // content:// ref (so the guard above misses it) and which scoped
+        // storage refuses to mkdir with errno 13.
+        //
+        // Self-heal rather than propagate, matching the Apple dead-bookmark
+        // and revoked SAF-grant branches: clearing the location stops it being
+        // retried and makes the settings subtitle revert, signaling a re-pick
+        // is needed.
+        //
+        // Both callers need this to be total. Normal backups arrive via
+        // resolveBackupTargetLeased, and would otherwise throw on every
+        // scheduled and manual run for as long as the location stays dead. The
+        // pre-migration safety copy arrives through a provider that
+        // PreMigrationBackupService invokes inside its fallback guard, so an
+        // escaping exception is recoverable there today -- but only because
+        // StartupPage resolves lazily. When it resolved eagerly the throw
+        // landed outside that guard, surfaced as a bare FileSystemException
+        // instead of a BackupFailedException, and stranded startup on the
+        // terminal "Database upgrade failed" screen, which offers no route
+        // back into settings to correct the location.
+        await preferences.setBackupLocation(null);
+        return BackupDirLease(
+          await resolveDefaultBackupsDirectory(),
+          _noRelease,
+        );
+      }
+    }
+    final port = bookmarks ?? const _DefaultBackupBookmarkPort();
+    final bytes = preferences.getBackupLocationBookmark();
+    if (bytes != null) {
+      final lease = await port.resolve(bytes);
+      if (lease != null) {
+        if (lease.isStale) {
+          // Resolved but stale (the folder moved, or an OS upgrade aged the
+          // bookmark). Re-mint it from the now-armed path so it stops resolving
+          // stale -- best-effort: if re-minting fails we keep the resolved
+          // location rather than discard a working choice. A genuinely broken
+          // bookmark resolves to null below and is reset to the default.
+          final fresh = await port.createBookmark(lease.path);
+          if (fresh != null) {
+            await preferences.setBackupLocationBookmark(fresh);
+          }
+        }
+        return BackupDirLease(
+          await _ensureDir(lease.path),
+          () => port.release(lease.ref),
+        );
+      }
+    }
+    // No bookmark, or it could not be resolved: the custom location is unusable
+    // on this platform. Reset to the sandbox default so backups keep working.
+    await preferences.setBackupLocation(null); // clears location + bookmark
+    return BackupDirLease(await resolveDefaultBackupsDirectory(), _noRelease);
+  }
+
+  /// Resolves where the next backup goes as a [BackupTarget]. A `content://`
+  /// custom location (Android SAF) yields a [SafBackupTarget] after confirming
+  /// the persisted tree grant still resolves; a dead grant self-heals to the
+  /// sandbox default. Everything else delegates to
+  /// [resolveBackupsDirectoryLeased], leaving iOS/macOS/Windows/Linux untouched.
+  static Future<BackupTargetLease> resolveBackupTargetLeased(
+    BackupPreferences preferences, {
+    BackupBookmarkPort? bookmarks,
+    BackupSafPort? saf,
+  }) async {
+    final custom = preferences.getSettings().backupLocation;
+    if (custom != null && isSafRef(custom)) {
+      final port = saf ?? const MethodChannelBackupSafPort();
+      final label = await port.resolveTree(custom);
+      if (label == null) {
+        // Grant revoked or folder deleted: reset to default so backups keep
+        // working (mirrors the Apple dead-bookmark self-heal). The settings
+        // subtitle reverts to the default, signaling a re-pick is needed.
+        await preferences.setBackupLocation(null);
+        final dir = await resolveDefaultBackupsDirectory();
+        return BackupTargetLease(FilesystemBackupTarget(dir), _noRelease);
+      }
+      return BackupTargetLease(SafBackupTarget(custom, port), _noRelease);
+    }
+    final lease = await resolveBackupsDirectoryLeased(
+      preferences,
+      bookmarks: bookmarks,
+    );
+    return BackupTargetLease(FilesystemBackupTarget(lease.path), lease.release);
+  }
+
+  static Future<void> _noRelease() async {}
+
+  static Future<String> _ensureDir(String dir) async {
+    final directory = Directory(dir);
+    if (!await directory.exists()) await directory.create(recursive: true);
+    return dir;
   }
 
   /// Get the active backups directory (custom or default), creating it if needed.
@@ -481,25 +1767,61 @@ class BackupService {
       BackupService.resolveBackupsDirectory(_preferences);
 
   /// Get the local backups directory, creating it if needed.
-  Future<String> getLocalBackupsDirectory() async {
-    // Direct-path version bypassing custom-location check; preserved for
-    // existing callers that want the default location specifically.
-    final appDir = await getApplicationDocumentsDirectory();
-    final backupDir = Directory(p.join(appDir.path, _localBackupFolder));
-    if (!await backupDir.exists()) {
-      await backupDir.create(recursive: true);
-    }
-    return backupDir.path;
-  }
+  ///
+  /// Direct-path version bypassing the custom-location check; preserved for
+  /// existing callers that want the default location specifically.
+  Future<String> getLocalBackupsDirectory() =>
+      BackupService.resolveDefaultBackupsDirectory();
 
   // ===========================================================================
   // Private Helpers
   // ===========================================================================
 
-  String _generateFilename() {
+  /// The connected account the cloud copy goes to, and so the account the
+  /// cloud folder this service lists is in: the one it is pinned to, else
+  /// sync's.
+  Future<String?> cloudCopyAccountId() => _copyAccountIdOrNull();
+
+  /// Names a new backup, tagging it with the device that wrote it.
+  ///
+  /// The tag lives in the filename rather than only in the [BackupRecord]
+  /// because an orphaned backup is one whose record has been lost, so a device
+  /// id in the record is exactly the information already missing. Attribution
+  /// is what makes it safe to offer a forgotten backup for deletion in a
+  /// shared cloud folder, where another device's backups sit in the same
+  /// directory and are equally absent from this device's history.
+  ///
+  /// Falls back to the historic unattributed name if the device id cannot be
+  /// read. An unattributed backup is never offered for deletion, so degrading
+  /// this way costs reclaimable space, never someone's only copy.
+  Future<String> _generateFilename() async {
     final dateFormat = DateFormat('yyyy-MM-dd_HHmmss');
     final timestamp = dateFormat.format(DateTime.now());
-    return 'submersion_backup_$timestamp.db';
+    final unattributed = 'submersion_backup_$timestamp.db';
+    try {
+      final deviceId = await _syncRepository.getDeviceId();
+      if (deviceId.isEmpty) {
+        // An empty id is not an id, and it is not harmless to hash: sha1('')
+        // is a constant, so every device in this state would mint the SAME
+        // tag and claim each other's backups in a shared folder. Only the
+        // read side's empty-id guard stops that today, and safety that
+        // depends on the far end of the system checking for you is worth
+        // making local. Unreadable and empty are one condition.
+        _log.warning(
+          'Backup device attribution unavailable (empty device id); '
+          'writing an unattributed name',
+        );
+        return unattributed;
+      }
+      return buildBackupFilename(timestamp: timestamp, deviceId: deviceId);
+    } catch (e, st) {
+      _log.warning(
+        'Backup device attribution unavailable; writing an unattributed name',
+        error: e,
+        stackTrace: st,
+      );
+      return unattributed;
+    }
   }
 
   Future<({int diveCount, int siteCount})> _getDiveSiteCounts() async {
@@ -521,39 +1843,239 @@ class BackupService {
     }
   }
 
-  Future<String?> _uploadToCloud(String localPath, String filename) async {
-    if (_cloudProvider == null) return null;
-
-    final folderId = await _getOrCreateCloudBackupFolder();
-    if (folderId == null) return null;
-
-    final bytes = await File(localPath).readAsBytes();
-    final result = await _cloudProvider.uploadFile(
-      Uint8List.fromList(bytes),
-      filename,
-      folderId: folderId,
-    );
-    return result.fileId;
+  /// The active backup-encryption key, or null when backup encryption is off.
+  /// Throws [BackupException] when the flag is on but the key is unavailable
+  /// (fail-closed: never silently write plaintext the user asked to protect).
+  Future<({SecretKey mlk, String libraryKeyId, Uint8List keyslotBytes})?>
+  _activeBackupKey() async {
+    if (!_preferences.getSettings().backupEncryptionEnabled) return null;
+    final key = await _backupEncryptionKeyStore?.loadKey();
+    final mirror = await _backupEncryptionKeyStore?.loadKeyslotMirror();
+    if (key == null || mirror == null) {
+      throw const BackupException(
+        'Backup encryption is enabled but the key is unavailable on this device',
+      );
+    }
+    return (mlk: key.mlk, libraryKeyId: key.libraryKeyId, keyslotBytes: mirror);
   }
 
-  Future<String> _downloadFromCloud(String cloudFileId, String filename) async {
-    if (_cloudProvider == null) {
-      throw const BackupException('No cloud provider available for download');
+  /// True when cloud backup is on and end-to-end sync encryption is on, but
+  /// this device has not been unlocked yet (no key or keyslot mirror in its
+  /// keychain). Cloud uploads fail closed in that state, so callers use this
+  /// to tell the user why a backup stayed on the device (issue #3089). Backup
+  /// encryption exempts the device: its .sbe backups upload regardless.
+  Future<bool> isCloudBackupBlockedByEncryptionLock() async {
+    if (_cloudProvider == null && _reachableExtraProviders.isEmpty) {
+      return false;
+    }
+    final settings = _preferences.getSettings();
+    if (!settings.cloudBackupEnabled || settings.backupEncryptionEnabled) {
+      return false;
+    }
+    if (!(_syncPreferences?.syncEncryptionEnabled ?? false)) return false;
+    return await _unlockedSyncKey() == null;
+  }
+
+  /// The sync-encryption key and its keyslot mirror, or null when either is
+  /// missing from this device's keychain.
+  Future<({SecretKey mlk, String libraryKeyId, Uint8List keyslotBytes})?>
+  _unlockedSyncKey() async {
+    final key = await _encryptionKeyStore?.loadKey();
+    final mirror = await _encryptionKeyStore?.loadKeyslotMirror();
+    if (key == null || mirror == null) return null;
+    return (mlk: key.mlk, libraryKeyId: key.libraryKeyId, keyslotBytes: mirror);
+  }
+
+  /// Uploads to [via], the main copy's provider when null.
+  Future<String?> _uploadToCloud(
+    String localPath,
+    String filename, {
+    CloudStorageProvider? via,
+  }) async {
+    final provider = via ?? _cloudProvider;
+    if (provider == null) return null;
+
+    // When backup encryption (issue #580) already produced a framed .sbe, the
+    // local artifact IS the encrypted upload -- send it verbatim. Otherwise, if
+    // sync encryption is on, the CLOUD copy becomes a framed .sbe here (local
+    // artifacts stay plaintext by design). The cloud decorator exempts
+    // submersion_backup_*.sbe, so a pass-through .sbe is never double-encrypted.
+    final alreadyEncrypted = await BackupCrypto.isEncryptedBackup(localPath);
+    final needsSyncEncryption =
+        !alreadyEncrypted && (_syncPreferences?.syncEncryptionEnabled ?? false);
+    final unlocked = needsSyncEncryption ? await _unlockedSyncKey() : null;
+    if (needsSyncEncryption && unlocked == null) {
+      // Fail closed (issue #3089): a diver who turned on end-to-end
+      // encryption must never get a plaintext copy in the cloud. Checked
+      // before touching the cloud folder, and the caller keeps the backup
+      // local-only.
+      _log.warning(
+        'Sync encryption is enabled but this device is not unlocked; '
+        'cloud upload skipped',
+      );
+      return null;
     }
 
-    final bytes = await _cloudProvider.downloadFile(cloudFileId);
-    final tempDir = await getTemporaryDirectory();
-    final tempPath = p.join(tempDir.path, filename);
-    await File(tempPath).writeAsBytes(bytes);
-    return tempPath;
-  }
+    final folderId = await _getOrCreateCloudBackupFolder(
+      rethrowRefused: true,
+      via: provider,
+    );
+    if (folderId == null) return null;
 
-  Future<String?> _getOrCreateCloudBackupFolder() async {
-    if (_cloudProvider == null) return null;
+    var uploadPath = localPath;
+    var uploadName = filename;
+    File? encryptedTemp;
+
+    if (unlocked != null) {
+      final tempDir = await resolveSyncTempDir();
+      uploadName =
+          p.basenameWithoutExtension(filename) + BackupCrypto.fileExtension;
+      uploadPath = p.join(tempDir.path, uploadName);
+      await BackupCrypto.encryptFile(
+        inPath: localPath,
+        outPath: uploadPath,
+        mlk: unlocked.mlk,
+        libraryKeyId: unlocked.libraryKeyId,
+        keyslotBytes: unlocked.keyslotBytes,
+      );
+      encryptedTemp = File(uploadPath);
+    }
 
     try {
-      return await _cloudProvider.createFolder(_cloudBackupFolder);
+      // Path-based upload: providers stream from disk, so a multi-hundred-MB
+      // backup is never resident in memory.
+      final result = await provider.uploadFileFromPath(
+        uploadPath,
+        uploadName,
+        folderId: folderId,
+      );
+      return result.fileId;
+    } finally {
+      if (encryptedTemp != null && await encryptedTemp.exists()) {
+        try {
+          await encryptedTemp.delete();
+        } catch (_) {
+          // best-effort temp cleanup
+        }
+      }
+    }
+  }
+
+  /// When [sourcePath] is an encrypted (.sbe framed) artifact, decrypt it to
+  /// a temp .db: silently with the cached key when the artifact's keyId
+  /// matches, else with [encryptionSecret] (passphrase or recovery code)
+  /// against the embedded keyslots. Throws [BackupEncryptedException] when
+  /// neither is available. Plaintext sources pass through untouched.
+  Future<PreparedBackupFile> _materializePlaintextBackup(
+    String sourcePath, {
+    String? encryptionSecret,
+  }) async {
+    if (!await BackupCrypto.isEncryptedBackup(sourcePath)) {
+      return PreparedBackupFile(sourcePath, isTemp: false);
+    }
+    final tempDir = await resolveSyncTempDir();
+    final decrypted = p.join(tempDir.path, 'restore_${_uuid.v4()}.db');
+    final syncKey = await _encryptionKeyStore?.loadKey();
+    final backupKey = await _backupEncryptionKeyStore?.loadKey();
+    final artifactKeyId = await BackupCrypto.libraryKeyIdOf(sourcePath);
+    try {
+      if (syncKey != null && syncKey.libraryKeyId == artifactKeyId) {
+        await BackupCrypto.decryptFileWithKey(
+          inPath: sourcePath,
+          outPath: decrypted,
+          mlk: syncKey.mlk,
+          expectedLibraryKeyId: syncKey.libraryKeyId,
+        );
+      } else if (backupKey != null && backupKey.libraryKeyId == artifactKeyId) {
+        await BackupCrypto.decryptFileWithKey(
+          inPath: sourcePath,
+          outPath: decrypted,
+          mlk: backupKey.mlk,
+          expectedLibraryKeyId: backupKey.libraryKeyId,
+        );
+      } else if (encryptionSecret != null) {
+        await BackupCrypto.decryptFile(
+          inPath: sourcePath,
+          outPath: decrypted,
+          secret: encryptionSecret,
+        );
+      } else {
+        throw const BackupEncryptedException();
+      }
+    } catch (_) {
+      // A failed auth/framing check may have already written partial plaintext
+      // to `decrypted`; remove it before rethrowing so no readable DB fragment
+      // is left in the temp directory.
+      final partial = File(decrypted);
+      if (await partial.exists()) {
+        try {
+          await partial.delete();
+        } catch (_) {
+          // best-effort cleanup
+        }
+      }
+      rethrow;
+    }
+    return PreparedBackupFile(decrypted, isTemp: true);
+  }
+
+  /// Delete every UNENCRYPTED backup (`submersion_backup_*.db`) from the
+  /// cloud backup folder. Offered at encryption-enable time; encrypted .sbe
+  /// artifacts are left alone. Returns the number deleted.
+  Future<int> deletePlaintextCloudBackups() async {
+    var deleted = 0;
+    // The main copy's folder, then each extra account's (issue #3782).
+    // One account failing leaves the others to be cleared.
+    for (final provider in [?_cloudProvider, ..._reachableExtraProviders]) {
+      try {
+        deleted += await _deletePlaintextIn(provider);
+      } catch (e, stack) {
+        _log.error(
+          'Unencrypted backups could not be cleared from one account',
+          error: e,
+          stackTrace: stack,
+        );
+      }
+    }
+    _log.info('Deleted $deleted unencrypted cloud backups');
+    return deleted;
+  }
+
+  /// [deletePlaintextCloudBackups] for one account's backup folder.
+  Future<int> _deletePlaintextIn(CloudStorageProvider provider) async {
+    final folderId = await _getOrCreateCloudBackupFolder(via: provider);
+    if (folderId == null) return 0;
+    final files = await provider.listFiles(
+      folderId: folderId,
+      namePattern: 'submersion_backup_',
+    );
+    var deleted = 0;
+    for (final f in files) {
+      if (f.name.startsWith('submersion_backup_') && f.name.endsWith('.db')) {
+        await provider.deleteFile(f.id);
+        deleted++;
+      }
+    }
+    // On a backend that keeps history (Git) the plaintext copies would
+    // otherwise stay readable in it.
+    if (deleted > 0) await resetHistoryNowIfSupported(provider);
+    return deleted;
+  }
+
+  /// [rethrowRefused] lets a refusal out for a caller that keeps the reason;
+  /// anything else is a null, as it is for every other caller. [via] is the
+  /// account's provider, the main copy's when null.
+  Future<String?> _getOrCreateCloudBackupFolder({
+    bool rethrowRefused = false,
+    CloudStorageProvider? via,
+  }) async {
+    final provider = via ?? _cloudProvider;
+    if (provider == null) return null;
+
+    try {
+      return await provider.createFolder(_cloudBackupFolder);
     } catch (e, stack) {
+      if (rethrowRefused && isAccessRefused(e)) rethrow;
       _log.error(
         'Failed to get/create cloud backup folder',
         error: e,
@@ -572,6 +2094,23 @@ class BackupException implements Exception {
 
   @override
   String toString() => 'BackupException: $message';
+}
+
+/// A backup written by a NEWER schema than this build supports. Restoring it
+/// would swap in a database the running app cannot open, and the version
+/// guard only fires once the file is already live (issue #1089).
+class BackupNewerSchemaException extends BackupException {
+  final int backupSchemaVersion;
+  final int supportedSchemaVersion;
+
+  BackupNewerSchemaException({
+    required this.backupSchemaVersion,
+    required this.supportedSchemaVersion,
+  }) : super(
+         'This backup was created by a newer version of Submersion '
+         '(database v$backupSchemaVersion; this app supports up to '
+         'v$supportedSchemaVersion). Update Submersion, then restore.',
+       );
 }
 
 /// Result of validating a backup file

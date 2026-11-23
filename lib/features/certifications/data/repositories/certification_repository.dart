@@ -1,20 +1,53 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
-import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/features/courses/data/course_certification_links.dart';
+import 'package:submersion/features/certifications/data/repositories/certification_currency_repository.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart'
     as domain;
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+
+/// Every `certifications` column a [domain.Certification] carries except the
+/// legacy photo BLOBs, which can still hold scans on a row v294 left alone
+/// (issue #3848).
+const _metadataColumns =
+    'id, diver_id, buddy_id, name, agency, level, additional_credentials, '
+    'card_number, issue_date, expiry_date, instructor_name, '
+    'instructor_number, instructor_id, course_id, card_id, notes, '
+    'created_at, updated_at';
 
 class CertificationRepository {
   AppDatabase get _db => DatabaseService.instance.database;
   final SyncRepository _syncRepository = SyncRepository();
   final _uuid = const Uuid();
   final _log = LoggerService.forClass(CertificationRepository);
+
+  /// Emits whenever a certification or its card changes, for what reads card
+  /// images. They are read from the card document (issue #2613), so a document
+  /// or page change ticks too. Anything else subscribes to
+  /// [watchCertificationRowChanges].
+  Stream<void> watchCertificationsChanges() => _db.tableUpdates(
+    TableUpdateQuery.allOf([
+      TableUpdateQuery.onTable(_db.certifications),
+      TableUpdateQuery.onTable(_db.documents),
+      TableUpdateQuery.onTable(_db.documentPages),
+    ]),
+  );
+
+  /// Emits when a `certifications` row changes: the tick for what reads only
+  /// the rows, which a document or page write leaves untouched (issue #3848).
+  Stream<void> watchCertificationRowChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.certifications));
 
   /// Get all certifications ordered by issue date (newest first)
   Future<List<domain.Certification>> getAllCertifications({
@@ -32,10 +65,42 @@ class CertificationRepository {
       }
 
       final rows = await query.get();
-      return rows.map(_mapRowToCertification).toList();
+      return await _withCardImages(rows.map(_mapRowToCertification).toList());
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get all certifications',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// [getAllCertifications] without the card images, for whatever does not
+  /// draw a card (issue #3848). A scan can run to megabytes, so these reads
+  /// keep a screen's cost and memory independent of them. [ids] narrows it
+  /// to those records (Global Search's few rows, issue #4247).
+  Future<List<domain.Certification>> getCertificationMetadata({
+    String? diverId,
+    List<String>? ids,
+  }) async {
+    if (ids != null && ids.isEmpty) return const [];
+    final conditions = [
+      if (diverId != null) 'diver_id = ?',
+      if (ids != null) 'id IN (${List.filled(ids.length, '?').join(', ')})',
+    ];
+    try {
+      return await _selectMetadata(
+        '${conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')} '}'
+        'ORDER BY issue_date DESC, name ASC',
+        [
+          if (diverId != null) Variable.withString(diverId),
+          ...?ids?.map(Variable.withString),
+        ],
+      );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get certification metadata',
         error: e,
         stackTrace: stackTrace,
       );
@@ -50,7 +115,8 @@ class CertificationRepository {
         ..where((t) => t.id.equals(id));
 
       final row = await query.getSingleOrNull();
-      return row != null ? _mapRowToCertification(row) : null;
+      if (row == null) return null;
+      return (await _withCardImages([_mapRowToCertification(row)])).single;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get certification by id: $id',
@@ -61,12 +127,13 @@ class CertificationRepository {
     }
   }
 
-  /// Search certifications by name or agency
+  /// Search certifications by name or agency. Without their card images:
+  /// the results are rows, and opening one reads it in full.
   Future<List<domain.Certification>> searchCertifications(
     String query, {
     String? diverId,
   }) async {
-    final searchTerm = '%${query.toLowerCase()}%';
+    final searchTerm = '%${foldForSearch(query)}%';
 
     final diverFilter = diverId != null ? 'AND diver_id = ?' : '';
     final variables = [
@@ -76,48 +143,73 @@ class CertificationRepository {
       if (diverId != null) Variable.withString(diverId),
     ];
 
-    final results = await _db.customSelect('''
-      SELECT * FROM certifications
-      WHERE (LOWER(name) LIKE ?
-         OR LOWER(agency) LIKE ?
-         OR LOWER(card_number) LIKE ?)
+    return _selectMetadata('''
+      WHERE (search_fold(name) LIKE ?
+         OR search_fold(agency) LIKE ?
+         OR search_fold(card_number) LIKE ?)
       $diverFilter
       ORDER BY issue_date DESC, name ASC
-    ''', variables: variables).get();
+    ''', variables);
+  }
 
-    return results.map((row) {
-      return domain.Certification(
-        id: row.data['id'] as String,
-        diverId: row.data['diver_id'] as String?,
-        name: row.data['name'] as String,
-        agency: _parseCertificationAgency(row.data['agency'] as String),
-        level: _parseCertificationLevel(row.data['level'] as String?),
-        cardNumber: row.data['card_number'] as String?,
-        issueDate: _parseDateTime(row.data['issue_date'] as int?),
-        expiryDate: _parseDateTime(row.data['expiry_date'] as int?),
-        instructorName: row.data['instructor_name'] as String?,
-        instructorNumber: row.data['instructor_number'] as String?,
-        photoFront: row.data['photo_front'] as Uint8List?,
-        photoBack: row.data['photo_back'] as Uint8List?,
-        notes: (row.data['notes'] as String?) ?? '',
-        createdAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['created_at'] as int,
-        ),
-        updatedAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['updated_at'] as int,
-        ),
-      );
-    }).toList();
+  /// All certifications owned by a buddy (newest issue date first). Issue #553.
+  Future<List<domain.Certification>> getCertificationsByBuddy(
+    String buddyId,
+  ) async {
+    final query = _db.select(_db.certifications)
+      ..where((t) => t.buddyId.equals(buddyId))
+      ..orderBy([
+        (t) => OrderingTerm.desc(t.issueDate),
+        (t) => OrderingTerm.asc(t.name),
+      ]);
+    final rows = await query.get();
+    return _withCardImages(rows.map(_mapRowToCertification).toList());
+  }
+
+  /// [getCertificationsByBuddy] without the card images (issue #3848).
+  Future<List<domain.Certification>> getCertificationMetadataByBuddy(
+    String buddyId,
+  ) => _selectMetadata(
+    'WHERE buddy_id = ? ORDER BY issue_date DESC, name ASC',
+    [Variable.withString(buddyId)],
+  );
+
+  /// Certifications for many buddies at once, grouped by buddyId. Single query
+  /// (no N+1) so buddy-list hydration stays O(1). Issue #553. Without their
+  /// card images: every buddy on the list passes through here (issue #3848).
+  Future<Map<String, List<domain.Certification>>> getCertificationsForBuddies(
+    List<String> buddyIds,
+  ) async {
+    if (buddyIds.isEmpty) return {};
+    final placeholders = List.filled(buddyIds.length, '?').join(', ');
+    final certs = await _selectMetadata('WHERE buddy_id IN ($placeholders)', [
+      for (final id in buddyIds) Variable.withString(id),
+    ]);
+    final out = <String, List<domain.Certification>>{};
+    for (final cert in certs) {
+      (out[cert.buddyId!] ??= []).add(cert);
+    }
+    return out;
   }
 
   /// Create a new certification
   Future<domain.Certification> createCertification(
-    domain.Certification cert,
-  ) async {
+    domain.Certification cert, {
+    bool notify = true,
+  }) async {
     try {
       _log.info('Creating certification: ${cert.name}');
       final id = cert.id.isEmpty ? _uuid.v4() : cert.id;
       final now = DateTime.now();
+
+      // issue #553: a certification belongs to a diver or a buddy, never
+      // both. (Ownerless certs remain valid: legacy rows and the
+      // no-validated-diver fallback both create them.)
+      if (cert.diverId != null && cert.buddyId != null) {
+        throw ArgumentError(
+          'Certification cannot belong to both a diver and a buddy',
+        );
+      }
 
       await _db
           .into(_db.certifications)
@@ -125,16 +217,20 @@ class CertificationRepository {
             CertificationsCompanion(
               id: Value(id),
               diverId: Value(cert.diverId),
+              buddyId: Value(cert.buddyId),
+              cardId: Value(cert.cardId),
               name: Value(cert.name),
-              agency: Value(cert.agency.name),
-              level: Value(cert.level?.name),
+              agency: Value(cert.agency),
+              level: Value(cert.level),
+              additionalCredentials: Value(
+                _encodeCredentials(cert.additionalCredentials),
+              ),
               cardNumber: Value(cert.cardNumber),
               issueDate: Value(cert.issueDate?.millisecondsSinceEpoch),
               expiryDate: Value(cert.expiryDate?.millisecondsSinceEpoch),
               instructorName: Value(cert.instructorName),
               instructorNumber: Value(cert.instructorNumber),
-              photoFront: Value(cert.photoFront),
-              photoBack: Value(cert.photoBack),
+              instructorId: Value(cert.instructorId),
               notes: Value(cert.notes),
               createdAt: Value(now.millisecondsSinceEpoch),
               updatedAt: Value(now.millisecondsSinceEpoch),
@@ -146,7 +242,8 @@ class CertificationRepository {
         recordId: id,
         localUpdatedAt: now.millisecondsSinceEpoch,
       );
-      SyncEventBus.notifyLocalChange();
+      await _saveCardImages(cert.copyWith(id: id), notify: false);
+      if (notify) SyncEventBus.notifyLocalChange();
 
       _log.info('Created certification with id: $id');
       return cert.copyWith(id: id, createdAt: now, updatedAt: now);
@@ -161,7 +258,10 @@ class CertificationRepository {
   }
 
   /// Update an existing certification
-  Future<void> updateCertification(domain.Certification cert) async {
+  Future<void> updateCertification(
+    domain.Certification cert, {
+    bool notify = true,
+  }) async {
     try {
       _log.info('Updating certification: ${cert.id}');
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -171,15 +271,18 @@ class CertificationRepository {
       )..where((t) => t.id.equals(cert.id))).write(
         CertificationsCompanion(
           name: Value(cert.name),
-          agency: Value(cert.agency.name),
-          level: Value(cert.level?.name),
+          agency: Value(cert.agency),
+          level: Value(cert.level),
+          additionalCredentials: Value(
+            _encodeCredentials(cert.additionalCredentials),
+          ),
           cardNumber: Value(cert.cardNumber),
           issueDate: Value(cert.issueDate?.millisecondsSinceEpoch),
           expiryDate: Value(cert.expiryDate?.millisecondsSinceEpoch),
           instructorName: Value(cert.instructorName),
           instructorNumber: Value(cert.instructorNumber),
-          photoFront: Value(cert.photoFront),
-          photoBack: Value(cert.photoBack),
+          instructorId: Value(cert.instructorId),
+          cardId: Value(cert.cardId),
           notes: Value(cert.notes),
           updatedAt: Value(now),
         ),
@@ -189,7 +292,19 @@ class CertificationRepository {
         recordId: cert.id,
         localUpdatedAt: now,
       );
-      SyncEventBus.notifyLocalChange();
+      // The course's representative is its earliest-issued card, so an
+      // issue-date or name edit can move it (#2515).
+      final courseId = (await (_db.select(
+        _db.certifications,
+      )..where((t) => t.id.equals(cert.id))).getSingleOrNull())?.courseId;
+      if (courseId != null) {
+        await CourseCertificationLinks(
+          _db,
+          _syncRepository,
+        ).refreshRepresentative(courseId, now: now);
+      }
+      await _saveCardImages(cert, notify: false);
+      if (notify) SyncEventBus.notifyLocalChange();
       _log.info('Updated certification: ${cert.id}');
     } catch (e, stackTrace) {
       _log.error(
@@ -202,21 +317,93 @@ class CertificationRepository {
   }
 
   /// Delete a certification
-  Future<void> deleteCertification(String id) async {
+  Future<void> deleteCertification(String id, {bool notify = true}) =>
+      ChangeLogScope.bulk(
+        DatabaseService.instance.databaseOrNull,
+        label: ChangeLogLabels.deletedRecord,
+        body: () => _deleteCertificationInner(id, notify: notify),
+      );
+
+  Future<void> _deleteCertificationInner(
+    String id, {
+    bool notify = true,
+  }) async {
     try {
       _log.info('Deleting certification: $id');
-      await (_db.delete(
-        _db.certifications,
-      )..where((t) => t.id.equals(id))).go();
-      await _syncRepository.logDeletion(
-        entityType: 'certifications',
-        recordId: id,
-      );
-      SyncEventBus.notifyLocalChange();
+      await _db.transaction(() async {
+        final courseId = (await (_db.select(
+          _db.certifications,
+        )..where((t) => t.id.equals(id))).getSingleOrNull())?.courseId;
+        // Currency prefs and events cascade with the row, and a cascade
+        // writes no tombstones, so log them before they go.
+        await CertificationCurrencyRepository().tombstoneChildrenOf(id);
+        // Its documents (the card and any others) go with it, tombstoned
+        // (issue #2613).
+        await DocumentRepository().deleteForOwner(
+          DocumentOwnerKind.certification,
+          id,
+        );
+        await (_db.delete(
+          _db.certifications,
+        )..where((t) => t.id.equals(id))).go();
+        await _syncRepository.logDeletion(
+          entityType: 'certifications',
+          recordId: id,
+        );
+        // courses.certification_id has no foreign key, so move the course's
+        // representative off the deleted row (#2515).
+        if (courseId != null) {
+          await CourseCertificationLinks(
+            _db,
+            _syncRepository,
+          ).refreshRepresentative(
+            courseId,
+            now: DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+      });
+      if (notify) SyncEventBus.notifyLocalChange();
       _log.info('Deleted certification: $id');
     } catch (e, stackTrace) {
       _log.error(
         'Failed to delete certification: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// The ids of the certifications [courseId] earned, without their card
+  /// images: for a write that needs only which ones (issue #4527).
+  Future<List<String>> getCertificationIdsForCourse(String courseId) async {
+    final rows = await (_db.select(
+      _db.certifications,
+    )..where((t) => t.courseId.equals(courseId))).get();
+    return [for (final row in rows) row.id];
+  }
+
+  /// The certifications earned through [courseId], earliest issued first
+  /// (undated last), then by name and id (#2515). The first is the course's
+  /// representative.
+  Future<List<domain.Certification>> getCertificationsForCourse(
+    String courseId,
+  ) async {
+    try {
+      final rows =
+          await (_db.select(_db.certifications)
+                ..where((t) => t.courseId.equals(courseId))
+                ..orderBy([
+                  (t) => OrderingTerm(expression: t.issueDate.isNull()),
+                  (t) => OrderingTerm.asc(t.issueDate),
+                  (t) => OrderingTerm.asc(t.name),
+                  (t) => OrderingTerm.asc(t.id),
+                ]))
+              .get();
+      return await _withCardImages(rows.map(_mapRowToCertification).toList());
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get certifications for course: $courseId',
         error: e,
         stackTrace: stackTrace,
       );
@@ -250,29 +437,7 @@ class CertificationRepository {
       ORDER BY expiry_date ASC
     ''', variables: variables).get();
 
-    return results.map((row) {
-      return domain.Certification(
-        id: row.data['id'] as String,
-        diverId: row.data['diver_id'] as String?,
-        name: row.data['name'] as String,
-        agency: _parseCertificationAgency(row.data['agency'] as String),
-        level: _parseCertificationLevel(row.data['level'] as String?),
-        cardNumber: row.data['card_number'] as String?,
-        issueDate: _parseDateTime(row.data['issue_date'] as int?),
-        expiryDate: _parseDateTime(row.data['expiry_date'] as int?),
-        instructorName: row.data['instructor_name'] as String?,
-        instructorNumber: row.data['instructor_number'] as String?,
-        photoFront: row.data['photo_front'] as Uint8List?,
-        photoBack: row.data['photo_back'] as Uint8List?,
-        notes: (row.data['notes'] as String?) ?? '',
-        createdAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['created_at'] as int,
-        ),
-        updatedAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['updated_at'] as int,
-        ),
-      );
-    }).toList();
+    return _withCardImages(results.map(_mapQueryRowToCertification).toList());
   }
 
   /// Get expired certifications
@@ -295,57 +460,157 @@ class CertificationRepository {
       ORDER BY expiry_date DESC
     ''', variables: variables).get();
 
-    return results.map((row) {
-      return domain.Certification(
-        id: row.data['id'] as String,
-        diverId: row.data['diver_id'] as String?,
-        name: row.data['name'] as String,
-        agency: _parseCertificationAgency(row.data['agency'] as String),
-        level: _parseCertificationLevel(row.data['level'] as String?),
-        cardNumber: row.data['card_number'] as String?,
-        issueDate: _parseDateTime(row.data['issue_date'] as int?),
-        expiryDate: _parseDateTime(row.data['expiry_date'] as int?),
-        instructorName: row.data['instructor_name'] as String?,
-        instructorNumber: row.data['instructor_number'] as String?,
-        photoFront: row.data['photo_front'] as Uint8List?,
-        photoBack: row.data['photo_back'] as Uint8List?,
-        notes: (row.data['notes'] as String?) ?? '',
-        createdAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['created_at'] as int,
-        ),
-        updatedAt: DateTime.fromMillisecondsSinceEpoch(
-          row.data['updated_at'] as int,
-        ),
-      );
-    }).toList();
+    return _withCardImages(results.map(_mapQueryRowToCertification).toList());
   }
 
   /// Get certifications by agency
   Future<List<domain.Certification>> getCertificationsByAgency(
-    CertificationAgency agency,
+    String agencyId,
   ) async {
     final query = _db.select(_db.certifications)
-      ..where((t) => t.agency.equals(agency.name))
+      ..where((t) => t.agency.equals(agencyId))
       ..orderBy([(t) => OrderingTerm.desc(t.issueDate)]);
 
     final rows = await query.get();
-    return rows.map(_mapRowToCertification).toList();
+    return _withCardImages(rows.map(_mapRowToCertification).toList());
+  }
+
+  /// The rows [clause] picks, as certifications without their card images.
+  Future<List<domain.Certification>> _selectMetadata(
+    String clause,
+    List<Variable<Object>> variables,
+  ) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT $_metadataColumns FROM certifications $clause',
+          variables: variables,
+        )
+        .get();
+    return [
+      for (final row in rows)
+        _mapQueryRowToCertification(row).copyWith(cardImagesLoaded: false),
+    ];
+  }
+
+  /// Maps a raw certifications row (from a customSelect query) to a domain
+  /// entity. Kept in step with [_mapRowToCertification] -- notably it hydrates
+  /// buddyId (issue #553), which the per-query hand-mapping used to drop.
+  domain.Certification _mapQueryRowToCertification(QueryRow row) {
+    return domain.Certification(
+      id: row.data['id'] as String,
+      diverId: row.data['diver_id'] as String?,
+      buddyId: row.data['buddy_id'] as String?,
+      name: row.data['name'] as String,
+      agency: row.data['agency'] as String,
+      level: row.data['level'] as String?,
+      additionalCredentials: _decodeCredentials(
+        row.data['additional_credentials'] as String?,
+      ),
+      cardNumber: row.data['card_number'] as String?,
+      issueDate: _parseDateTime(row.data['issue_date'] as int?),
+      expiryDate: _parseDateTime(row.data['expiry_date'] as int?),
+      instructorName: row.data['instructor_name'] as String?,
+      instructorNumber: row.data['instructor_number'] as String?,
+      instructorId: row.data['instructor_id'] as String?,
+      courseId: row.data['course_id'] as String?,
+      cardId: row.data['card_id'] as String?,
+      notes: (row.data['notes'] as String?) ?? '',
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        row.data['created_at'] as int,
+      ),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(
+        row.data['updated_at'] as int,
+      ),
+    );
+  }
+
+  /// Writes [cert]'s card images to its card document (issue #2613). With
+  /// no images it only clears a card left from before, which needs no
+  /// diver; a card with images is filed under the cert's diver. A
+  /// certification read without its images has nothing to say about the
+  /// card, so its null photos clear nothing (issue #3848).
+  Future<void> _saveCardImages(
+    domain.Certification cert, {
+    required bool notify,
+  }) async {
+    final hasImages = cert.photoFront != null || cert.photoBack != null;
+    assert(
+      cert.cardImagesLoaded || !hasImages,
+      'Set card images on a full read: this one would be dropped',
+    );
+    if (!cert.cardImagesLoaded) return;
+    final diverId = cert.diverId ?? await _diverIdForCardOf(cert);
+    if (hasImages && diverId == null) {
+      _log.warning('No diver to file the card of ${cert.id} under');
+      return;
+    }
+    await DocumentRepository().saveCardImages(
+      certificationId: cert.id,
+      diverId: diverId ?? '',
+      front: cert.photoFront,
+      back: cert.photoBack,
+      notify: notify,
+    );
+  }
+
+  /// A buddy's card is filed under the diver who owns the buddy; a legacy
+  /// ownerless certification under the default diver. Null only when the
+  /// library has no diver at all.
+  Future<String?> _diverIdForCardOf(domain.Certification cert) async {
+    final buddyId = cert.buddyId;
+    if (buddyId != null) {
+      final row = await (_db.select(
+        _db.buddies,
+      )..where((t) => t.id.equals(buddyId))).getSingleOrNull();
+      final owner = row?.diverId;
+      if (owner != null) return owner;
+    }
+    final fallback = await _db
+        .customSelect(
+          'SELECT id FROM divers ORDER BY is_default DESC, created_at LIMIT 1',
+        )
+        .getSingleOrNull();
+    return fallback?.read<String>('id');
+  }
+
+  /// Overlays each certification's card images from its card document; the
+  /// row's own photo columns are legacy and never read (issue #2613).
+  Future<List<domain.Certification>> _withCardImages(
+    List<domain.Certification> certs,
+  ) async {
+    if (certs.isEmpty) return certs;
+    final images = await DocumentRepository().cardImagesFor([
+      for (final c in certs) c.id,
+    ]);
+    return [
+      for (final c in certs)
+        switch (images[c.id]) {
+          final card? => c.copyWith(
+            photoFront: card.front,
+            photoBack: card.back,
+          ),
+          null => c,
+        },
+    ];
   }
 
   domain.Certification _mapRowToCertification(Certification row) {
     return domain.Certification(
       id: row.id,
       diverId: row.diverId,
+      buddyId: row.buddyId,
       name: row.name,
-      agency: _parseCertificationAgency(row.agency),
-      level: _parseCertificationLevel(row.level),
+      agency: row.agency,
+      level: row.level,
+      additionalCredentials: _decodeCredentials(row.additionalCredentials),
       cardNumber: row.cardNumber,
       issueDate: _parseDateTime(row.issueDate),
       expiryDate: _parseDateTime(row.expiryDate),
       instructorName: row.instructorName,
       instructorNumber: row.instructorNumber,
-      photoFront: row.photoFront,
-      photoBack: row.photoBack,
+      instructorId: row.instructorId,
+      courseId: row.courseId,
+      cardId: row.cardId,
       notes: row.notes,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
@@ -358,18 +623,24 @@ class CertificationRepository {
         : null;
   }
 
-  CertificationAgency _parseCertificationAgency(String value) {
-    return CertificationAgency.values.firstWhere(
-      (a) => a.name == value,
-      orElse: () => CertificationAgency.other,
-    );
+  /// Decode the `additional_credentials` JSON column. Tolerant of null, an
+  /// empty string, and malformed rows (falls back to no extra credentials).
+  List<domain.CertificationCredential> _decodeCredentials(String? json) {
+    if (json == null || json.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map<String, dynamic>>()
+          .map(domain.CertificationCredential.fromJson)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
-  CertificationLevel? _parseCertificationLevel(String? value) {
-    if (value == null) return null;
-    return CertificationLevel.values.firstWhere(
-      (l) => l.name == value,
-      orElse: () => CertificationLevel.other,
-    );
+  String? _encodeCredentials(List<domain.CertificationCredential> creds) {
+    if (creds.isEmpty) return null;
+    return jsonEncode(creds.map((c) => c.toJson()).toList());
   }
 }

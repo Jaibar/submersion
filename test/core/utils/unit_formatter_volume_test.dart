@@ -20,14 +20,38 @@ void main() {
     });
 
     test('metric shows physical volume in liters', () {
-      expect(metricFormatter.formatTankVolume(11.1, 207.0), '11 L');
+      expect(metricFormatter.formatTankVolume(11.1, 207.0), '11.1 L');
     });
 
-    test('metric shows volume with decimals', () {
-      expect(
-        metricFormatter.formatTankVolume(11.1, 207.0, decimals: 1),
-        '11.1 L',
-      );
+    test('metric keeps fractional sizes distinct from whole ones', () {
+      // A 1.5 L stage must never render as the 2 L bottle beside it.
+      expect(metricFormatter.formatTankVolume(1.5, 200.0), '1.5 L');
+      expect(metricFormatter.formatTankVolume(2.0, 200.0), '2 L');
+    });
+
+    test('metric trims a trailing zero from whole sizes', () {
+      expect(metricFormatter.formatTankVolume(12.0, 232.0), '12 L');
+      expect(metricFormatter.formatTankVolume(15.0, 232.0), '15 L');
+    });
+
+    test('metric rounds to a single decimal', () {
+      expect(metricFormatter.formatTankVolume(11.14, 207.0), '11.1 L');
+      expect(metricFormatter.formatTankVolume(11.16, 207.0), '11.2 L');
+    });
+
+    test('a small bottle keeps two decimals (#4243)', () {
+      // A drysuit's 0.85 L argon bottle is not a 0.8 L one.
+      expect(metricFormatter.formatTankVolume(0.85, 200.0), '0.85 L');
+      expect(metricFormatter.formatTankVolume(0.4, 200.0), '0.4 L');
+      expect(metricFormatter.formatTankVolume(2.94, 200.0), '2.94 L');
+      expect(metricFormatter.formatTankVolume(3.04, 200.0), '3 L');
+    });
+
+    test('tankVolumeLiterDecimals is two below 3 L, else one', () {
+      expect(UnitFormatter.tankVolumeLiterDecimals(0.85), 2);
+      expect(UnitFormatter.tankVolumeLiterDecimals(2.99), 2);
+      expect(UnitFormatter.tankVolumeLiterDecimals(3), 1);
+      expect(UnitFormatter.tankVolumeLiterDecimals(11.1), 1);
     });
 
     test('imperial uses ratedCapacityCuft when provided', () {
@@ -47,7 +71,7 @@ void main() {
           11.1,
           206.843,
           ratedCapacityCuft: 77.4,
-          decimals: 1,
+          cuftDecimals: 1,
         ),
         '77.4 cuft',
       );
@@ -71,6 +95,31 @@ void main() {
 
     test('imperial shows approximate when working pressure is zero', () {
       expect(imperialFormatter.formatTankVolume(11.1, 0.0), '~78 cuft');
+    });
+
+    test('metric ignores cuftDecimals, which only governs the cuft branch', () {
+      expect(
+        metricFormatter.formatTankVolume(1.5, 200.0, cuftDecimals: 0),
+        '1.5 L',
+      );
+    });
+  });
+
+  group('UnitFormatter formatVolume', () {
+    test('gas quantities stay whole - a fractional liter is noise', () {
+      const metricFormatter = UnitFormatter(AppSettings());
+      expect(metricFormatter.formatVolume(1800.0), '1800 L');
+      expect(metricFormatter.formatVolume(1823.6), '1824 L');
+    });
+
+    test('honours an explicit decimals argument', () {
+      const metricFormatter = UnitFormatter(AppSettings());
+      expect(metricFormatter.formatVolume(1823.6, decimals: 1), '1823.6 L');
+    });
+
+    test('returns -- for null', () {
+      const metricFormatter = UnitFormatter(AppSettings());
+      expect(metricFormatter.formatVolume(null), '--');
     });
   });
 }

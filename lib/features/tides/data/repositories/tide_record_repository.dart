@@ -91,10 +91,15 @@ class TideRecordRepository {
   /// This is the primary method for recording tide data with a dive.
   /// Any existing tide records for this dive are removed first so that
   /// each dive has at most one record.
+  ///
+  /// One transaction, so two writers recording the same dive at once (a
+  /// save's follow-up and the tide card's heal, issue #4527) cannot both
+  /// clear the old record before either stores its own, and leave two.
   Future<domain.TideRecord> createFromStatus({
     required String diveId,
     required TideStatus status,
-  }) async {
+    String? id,
+  }) => _db.transaction(() async {
     // Remove existing records for this dive to prevent duplicates.
     final existing = await (_db.select(
       _db.tideRecords,
@@ -112,13 +117,13 @@ class TideRecordRepository {
     }
 
     final record = domain.TideRecord.fromStatus(
-      id: _uuid.v4(),
+      id: id ?? _uuid.v4(),
       diveId: diveId,
       status: status,
     );
 
     return saveTideRecord(record);
-  }
+  });
 
   /// Delete the tide record for a dive.
   Future<void> deleteTideRecordForDive(String diveId) async {

@@ -1,0 +1,372 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui';
+
+import 'package:submersion/core/utils/geo_math.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/bathymetry/domain/grid_sampling.dart';
+import 'package:submersion/features/bathymetry/domain/terrain_imagery_frame.dart';
+import 'package:submersion/features/dive_3d/domain/entities/mesh_data.dart';
+import 'package:submersion/features/dive_3d/domain/geometry/marker_layout.dart';
+import 'package:submersion/features/dive_3d/domain/geometry/scene_bounds.dart';
+import 'package:submersion/features/dive_3d/domain/scene_3d.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/bathymetry_terrain_builder.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/contour_builder.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/path_scene_markers.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/reckoned_path.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/seascape_appearance.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/spatial_path_builder.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/spatial_projection.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/vertical_exaggeration.dart';
+import 'package:submersion/features/dive_3d/domain/spatial/wall_highlight_builder.dart';
+import 'package:submersion/features/dive_3d/presentation/scene_overlay.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+
+/// One dive's reconstructed path placed in the site's local frame.
+class SiteDivePathInput {
+  final String diveId;
+  final ReckonedPath path;
+  final ({double east, double north}) anchor;
+
+  const SiteDivePathInput({
+    required this.diveId,
+    required this.path,
+    required this.anchor,
+  });
+}
+
+/// A diver-placed annotation, flattened to plain sendable data for the
+/// compute() boundary: the domain entity and its lat/lon stay UI-side.
+class SiteFeatureMarkerInput {
+  final String id;
+  final String typeName;
+  final String label;
+  final ({double east, double north}) offset;
+
+  /// Meters, when the diver recorded one; null drapes the marker on the
+  /// sampled seafloor instead.
+  final double? depthMeters;
+
+  const SiteFeatureMarkerInput({
+    required this.id,
+    required this.typeName,
+    required this.label,
+    required this.offset,
+    this.depthMeters,
+  });
+}
+
+/// Another site whose pin falls inside the fetched terrain.
+class NearbySiteInput {
+  final String siteId;
+  final String name;
+  final ({double east, double north}) offset;
+
+  const NearbySiteInput({
+    required this.siteId,
+    required this.name,
+    required this.offset,
+  });
+}
+
+/// Everything the site seascape scene needs, in plain sendable data (the
+/// whole input crosses the compute() isolate boundary for large grids).
+class SiteSeascapeInput {
+  final BathymetryGrid grid;
+  final GeoPoint center;
+  final String siteName;
+  final double? siteMaxDepth;
+  final List<SiteDivePathInput> divePaths;
+  final List<NearbySiteInput> nearbySites;
+  final List<SiteFeatureMarkerInput> features;
+  final SeascapeAppearance appearance;
+  final double displayUnitInMeters;
+  final String depthSymbol;
+
+  /// The stitched imagery's mercator mapping when the surface drapes map
+  /// tiles; null renders the depth ramp. Plain data so the whole input
+  /// still crosses compute().
+  final TerrainImageryFrame? imageryFrame;
+
+  /// Overrides the auto-computed [computeVerticalExaggeration] (issue
+  /// #2141) when the diver has adjusted the terrain's vertical
+  /// exaggeration slider; null uses the automatic value.
+  final double? verticalExaggerationOverride;
+
+  const SiteSeascapeInput({
+    required this.grid,
+    required this.center,
+    required this.siteName,
+    this.siteMaxDepth,
+    required this.divePaths,
+    required this.nearbySites,
+    this.features = const [],
+    this.appearance = const SeascapeAppearance(),
+    this.displayUnitInMeters = 1.0,
+    this.depthSymbol = 'm',
+    this.imageryFrame,
+    this.verticalExaggerationOverride,
+  });
+}
+
+/// Assembles the site-level seascape: real terrain, every reconstructed
+/// dive path draped in place (never deforming the measured seafloor),
+/// the site pin with its recorded max depth, and nearby-site markers.
+class SiteSeascapeGeometryService {
+  static const Color _sitePinColor = Color(0xFFF43F5E);
+  static const double _markerFloat = 0.15;
+  static const double _surfaceHeadroom = 0.6;
+
+  const SiteSeascapeGeometryService();
+
+  Scene3d build(SiteSeascapeInput input) => buildWithLabels(input).scene;
+
+  /// [verticalExaggeration] is the auto-computed factor actually applied to
+  /// the terrain's depth axis (issue #2141): callers that rebuild a
+  /// [SpatialProjection] elsewhere (e.g. for axis labels) must pass it
+  /// through too, or their depth axis disagrees with the terrain it labels.
+  ({
+    Scene3d scene,
+    List<ContourLabelSpec> contourLabels,
+    double verticalExaggeration,
+  })
+  buildWithLabels(SiteSeascapeInput input) {
+    final box = BathymetryTerrainBuilder.enuBounds(input.grid, input.center);
+    // Scaled from the MEASURED grid alone: input.siteMaxDepth is the site's
+    // recorded max depth, which can come from anywhere in a large lake and
+    // need not fall inside this local box. Folding it in here used to
+    // squash the real terrain toward the surface whenever it exceeded the
+    // grid's own range, making proportionally shallow sites look flat and
+    // deep ones look stretched (issue #45). The site pin below still
+    // reaches the diver's recorded depth even when that is deeper than the
+    // visible terrain; only the scene's overall vertical scale stays tied
+    // to what the grid actually measured.
+    final maxDepth = math.max(input.grid.maxDepthMeters, 1.0);
+    // Sized off the site's actual wet footprint, not the fetched tile's
+    // fixed span: the tile always spans BathymetryResolver.defaultSpanMeters
+    // regardless of the site's real shape, so a narrow lake inside a wide
+    // tile must not be treated as if it were that wide (issue #2141). The
+    // width comes from the wet cells' own principal axes (orientation-
+    // independent), not an axis-aligned bounding box, which reads a
+    // diagonally oriented narrow lake -- the common case for alpine
+    // valleys -- as far wider than it really is (issue #2141 follow-up).
+    //
+    // Fallback (fewer than 2 wet cells, so no meaningful shape to measure):
+    // the tile's own NARROWER side, not the wider one -- the wider side
+    // would drive the ratio toward zero and force the exaggeration to its
+    // maximum for a site with essentially no real data to justify it,
+    // exactly the failure this whole computation exists to avoid.
+    final narrowSpan =
+        BathymetryTerrainBuilder.wetPrincipalAxisWidth(
+          input.grid,
+          input.center,
+        ) ??
+        math.min(box.maxEast - box.minEast, box.maxNorth - box.minNorth);
+    // Clamped, not trusted as stored: the override reaches here straight
+    // from settings without passing back through the slider, so a
+    // corrupted or foreign-written row would otherwise scale the whole
+    // scene by an arbitrary factor (Copilot review).
+    final override = input.verticalExaggerationOverride;
+    final verticalExaggeration = override != null
+        ? clampManualVerticalExaggeration(override)
+        : computeVerticalExaggeration(
+            maxDepthMeters: maxDepth,
+            narrowSpanMeters: narrowSpan,
+          );
+    final proj = SpatialProjection(
+      minEast: box.minEast,
+      maxEast: box.maxEast,
+      minNorth: box.minNorth,
+      maxNorth: box.maxNorth,
+      maxDepth: maxDepth,
+      verticalExaggeration: verticalExaggeration,
+    );
+
+    final terrain = BathymetryTerrainBuilder.build(
+      grid: input.grid,
+      center: input.center,
+      projection: proj,
+      rampMaxDepthMeters: input.appearance.rampMaxDepthMeters,
+      rampBanded: input.appearance.rampBanded,
+      imageryFrame: input.imageryFrame,
+      surfaceMode: input.appearance.surfaceMode,
+    );
+    final contours = buildContourLayers(
+      grid: input.grid,
+      center: input.center,
+      projection: proj,
+      appearance: input.appearance,
+      displayUnitInMeters: input.displayUnitInMeters,
+      depthSymbol: input.depthSymbol,
+    );
+    final wallMesh = buildWallHighlightMesh(
+      grid: input.grid,
+      center: input.center,
+      projection: proj,
+      thresholdDeg: input.appearance.wallAngleDeg,
+    );
+
+    final layers = <SceneLayer>[SceneLayer(terrain.terrain)];
+    layers.addAll(contours.layers);
+    if (wallMesh != null) {
+      layers.add(
+        SceneLayer(
+          wallMesh,
+          overlay: SceneOverlay.steepWalls,
+          drapedOnTerrain: true,
+        ),
+      );
+    }
+    // Each dive's own device markers, on its own ribbon (issue #4231).
+    final pathMarkers = <SceneMarker>[];
+    for (final d in input.divePaths) {
+      final placed = offsetReckonedPath(d.path, d.anchor);
+      if (placed.points.length < 2) continue;
+      pathMarkers.addAll(pathSceneMarkers(placed, proj));
+      layers
+        ..add(
+          SceneLayer(
+            SpatialPathBuilder.buildRibbon(placed, proj),
+            overlay: SceneOverlay.paths,
+          ),
+        )
+        ..add(
+          SceneLayer(
+            SpatialPathBuilder.buildPin(
+              placed.points.first,
+              proj,
+              isEntry: true,
+            ),
+            overlay: SceneOverlay.paths,
+          ),
+        )
+        ..add(
+          SceneLayer(
+            SpatialPathBuilder.buildPin(
+              placed.points.last,
+              proj,
+              isEntry: false,
+            ),
+            overlay: SceneOverlay.paths,
+          ),
+        );
+    }
+    final pinDepth = input.siteMaxDepth ?? maxDepth;
+    layers
+      ..add(SceneLayer(_sitePin(proj, pinDepth)))
+      ..add(SceneLayer(terrain.water, overlay: SceneOverlay.water));
+
+    final markers = <SceneMarker>[
+      SceneMarker(
+        kind: SceneMarkerKind.site,
+        refId: null,
+        label: input.siteName,
+        x: proj.xOf(0),
+        y: _markerFloat,
+        z: proj.zOf(0),
+        timestampSeconds: 0,
+      ),
+      for (final n in input.nearbySites)
+        SceneMarker(
+          kind: SceneMarkerKind.nearbySite,
+          refId: n.siteId,
+          label: n.name,
+          x: proj.xOf(n.offset.east),
+          y: _markerFloat,
+          z: proj.zOf(n.offset.north),
+          timestampSeconds: 0,
+        ),
+      for (final f in input.features)
+        SceneMarker(
+          kind: SceneMarkerKind.siteFeature,
+          refId: f.id,
+          label: f.label.isNotEmpty ? f.label : f.typeName,
+          x: proj.xOf(f.offset.east),
+          y: f.depthMeters != null
+              ? proj.yOf(f.depthMeters!)
+              : _featureY(input.grid, input.center, f.offset, proj),
+          z: proj.zOf(f.offset.north),
+          timestampSeconds: 0,
+        ),
+      ...pathMarkers,
+    ];
+
+    final zHalf = proj.zHalfExtent + SceneBounds.zHalfWidth;
+    // The camera frame grows to keep the pin in view when the diver's
+    // recorded max depth reaches past the measured terrain; it never
+    // shrinks above the terrain's own true-to-scale floor.
+    final sceneMinY = math.min(proj.yOf(maxDepth), proj.yOf(pinDepth));
+    final scene = Scene3d(
+      layers: layers,
+      markers: markers,
+      bounds: SceneBounds(
+        durationSeconds: 1,
+        maxDepthMeters: maxDepth,
+        sceneMinY: sceneMinY,
+        sceneMaxY: _surfaceHeadroom,
+        sceneMinZ: -zHalf,
+        sceneMaxZ: zHalf,
+      ),
+    );
+    return (
+      scene: scene,
+      contourLabels: contours.labels,
+      verticalExaggeration: verticalExaggeration,
+    );
+  }
+
+  /// Scene y for a feature with no recorded depth: the measured seafloor
+  /// under it, so the marker sits ON the terrain rather than floating at
+  /// an invented depth. Falls back to the surface float when the grid has
+  /// nothing there (nodata, land, or outside).
+  double _featureY(
+    BathymetryGrid grid,
+    GeoPoint center,
+    ({double east, double north}) offset,
+    SpatialProjection proj,
+  ) {
+    final lat =
+        center.latitude +
+        offset.north / BathymetryTerrainBuilder.metersPerDegLat;
+    final lon =
+        center.longitude +
+        offset.east / metersPerDegreeLongitude(center.latitude);
+    final depth = sampleGridDepth(grid, lat, lon);
+    return depth == null ? _markerFloat : proj.yOf(depth);
+  }
+
+  /// A thin vertical quad from the surface down to the site's recorded max
+  /// depth at the scene center — the "you are here, this deep" pin.
+  MeshData _sitePin(SpatialProjection proj, double pinDepth) {
+    const halfWidth = 0.05;
+    final x = proj.xOf(0);
+    final z = proj.zOf(0);
+    final yBottom = proj.yOf(pinDepth);
+    final positions = Float32List.fromList([
+      x - halfWidth,
+      0,
+      z,
+      x + halfWidth,
+      0,
+      z,
+      x - halfWidth,
+      yBottom,
+      z,
+      x + halfWidth,
+      yBottom,
+      z,
+    ]);
+    final colors = Float32List(4 * 3);
+    for (var i = 0; i < 4; i++) {
+      colors[i * 3] = _sitePinColor.r;
+      colors[i * 3 + 1] = _sitePinColor.g;
+      colors[i * 3 + 2] = _sitePinColor.b;
+    }
+    return MeshData(
+      positions: positions,
+      indices: Uint32List.fromList([0, 1, 2, 1, 3, 2]),
+      colors: colors,
+      opacity: 0.85,
+    );
+  }
+}

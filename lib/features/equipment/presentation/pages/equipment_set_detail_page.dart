@@ -1,22 +1,136 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
-import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/change_log/presentation/widgets/change_log_history_menu_item.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/new_record_diver.dart';
+import 'package:submersion/features/equipment/data/services/equipment_set_edit_save_service.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set_geofence.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/features/equipment/domain/services/equipment_arranger.dart';
+import 'package:submersion/features/equipment/domain/services/set_history_diff.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_composer.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_inputs.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_model.dart';
+import 'package:submersion/features/equipment/figure/presentation/figure_model_memo.dart';
+import 'package:submersion/features/equipment/figure/presentation/figure_number_badge.dart';
+import 'package:submersion/features/equipment/figure/presentation/figure_palette_theme.dart';
+import 'package:submersion/features/equipment/figure/presentation/figure_selection.dart';
+import 'package:submersion/features/equipment/figure/presentation/gear_figure.dart';
+import 'package:submersion/features/equipment/presentation/editing/equipment_set_card_ids.dart';
+import 'package:submersion/features/equipment/presentation/editing/equipment_set_edit_cards.dart';
+import 'package:submersion/features/equipment/presentation/editing/equipment_set_members_editor.dart';
+import 'package:submersion/features/equipment/presentation/editing/equipment_set_new_sitting.dart';
+import 'package:submersion/features/equipment/presentation/helpers/equipment_set_clone_action.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_arrangement_provider.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_row_label.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_row_labels_of.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_type_icon.dart';
+import 'package:submersion/features/equipment/presentation/widgets/assembly_chips.dart';
+import 'package:submersion/features/equipment/presentation/widgets/assembly_history_dialog.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_group_header.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_status_indicator.dart';
+import 'package:submersion/features/equipment/presentation/widgets/set_bundle_summary.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_view.dart';
+import 'package:submersion/shared/widgets/record_editing/add_strip.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_card.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_frame.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
+import 'package:submersion/shared/widgets/record_editing/record_creating.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_host.dart';
+import 'package:submersion/shared/widgets/record_editing/record_open_unlocked.dart';
+import 'package:submersion/shared/widgets/record_editing/record_operation_gate.dart';
+import 'package:submersion/shared/widgets/record_editing/record_sitting_refusal.dart';
 
-class EquipmentSetDetailPage extends ConsumerWidget {
+part 'equipment_set_detail_page_creating.dart';
+part 'equipment_set_detail_page_editing.dart';
+part 'equipment_set_detail_page_sections.dart';
+
+/// An equipment set's page. It opens locked and edits in place (issue #4527):
+/// its cards are held in one sitting and written by one Save.
+class EquipmentSetDetailPage extends ConsumerStatefulWidget {
   final String setId;
 
-  const EquipmentSetDetailPage({super.key, required this.setId});
+  /// Opens unlocked, as the old edit address asks (`?mode=edit`).
+  final bool openUnlocked;
+
+  /// Told when a sitting the page opened unlocked ends: the sets pane's
+  /// edit returns to the set in view.
+  final VoidCallback? onSittingEnded;
+
+  /// A new set, or a clone of [cloneFromId] (issue #4527, phase 3, plan
+  /// 11): the page opened unlocked on a set not yet created.
+  final ({String? cloneFromId})? newSet;
+
+  const EquipmentSetDetailPage({
+    super.key,
+    required this.setId,
+    this.openUnlocked = false,
+    this.onSittingEnded,
+  }) : newSet = null;
+
+  /// A new set's page.
+  const EquipmentSetDetailPage.newSet({super.key, String? cloneFromId})
+    : newSet = (cloneFromId: cloneFromId),
+      setId = '',
+      openUnlocked = false,
+      onSittingEnded = null;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<EquipmentSetDetailPage> createState() =>
+      _EquipmentSetDetailPageState();
+}
+
+class _EquipmentSetDetailPageState extends ConsumerState<EquipmentSetDetailPage>
+    with
+        FigureSelection<EquipmentSetDetailPage>,
+        RecordEditHost<EquipmentSetDetailPage, EquipmentSet>,
+        RecordOpenUnlocked<EquipmentSetDetailPage, EquipmentSet>,
+        _EquipmentSetDetailPageEditing,
+        _EquipmentSetDetailPageSections,
+        RecordCreating<EquipmentSetDetailPage, EquipmentSet>,
+        _EquipmentSetDetailPageCreating {
+  /// The menu value that clones the set (issue #2156).
+  static const _cloneAction = 'clone';
+
+  /// The composed figure, reused by rebuilds that change none of its
+  /// inputs (the highlight flash, for one), so the painter is not handed a
+  /// new model and does not repaint.
+  @override
+  final _memo = FigureModelMemo();
+
+  String get setId => widget.setId;
+
+  @override
+  void dispose() {
+    disposeEditing();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (isCreating) {
+      _dropCloneOnProfileSwitch();
+      final seed = newRecordSeed;
+      return newRecordWaiting(context) ??
+          _buildContent(context, shownRecord(seed!), seed);
+    }
     final setAsync = ref.watch(equipmentSetProvider(setId));
+    followStored(equipmentSetProvider(setId));
 
     return setAsync.when(
       data: (set) {
@@ -30,7 +144,8 @@ class EquipmentSetDetailPage extends ConsumerWidget {
             ),
           );
         }
-        return _buildContent(context, ref, set);
+        openUnlockedOnce(set);
+        return _buildContent(context, shownRecord(set), set);
       },
       loading: () => Scaffold(
         appBar: AppBar(
@@ -47,246 +162,5 @@ class EquipmentSetDetailPage extends ConsumerWidget {
         ),
       ),
     );
-  }
-
-  Widget _buildContent(BuildContext context, WidgetRef ref, EquipmentSet set) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(set.name),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit),
-            tooltip: context.l10n.equipment_setDetail_editTooltip,
-            onPressed: () => context.push('/equipment/sets/$setId/edit'),
-          ),
-          PopupMenuButton<String>(
-            onSelected: (value) => _handleMenuAction(context, ref, value, set),
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'delete',
-                child: ListTile(
-                  leading: const Icon(Icons.delete, color: Colors.red),
-                  title: Text(
-                    context.l10n.equipment_setDetail_deleteMenuItem,
-                    style: const TextStyle(color: Colors.red),
-                  ),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header card
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 32,
-                      backgroundColor: Theme.of(
-                        context,
-                      ).colorScheme.primaryContainer,
-                      child: Icon(
-                        Icons.folder,
-                        size: 32,
-                        color: Theme.of(context).colorScheme.onPrimaryContainer,
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            set.name,
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          if (set.description.isNotEmpty) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              set.description,
-                              style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurfaceVariant,
-                                  ),
-                            ),
-                          ],
-                          const SizedBox(height: 4),
-                          Text(
-                            set.itemCount == 1
-                                ? context.l10n.equipment_sets_itemCountSingular(
-                                    set.itemCount,
-                                  )
-                                : context.l10n.equipment_sets_itemCountPlural(
-                                    set.itemCount,
-                                  ),
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.primary,
-                                ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Equipment items
-            Text(
-              context.l10n.equipment_setDetail_equipmentInSetTitle,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            if (set.items == null || set.items!.isEmpty)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(32),
-                  child: Center(
-                    child: Column(
-                      children: [
-                        Icon(
-                          Icons.backpack_outlined,
-                          size: 48,
-                          color: Theme.of(
-                            context,
-                          ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          context.l10n.equipment_setDetail_emptySet,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        const SizedBox(height: 16),
-                        OutlinedButton.icon(
-                          onPressed: () =>
-                              context.push('/equipment/sets/$setId/edit'),
-                          icon: const Icon(Icons.add),
-                          label: Text(
-                            context.l10n.equipment_setDetail_addEquipmentButton,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              )
-            else
-              ...set.items!.map((item) => _buildEquipmentTile(context, item)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEquipmentTile(BuildContext context, EquipmentItem item) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        onTap: () => context.push('/equipment/${item.id}'),
-        leading: CircleAvatar(
-          backgroundColor: Theme.of(context).colorScheme.tertiaryContainer,
-          child: Icon(
-            _getIconForType(item.type),
-            color: Theme.of(context).colorScheme.onTertiaryContainer,
-          ),
-        ),
-        title: Text(item.name),
-        subtitle: Text(
-          item.fullName != item.name ? item.fullName : item.type.displayName,
-        ),
-        trailing: const Icon(Icons.chevron_right),
-      ),
-    );
-  }
-
-  Future<void> _handleMenuAction(
-    BuildContext context,
-    WidgetRef ref,
-    String action,
-    EquipmentSet set,
-  ) async {
-    if (action == 'delete') {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(context.l10n.equipment_setDetail_deleteDialog_title),
-          content: Text(context.l10n.equipment_setDetail_deleteDialog_content),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: Text(context.l10n.equipment_setDetail_deleteDialog_cancel),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              style: FilledButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.error,
-              ),
-              child: Text(
-                context.l10n.equipment_setDetail_deleteDialog_confirm,
-              ),
-            ),
-          ],
-        ),
-      );
-
-      if (confirmed == true) {
-        await ref
-            .read(equipmentSetListNotifierProvider.notifier)
-            .deleteSet(setId);
-        if (context.mounted) {
-          context.go('/equipment');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.equipment_setDetail_snackbar_deleted),
-            ),
-          );
-        }
-      }
-    }
-  }
-
-  IconData _getIconForType(EquipmentType type) {
-    switch (type) {
-      case EquipmentType.regulator:
-        return Icons.air;
-      case EquipmentType.bcd:
-        return Icons.accessibility_new;
-      case EquipmentType.wetsuit:
-      case EquipmentType.drysuit:
-        return Icons.checkroom;
-      case EquipmentType.fins:
-        return Icons.directions_walk;
-      case EquipmentType.mask:
-        return Icons.visibility;
-      case EquipmentType.computer:
-        return Icons.watch;
-      case EquipmentType.tank:
-        return MdiIcons.divingScubaTank;
-      case EquipmentType.weights:
-        return Icons.fitness_center;
-      case EquipmentType.light:
-        return Icons.flashlight_on;
-      case EquipmentType.camera:
-        return Icons.camera_alt;
-      default:
-        return Icons.backpack;
-    }
   }
 }

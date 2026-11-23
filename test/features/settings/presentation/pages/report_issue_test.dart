@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
+import 'package:submersion/features/settings/presentation/about_links.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 void main() {
@@ -64,12 +64,19 @@ void main() {
       expect(find.byType(SnackBar), findsNothing);
     });
 
-    testWidgets('shows snackbar fallback when launch fails', (tester) async {
+    testWidgets('launches even when canLaunch reports false', (tester) async {
+      // canLaunchUrl false-negatives on Android 11+ without a matching
+      // <queries> entry, so launchReportIssue must not gate on it.
+      bool launchCalled = false;
+
       const channel = MethodChannel('plugins.flutter.io/url_launcher');
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
-            if (methodCall.method == 'launch') return false;
             if (methodCall.method == 'canLaunch') return false;
+            if (methodCall.method == 'launch') {
+              launchCalled = true;
+              return true;
+            }
             return null;
           });
       addTearDown(
@@ -95,21 +102,20 @@ void main() {
       await tester.tap(find.text('Report'));
       await tester.pumpAndSettle();
 
-      expect(find.byType(SnackBar), findsOneWidget);
+      expect(launchCalled, isTrue);
+      expect(find.byType(SnackBar), findsNothing);
     });
-    testWidgets('shows snackbar when launchUrl throws', (tester) async {
-      const channel = MethodChannel('plugins.flutter.io/url_launcher');
+
+    testWidgets('fallback snackbar copy action copies the URL', (tester) async {
+      final platformCalls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
-            if (methodCall.method == 'canLaunch') return true;
-            if (methodCall.method == 'launch') {
-              throw PlatformException(code: 'ERROR');
-            }
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            platformCalls.add(call);
             return null;
           });
       addTearDown(
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(channel, null),
+            .setMockMethodCallHandler(SystemChannels.platform, null),
       );
 
       await tester.pumpWidget(
@@ -119,7 +125,64 @@ void main() {
           home: Builder(
             builder: (context) => Scaffold(
               body: ElevatedButton(
-                onPressed: () => launchReportIssue(context),
+                onPressed: () =>
+                    launchReportIssue(context, launch: (_) async => false),
+                child: const Text('Report'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Report'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SnackBar), findsOneWidget);
+      expect(find.byType(SnackBarAction), findsOneWidget);
+
+      await tester.tap(find.byType(SnackBarAction));
+      await tester.pump();
+
+      final setData = platformCalls.firstWhere(
+        (c) => c.method == 'Clipboard.setData',
+      );
+      expect((setData.arguments as Map)['text'], reportIssueUrl);
+    });
+
+    testWidgets('shows snackbar fallback when launch fails', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: ElevatedButton(
+                onPressed: () =>
+                    launchReportIssue(context, launch: (_) async => false),
+                child: const Text('Report'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Report'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SnackBar), findsOneWidget);
+    });
+    testWidgets('shows snackbar when the launch throws', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: ElevatedButton(
+                onPressed: () => launchReportIssue(
+                  context,
+                  launch: (_) async => throw PlatformException(code: 'ERROR'),
+                ),
                 child: const Text('Report'),
               ),
             ),

@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_photo_picker.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_weight_entry_providers.dart';
 import 'package:submersion/features/divers/presentation/widgets/delete_diver_dialog.dart';
+import 'package:submersion/features/divers/presentation/widgets/delete_diver_snackbar_text.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/divers/presentation/widgets/diver_switcher_sheet.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/features/safety/presentation/providers/incident_providers.dart';
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
+
+final _log = LoggerService.forClass(DiverProfileHubPage);
 
 class DiverProfileHubPage extends ConsumerWidget {
   const DiverProfileHubPage({super.key});
@@ -62,11 +74,11 @@ class DiverProfileHubPage extends ConsumerWidget {
           ),
           body: ListView(
             children: [
-              _buildActiveDiverCard(context, diver),
+              _buildActiveDiverCard(context, ref, diver),
               const SizedBox(height: 16),
-              _buildSectionTilesCard(context, diver),
+              _buildSectionTilesCard(context, ref, diver),
               const SizedBox(height: 16),
-              _buildManagementTilesCard(context, ref, diver),
+              _buildManagementTilesCard(context, diver),
               const SizedBox(height: 32),
             ],
           ),
@@ -113,7 +125,29 @@ class DiverProfileHubPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildActiveDiverCard(BuildContext context, Diver diver) {
+  Future<void> _editPhoto(
+    BuildContext context,
+    WidgetRef ref,
+    Diver diver,
+  ) async {
+    final result = await pickProfilePhoto(
+      context: context,
+      hasPhoto: diver.photo != null,
+      allowContacts: false,
+    );
+    if (result == null) return;
+    await ref
+        .read(diverRepositoryProvider)
+        .updateDiver(
+          diver.copyWith(photo: result.removed ? null : result.bytes),
+        );
+  }
+
+  Widget _buildActiveDiverCard(
+    BuildContext context,
+    WidgetRef ref,
+    Diver diver,
+  ) {
     final theme = Theme.of(context);
 
     return Padding(
@@ -123,13 +157,40 @@ class DiverProfileHubPage extends ConsumerWidget {
           padding: const EdgeInsets.symmetric(vertical: 24),
           child: Column(
             children: [
-              CircleAvatar(
-                radius: 40,
-                backgroundColor: theme.colorScheme.primaryContainer,
-                foregroundColor: theme.colorScheme.onPrimaryContainer,
-                child: Text(
-                  diver.initials,
-                  style: theme.textTheme.headlineMedium,
+              Semantics(
+                button: true,
+                label: context.l10n.profilePhoto_sheet_title,
+                child: GestureDetector(
+                  // Contacts hold buddies, not the diver using the app, so
+                  // that source is deliberately not offered here.
+                  onTap: () => _editPhoto(context, ref, diver),
+                  child: Stack(
+                    children: [
+                      ProfileAvatar(
+                        photo: diver.photo,
+                        initials: diver.initials,
+                        radius: 40,
+                        backgroundColor: theme.colorScheme.primaryContainer,
+                        foregroundColor: theme.colorScheme.onPrimaryContainer,
+                        textStyle: theme.textTheme.headlineMedium,
+                      ),
+                      Positioned(
+                        bottom: 0,
+                        right: 0,
+                        child: ExcludeSemantics(
+                          child: CircleAvatar(
+                            radius: 14,
+                            backgroundColor: theme.colorScheme.primary,
+                            child: Icon(
+                              Icons.camera_alt,
+                              size: 14,
+                              color: theme.colorScheme.onPrimary,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -153,7 +214,11 @@ class DiverProfileHubPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildSectionTilesCard(BuildContext context, Diver diver) {
+  Widget _buildSectionTilesCard(
+    BuildContext context,
+    WidgetRef ref,
+    Diver diver,
+  ) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Card(
@@ -178,18 +243,91 @@ class DiverProfileHubPage extends ConsumerWidget {
             const Divider(height: 1),
             _buildSectionTile(
               context,
+              icon: Icons.emergency_outlined,
+              title: context.l10n.safetyHub_emergencyCardLink,
+              subtitle: context.l10n.safetyHub_emergencyCardLink_subtitle,
+              route: '/settings/diver-profile/emergency-card',
+            ),
+            const Divider(height: 1),
+            _buildSectionTile(
+              context,
               icon: Icons.medical_information,
               title: context.l10n.settings_profileHub_medicalInfo,
               subtitle: _medicalInfoSubtitle(context, diver),
               route: '/settings/diver-profile/medical',
             ),
             const Divider(height: 1),
+            // The near-miss log is the active diver's own safety record, so
+            // it sits with the emergency and medical tiles (issue #3061).
+            Consumer(
+              builder: (context, ref, _) {
+                // .value keeps the last count through a reload, as the
+                // Documents tile does.
+                final incidents = ref.watch(incidentsProvider).value;
+                return _buildSectionTile(
+                  context,
+                  icon: Icons.flag_outlined,
+                  title: context.l10n.safetyHub_incidentsLink,
+                  subtitle: context.l10n.safetyHub_incidentsLink_count(
+                    incidents?.length ?? 0,
+                  ),
+                  route: '/incidents',
+                );
+              },
+            ),
+            const Divider(height: 1),
             _buildSectionTile(
               context,
               icon: Icons.health_and_safety,
               title: context.l10n.settings_profileHub_insurance,
-              subtitle: _insuranceSubtitle(context, diver),
-              route: '/settings/diver-profile/insurance',
+              subtitle: _insuranceSubtitle(context, ref, diver),
+              // Insurance is a document now (issue #2613).
+              route: '/documents?type=insurance',
+            ),
+            const Divider(height: 1),
+            Consumer(
+              builder: (context, ref, _) {
+                final personal = ref
+                    .watch(
+                      documentsForOwnerProvider(const DocumentOwner.personal()),
+                    )
+                    // .value keeps the last count through a reload; a
+                    // document change would otherwise flash "None yet".
+                    .value;
+                return _buildSectionTile(
+                  context,
+                  icon: Icons.folder_copy_outlined,
+                  title: context.l10n.documents_profileHub_documents,
+                  subtitle: context.l10n.documents_profileHub_documents_count(
+                    personal?.length ?? 0,
+                  ),
+                  route: '/documents?owner=personal',
+                );
+              },
+            ),
+            const Divider(height: 1),
+            _buildSectionTile(
+              context,
+              icon: Icons.history,
+              title: context.l10n.divers_edit_priorExperienceSection,
+              subtitle: _priorExperienceSubtitle(context, diver),
+              route: '/settings/diver-profile/prior',
+            ),
+            const Divider(height: 1),
+            Consumer(
+              builder: (context, ref, _) {
+                final latest = ref.watch(latestDiverWeightProvider).valueOrNull;
+                final units = ref.watch(unitFormatterProvider);
+                return _buildSectionTile(
+                  context,
+                  icon: Icons.monitor_weight,
+                  title: context.l10n.diverProfile_bodyWeight_title,
+                  subtitle: latest != null
+                      ? units.formatWeight(latest.weightKg)
+                      : context.l10n.diverProfile_bodyWeight_empty,
+                  route: '/settings/diver-profile/body-weight',
+                );
+              },
             ),
             const Divider(height: 1),
             _buildSectionTile(
@@ -221,11 +359,7 @@ class DiverProfileHubPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildManagementTilesCard(
-    BuildContext context,
-    WidgetRef ref,
-    Diver diver,
-  ) {
+  Widget _buildManagementTilesCard(BuildContext context, Diver diver) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Card(
@@ -239,7 +373,7 @@ class DiverProfileHubPage extends ConsumerWidget {
               ),
               title: Text(context.l10n.settings_profileHub_switchDiver),
               trailing: const Icon(Icons.chevron_right),
-              onTap: () => _showDiverSwitcher(context, ref, diver.id),
+              onTap: () => showDiverSwitcherSheet(context),
             ),
             const Divider(height: 1),
             ListTile(
@@ -286,120 +420,42 @@ class DiverProfileHubPage extends ConsumerWidget {
     return context.l10n.settings_profileHub_medicalInfo_notSet;
   }
 
-  String _insuranceSubtitle(BuildContext context, Diver diver) {
+  String _insuranceSubtitle(BuildContext context, WidgetRef ref, Diver diver) {
     final insurance = diver.insurance;
-    if (insurance.provider == null || insurance.provider!.isEmpty) {
+    final provider = insurance.providerLabel;
+    if (provider == null) {
       return context.l10n.settings_profileHub_insurance_notSet;
     }
 
     if (insurance.isExpired) {
-      return '${insurance.provider} - ${context.l10n.settings_profileHub_insurance_expired}';
+      return '$provider - ${context.l10n.settings_profileHub_insurance_expired}';
     }
 
     if (insurance.expiryDate != null) {
-      final formatted = DateFormat.yMMMd().format(insurance.expiryDate!);
-      return '${insurance.provider} - $formatted';
+      final formatted = ref
+          .watch(unitFormatterProvider)
+          .formatDate(insurance.expiryDate);
+      return '$provider - $formatted';
     }
 
-    return insurance.provider!;
+    return provider;
   }
 
   String _notesSubtitle(BuildContext context, Diver diver) {
     if (diver.notes.isEmpty) {
       return context.l10n.settings_profileHub_notes_notSet;
     }
-    return diver.notes.split('\n').first;
+    return markdownToPlainText(diver.notes).split('\n').first;
   }
 
-  // -- Dialogs --
-
-  void _showDiverSwitcher(
-    BuildContext context,
-    WidgetRef ref,
-    String currentDiverId,
-  ) {
-    final diverListAsync = ref.read(diverListNotifierProvider);
-
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetContext) {
-        return ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(sheetContext).size.height * 0.4,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: Text(
-                  context.l10n.settings_profile_switchDiver_title,
-                  style: Theme.of(sheetContext).textTheme.titleLarge,
-                ),
-              ),
-              const Divider(),
-              Flexible(
-                child: diverListAsync.when(
-                  loading: () =>
-                      const Center(child: CircularProgressIndicator()),
-                  error: (error, _) => Center(
-                    child: Text(
-                      context.l10n.settings_profile_error_loadingDiver,
-                    ),
-                  ),
-                  data: (divers) => ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: divers.length,
-                    itemBuilder: (listContext, index) {
-                      final diver = divers[index];
-                      final isActive = diver.id == currentDiverId;
-
-                      return ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: Theme.of(
-                            sheetContext,
-                          ).colorScheme.primaryContainer,
-                          foregroundColor: Theme.of(
-                            sheetContext,
-                          ).colorScheme.onPrimaryContainer,
-                          child: Text(diver.initials),
-                        ),
-                        title: Text(diver.name),
-                        trailing: isActive
-                            ? Icon(
-                                Icons.check,
-                                color: Theme.of(
-                                  sheetContext,
-                                ).colorScheme.primary,
-                              )
-                            : null,
-                        onTap: () {
-                          if (!isActive) {
-                            ref
-                                .read(currentDiverIdProvider.notifier)
-                                .setCurrentDiver(diver.id);
-                            Navigator.of(sheetContext).pop();
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  context.l10n.settings_profile_switchedTo(
-                                    diver.name,
-                                  ),
-                                ),
-                              ),
-                            );
-                          }
-                        },
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
+  String _priorExperienceSubtitle(BuildContext context, Diver diver) {
+    if (diver.priorDiveCount != null) {
+      return '${diver.priorDiveCount} ${context.l10n.divers_edit_priorDivesLabel}';
+    }
+    if (diver.divingSince != null) {
+      return context.l10n.insights_divingSince(diver.divingSince!.year);
+    }
+    return context.l10n.divers_edit_divingSinceNotSet;
   }
 
   Future<void> _showDeleteConfirmation(
@@ -407,15 +463,35 @@ class DiverProfileHubPage extends ConsumerWidget {
     WidgetRef ref,
     Diver diver,
   ) async {
+    // The count only informs the confirmation; the delete keeps the gear
+    // whether or not it could be read (issue #2852).
+    var keptCount = 0;
+    try {
+      keptCount = await ref
+          .read(diverRepositoryProvider)
+          .keptEquipmentCount(diver.id);
+    } catch (e, stackTrace) {
+      _log.warning(
+        'Could not count the gear a delete would keep',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+    if (!context.mounted) return;
     final confirmed = await DeleteDiverDialog.show(
       context,
       diverName: diver.name,
+      keptEquipmentCount: keptCount,
     );
     if (confirmed && context.mounted) {
-      await ref.read(diverListNotifierProvider.notifier).deleteDiver(diver.id);
+      final result = await ref
+          .read(diverListNotifierProvider.notifier)
+          .deleteDiver(diver.id);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.settings_profileHub_deleted)),
+          SnackBar(
+            content: Text(deleteDiverSnackbarText(context.l10n, result)),
+          ),
         );
       }
     }

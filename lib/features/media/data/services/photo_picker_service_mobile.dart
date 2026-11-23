@@ -1,14 +1,20 @@
-import 'dart:typed_data';
-
+import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart' as pm;
 
+import 'package:submersion/features/media/data/services/exif_date_parser.dart';
+import 'package:submersion/features/media/data/services/gallery_album_membership.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_metadata.dart';
 
 /// Photo picker implementation for iOS, Android, and macOS using photo_manager.
 ///
 /// This implementation provides full gallery access with date range filtering,
 /// making it ideal for selecting dive photos from a specific time window.
 class PhotoPickerServiceMobile implements PhotoPickerService {
+  static const MethodChannel _metadataChannel = MethodChannel(
+    'com.submersion.app/photo_metadata',
+  );
+
   /// Cache of AssetEntity objects keyed by their ID.
   /// Used to retrieve full file bytes after thumbnail selection.
   final Map<String, pm.AssetEntity> _assetCache = {};
@@ -19,6 +25,22 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
   @override
   Future<PhotoPermissionStatus> checkPermission() async {
     final status = await pm.PhotoManager.requestPermissionExtend(
+      requestOption: const pm.PermissionRequestOption(
+        androidPermission: pm.AndroidPermission(
+          type: pm.RequestType.common,
+          mediaLocation: true,
+        ),
+      ),
+    );
+    return _mapPermissionStatus(status);
+  }
+
+  /// The current photo access, read without asking. [checkPermission] is a
+  /// request on this platform and shows the OS prompt when access was never
+  /// decided; background work that must not prompt reads this instead.
+  @override
+  Future<PhotoPermissionStatus> currentPermission() async {
+    final status = await pm.PhotoManager.getPermissionState(
       requestOption: const pm.PermissionRequestOption(
         androidPermission: pm.AndroidPermission(
           type: pm.RequestType.common,
@@ -77,6 +99,12 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
     // Collect assets from all albums (primarily "Recent" or "All Photos")
     final List<AssetInfo> results = [];
 
+    // An asset is listed once per album it is in, and each one below costs
+    // platform calls. Not _assetCache: a concurrent query fills that too.
+    final seen = <String>{};
+    // Every album an asset was listed in, for the picker's album filter.
+    final membership = GalleryAlbumMembership();
+
     for (final album in albums) {
       // Get asset count for this album
       final count = await album.assetCountAsync;
@@ -84,6 +112,9 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
 
       // Load all assets from the album
       final assets = await album.getAssetListRange(start: 0, end: count);
+      final galleryAlbum = album.isAll
+          ? null
+          : GalleryAlbum(id: album.id, name: album.name);
 
       for (final asset in assets) {
         // Filter by date range (photo_manager filter should handle this,
@@ -92,6 +123,8 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
         if (createTime.isBefore(start) || createTime.isAfter(end)) {
           continue;
         }
+        membership.add(asset.id, galleryAlbum);
+        if (!seen.add(asset.id)) continue;
 
         // Cache asset for later file retrieval
         _assetCache[asset.id] = asset;
@@ -121,17 +154,9 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
       }
     }
 
-    // Remove duplicates (same asset may appear in multiple albums)
-    final uniqueResults = <String, AssetInfo>{};
-    for (final asset in results) {
-      uniqueResults[asset.id] = asset;
-    }
-
     // Sort by creation date (newest first)
-    final sorted = uniqueResults.values.toList()
+    return membership.attach(results)
       ..sort((a, b) => b.createDateTime.compareTo(a.createDateTime));
-
-    return sorted;
   }
 
   @override
@@ -178,6 +203,35 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
     return file?.path;
   }
 
+  @override
+  Future<MediaSourceMetadata?> getAssetMetadata(String assetId) async {
+    try {
+      final result = await _metadataChannel.invokeMapMethod<String, Object?>(
+        'getAssetMetadata',
+        {'assetId': assetId},
+      );
+      if (result == null) return null;
+      final takenAt = parseExifDateTimeOriginal(
+        result['dateTimeOriginal']?.toString(),
+      );
+      final latitude = _asDouble(result['latitude']);
+      final longitude = _asDouble(result['longitude']);
+      return MediaSourceMetadata(
+        takenAt: takenAt,
+        latitude: latitude,
+        longitude: longitude,
+        width: _asInt(result['width']),
+        height: _asInt(result['height']),
+        durationSeconds: _asInt(result['durationSeconds']),
+        mimeType: result['mimeType']?.toString() ?? 'application/octet-stream',
+      );
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
   PhotoPermissionStatus _mapPermissionStatus(pm.PermissionState status) {
     switch (status) {
       case pm.PermissionState.authorized:
@@ -192,4 +246,18 @@ class PhotoPickerServiceMobile implements PhotoPickerService {
         return PhotoPermissionStatus.restricted;
     }
   }
+}
+
+double? _asDouble(Object? value) {
+  if (value is double) return value;
+  if (value is int) return value.toDouble();
+  if (value is String) return double.tryParse(value);
+  return null;
+}
+
+int? _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is double) return value.round();
+  if (value is String) return int.tryParse(value);
+  return null;
 }

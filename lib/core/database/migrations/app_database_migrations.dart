@@ -1,0 +1,218 @@
+/// The migrations of [AppDatabase]: the upgrade ladder, the helpers its
+/// rungs call, and the backstops that run on every open.
+///
+/// Kept out of `database.dart` on purpose. During code generation
+/// drift_dev resolves the whole library that declares the database, so
+/// every line there is paid for on each build (issue #2502).
+library;
+
+import 'dart:convert';
+import 'dart:developer' as developer;
+
+import 'package:collection/collection.dart';
+import 'package:crypto/crypto.dart';
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/database/change_log/change_log_policy.dart';
+import 'package:submersion/core/database/change_log/change_log_trigger_sql.dart';
+import 'package:submersion/core/database/combine_source_slot_stamp.dart';
+import 'package:submersion/core/database/combined_dive_summary_repair.dart';
+import 'package:submersion/core/database/cylinder_volume_repair.dart';
+import 'package:submersion/core/database/duplicate_primary_series_repair.dart';
+import 'package:submersion/core/database/lone_download_source_repair.dart';
+import 'package:submersion/core/database/dive_rating_repair.dart';
+import 'package:submersion/core/geography/country_code.dart';
+import 'package:submersion/core/database/dive_water_temp_fill.dart';
+import 'package:submersion/core/database/computer_tissue_scalar_move.dart';
+import 'package:submersion/core/database/weather_fetched_at_repair.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/dive_computer_connection_seed.dart';
+import 'package:submersion/core/database/device_gear_heal.dart';
+import 'package:submersion/core/database/device_gear_upgrade.dart';
+import 'package:submersion/core/database/dive_computer_gear_backfill.dart';
+import 'package:submersion/core/database/dive_course_links_schema.dart';
+import 'package:submersion/core/database/dive_time_wall_clock_shift.dart';
+import 'package:submersion/core/database/dive_role_link_uniqueness.dart';
+import 'package:submersion/core/database/dive_type_uniqueness.dart';
+import 'package:submersion/core/database/imported_computer_backfill.dart';
+import 'package:submersion/core/database/last_service_date_repair.dart';
+import 'package:submersion/core/database/shearwater_serial_heal.dart';
+import 'package:submersion/core/database/snapshot_serial_heal.dart';
+import 'package:submersion/core/database/source_computer_relink.dart';
+import 'package:submersion/core/database/performance_indexes.dart';
+import 'package:submersion/core/database/profile_series_pack_coverage.dart';
+import 'package:submersion/core/database/profile_series_pack.dart';
+import 'package:submersion/core/database/table_columns.dart';
+import 'package:submersion/core/database/profile_series_safety_stop_scrub.dart';
+import 'package:submersion/core/database/raw_dive_data_codec.dart';
+import 'package:submersion/core/database/site_classification_uniqueness.dart';
+import 'package:submersion/core/database/site_type_seed.dart';
+import 'package:submersion/core/database/equipment_share_uniqueness.dart';
+import 'package:submersion/core/database/tag_uniqueness.dart';
+import 'package:submersion/core/database/tank_shared_computer_backfill.dart';
+import 'package:submersion/core/database/trip_checklist_default.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/services/sync/changeset_log/rebase_request.dart';
+import 'package:submersion/features/certifications/domain/entities/currency_scope.dart';
+import 'package:submersion/features/documents/domain/document_ids.dart';
+import 'package:submersion/features/documents/domain/entities/document_page.dart';
+
+part 'before_open.dart';
+part 'before_open_backup_note.dart';
+part 'before_open_change_log.dart';
+part 'before_open_child_columns.dart';
+part 'before_open_settings_columns.dart';
+part 'before_open_course_links.dart';
+part 'before_open_device_gear.dart';
+part 'before_open_table_backstops.dart';
+part 'before_open_view_configs.dart';
+part 'helpers/buddy_card_migrations.dart';
+part 'helpers/buddy_migrations.dart';
+part 'helpers/certification_currency_migrations.dart';
+part 'helpers/change_log_migrations.dart';
+part 'helpers/checklist_section_migrations.dart';
+part 'helpers/computer_tissue_migrations.dart';
+part 'helpers/connection_migrations.dart';
+part 'helpers/course_link_migrations.dart';
+part 'helpers/cylinder_migrations.dart';
+part 'helpers/cylinder_pairing_migrations.dart';
+part 'helpers/data_source_migrations.dart';
+part 'helpers/deco_status_migrations.dart';
+part 'helpers/derived_metrics_migrations.dart';
+part 'helpers/dive_computer_auto_download_migrations.dart';
+part 'helpers/dive_computer_connection_migrations.dart';
+part 'helpers/dive_hand_set_fields_migrations.dart';
+part 'helpers/dive_health_migrations.dart';
+part 'helpers/dive_media_time_offset_migrations.dart';
+part 'helpers/dive_migrations.dart';
+part 'helpers/dive_plan_migrations.dart';
+part 'helpers/dive_plan_series_migrations.dart';
+part 'helpers/dive_profile_migrations.dart';
+part 'helpers/dive_lab_migrations.dart';
+part 'helpers/diver_migrations.dart';
+part 'helpers/document_migrations.dart';
+part 'helpers/equipment_migrations.dart';
+part 'helpers/app_tag_migrations.dart';
+part 'helpers/identification_migrations.dart';
+part 'helpers/equipment_collapsed_groups_migrations.dart';
+part 'helpers/recent_equipment_colors_migrations.dart';
+part 'helpers/country_flags_migrations.dart';
+part 'helpers/counterdiffusion_migrations.dart';
+part 'helpers/buoyancy_line_migrations.dart';
+part 'helpers/avelo_line_migrations.dart';
+part 'helpers/dive_center_logo_migrations.dart';
+part 'helpers/scr_flow_migrations.dart';
+part 'helpers/dive_type_favourites_migrations.dart';
+part 'helpers/site_country_code_migrations.dart';
+part 'helpers/site_catalogue_id_migrations.dart';
+part 'helpers/attribute_unit_migrations.dart';
+part 'helpers/site_catalogue_answers_migrations.dart';
+part 'helpers/equipment_condition_migrations.dart';
+part 'helpers/equipment_location_migrations.dart';
+part 'helpers/equipment_photo_migrations.dart';
+part 'helpers/first_day_of_week_migrations.dart';
+part 'helpers/insight_migrations.dart';
+part 'helpers/nearby_migrations.dart';
+part 'helpers/media_migrations.dart';
+part 'helpers/media_people_migrations.dart';
+part 'helpers/planner_defaults_migrations.dart';
+part 'helpers/air_breaks_turn_pressure_migrations.dart';
+part 'helpers/reserve_pressure_gf_migrations.dart';
+part 'helpers/download_owner_migrations.dart';
+part 'helpers/unused_oc_gas_migrations.dart';
+part 'helpers/dive_card_photo_migrations.dart';
+part 'helpers/pinned_profile_migrations.dart';
+part 'helpers/sighting_abundance_migrations.dart';
+part 'helpers/ppo2_deco_band_migrations.dart';
+part 'helpers/hypercapnia_bailout_migrations.dart';
+part 'helpers/list_arrangement_migrations.dart';
+part 'helpers/pre_dive_migrations.dart';
+part 'helpers/profile_series_history_migrations.dart';
+part 'helpers/quality_migrations.dart';
+part 'helpers/query_migrations.dart';
+part 'helpers/rule_migrations.dart';
+part 'helpers/safety_migrations.dart';
+part 'helpers/set_bundle_migrations.dart';
+part 'helpers/service_migrations.dart';
+part 'helpers/site_migrations.dart';
+part 'helpers/support_migrations.dart';
+part 'helpers/sync_migrations.dart';
+part 'helpers/tag_migrations.dart';
+part 'helpers/tdi_certification_migrations.dart';
+part 'helpers/shared_library_migrations.dart';
+part 'helpers/track_migrations.dart';
+part 'helpers/trip_checklist_migrations.dart';
+part 'helpers/trip_migrations.dart';
+part 'helpers/weight_migrations.dart';
+part 'ladder/rungs_v002_to_v029.dart';
+part 'ladder/rungs_v030_to_v054.dart';
+part 'ladder/rungs_v055_to_v071.dart';
+part 'ladder/rungs_v072_to_v095.dart';
+part 'ladder/rungs_v096_to_v148.dart';
+part 'ladder/rungs_v149_to_v230.dart';
+part 'ladder/rungs_v231_to_v339.dart';
+part 'ladder/rungs_v340_onward.dart';
+part 'migration_strategy.dart';
+
+/// Tables that carry a per-row Hybrid Logical Clock for cross-device conflict
+/// resolution (plus sync_metadata for the device clock). Shared between the
+/// v77 backfill (original add), the v82 backfill (recovery for databases that
+/// landed at user_version = 77 via the schema-version collision with PR #302's
+/// surface-interval index migration) and the v83 backfill (comprehensive
+/// recovery for databases stranded past v77 by the wider set of sync-branch
+/// version collisions; see the v82 and v83 rungs in
+/// `ladder/rungs_v072_to_v095.dart`).
+const List<String> _hlcTables = [
+  'divers',
+  'diver_settings',
+  'buddies',
+  'dive_centers',
+  'trips',
+  'liveaboard_detail_records',
+  'trip_itinerary_days',
+  'equipment',
+  'equipment_sets',
+  'equipment_attributes',
+  'equipment_components',
+  'dive_types',
+  'dive_roles',
+  'custom_certification_agencies',
+  'custom_certification_levels',
+  'tank_presets',
+  'weight_presets',
+  'transmitters',
+  'dive_computers',
+  'tags',
+  'courses',
+  'dives',
+  'dive_sites',
+  'diver_weight_entries',
+  'certifications',
+  'service_records',
+  'settings',
+  'csv_presets',
+  'view_configs',
+  'sync_metadata',
+  'media',
+  'species',
+  'field_presets',
+  'quality_findings',
+];
+
+/// What the migrations of one connection did, for the getters that report
+/// it.
+///
+/// An extension cannot declare instance fields, so the flags that were
+/// fields of [AppDatabase] are held here, one record per database.
+class _MigrationOutcome {
+  bool droppedLegacySampleTables = false;
+  bool recompressedRawBlobs = false;
+  int rawBlobsLeftUncompressed = 0;
+}
+
+final _migrationOutcomes = Expando<_MigrationOutcome>();
+
+extension _MigrationOutcomeOf on AppDatabase {
+  _MigrationOutcome get _migrationOutcome =>
+      _migrationOutcomes[this] ??= _MigrationOutcome();
+}

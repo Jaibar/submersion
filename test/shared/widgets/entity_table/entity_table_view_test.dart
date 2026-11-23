@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/constants/entity_field.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
@@ -29,6 +30,19 @@ class _TestField implements EntityField {
   static const entityName = _TestField._('entityName', 'Name', 'Name', false);
   static const entityCount = _TestField._('entityCount', 'Count', 'Cnt', true);
   static const List<_TestField> values = [entityName, entityCount];
+
+  /// Not in [values]: a List value is not Comparable, so sorting by it
+  /// exercises the formatted-value fallback.
+  static const entityAliases = _TestField._(
+    'entityAliases',
+    'Aka',
+    'Aka',
+    false,
+  );
+
+  /// Not in [values]: the count for an even count, the name for an odd one,
+  /// so a sort compares numbers with text (issue #2444).
+  static const entityMixed = _TestField._('entityMixed', 'Mix', 'Mix', false);
 
   @override
   final String name;
@@ -58,6 +72,11 @@ class _TestField implements EntityField {
   String get categoryName => 'basic';
 
   @override
+  String localizedDisplayName(AppLocalizations l10n) => displayName;
+  @override
+  String localizedShortLabel(AppLocalizations l10n) => shortLabel;
+
+  @override
   bool operator ==(Object other) => other is _TestField && other.name == name;
   @override
   int get hashCode => name.hashCode;
@@ -83,12 +102,17 @@ class _TestAdapter extends EntityFieldAdapter<_TestEntity, _TestField> {
         return entity.name;
       case _TestField.entityCount:
         return entity.count;
+      case _TestField.entityAliases:
+        return [entity.name];
+      case _TestField.entityMixed:
+        return entity.count.isEven ? entity.count : entity.name;
     }
   }
 
   @override
   String formatValue(_TestField field, dynamic value, UnitFormatter units) {
     if (value == null) return '--';
+    if (value is List) return value.join(', ');
     return value.toString();
   }
 
@@ -117,7 +141,6 @@ Widget _buildTable({
   EntityTableViewConfig<_TestField>? config,
   void Function(String)? onEntityTap,
   void Function(String)? onEntityDoubleTap,
-  void Function(String)? onEntityLongPress,
   void Function(_TestField)? onSortFieldChanged,
   void Function(_TestField, double)? onResizeColumn,
   Set<String>? selectedIds,
@@ -135,7 +158,6 @@ Widget _buildTable({
       onResizeColumn: onResizeColumn ?? (_, _) {},
       onEntityTap: onEntityTap ?? (_) {},
       onEntityDoubleTap: onEntityDoubleTap,
-      onEntityLongPress: onEntityLongPress,
       selectedIds: selectedIds ?? const {},
       isSelectionMode: isSelectionMode,
       highlightedId: highlightedId,
@@ -227,22 +249,39 @@ void main() {
       expect(doubleTappedId, equals('dt-1'));
     });
 
-    testWidgets('calls onEntityLongPress on long-press', (tester) async {
-      String? longPressedId;
-
+    testWidgets('rows register no long-press recognizer', (tester) async {
       await tester.pumpWidget(
         _buildTable(
           entities: [const _TestEntity('lp-1', 'Echo', 7)],
           onEntityTap: (_) {},
-          onEntityLongPress: (id) => longPressedId = id,
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Echo'));
-      await tester.pumpAndSettle();
-
-      expect(longPressedId, equals('lp-1'));
+      // Long-press is no longer a selection gesture on any surface, so no row
+      // may carry a handler for it. Asserting on the widget tree rather than
+      // on a callback is deliberate: with the parameter gone there is nothing
+      // left to observe from the outside, and a reintroduced handler would
+      // otherwise slip in unnoticed.
+      //
+      // The assertion is on the recognizer, not on individual callbacks:
+      // GestureDetector registers one LongPressGestureRecognizer keyed by its
+      // own Type if ANY of seven long-press callbacks is non-null, so checking
+      // the map key covers onLongPressMoveUpdate, onLongPressEnd, onLongPressUp
+      // and the rest without having to enumerate them.
+      final detectors = tester.widgetList<RawGestureDetector>(
+        find.descendant(
+          of: find.byType(EntityTableView<_TestEntity, _TestField>),
+          matching: find.byType(RawGestureDetector),
+        ),
+      );
+      expect(detectors, isNotEmpty);
+      for (final detector in detectors) {
+        expect(
+          detector.gestures.containsKey(LongPressGestureRecognizer),
+          isFalse,
+        );
+      }
     });
 
     testWidgets('highlights the row matching highlightedId', (tester) async {
@@ -394,6 +433,95 @@ void main() {
       expect(find.text('Alpha'), findsOneWidget);
       expect(find.text('Bravo'), findsOneWidget);
       expect(find.text('Charlie'), findsOneWidget);
+    });
+
+    testWidgets('text sort ignores case (issue #2038)', (tester) async {
+      final entities = [
+        const _TestEntity('z', 'Zebra', 1),
+        const _TestEntity('l', 'plage', 2),
+        const _TestEntity('a', 'anchor', 3),
+      ];
+
+      final configWithSort = EntityTableViewConfig<_TestField>(
+        columns: [
+          EntityTableColumnConfig(field: _TestField.entityName, isPinned: true),
+          EntityTableColumnConfig(field: _TestField.entityCount),
+        ],
+        sortField: _TestField.entityName,
+        sortAscending: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTable(entities: entities, config: configWithSort),
+      );
+      await tester.pumpAndSettle();
+
+      double rowY(String name) => tester.getTopLeft(find.text(name)).dy;
+      expect(rowY('anchor'), lessThan(rowY('plage')));
+      expect(rowY('plage'), lessThan(rowY('Zebra')));
+    });
+
+    testWidgets('non-Comparable values sort by formatted text, ignoring case', (
+      tester,
+    ) async {
+      final entities = [
+        const _TestEntity('z', 'Zebra', 1),
+        const _TestEntity('l', 'plage', 2),
+        const _TestEntity('a', 'anchor', 3),
+      ];
+
+      final configWithSort = EntityTableViewConfig<_TestField>(
+        columns: [
+          EntityTableColumnConfig(
+            field: _TestField.entityCount,
+            isPinned: true,
+          ),
+          EntityTableColumnConfig(field: _TestField.entityAliases),
+        ],
+        sortField: _TestField.entityAliases,
+        sortAscending: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTable(entities: entities, config: configWithSort),
+      );
+      await tester.pumpAndSettle();
+
+      double rowY(String text) => tester.getTopLeft(find.text(text)).dy;
+      expect(rowY('anchor'), lessThan(rowY('plage')));
+      expect(rowY('plage'), lessThan(rowY('Zebra')));
+    });
+
+    testWidgets('a column mixing numbers and text sorts numbers first, '
+        'without throwing (issue #2444)', (tester) async {
+      final entities = [
+        const _TestEntity('p', 'Poor', 1),
+        const _TestEntity('twelve', 'x', 12),
+        const _TestEntity('g', 'Good', 3),
+        const _TestEntity('four', 'y', 4),
+      ];
+
+      final configWithSort = EntityTableViewConfig<_TestField>(
+        columns: [
+          EntityTableColumnConfig(field: _TestField.entityName, isPinned: true),
+          EntityTableColumnConfig(field: _TestField.entityMixed),
+        ],
+        sortField: _TestField.entityMixed,
+        sortAscending: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTable(entities: entities, config: configWithSort),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      // An odd count shows its name in both columns; either hit is the row.
+      double rowY(String name) => tester.getTopLeft(find.text(name).first).dy;
+      // 4, 12, then the text values alphabetically: Good, Poor.
+      expect(rowY('y'), lessThan(rowY('x')));
+      expect(rowY('x'), lessThan(rowY('Good')));
+      expect(rowY('Good'), lessThan(rowY('Poor')));
     });
 
     testWidgets('sorts descending when sortAscending is false', (tester) async {
@@ -568,9 +696,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // The widget should have attempted to scroll to the highlighted row.
-      // We verify the table rendered without errors.
-      expect(find.text('Entity 0'), findsWidgets);
+      expect(find.text('Entity 40'), findsOneWidget);
     });
 
     testWidgets('tapping scrollable column header fires onSortFieldChanged', (
@@ -750,6 +876,86 @@ void main() {
       );
     });
 
+    testWidgets('a table built with a highlighted row brings it into view, '
+        'as returning to a list does (#3301)', (tester) async {
+      final entities = List.generate(
+        200,
+        (i) => _TestEntity('mount-$i', 'Mounted $i', i),
+      );
+
+      await tester.pumpWidget(
+        _buildTable(entities: entities, highlightedId: 'mount-150'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Mounted 150'), findsOneWidget);
+      expect(find.text('Mounted 0'), findsNothing);
+    });
+
+    testWidgets('a highlighted row whose rows arrive after the table is '
+        'built is still brought into view (#3301)', (tester) async {
+      await tester.pumpWidget(
+        _buildTable(entities: const [], highlightedId: 'late-150'),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(
+        _buildTable(
+          entities: List.generate(
+            200,
+            (i) => _TestEntity('late-$i', 'Late $i', i),
+          ),
+          highlightedId: 'late-150',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Late 150'), findsOneWidget);
+    });
+
+    testWidgets('a table built with its highlighted row filtered out does not '
+        'jump to it when a later filter shows it (#3301)', (tester) async {
+      final rows = List.generate(200, (i) => _TestEntity('f-$i', 'Row $i', i));
+      await tester.pumpWidget(
+        _buildTable(entities: rows.take(100).toList(), highlightedId: 'f-150'),
+      );
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildTable(entities: const [], highlightedId: 'f-150'),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(
+        _buildTable(entities: rows, highlightedId: 'f-150'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Row 0'), findsOneWidget);
+    });
+
+    testWidgets('a row highlighted before its rows arrive is brought into '
+        'view when they do, as a jump that clears the search (#3744)', (
+      tester,
+    ) async {
+      final rows = List.generate(200, (i) => _TestEntity('j-$i', 'Row $i', i));
+      await tester.pumpWidget(_buildTable(entities: rows.take(100).toList()));
+      await tester.pumpAndSettle();
+
+      // Highlighted while the filtered rows still show, then the whole list
+      // arrives.
+      await tester.pumpWidget(
+        _buildTable(entities: rows.take(100).toList(), highlightedId: 'j-150'),
+      );
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildTable(entities: rows, highlightedId: 'j-150'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Row 150'), findsOneWidget);
+      expect(find.text('Row 0'), findsNothing);
+    });
+
     // -----------------------------------------------------------------------
     // didUpdateWidget changes highlightedId
     // -----------------------------------------------------------------------
@@ -779,14 +985,13 @@ void main() {
     });
 
     // -----------------------------------------------------------------------
-    // No long-press or double-tap handlers
+    // No double-tap handler
     // -----------------------------------------------------------------------
 
     testWidgets('table renders without optional handlers', (tester) async {
       await tester.pumpWidget(
         _buildTable(
           entities: [const _TestEntity('np-1', 'NoPress', 5)],
-          onEntityLongPress: null,
           onEntityDoubleTap: null,
         ),
       );

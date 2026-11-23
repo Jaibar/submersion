@@ -1,8 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/shared/widgets/sheet_messenger_scope.dart';
+import 'package:submersion/core/query/domain/query_node.dart' show QueryNode;
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/utils/number_input.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/searchable_filter_dropdown.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/utils/location_options.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/query/site_filter_query.dart';
+import 'package:submersion/features/dive_sites/query/site_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/query_sheet_section.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/site_difficulty_display.dart';
+import 'package:submersion/features/site_types/presentation/providers/site_type_providers.dart';
+import 'package:submersion/features/site_types/presentation/site_type_display.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/shared/widgets/forms/number_field.dart';
+import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
+import 'package:submersion/features/shared_library/presentation/providers/shared_library_providers.dart';
 
 /// Bottom sheet for filtering dive sites.
 ///
@@ -22,15 +41,19 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
   String? _country;
   String? _region;
   SiteDifficulty? _difficulty;
+  String? _libraryId;
   double? _minDepth;
   double? _maxDepth;
   double? _minRating;
   bool? _hasCoordinates;
   bool? _hasDives;
+  Set<String> _siteTypeIds = {};
+  Set<String> _tagIds = {};
+
+  /// The advanced part (#2365): typed, built or applied from a saved query.
+  QueryNode? _query;
 
   // Controllers for text fields
-  late TextEditingController _countryController;
-  late TextEditingController _regionController;
   late TextEditingController _minDepthController;
   late TextEditingController _maxDepthController;
 
@@ -42,26 +65,29 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
     _country = filter.country;
     _region = filter.region;
     _difficulty = filter.difficulty;
+    _libraryId = filter.libraryId;
     _minDepth = filter.minDepth;
     _maxDepth = filter.maxDepth;
     _minRating = filter.minRating;
     _hasCoordinates = filter.hasCoordinates;
     _hasDives = filter.hasDives;
+    _siteTypeIds = {...filter.siteTypeIds};
+    _tagIds = {...filter.tagIds};
+    _query = filter.query;
 
-    _countryController = TextEditingController(text: _country ?? '');
-    _regionController = TextEditingController(text: _region ?? '');
+    // Depth bounds are held in meters, matching the stored site depths they
+    // are compared against, but the diver reads and edits them in their unit.
+    final units = UnitFormatter(widget.ref.read(settingsProvider));
     _minDepthController = TextEditingController(
-      text: _minDepth?.toStringAsFixed(0) ?? '',
+      text: _depthInputText(units, _minDepth),
     );
     _maxDepthController = TextEditingController(
-      text: _maxDepth?.toStringAsFixed(0) ?? '',
+      text: _depthInputText(units, _maxDepth),
     );
   }
 
   @override
   void dispose() {
-    _countryController.dispose();
-    _regionController.dispose();
     _minDepthController.dispose();
     _maxDepthController.dispose();
     super.dispose();
@@ -82,94 +108,157 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
             color: colorScheme.surface,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
           ),
-          child: Column(
-            children: [
-              // Handle bar
-              Container(
-                margin: const EdgeInsets.symmetric(vertical: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(2),
+          // Transparent Material so the ListTiles inside paint their ink and
+          // background above this decorated container (Flutter 3.44 asserts on
+          // a ListTile whose nearest decorated ancestor precedes its Material).
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              children: [
+                // Handle bar
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-              ),
-              // Header
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      context.l10n.diveSites_filter_title,
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    TextButton(
-                      onPressed: _clearAll,
-                      child: Text(context.l10n.diveSites_filter_clearAll),
-                    ),
-                  ],
+                // Header
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        context.l10n.diveSites_filter_title,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      TextButton(
+                        onPressed: _clearAll,
+                        child: Text(context.l10n.diveSites_filter_clearAll),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const Divider(),
-              // Filter content
-              Expanded(
-                child: ListView(
-                  controller: scrollController,
+                const Divider(),
+                // Filter content
+                Expanded(
+                  child: SheetMessengerScope(
+                    child: ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        QuerySheetSection(
+                          subject: QuerySubject.sites,
+                          root: siteQueryEntity,
+                          value: _query,
+                          onChanged: (node) => setState(() => _query = node),
+                          saveNode: _draft().toQuery(),
+                          onLoad: _loadSaved,
+                        ),
+                        const SizedBox(height: 24),
+                        _buildLocationSection(),
+                        const SizedBox(height: 24),
+                        _buildDifficultySection(),
+                        const SizedBox(height: 24),
+                        _buildSiteTypeSection(),
+                        _buildTagSection(),
+                        _buildLibrarySection(),
+                        _buildDepthSection(),
+                        const SizedBox(height: 24),
+                        _buildRatingSection(),
+                        const SizedBox(height: 24),
+                        _buildOptionsSection(),
+                        const SizedBox(height: 80), // Space for buttons
+                      ],
+                    ),
+                  ),
+                ),
+                // Bottom buttons
+                Container(
                   padding: const EdgeInsets.all(16),
-                  children: [
-                    _buildLocationSection(),
-                    const SizedBox(height: 24),
-                    _buildDifficultySection(),
-                    const SizedBox(height: 24),
-                    _buildDepthSection(),
-                    const SizedBox(height: 24),
-                    _buildRatingSection(),
-                    const SizedBox(height: 24),
-                    _buildOptionsSection(),
-                    const SizedBox(height: 80), // Space for buttons
-                  ],
-                ),
-              ),
-              // Bottom buttons
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: colorScheme.surface,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.1),
-                      blurRadius: 4,
-                      offset: const Offset(0, -2),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: Text(context.l10n.diveSites_filter_cancel),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surface,
+                    boxShadow: [
+                      BoxShadow(
+                        color: colorScheme.shadow.withValues(alpha: 0.1),
+                        blurRadius: 4,
+                        offset: const Offset(0, -2),
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: FilledButton(
-                        onPressed: _applyFilters,
-                        child: Text(context.l10n.diveSites_filter_apply),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Text(context.l10n.diveSites_filter_cancel),
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: _applyFilters,
+                          child: Text(context.l10n.diveSites_filter_apply),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
     );
   }
 
+  /// Brings a filter value held from before into line with the [options] the
+  /// dropdown now offers, through [assign].
+  ///
+  /// A value the free-text field this replaces left behind can differ from
+  /// its canonical option in case or whitespace only - " egypt " selects the
+  /// same sites as "Egypt" ([locationDedupKey]), so it is adopted under the
+  /// offered spelling rather than discarded.
+  ///
+  /// A value no option matches at all is genuinely stale: the site that won
+  /// the dedup tie-break was renamed or deleted between sessions, or (for
+  /// region) the currently selected country does not have it. That is
+  /// cleared, since otherwise the field silently falls back to showing
+  /// "All ..." while the stale value is still held and would be reapplied
+  /// verbatim on the next Apply.
+  ///
+  /// Deferred to after this frame since build() must not call setState
+  /// synchronously.
+  void _reconcileWithOptions(
+    String? value,
+    List<String> options,
+    ValueChanged<String?> assign,
+  ) {
+    if (value == null || options.contains(value)) return;
+    final key = locationDedupKey(value);
+    String? canonical;
+    for (final option in options) {
+      if (locationDedupKey(option) == key) {
+        canonical = option;
+        break;
+      }
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => assign(canonical));
+    });
+  }
+
   Widget _buildLocationSection() {
+    // The sheet's own ref, not widget.ref: the launching page's ref belongs
+    // to a different element, so a watch registered on it rebuilds that page
+    // while this sheet - built separately, in its own modal route - stays on
+    // the loading indicators when sitesProvider resolves.
+    final countryOptions = ref.watch(siteCountryOptionsProvider);
+    final regionOptions = ref.watch(siteRegionOptionsProvider(_country));
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -178,34 +267,68 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: 12),
-        TextField(
-          controller: _countryController,
-          decoration: InputDecoration(
-            labelText: context.l10n.diveSites_filter_country_label,
-            hintText: context.l10n.diveSites_filter_country_hint,
-            prefixIcon: const Icon(Icons.public),
-            border: const OutlineInputBorder(),
-          ),
-          onChanged: (value) {
-            setState(() {
-              _country = value.isEmpty ? null : value;
-            });
+        countryOptions.when(
+          data: (countries) {
+            _reconcileWithOptions(
+              _country,
+              countries,
+              (value) => _country = value,
+            );
+            return SearchableFilterDropdown<String>(
+              value: _country,
+              allOptionLabel: context.l10n.diveSites_filter_allCountries,
+              searchHintText: context.l10n.diveSites_filter_searchCountriesHint,
+              labelText: context.l10n.diveSites_filter_country_label,
+              icon: Icons.public,
+              options: [
+                for (final country in countries)
+                  FilterDropdownOption(value: country, label: country),
+              ],
+              onChanged: (value) {
+                setState(() {
+                  _country = value;
+                  // A country change can narrow the region list (issue
+                  // #1373's cascading dropdown); drop a region the new
+                  // country's sites don't have, so the state never holds a
+                  // filter the visible list no longer offers. Read (not
+                  // watch) the new country's regions directly - regionOptions
+                  // above is still built from the country before this
+                  // change.
+                  final regionsForNewCountry =
+                      ref.read(siteRegionOptionsProvider(value)).value ??
+                      const [];
+                  if (_region != null &&
+                      !regionsForNewCountry.contains(_region)) {
+                    _region = null;
+                  }
+                });
+              },
+            );
           },
+          loading: () => const LinearProgressIndicator(),
+          error: (_, _) => const SizedBox.shrink(),
         ),
         const SizedBox(height: 12),
-        TextField(
-          controller: _regionController,
-          decoration: InputDecoration(
-            labelText: context.l10n.diveSites_filter_region_label,
-            hintText: context.l10n.diveSites_filter_region_hint,
-            prefixIcon: const Icon(Icons.place),
-            border: const OutlineInputBorder(),
-          ),
-          onChanged: (value) {
-            setState(() {
-              _region = value.isEmpty ? null : value;
-            });
+        regionOptions.when(
+          data: (regions) {
+            _reconcileWithOptions(_region, regions, (value) => _region = value);
+            return SearchableFilterDropdown<String>(
+              value: _region,
+              allOptionLabel: context.l10n.diveSites_filter_allRegions,
+              searchHintText: context.l10n.diveSites_filter_searchRegionsHint,
+              labelText: context.l10n.diveSites_filter_region_label,
+              icon: Icons.place,
+              options: [
+                for (final region in regions)
+                  FilterDropdownOption(value: region, label: region),
+              ],
+              onChanged: (value) {
+                setState(() => _region = value);
+              },
+            );
           },
+          loading: () => const LinearProgressIndicator(),
+          error: (_, _) => const SizedBox.shrink(),
         ),
       ],
     );
@@ -235,7 +358,7 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
             ),
             ...SiteDifficulty.values.map((difficulty) {
               return FilterChip(
-                label: Text(difficulty.displayName),
+                label: Text(difficulty.localizedName(context.l10n)),
                 selected: _difficulty == difficulty,
                 onSelected: (selected) {
                   setState(() {
@@ -250,7 +373,88 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
     );
   }
 
+  /// Render a meters-valued bound as whole units of the diver's depth unit.
+  String _depthInputText(UnitFormatter units, double? meters) {
+    if (meters == null) return '';
+    return formatDecimalForInput(units.convertDepth(meters).roundToDouble());
+  }
+
+  /// Convert a depth the diver typed in their own unit back to the meters the
+  /// filter compares against. Blank clears the bound; unreadable text keeps
+  /// [previous] while the field shows its error (#1900).
+  double? _depthInputToMeters(NumberRead read, double? previous) =>
+      switch (read) {
+        NumberValue(:final value) => UnitFormatter(
+          ref.read(settingsProvider),
+        ).depthToMeters(value),
+        NumberBlank() => null,
+        NumberInvalid() => previous,
+      };
+
+  /// Personal sites or one shared site library (issue #2567). Hidden while no
+  /// library is connected, since every site is personal then.
+  Widget _buildLibrarySection() {
+    // The active profile's libraries only: another profile's library would
+    // filter to nothing, as its sites are not visible here.
+    final mine = {
+      for (final m
+          in ref.watch(currentMembershipsProvider).valueOrNull ?? const [])
+        m.libraryId,
+    };
+    final libraries = [
+      for (final l
+          in ref.watch(sharedLibrariesProvider).valueOrNull ?? const [])
+        if (mine.contains(l.id)) l,
+    ];
+    if (libraries.isEmpty) return const SizedBox.shrink();
+    // Its own bottom padding, like the tag section, so an absent section
+    // leaves no gap.
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            context.l10n.sharedLibrary_filter_library,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                label: Text(context.l10n.diveSites_filter_difficulty_any),
+                selected: _libraryId == null,
+                onSelected: (selected) {
+                  if (selected) setState(() => _libraryId = null);
+                },
+              ),
+              FilterChip(
+                label: Text(context.l10n.sharedLibrary_filter_personal),
+                selected: _libraryId == SiteFilterState.personalLibrary,
+                onSelected: (selected) => setState(
+                  () => _libraryId = selected
+                      ? SiteFilterState.personalLibrary
+                      : null,
+                ),
+              ),
+              for (final library in libraries)
+                FilterChip(
+                  label: Text(library.name),
+                  selected: _libraryId == library.id,
+                  onSelected: (selected) =>
+                      setState(() => _libraryId = selected ? library.id : null),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildDepthSection() {
+    final depthSymbol = ref.watch(unitFormatterProvider).depthSymbol;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -262,17 +466,16 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
         Row(
           children: [
             Expanded(
-              child: TextField(
+              child: NumberField(
                 controller: _minDepthController,
-                keyboardType: TextInputType.number,
                 decoration: InputDecoration(
                   labelText: context.l10n.diveSites_filter_depth_min_label,
-                  suffixText: 'm',
+                  suffixText: depthSymbol,
                   border: const OutlineInputBorder(),
                 ),
-                onChanged: (value) {
+                onChanged: (read) {
                   setState(() {
-                    _minDepth = double.tryParse(value);
+                    _minDepth = _depthInputToMeters(read, _minDepth);
                   });
                 },
               ),
@@ -282,17 +485,16 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
               child: Text(context.l10n.diveSites_filter_depth_separator),
             ),
             Expanded(
-              child: TextField(
+              child: NumberField(
                 controller: _maxDepthController,
-                keyboardType: TextInputType.number,
                 decoration: InputDecoration(
                   labelText: context.l10n.diveSites_filter_depth_max_label,
-                  suffixText: 'm',
+                  suffixText: depthSymbol,
                   border: const OutlineInputBorder(),
                 ),
-                onChanged: (value) {
+                onChanged: (read) {
                   setState(() {
-                    _maxDepth = double.tryParse(value);
+                    _maxDepth = _depthInputToMeters(read, _maxDepth);
                   });
                 },
               ),
@@ -385,35 +587,133 @@ class _SiteFilterSheetState extends ConsumerState<SiteFilterSheet> {
     );
   }
 
+  /// A saved search is the whole search (#2989, spec 5.4): it may carry
+  /// any of the sheet's axes, so the controls clear rather than be ANDed
+  /// with it.
+  void _loadSaved(QueryNode? node) {
+    _clearAll();
+    setState(() => _query = node);
+  }
+
   void _clearAll() {
     setState(() {
       _country = null;
       _region = null;
       _difficulty = null;
+      _libraryId = null;
       _minDepth = null;
       _maxDepth = null;
       _minRating = null;
       _hasCoordinates = null;
       _hasDives = null;
+      _siteTypeIds = {};
+      _tagIds = {};
+      _query = null;
 
-      _countryController.clear();
-      _regionController.clear();
       _minDepthController.clear();
       _maxDepthController.clear();
     });
   }
 
+  /// The filter as the sheet shows it: what Apply writes and Save stores.
+  SiteFilterState _draft() => SiteFilterState(
+    country: _country,
+    region: _region,
+    difficulty: _difficulty,
+    libraryId: _libraryId,
+    minDepth: _minDepth,
+    maxDepth: _maxDepth,
+    minRating: _minRating,
+    hasCoordinates: _hasCoordinates,
+    hasDives: _hasDives,
+    siteTypeIds: _siteTypeIds,
+    tagIds: _tagIds,
+    query: _query,
+  );
+
   void _applyFilters() {
-    widget.ref.read(siteFilterProvider.notifier).state = SiteFilterState(
-      country: _country,
-      region: _region,
-      difficulty: _difficulty,
-      minDepth: _minDepth,
-      maxDepth: _maxDepth,
-      minRating: _minRating,
-      hasCoordinates: _hasCoordinates,
-      hasDives: _hasDives,
-    );
+    widget.ref.read(siteFilterProvider.notifier).state = _draft();
     Navigator.of(context).pop();
+  }
+
+  /// Site type chips (issue #1765). Any chosen type matches. Renders nothing
+  /// until the types load, and leaves its own trailing gap.
+  Widget _buildSiteTypeSection() {
+    final types = ref.watch(siteTypesProvider).value ?? const [];
+    if (types.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            context.l10n.diveSites_filter_section_siteTypes,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final type in types)
+                FilterChip(
+                  label: Text(type.localizedName(context.l10n)),
+                  selected: _siteTypeIds.contains(type.id),
+                  onSelected: (selected) => setState(() {
+                    _siteTypeIds = {..._siteTypeIds};
+                    if (selected) {
+                      _siteTypeIds.add(type.id);
+                    } else {
+                      _siteTypeIds.remove(type.id);
+                    }
+                  }),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Site tag chips (issue #1765): only tags offered on sites. Any chosen
+  /// tag matches. Hidden when there are none.
+  Widget _buildTagSection() {
+    final tags = (ref.watch(tagsProvider).value ?? const <Tag>[])
+        .where((t) => t.appliesTo(TagScope.sites))
+        .toList();
+    if (tags.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            context.l10n.diveSites_filter_section_tags,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final tag in tags)
+                FilterChip(
+                  avatar: CircleAvatar(backgroundColor: tag.color, radius: 6),
+                  label: Text(tag.name),
+                  selected: _tagIds.contains(tag.id),
+                  onSelected: (selected) => setState(() {
+                    _tagIds = {..._tagIds};
+                    if (selected) {
+                      _tagIds.add(tag.id);
+                    } else {
+                      _tagIds.remove(tag.id);
+                    }
+                  }),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }

@@ -4,20 +4,80 @@ import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/enums.dart';
 
+/// One (agency, level) recognition on a certification card. A card can grant
+/// several at once -- e.g. an FFESSM Niveau 1 that is also a CMAS 1-star --
+/// with no primary among them.
+class CertificationCredential extends Equatable {
+  /// A built-in agency's enum name or a custom agency id (issue #690).
+  final String agency;
+
+  /// A built-in level's enum name or a custom level id.
+  final String? level;
+
+  const CertificationCredential({required this.agency, this.level});
+
+  Map<String, dynamic> toJson() => {
+    'agency': agency,
+    if (level != null) 'level': level,
+  };
+
+  /// Ids are kept verbatim: an id this build does not know (a custom agency
+  /// not yet synced, a newer build's built-in) must survive a save, never
+  /// collapse to "Other" (issue #690). A missing agency is Other.
+  factory CertificationCredential.fromJson(Map<String, dynamic> json) =>
+      CertificationCredential(
+        agency: (json['agency'] as String?) ?? CertificationAgency.other.name,
+        level: json['level'] as String?,
+      );
+
+  @override
+  List<Object?> get props => [agency, level];
+}
+
 /// Represents a diver certification
 class Certification extends Equatable {
   final String id;
   final String? diverId;
+
+  /// Owner when this certification belongs to a buddy instead of the diver
+  /// (issue #553). At most one of {diverId, buddyId} is set -- ownerless rows
+  /// are allowed (legacy rows and the no-validated-diver fallback).
+  final String? buddyId;
   final String name;
-  final CertificationAgency agency;
-  final CertificationLevel? level;
+
+  /// A built-in agency's enum name or a custom agency id (issue #690).
+  final String agency;
+
+  /// A built-in level's enum name or a custom level id.
+  final String? level;
+
+  /// Extra recognitions the same card grants beyond [agency]/[level] (e.g. a
+  /// CMAS 1-star equivalence on an FFESSM N1). Empty for a single-agency card.
+  /// None of them outranks [agency]/[level]; the card simply is all of them.
+  /// [credentials] is the full list, in the stable display order the UI uses.
+  final List<CertificationCredential> additionalCredentials;
+
   final String? cardNumber;
   final DateTime? issueDate;
   final DateTime? expiryDate;
   final String? instructorName;
   final String? instructorNumber;
+  final String? instructorId;
+
+  /// The course this certification came from (issue #2515). Read-only here:
+  /// only CourseCertificationLinks writes `certifications.course_id`.
+  final String? courseId;
+
+  /// The buddy card that created this certification (issue #3728); null
+  /// for one entered by hand.
+  final String? cardId;
   final Uint8List? photoFront;
   final Uint8List? photoBack;
+
+  /// False on a certification read without its card images (issue #3848):
+  /// null photos then say nothing about the card, and saving it leaves the
+  /// card as it is. Anything that draws or edits a card reads it in full.
+  final bool cardImagesLoaded;
   final String notes;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -25,20 +85,39 @@ class Certification extends Equatable {
   const Certification({
     required this.id,
     this.diverId,
+    this.buddyId,
     required this.name,
     required this.agency,
     this.level,
+    this.additionalCredentials = const [],
     this.cardNumber,
     this.issueDate,
     this.expiryDate,
     this.instructorName,
     this.instructorNumber,
+    this.instructorId,
+    this.courseId,
+    this.cardId,
     this.photoFront,
     this.photoBack,
+    this.cardImagesLoaded = true,
     this.notes = '',
     required this.createdAt,
     required this.updatedAt,
   });
+
+  /// Every (agency, level) this card grants. No entry is the primary one --
+  /// they are equal recognitions -- but the list order is stable and is what
+  /// the list tile, detail page and wallet card render: the row's own
+  /// [agency]/[level] first, then [additionalCredentials] in stored order.
+  /// Always at least one entry.
+  List<CertificationCredential> get credentials => [
+    CertificationCredential(agency: agency, level: level),
+    ...additionalCredentials,
+  ];
+
+  /// Whether the card grants more than one agency's credential.
+  bool get hasMultipleCredentials => additionalCredentials.isNotEmpty;
 
   /// Check if certification has any photos
   bool get hasPhotos => photoFront != null || photoBack != null;
@@ -77,16 +156,22 @@ class Certification extends Equatable {
   Certification copyWith({
     String? id,
     String? diverId,
+    String? buddyId,
     String? name,
-    CertificationAgency? agency,
-    CertificationLevel? level,
+    String? agency,
+    String? level,
+    List<CertificationCredential>? additionalCredentials,
     String? cardNumber,
     DateTime? issueDate,
     DateTime? expiryDate,
     String? instructorName,
     String? instructorNumber,
+    String? instructorId,
+    String? courseId,
+    String? cardId,
     Uint8List? photoFront,
     Uint8List? photoBack,
+    bool? cardImagesLoaded,
     String? notes,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -94,16 +179,23 @@ class Certification extends Equatable {
     return Certification(
       id: id ?? this.id,
       diverId: diverId ?? this.diverId,
+      buddyId: buddyId ?? this.buddyId,
       name: name ?? this.name,
       agency: agency ?? this.agency,
       level: level ?? this.level,
+      additionalCredentials:
+          additionalCredentials ?? this.additionalCredentials,
       cardNumber: cardNumber ?? this.cardNumber,
       issueDate: issueDate ?? this.issueDate,
       expiryDate: expiryDate ?? this.expiryDate,
       instructorName: instructorName ?? this.instructorName,
       instructorNumber: instructorNumber ?? this.instructorNumber,
+      instructorId: instructorId ?? this.instructorId,
+      courseId: courseId ?? this.courseId,
+      cardId: cardId ?? this.cardId,
       photoFront: photoFront ?? this.photoFront,
       photoBack: photoBack ?? this.photoBack,
+      cardImagesLoaded: cardImagesLoaded ?? this.cardImagesLoaded,
       notes: notes ?? this.notes,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -115,16 +207,22 @@ class Certification extends Equatable {
     return Certification(
       id: id,
       diverId: diverId,
+      buddyId: buddyId,
       name: name,
       agency: agency,
       level: level,
+      additionalCredentials: additionalCredentials,
       cardNumber: cardNumber,
       issueDate: issueDate,
       expiryDate: expiryDate,
       instructorName: instructorName,
       instructorNumber: instructorNumber,
+      instructorId: instructorId,
+      courseId: courseId,
+      cardId: cardId,
       photoFront: clearFront ? null : photoFront,
       photoBack: clearBack ? null : photoBack,
+      cardImagesLoaded: cardImagesLoaded,
       notes: notes,
       createdAt: createdAt,
       updatedAt: updatedAt,
@@ -137,7 +235,7 @@ class Certification extends Equatable {
     return Certification(
       id: '',
       name: '',
-      agency: CertificationAgency.padi,
+      agency: CertificationAgency.padi.name,
       createdAt: now,
       updatedAt: now,
     );
@@ -147,16 +245,22 @@ class Certification extends Equatable {
   List<Object?> get props => [
     id,
     diverId,
+    buddyId,
     name,
     agency,
     level,
+    additionalCredentials,
     cardNumber,
     issueDate,
     expiryDate,
     instructorName,
     instructorNumber,
+    instructorId,
+    courseId,
+    cardId,
     photoFront,
     photoBack,
+    cardImagesLoaded,
     notes,
     createdAt,
     updatedAt,

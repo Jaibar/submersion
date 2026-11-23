@@ -7,6 +7,10 @@ multi-platform release workflow.
 
 Go to: Repository Settings > Secrets and variables > Actions > New repository secret
 
+The web app's own site, <https://web.submersion.app>, needs the secret
+`WEB_DEPLOY_TOKEN` and the variable `GOOGLE_WEB_CLIENT_ID`; its setup is in
+[Submersion's Own Web Site](web-site-setup.md).
+
 ### App Store Connect API Key
 
 These are shared by both iOS and macOS Fastlane builds for automatic signing
@@ -82,6 +86,42 @@ The alias of the key within the keystore (e.g., `submersion`).
 **ANDROID_KEY_PASSWORD**
 
 The password for the key (often the same as the keystore password).
+
+### Beta Pipeline (beta-builds publishing)
+
+**BETA_BUILDS_TOKEN**
+
+Fine-grained personal access token used by the Beta workflow (`beta.yml`) to
+publish per-merge beta releases into `submersion-app/beta-builds`:
+
+1. Create at https://github.com/settings/personal-access-tokens/new
+2. Resource owner: `submersion-app`
+3. Repository access: Only select repositories > `submersion-app/beta-builds`
+4. Permissions: Contents - Read and write (nothing else)
+5. Set with: `gh secret set BETA_BUILDS_TOKEN --repo submersion-app/submersion`
+
+Rotation: regenerate the token and re-run the same command. The workflow
+fails loudly on the next merge to main if the token has expired.
+
+**RELEASE_BOT_TOKEN**
+
+Fine-grained personal access token used by the Promote Beta workflow
+(`promote.yml`) to push the version-bump branch and open its auto-merging
+PR. A PAT is required because pushes made with the built-in `GITHUB_TOKEN`
+never trigger workflows, so CI would not run on the bump branch:
+
+1. Create at https://github.com/settings/personal-access-tokens/new
+2. Resource owner: `submersion-app`
+3. Repository access: only `submersion-app/submersion`
+4. Permissions: Contents - Read and write; Pull requests - Read and write;
+   Workflows - Read and write (required to push the stable tag: it points at
+   commits whose history touches `.github/workflows`, and GitHub rejects the
+   push without this permission)
+5. Set with: `gh secret set RELEASE_BOT_TOKEN --repo submersion-app/submersion`
+
+Also requires repository auto-merge to be enabled (Settings > General >
+"Allow auto-merge"). Rotation: same as BETA_BUILDS_TOKEN; an expired token
+fails the bump-pr job of the next promotion.
 
 ## Verification
 

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
 
@@ -11,11 +13,17 @@ class TagInputWidget extends ConsumerStatefulWidget {
   final void Function(List<Tag> tags) onTagsChanged;
   final bool enabled;
 
+  /// Which tags are suggested (issue #1765). A new tag applies to every
+  /// scope (issue #4407); a name already used by a tag of another scope
+  /// widens that tag to this one rather than creating a second one.
+  final TagScope scope;
+
   const TagInputWidget({
     super.key,
     required this.selectedTags,
     required this.onTagsChanged,
     this.enabled = true,
+    this.scope = TagScope.dives,
   });
 
   @override
@@ -56,6 +64,7 @@ class _TagInputWidgetState extends ConsumerState<TagInputWidget> {
       name.trim(),
       colorHex: TagColors
           .predefined[widget.selectedTags.length % TagColors.predefined.length],
+      scope: widget.scope,
     );
     _addTag(newTag);
   }
@@ -74,16 +83,9 @@ class _TagInputWidgetState extends ConsumerState<TagInputWidget> {
             spacing: 8,
             runSpacing: 4,
             children: widget.selectedTags.map((tag) {
-              return Chip(
-                label: Text(tag.name),
-                backgroundColor: tag.color.withValues(alpha: 0.2),
-                side: BorderSide(color: tag.color),
-                deleteIcon: widget.enabled
-                    ? Icon(Icons.close, size: 18, color: tag.color)
-                    : null,
+              return TagChip(
+                tag: tag,
                 onDeleted: widget.enabled ? () => _removeTag(tag) : null,
-                labelStyle: TextStyle(color: tag.color),
-                visualDensity: VisualDensity.compact,
               );
             }).toList(),
           ),
@@ -135,90 +137,114 @@ class _TagInputWidgetState extends ConsumerState<TagInputWidget> {
             ),
           ),
 
-          // Suggestions dropdown
+          // Suggestions dropdown. Part of the field's tap region: a tap off
+          // the field drops its focus (#4813), and the list then hides, so
+          // without this a press on a suggestion could lose it mid-tap.
           if (_showSuggestions && _textController.text.isNotEmpty)
-            allTagsAsync.when(
-              data: (allTags) {
-                final query = _textController.text.toLowerCase();
-                final filteredTags = allTags
-                    .where(
-                      (tag) =>
-                          tag.name.toLowerCase().contains(query) &&
-                          !widget.selectedTags.any((t) => t.id == tag.id),
-                    )
-                    .take(5)
-                    .toList();
+            TextFieldTapRegion(
+              child: allTagsAsync.when(
+                data: (everyTag) {
+                  // Only tags offered where this input is. Typing the name of
+                  // a tag from the other scope still offers "create", which
+                  // widens that tag instead of duplicating it.
+                  final allTags = everyTag
+                      .where((tag) => tag.appliesTo(widget.scope))
+                      .toList();
+                  final query = foldForSearch(_textController.text);
+                  final filteredTags = allTags
+                      .where(
+                        (tag) =>
+                            foldForSearch(tag.name).contains(query) &&
+                            !widget.selectedTags.any((t) => t.id == tag.id),
+                      )
+                      .take(5)
+                      .toList();
 
-                final exactMatch = allTags.any(
-                  (tag) => tag.name.toLowerCase() == query.toLowerCase(),
-                );
+                  final exactMatch = allTags.any(
+                    // Case only: [query] is accent-folded for the search.
+                    (tag) =>
+                        tag.name.toLowerCase() ==
+                        _textController.text.toLowerCase(),
+                  );
 
-                if (filteredTags.isEmpty && exactMatch) {
-                  return const SizedBox.shrink();
-                }
+                  if (filteredTags.isEmpty && exactMatch) {
+                    return const SizedBox.shrink();
+                  }
 
-                return Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surface,
-                    borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.1),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Existing tag suggestions
-                      ...filteredTags.map(
-                        (tag) => ListTile(
-                          dense: true,
-                          leading: CircleAvatar(
-                            radius: 12,
-                            backgroundColor: tag.color,
+                  return Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface,
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: theme.colorScheme.shadow.withValues(
+                            alpha: 0.1,
                           ),
-                          title: Text(tag.name),
-                          onTap: () => _addTag(tag),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
                         ),
-                      ),
+                      ],
+                    ),
+                    // The tiles need a Material of their own inside the
+                    // decorated box, or their ink paints behind its background
+                    // (and Flutter asserts in debug builds).
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Existing tag suggestions
+                          ...filteredTags.map(
+                            (tag) => ListTile(
+                              dense: true,
+                              leading: CircleAvatar(
+                                radius: 12,
+                                backgroundColor: tag.color,
+                              ),
+                              title: Text(tag.name),
+                              onTap: () => _addTag(tag),
+                            ),
+                          ),
 
-                      // Create new tag option
-                      if (!exactMatch)
-                        ListTile(
-                          dense: true,
-                          leading: CircleAvatar(
-                            radius: 12,
-                            backgroundColor: TagColors.fromHex(
-                              TagColors.predefined[widget.selectedTags.length %
-                                  TagColors.predefined.length],
+                          // Create new tag option
+                          if (!exactMatch)
+                            ListTile(
+                              dense: true,
+                              leading: CircleAvatar(
+                                radius: 12,
+                                backgroundColor: TagColors.fromHex(
+                                  TagColors.predefined[widget
+                                          .selectedTags
+                                          .length %
+                                      TagColors.predefined.length],
+                                ),
+                                child: const Icon(
+                                  Icons.add,
+                                  size: 14,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              title: Text(
+                                context.l10n.tags_action_createNamed(
+                                  _textController.text,
+                                ),
+                              ),
+                              onTap: () =>
+                                  _createAndAddTag(_textController.text),
                             ),
-                            child: const Icon(
-                              Icons.add,
-                              size: 14,
-                              color: Colors.white,
-                            ),
-                          ),
-                          title: Text(
-                            context.l10n.tags_action_createNamed(
-                              _textController.text,
-                            ),
-                          ),
-                          onTap: () => _createAndAddTag(_textController.text),
-                        ),
-                    ],
-                  ),
-                );
-              },
-              loading: () => const Padding(
-                padding: EdgeInsets.all(8.0),
-                child: Center(child: CircularProgressIndicator()),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+                loading: () => const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+                error: (e, _) => const SizedBox.shrink(),
               ),
-              error: (e, _) => const SizedBox.shrink(),
             ),
         ],
       ],
@@ -237,6 +263,7 @@ class TagChips extends StatelessWidget {
   Widget build(BuildContext context) {
     if (tags.isEmpty) return const SizedBox.shrink();
 
+    final colorScheme = Theme.of(context).colorScheme;
     final displayTags = tags.take(maxTags).toList();
     final remaining = tags.length - maxTags;
 
@@ -244,88 +271,23 @@ class TagChips extends StatelessWidget {
       spacing: 4,
       runSpacing: 2,
       children: [
-        ...displayTags.map(
-          (tag) => Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: tag.color.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: tag.color.withValues(alpha: 0.3)),
-            ),
-            child: Text(
-              tag.name,
-              style: TextStyle(fontSize: 11, color: tag.color),
-            ),
-          ),
-        ),
+        ...displayTags.map((tag) => TagChip(tag: tag, dense: true)),
         if (remaining > 0)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: Colors.grey.withValues(alpha: 0.15),
+              color: colorScheme.surfaceContainerHighest,
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
               '+$remaining',
-              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+              style: TextStyle(
+                fontSize: 11,
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
       ],
-    );
-  }
-}
-
-/// Color picker for tags
-class TagColorPicker extends StatelessWidget {
-  final String? selectedColor;
-  final void Function(String color) onColorSelected;
-
-  const TagColorPicker({
-    super.key,
-    this.selectedColor,
-    required this.onColorSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: TagColors.predefined.map((color) {
-        final isSelected = color == selectedColor;
-        return Semantics(
-          button: true,
-          label: 'Select color $color',
-          selected: isSelected,
-          child: GestureDetector(
-            onTap: () => onColorSelected(color),
-            child: Container(
-              width: 28,
-              height: 28,
-              decoration: BoxDecoration(
-                color: TagColors.fromHex(color),
-                shape: BoxShape.circle,
-                border: isSelected
-                    ? Border.all(color: Colors.white, width: 2)
-                    : null,
-                boxShadow: isSelected
-                    ? [
-                        BoxShadow(
-                          color: TagColors.fromHex(
-                            color,
-                          ).withValues(alpha: 0.5),
-                          blurRadius: 6,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: isSelected
-                  ? const Icon(Icons.check, size: 16, color: Colors.white)
-                  : null,
-            ),
-          ),
-        );
-      }).toList(),
     );
   }
 }

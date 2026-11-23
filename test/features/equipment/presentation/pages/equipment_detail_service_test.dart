@@ -1,0 +1,180 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_detail_page.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_observation_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/condition_trend.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_exposure_totals.dart';
+import 'package:submersion/features/equipment/presentation/providers/condition_trend_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_condition_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_exposure_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+void main() {
+  final t0 = DateTime(2025, 1, 1);
+
+  ServiceClockStatus overdueStatus(String eid) => ServiceClockStatus(
+    schedule: ServiceSchedule(
+      id: 's-$eid',
+      equipmentId: eid,
+      serviceKindId: 'regulator-service',
+      createdAt: t0,
+      updatedAt: t0,
+    ),
+    kind: ServiceKind(
+      id: 'regulator-service',
+      name: 'Regulator service',
+      defaultIntervalDays: 365,
+      isBuiltIn: true,
+      createdAt: t0,
+      updatedAt: t0,
+    ),
+    anchor: t0,
+    dueDate: DateTime(2025, 6, 1),
+    severity: ServiceClockSeverity.overdue,
+    now: DateTime(2026, 1, 1),
+  );
+
+  Future<void> pumpDetail(
+    WidgetTester tester, {
+    required EquipmentItem item,
+    required List<ServiceClockStatus> clockStatuses,
+  }) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(600, 1600);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final overrides = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...overrides,
+          // No diver profile: the page treats every item as the viewer's own
+          // (issue #2046), and the menu waits for this to resolve.
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          equipmentItemProvider(item.id).overrideWith((ref) async => item),
+          equipmentDiveCountProvider(item.id).overrideWith((ref) async => 0),
+          equipmentTripCountProvider(item.id).overrideWith((ref) async => 0),
+          equipmentComponentsProvider(
+            item.id,
+          ).overrideWith((ref) async => const []),
+          equipmentPartOfProvider(
+            item.id,
+          ).overrideWith((ref) async => const []),
+          equipmentExposureTotalsProvider(
+            item.id,
+          ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+          equipmentConditionProvider(
+            item.id,
+          ).overrideWith((ref) async => const []),
+          conditionTrendProvider((
+            equipmentId: item.id,
+            kind: null,
+          )).overrideWith((ref) async => null),
+          conditionTrendProvider((
+            equipmentId: item.id,
+            kind: ConditionTrendKind.scrubberMinutes,
+          )).overrideWith((ref) async => null),
+          childEquipmentProvider(item.id).overrideWith((ref) async => const []),
+          observationsForEquipmentProvider(
+            item.id,
+          ).overrideWith((ref) async => const []),
+          equipmentWorstClockProvider.overrideWith((ref) async => {}),
+          serviceRecordNotifierProvider(
+            item.id,
+          ).overrideWith((ref) => _MockServiceRecordNotifier()),
+          serviceClockStatusesProvider(
+            item.id,
+          ).overrideWith((ref) async => clockStatuses),
+        ].cast(),
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EquipmentDetailPage(equipmentId: item.id),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('overdue banner follows clocks, not the legacy interval', (
+    tester,
+  ) async {
+    final legacyOverdue = EquipmentItem(
+      id: 'e1',
+      name: 'Old Reg',
+      type: EquipmentType.regulator,
+      lastServiceDate: DateTime.now().subtract(const Duration(days: 400)),
+      serviceIntervalDays: 365, // legacy getter says overdue
+    );
+    await pumpDetail(tester, item: legacyOverdue, clockStatuses: const []);
+    expect(find.text('Service is overdue!'), findsNothing);
+  });
+
+  testWidgets('the Components card is on the page', (tester) async {
+    const item = EquipmentItem(
+      id: 'e1',
+      name: 'Reg',
+      type: EquipmentType.regulator,
+    );
+    await pumpDetail(tester, item: item, clockStatuses: const []);
+    expect(find.text('Components'), findsOneWidget);
+  });
+
+  testWidgets('overdue banner shows when a clock is overdue', (tester) async {
+    const item = EquipmentItem(
+      id: 'e1',
+      name: 'Reg',
+      type: EquipmentType.regulator,
+    );
+    await pumpDetail(tester, item: item, clockStatuses: [overdueStatus('e1')]);
+    // The banner now names the service rather than "Service is overdue!"
+    // (#2260).
+    expect(find.text('Regulator service overdue'), findsOneWidget);
+  });
+
+  testWidgets('the overflow menu no longer offers Mark as Serviced', (
+    tester,
+  ) async {
+    const item = EquipmentItem(
+      id: 'e1',
+      name: 'Reg',
+      type: EquipmentType.regulator,
+    );
+    await pumpDetail(tester, item: item, clockStatuses: const []);
+    // Scoped to the app bar: the service history card carries its own
+    // overflow menu (#829), so a bare byIcon finder is ambiguous.
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byIcon(Icons.more_vert),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Mark as Serviced'), findsNothing);
+  });
+}
+
+class _MockServiceRecordNotifier
+    extends StateNotifier<AsyncValue<List<ServiceRecord>>>
+    implements ServiceRecordNotifier {
+  _MockServiceRecordNotifier() : super(const AsyncValue.data([]));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}

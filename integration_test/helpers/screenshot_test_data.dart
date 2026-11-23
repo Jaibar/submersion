@@ -1,7 +1,12 @@
 import 'dart:math';
 
 import 'package:drift/drift.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/codecs/tank_pressure_series_codec.dart';
 import 'package:uuid/uuid.dart';
 
 /// Seeds the database with realistic test data for App Store screenshots.
@@ -325,46 +330,68 @@ class ScreenshotTestDataSeeder {
       {
         'name': 'Sarah Chen',
         'email': 'sarah.chen@email.com',
-        'certLevel': 'PADI Rescue Diver',
-        'agency': 'PADI',
+        'certName': 'Rescue Diver',
+        'level': CertificationLevel.rescue,
+        'agency': CertificationAgency.padi,
       },
       {
         'name': 'Marcus Johnson',
         'email': 'marcus.j@email.com',
-        'certLevel': 'SSI Advanced Open Water',
-        'agency': 'SSI',
+        'certName': 'Advanced Open Water',
+        'level': CertificationLevel.advancedOpenWater,
+        'agency': CertificationAgency.ssi,
       },
       {
         'name': 'Elena Rodriguez',
         'email': 'elena.r@email.com',
-        'certLevel': 'PADI Divemaster',
-        'agency': 'PADI',
+        'certName': 'Divemaster',
+        'level': CertificationLevel.diveMaster,
+        'agency': CertificationAgency.padi,
       },
       {
         'name': 'James Wilson',
         'email': 'jwilson@email.com',
-        'certLevel': 'NAUI Open Water',
-        'agency': 'NAUI',
+        'certName': 'Open Water Diver',
+        'level': CertificationLevel.openWater,
+        'agency': CertificationAgency.naui,
       },
       {
         'name': 'Yuki Tanaka',
         'email': 'yuki.t@email.com',
-        'certLevel': 'TDI Advanced Nitrox',
-        'agency': 'TDI',
+        'certName': 'Advanced Nitrox',
+        'level': CertificationLevel.advancedNitrox,
+        'agency': CertificationAgency.tdi,
       },
     ];
 
     for (final buddy in buddies) {
+      final buddyId = _uuid.v4();
       await db
           .into(db.buddies)
           .insert(
             BuddiesCompanion.insert(
-              id: _uuid.v4(),
+              id: buddyId,
               diverId: Value(_diverId),
               name: buddy['name'] as String,
               email: Value(buddy['email'] as String),
-              certificationLevel: Value(buddy['certLevel'] as String),
-              certificationAgency: Value(buddy['agency'] as String),
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+
+      // Seed a buddy-owned certification row. The inline buddy cert columns
+      // were dropped in v110; a buddy's primary cert is now derived from these
+      // rows (issue #553), so without this the screenshot buddies would show
+      // an empty Certifications section.
+      await db
+          .into(db.certifications)
+          .insert(
+            CertificationsCompanion.insert(
+              id: _uuid.v4(),
+              buddyId: Value(buddyId),
+              name: buddy['certName'] as String,
+              agency: (buddy['agency'] as CertificationAgency).name,
+              level: Value((buddy['level'] as CertificationLevel).name),
               createdAt: now,
               updatedAt: now,
             ),
@@ -440,11 +467,12 @@ class ScreenshotTestDataSeeder {
           );
 
       // Create tank entry
+      final tankId = _uuid.v4();
       await db
           .into(db.diveTanks)
           .insert(
             DiveTanksCompanion.insert(
-              id: _uuid.v4(),
+              id: tankId,
               diveId: diveId,
               volume: const Value(11.1),
               workingPressure: const Value(207.0),
@@ -460,6 +488,7 @@ class ScreenshotTestDataSeeder {
         durationSeconds * 60, // duration in seconds for profile
         maxDepth,
         waterTemp + random.nextDouble() * 2,
+        tankId,
       );
     }
   }
@@ -469,11 +498,19 @@ class ScreenshotTestDataSeeder {
     int duration,
     double maxDepth,
     double temp,
+    String tankId,
   ) async {
     final random = Random();
 
     // Create profile points every 10 seconds
     final numPoints = duration ~/ 10;
+    final samples = <ProfileSample>[];
+    // Cylinder pressure is its own series (the app reads tank pressure from
+    // tank_pressure_series, and ProfileSample.pressure is a legacy
+    // per-sample column that the ProfileSample -> DiveProfilePoint
+    // conversion drops), so the consumption curve below is written there
+    // instead of into the profile blob.
+    final pressures = <TankPressureSample>[];
 
     for (var i = 0; i < numPoints; i++) {
       final timestamp = i * 10;
@@ -516,21 +553,26 @@ class ScreenshotTestDataSeeder {
       final pressure = (200 - depthAdjustedConsumption + breathingVariation)
           .clamp(40.0, 210.0);
 
-      await db
-          .into(db.diveProfiles)
-          .insert(
-            DiveProfilesCompanion.insert(
-              id: _uuid.v4(),
-              diveId: diveId,
-              timestamp: timestamp,
-              depth: depth,
-              temperature: Value(
-                temp - (depth * 0.1),
-              ), // Temp decreases with depth
-              pressure: Value(pressure), // Realistic gas consumption
-            ),
-          );
+      samples.add(
+        ProfileSample(
+          timestamp: timestamp,
+          depth: depth,
+          // Temp decreases with depth
+          temperature: temp - (depth * 0.1),
+        ),
+      );
+      pressures.add(
+        TankPressureSample(timestamp: timestamp, pressure: pressure),
+      );
     }
+
+    if (samples.isEmpty) return;
+    await ProfileSeriesRepository(
+      database: db,
+    ).insertSeries(diveId: diveId, samples: samples);
+    await TankPressureSeriesRepository(
+      database: db,
+    ).insertSeries(diveId: diveId, tankId: tankId, samples: pressures);
   }
 
   String _generateDiveNotes(String diveType, String siteName) {

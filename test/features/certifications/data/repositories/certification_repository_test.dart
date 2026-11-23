@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 
@@ -20,8 +22,8 @@ void main() {
   Certification createTestCert({
     String id = '',
     String name = 'Open Water Diver',
-    CertificationAgency agency = CertificationAgency.padi,
-    CertificationLevel? level,
+    String agency = 'padi',
+    String? level,
     String? cardNumber,
     DateTime? issueDate,
     DateTime? expiryDate,
@@ -71,8 +73,8 @@ void main() {
         final expiryDate = DateTime(2025, 6, 15);
         final cert = createTestCert(
           name: 'Nitrox Diver',
-          agency: CertificationAgency.ssi,
-          level: CertificationLevel.nitrox,
+          agency: CertificationAgency.ssi.name,
+          level: CertificationLevel.nitrox.name,
           cardNumber: 'SSI-12345',
           issueDate: issueDate,
           expiryDate: expiryDate,
@@ -87,8 +89,8 @@ void main() {
 
         expect(fetchedCert, isNotNull);
         expect(fetchedCert!.name, equals('Nitrox Diver'));
-        expect(fetchedCert.agency, equals(CertificationAgency.ssi));
-        expect(fetchedCert.level, equals(CertificationLevel.nitrox));
+        expect(fetchedCert.agency, equals(CertificationAgency.ssi.name));
+        expect(fetchedCert.level, equals(CertificationLevel.nitrox.name));
         expect(fetchedCert.cardNumber, equals('SSI-12345'));
         expect(fetchedCert.issueDate?.year, equals(2023));
         expect(fetchedCert.issueDate?.month, equals(6));
@@ -96,6 +98,45 @@ void main() {
         expect(fetchedCert.instructorName, equals('John Smith'));
         expect(fetchedCert.notes, equals('EAN32/EAN36 certified'));
       });
+
+      test(
+        'additionalCredentials persist and reload as a JSON array',
+        () async {
+          final cert =
+              createTestCert(
+                name: 'Niveau 1',
+                agency: CertificationAgency.ffessm.name,
+                level: CertificationLevel.ffessmN1.name,
+              ).copyWith(
+                additionalCredentials: const [
+                  CertificationCredential(
+                    agency: 'cmas',
+                    level: 'cmas1StarDiver',
+                  ),
+                ],
+              );
+
+          final created = await repository.createCertification(cert);
+          final reloaded = await repository.getCertificationById(created.id);
+
+          expect(reloaded!.hasMultipleCredentials, isTrue);
+          expect(
+            reloaded.additionalCredentials.single.agency,
+            CertificationAgency.cmas.name,
+          );
+          expect(
+            reloaded.additionalCredentials.single.level,
+            CertificationLevel.cmas1StarDiver.name,
+          );
+
+          await repository.updateCertification(
+            reloaded.copyWith(additionalCredentials: const []),
+          );
+          final cleared = await repository.getCertificationById(created.id);
+          expect(cleared!.hasMultipleCredentials, isFalse);
+          expect(cleared.additionalCredentials, isEmpty);
+        },
+      );
     });
 
     group('getCertificationById', () {
@@ -175,21 +216,49 @@ void main() {
         final cert = await repository.createCertification(
           createTestCert(
             name: 'Level Cert',
-            agency: CertificationAgency.padi,
-            level: CertificationLevel.openWater,
+            agency: CertificationAgency.padi.name,
+            level: CertificationLevel.openWater.name,
           ),
         );
 
         final updatedCert = cert.copyWith(
-          agency: CertificationAgency.ssi,
-          level: CertificationLevel.advancedOpenWater,
+          agency: CertificationAgency.ssi.name,
+          level: CertificationLevel.advancedOpenWater.name,
         );
 
         await repository.updateCertification(updatedCert);
         final result = await repository.getCertificationById(cert.id);
 
-        expect(result!.agency, equals(CertificationAgency.ssi));
-        expect(result.level, equals(CertificationLevel.advancedOpenWater));
+        expect(result!.agency, equals(CertificationAgency.ssi.name));
+        expect(result.level, equals(CertificationLevel.advancedOpenWater.name));
+      });
+    });
+
+    group('instructorId', () {
+      test('persists and reads back instructorId', () async {
+        // Seed a buddy with id 'buddy-1' to satisfy FK constraint
+        final buddyRepository = BuddyRepository();
+        final now = DateTime.now();
+        final buddy = await buddyRepository.createBuddy(
+          Buddy(
+            id: 'buddy-1',
+            name: 'Instructor Buddy',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+
+        final created = await repository.createCertification(
+          Certification.empty()
+              .copyWith(name: 'Rescue Diver')
+              .copyWith(instructorId: buddy.id),
+        );
+        final loaded = await repository.getCertificationById(created.id);
+        expect(loaded!.instructorId, 'buddy-1');
+
+        await repository.updateCertification(loaded.copyWith(name: 'Rescue'));
+        final reloaded = await repository.getCertificationById(created.id);
+        expect(reloaded!.instructorId, 'buddy-1'); // survives update
       });
     });
 
@@ -218,21 +287,21 @@ void main() {
         await repository.createCertification(
           createTestCert(
             name: 'Open Water Diver',
-            agency: CertificationAgency.padi,
+            agency: CertificationAgency.padi.name,
             cardNumber: 'PADI-001',
           ),
         );
         await repository.createCertification(
           createTestCert(
             name: 'Advanced Nitrox',
-            agency: CertificationAgency.ssi,
+            agency: CertificationAgency.ssi.name,
             cardNumber: 'SSI-002',
           ),
         );
         await repository.createCertification(
           createTestCert(
             name: 'Rescue Diver',
-            agency: CertificationAgency.naui,
+            agency: CertificationAgency.naui.name,
             cardNumber: 'NAUI-003',
           ),
         );
@@ -276,31 +345,40 @@ void main() {
     group('getCertificationsByAgency', () {
       setUp(() async {
         await repository.createCertification(
-          createTestCert(name: 'PADI Cert 1', agency: CertificationAgency.padi),
+          createTestCert(
+            name: 'PADI Cert 1',
+            agency: CertificationAgency.padi.name,
+          ),
         );
         await repository.createCertification(
-          createTestCert(name: 'PADI Cert 2', agency: CertificationAgency.padi),
+          createTestCert(
+            name: 'PADI Cert 2',
+            agency: CertificationAgency.padi.name,
+          ),
         );
         await repository.createCertification(
-          createTestCert(name: 'SSI Cert', agency: CertificationAgency.ssi),
+          createTestCert(
+            name: 'SSI Cert',
+            agency: CertificationAgency.ssi.name,
+          ),
         );
       });
 
       test('should return certs for specified agency', () async {
         final results = await repository.getCertificationsByAgency(
-          CertificationAgency.padi,
+          CertificationAgency.padi.name,
         );
 
         expect(results.length, equals(2));
         expect(
-          results.every((c) => c.agency == CertificationAgency.padi),
+          results.every((c) => c.agency == CertificationAgency.padi.name),
           isTrue,
         );
       });
 
       test('should return empty list when no certs for agency', () async {
         final results = await repository.getCertificationsByAgency(
-          CertificationAgency.gue,
+          CertificationAgency.gue.name,
         );
 
         expect(results, isEmpty);

@@ -1,4 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/entities/cns_calculation_method.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/deco/o2_toxicity_calculator.dart';
 import 'package:submersion/core/deco/entities/o2_exposure.dart';
 
@@ -101,14 +105,14 @@ void main() {
     group('calculateEnd', () {
       test('should calculate END for air dive', () {
         // Air at 30m: END should equal actual depth (no advantage)
-        final end = O2ToxicityCalculator.calculateEnd(30, 0.79);
+        final end = O2ToxicityCalculator.calculateEnd(30, airN2Fraction);
         expect(end, closeTo(30, 0.5));
       });
 
       test('should calculate reduced END for trimix', () {
         // Trimix 18/45 at 60m (45% He, 37% N2)
         // N2 pressure at 60m = 7.0 * 0.37 = 2.59 bar
-        // END = (2.59 / 0.79 - 1) * 10 = 22.8m
+        // END = (2.59 / air N2 fraction - 1) * 10 = 22.8m
         final end = O2ToxicityCalculator.calculateEnd(60, 0.37);
         expect(end, closeTo(22.8, 1.0));
       });
@@ -252,6 +256,26 @@ void main() {
         expect(exposure.maxPpO2, lessThanOrEqualTo(0.63)); // ~3 bar * 0.21
       });
 
+      test('stamps the calculator thresholds onto the exposure', () {
+        const custom = O2ToxicityCalculator(
+          ppO2WarningThreshold: 1.5,
+          ppO2CriticalThreshold: 1.6,
+        );
+        // EAN32 to 40 m: ppO2 = 0.32 * 5 = 1.6.
+        final exposure = custom.calculateDiveExposure(
+          depths: [0.0, 40.0, 40.0, 0.0],
+          timestamps: [0, 120, 900, 1020],
+          o2Fraction: 0.32,
+        );
+        expect(exposure.warningThreshold, 1.5);
+        expect(exposure.criticalThreshold, 1.6);
+        // The 1.6 bar peak exceeds both the default (1.4) and this raised
+        // (1.5) warning threshold, but it only equals the raised critical
+        // limit, so it stays out of the red.
+        expect(exposure.ppO2Warning, isTrue); // 1.6 > 1.5
+        expect(exposure.ppO2Critical, isFalse); // not > 1.6
+      });
+
       test('should track max ppO2 at max depth', () {
         final depths = [0.0, 10.0, 30.0, 30.0, 10.0, 0.0];
         final timestamps = [0, 60, 180, 1800, 1920, 2040];
@@ -265,6 +289,31 @@ void main() {
         // Max ppO2 should occur at or near 30m
         expect(exposure.maxPpO2Depth, closeTo(30, 5));
         expect(exposure.maxPpO2, closeTo(0.84, 0.05)); // 4 bar * 0.21
+      });
+
+      test('keeps a peak that interval averaging would flatten', () {
+        // Issue #3959: both intervals average 35 m (1.53 bar), but the diver
+        // reached 40 m (1.70 bar), past the 1.6 bar limit.
+        final exposure = calculator.calculateDiveExposure(
+          depths: [30.0, 40.0, 30.0],
+          timestamps: [0, 120, 240],
+          o2Fraction: 0.34,
+        );
+
+        expect(exposure.maxPpO2, closeTo(1.70, 1e-9));
+        expect(exposure.maxPpO2Depth, 40.0);
+        expect(exposure.ppO2Critical, isTrue);
+      });
+
+      test('reads the peak of a single sample', () {
+        final exposure = calculator.calculateDiveExposure(
+          depths: [40.0],
+          timestamps: [0],
+          o2Fraction: 0.34,
+        );
+
+        expect(exposure.maxPpO2, closeTo(1.70, 1e-9));
+        expect(exposure.maxPpO2Depth, 40.0);
       });
 
       test('should start from existing CNS', () {
@@ -334,6 +383,104 @@ void main() {
         expect(exposure.otu, closeTo(singleGasExposure.otu, 0.1));
       });
 
+      test('keeps a peak that interval averaging would flatten', () {
+        // Issue #3959: both intervals average 35 m (1.53 bar).
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [30.0, 40.0, 30.0],
+          timestamps: [0, 120, 240],
+          gasSwitches: {},
+          initialO2Fraction: 0.34,
+        );
+
+        expect(exposure.maxPpO2, closeTo(1.70, 1e-9));
+        expect(exposure.maxPpO2Depth, 40.0);
+        expect(exposure.ppO2Critical, isTrue);
+      });
+
+      test('does not put a gas on the sample before its switch', () {
+        // EAN50 from the 6 m sample: 30 m was breathed on air (0.84 bar), so
+        // the 2.0 bar of EAN50 at 30 m was never reached.
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [30.0, 6.0, 6.0],
+          timestamps: [0, 240, 540],
+          gasSwitches: {240: 0.50},
+          initialO2Fraction: 0.21,
+        );
+
+        expect(exposure.maxPpO2, closeTo(0.84, 1e-9));
+        expect(exposure.maxPpO2Depth, 30.0);
+      });
+
+      test('integrates a switch only from its sample onward', () {
+        // Air down to the 6 m sample, then EAN50 for the 300 s stop.
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [30.0, 6.0, 6.0],
+          timestamps: [0, 240, 540],
+          gasSwitches: {240: 0.50},
+          initialO2Fraction: 0.21,
+        );
+
+        final onAir = O2ToxicityCalculator.calculatePpO2(18.0, 0.21);
+        final onEan50 = O2ToxicityCalculator.calculatePpO2(6.0, 0.50);
+        expect(
+          exposure.cnsEnd,
+          closeTo(
+            calculator.calculateCnsForSegment(onAir, 240) +
+                calculator.calculateCnsForSegment(onEan50, 300),
+            1e-9,
+          ),
+        );
+        expect(
+          exposure.otu,
+          closeTo(
+            calculator.calculateOtuForSegment(onAir, 240) +
+                calculator.calculateOtuForSegment(onEan50, 300),
+            1e-9,
+          ),
+        );
+      });
+
+      test('applies a switch at the first sample from the start', () {
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [20.0, 20.0],
+          timestamps: [0, 60],
+          gasSwitches: {0: 0.50},
+          initialO2Fraction: 0.21,
+        );
+
+        expect(exposure.maxPpO2, closeTo(1.5, 1e-9));
+        expect(exposure.maxPpO2Depth, 20.0);
+        expect(
+          exposure.cnsEnd,
+          closeTo(calculator.calculateCnsForSegment(1.5, 60), 1e-9),
+        );
+      });
+
+      test('counts the outgoing gas at the sample of a switch', () {
+        // Arrives at 30 m on EAN50 (2.0 bar), then switches to a leaner mix.
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [20.0, 30.0, 30.0],
+          timestamps: [0, 60, 120],
+          gasSwitches: {60: 0.18},
+          initialO2Fraction: 0.50,
+        );
+
+        expect(exposure.maxPpO2, closeTo(2.0, 1e-9));
+        expect(exposure.maxPpO2Depth, 30.0);
+      });
+
+      test('reads the peak of a single sample', () {
+        final exposure = calculator.calculateMultiGasExposure(
+          depths: [40.0],
+          timestamps: [0],
+          gasSwitches: {},
+          initialO2Fraction: 0.34,
+        );
+
+        expect(exposure.maxPpO2, closeTo(1.70, 1e-9));
+        expect(exposure.maxPpO2Depth, 40.0);
+      });
+
       test('should apply gas switch at correct time', () {
         // Start on 21%, switch to 50% at ascent
         final depths = [0.0, 30.0, 30.0, 6.0, 6.0, 0.0];
@@ -359,6 +506,52 @@ void main() {
       });
     });
 
+    group('peakPpO2', () {
+      test('returns the highest reading and the depth it was reached at', () {
+        final peak = O2ToxicityCalculator.peakPpO2(
+          [1.2, 1.8, 1.3],
+          [10.0, 25.0, 40.0],
+        );
+
+        expect(peak.ppO2, 1.8);
+        expect(peak.depth, 25.0);
+      });
+
+      test('reports the deepest depth of a repeated peak', () {
+        final peak = O2ToxicityCalculator.peakPpO2(
+          [1.3, 1.3, 1.3, 1.3],
+          [0.0, 30.0, 20.0, 0.0],
+        );
+
+        expect(peak.ppO2, 1.3);
+        expect(peak.depth, 30.0);
+      });
+
+      test('a higher reading replaces a deeper one', () {
+        final peak = O2ToxicityCalculator.peakPpO2(
+          [1.2, 1.2, 1.4],
+          [40.0, 30.0, 6.0],
+        );
+
+        expect(peak.ppO2, 1.4);
+        expect(peak.depth, 6.0);
+      });
+
+      test('reports no depth when no reading is above zero', () {
+        final peak = O2ToxicityCalculator.peakPpO2([0.0, 0.0], [10.0, 30.0]);
+
+        expect(peak.ppO2, 0.0);
+        expect(peak.depth, 0.0);
+      });
+
+      test('reports nothing for no readings', () {
+        final peak = O2ToxicityCalculator.peakPpO2([], []);
+
+        expect(peak.ppO2, 0.0);
+        expect(peak.depth, 0.0);
+      });
+    });
+
     group('calculatePpO2Curve', () {
       test('should return curve matching depth points', () {
         final depths = [0.0, 10.0, 20.0, 30.0, 20.0, 10.0, 0.0];
@@ -378,6 +571,77 @@ void main() {
 
         expect(nitroxCurve[1], greaterThan(airCurve[1]));
         expect(nitroxCurve[1] / airCurve[1], closeTo(0.32 / 0.21, 0.01));
+      });
+    });
+
+    group('in a selected environment (issue #3958)', () {
+      final environment = DiveEnvironment.forConditions(
+        altitudeMeters: 3000,
+        waterType: WaterType.fresh,
+      );
+      final atSite = O2ToxicityCalculator(environment: environment);
+      final ambient = environment.pressureAtDepth(35);
+
+      test('the ppO2 curve reads the environment', () {
+        expect(
+          atSite.calculatePpO2Curve([35.0], 0.36).single,
+          closeTo(ambient * 0.36, 1e-9),
+        );
+      });
+
+      test('dive exposure reads the environment', () {
+        final exposure = atSite.calculateDiveExposure(
+          depths: [35.0, 35.0],
+          timestamps: [0, 600],
+          o2Fraction: 0.36,
+        );
+
+        expect(exposure.maxPpO2, closeTo(ambient * 0.36, 1e-9));
+        expect(
+          exposure.otu,
+          closeTo(atSite.calculateOtuForSegment(ambient * 0.36, 600), 1e-9),
+        );
+      });
+
+      test('multi-gas exposure reads the environment', () {
+        final exposure = atSite.calculateMultiGasExposure(
+          depths: [35.0, 35.0],
+          timestamps: [0, 600],
+          gasSwitches: const {},
+          initialO2Fraction: 0.36,
+        );
+
+        expect(exposure.maxPpO2, closeTo(ambient * 0.36, 1e-9));
+      });
+
+      test('the SCR curve reads the environment', () {
+        final flat = calculator.calculatePpO2CurveSCR(
+          [20.0],
+          injectionRateLpm: 10,
+          supplyO2Percent: 40,
+        );
+        final site = atSite.calculatePpO2CurveSCR(
+          [20.0],
+          injectionRateLpm: 10,
+          supplyO2Percent: 40,
+        );
+
+        expect(
+          site.single,
+          closeTo(environment.pressureAtDepth(20) * flat.single / 3.0, 1e-6),
+        );
+      });
+
+      test('the safety check reads the environment', () {
+        expect(calculator.isPpO2Safe(30, 0.36), isFalse);
+        expect(atSite.isPpO2Safe(30, 0.36), isTrue);
+      });
+
+      test('the static ppO2 stays on the flat model', () {
+        expect(
+          O2ToxicityCalculator.calculatePpO2(35, 0.36),
+          closeTo(1.62, 1e-9),
+        );
       });
     });
 
@@ -499,18 +763,53 @@ void main() {
 
   group('CnsTable', () {
     test('should have valid rates for all ppO2 ranges', () {
-      // Test each bracket from NOAA table
-      expect(CnsTable.cnsPerMinute(0.55), closeTo(100.0 / 720.0, 0.01));
-      expect(CnsTable.cnsPerMinute(0.65), closeTo(100.0 / 570.0, 0.01));
-      expect(CnsTable.cnsPerMinute(0.75), closeTo(100.0 / 450.0, 0.01));
-      expect(CnsTable.cnsPerMinute(0.85), closeTo(100.0 / 360.0, 0.01));
-      expect(CnsTable.cnsPerMinute(0.95), closeTo(100.0 / 300.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.05), closeTo(100.0 / 240.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.15), closeTo(100.0 / 210.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.25), closeTo(100.0 / 180.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.35), closeTo(100.0 / 150.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.45), closeTo(100.0 / 120.0, 0.01));
-      expect(CnsTable.cnsPerMinute(1.55), closeTo(100.0 / 45.0, 0.01));
+      // Test each bracket from NOAA table. These verify the classic step-table
+      // band semantics, so opt into the classic method explicitly.
+      const m = CnsCalculationMethod.classic;
+      expect(
+        CnsTable.cnsPerMinute(0.55, method: m),
+        closeTo(100.0 / 720.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(0.65, method: m),
+        closeTo(100.0 / 570.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(0.75, method: m),
+        closeTo(100.0 / 450.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(0.85, method: m),
+        closeTo(100.0 / 360.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(0.95, method: m),
+        closeTo(100.0 / 300.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.05, method: m),
+        closeTo(100.0 / 240.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.15, method: m),
+        closeTo(100.0 / 210.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.25, method: m),
+        closeTo(100.0 / 180.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.35, method: m),
+        closeTo(100.0 / 150.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.45, method: m),
+        closeTo(100.0 / 120.0, 0.01),
+      );
+      expect(
+        CnsTable.cnsPerMinute(1.55, method: m),
+        closeTo(100.0 / 45.0, 0.01),
+      );
     });
 
     test('should calculate CNS for segment correctly', () {
@@ -594,6 +893,25 @@ void main() {
       expect(CnsStatus.safe.displayName, equals('Safe'));
       expect(CnsStatus.warning.displayName, equals('Warning'));
       expect(CnsStatus.critical.displayName, equals('Critical'));
+    });
+  });
+
+  group('CNS method selection', () {
+    test('default method is Shearwater-style interpolation', () {
+      const calc = O2ToxicityCalculator();
+      expect(calc.getCnsPerMinute(1.25), closeTo(100 / 195, 1e-9));
+    });
+    test('classic method reproduces the step table', () {
+      const calc = O2ToxicityCalculator(
+        cnsMethod: CnsCalculationMethod.classic,
+      );
+      expect(calc.getCnsPerMinute(1.25), closeTo(100 / 180, 1e-9));
+    });
+    test('subsurface method uses the exponential fit', () {
+      const calc = O2ToxicityCalculator(
+        cnsMethod: CnsCalculationMethod.subsurface,
+      );
+      expect(calc.getCnsPerMinute(1.25), closeTo(0.51563, 5e-4));
     });
   });
 }

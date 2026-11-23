@@ -7,7 +7,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/certifications/domain/constants/certification_field.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_detail_page.dart';
-import 'package:submersion/features/certifications/presentation/pages/certification_edit_page.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_edit_routes.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_list_page.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
 import 'package:submersion/features/certifications/presentation/widgets/certification_list_content.dart';
@@ -17,10 +17,12 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 
 // ---------------------------------------------------------------------------
 // Mock notifiers
@@ -108,14 +110,18 @@ void main() {
     }) {
       return [
         sharedPreferencesProvider.overrideWithValue(prefs),
-        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        // The view mode is read from the diver's saved settings (#3748).
+        settingsProvider.overrideWith(
+          (ref) => MockSettingsNotifier(
+            AppSettings(certificationListViewMode: viewMode),
+          ),
+        ),
         currentDiverIdProvider.overrideWith(
           (ref) => MockCurrentDiverIdNotifier(),
         ),
         certificationListNotifierProvider.overrideWith(
           (ref) => _MockCertificationListNotifier(),
         ),
-        certificationListViewModeProvider.overrideWith((ref) => viewMode),
         certificationTableConfigProvider.overrideWith(
           (ref) => _TestCertificationTableConfigNotifier(),
         ),
@@ -156,6 +162,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TableModeLayout), findsOneWidget);
+      // Table mode titles the list with its entry count (#2669).
+      expect(
+        tester
+            .widget<TableModeLayout>(find.byType(TableModeLayout))
+            .appBarSubtitle,
+        isNotNull,
+      );
       expect(find.byType(MasterDetailScaffold), findsNothing);
     });
 
@@ -281,10 +294,45 @@ void main() {
       await tester.pumpAndSettle();
 
       // The sort bottom sheet should appear with sort field options
-      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Title'), findsOneWidget);
       expect(find.text('Date Issued'), findsOneWidget);
       expect(find.text('Agency'), findsOneWidget);
     });
+
+    // Table mode stays flat -- no grouping control -- but still offers the
+    // List/Wallet switch every other sort sheet carries (#3359).
+    testWidgets(
+      'table mode sort sheet offers the view switch but no group-by control',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final originalOnError = FlutterError.onError;
+        FlutterError.onError = (details) {
+          if (details.toString().contains('overflowed')) return;
+          originalOnError?.call(details);
+        };
+        addTearDown(() => FlutterError.onError = originalOnError);
+
+        await tester.pumpWidget(
+          _buildTestWidget(
+            overrides: baseOverrides(viewMode: ListViewMode.table),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byIcon(Icons.sort));
+        await tester.pumpAndSettle();
+
+        expect(find.text('List'), findsOneWidget);
+        expect(find.text('Certification Wallet'), findsOneWidget);
+        expect(find.text('Group by'), findsNothing);
+      },
+    );
 
     testWidgets('table mode search button opens search', (tester) async {
       tester.view.devicePixelRatio = 1.0;
@@ -304,7 +352,7 @@ void main() {
       await tester.tap(find.byIcon(Icons.search));
       await tester.pumpAndSettle();
 
-      // The search delegate should open, showing a search bar
+      // The search row opens under the app bar
       expect(find.byType(TextField), findsOneWidget);
     });
 
@@ -353,6 +401,94 @@ void main() {
       // The popup menu should show view mode options
       expect(find.text('Detailed'), findsOneWidget);
       expect(find.text('Table'), findsOneWidget);
+    });
+
+    // Table mode has no app bar inside the list, so "Select items" lives in
+    // the page header's overflow menu and drives the list through the
+    // controller the page hands it (issue #2775).
+    group('table mode "Select items"', () {
+      Future<void> pumpTablePage(WidgetTester tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          _buildTestWidget(
+            overrides: baseOverrides(viewMode: ListViewMode.table),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shows no separate Select strip above the table', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+        expect(find.byIcon(Icons.checklist), findsNothing);
+      });
+
+      testWidgets('is the first overflow entry and enters selection', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        await tester.tap(find.byIcon(Icons.more_vert));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+          lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+        );
+
+        await tester.tap(find.byKey(selectItemsMenuKey));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+        expect(find.text('0 selected'), findsOneWidget);
+      });
+
+      testWidgets('leaves the entry out while selecting', (tester) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+
+        // The header's overflow, not the selection bar's.
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byIcon(Icons.more_vert),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Detailed'), findsOneWidget);
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+      });
+
+      testWidgets('selection does not outlive leaving table mode', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(CertificationListPage)),
+        );
+        container
+            .read(settingsProvider.notifier)
+            .setCertificationListViewMode(ListViewMode.detailed);
+        await tester.pumpAndSettle();
+        container
+            .read(settingsProvider.notifier)
+            .setCertificationListViewMode(ListViewMode.table);
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      });
     });
 
     testWidgets('table mode popup menu changes view mode', (tester) async {
@@ -539,7 +675,7 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(CertificationEditPage), findsOneWidget);
+      expect(find.byType(CertificationDetailPage), findsOneWidget);
     });
 
     testWidgets('table mode edit builder invoked via edit query param', (
@@ -571,7 +707,71 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(CertificationEditPage), findsOneWidget);
+      expect(find.byType(CertificationDetailPage), findsOneWidget);
     });
+  });
+
+  // A new certification opens on its page behind the phase 3 switch (issue
+  // #4527, phase 3, plan 11).
+  testWidgets("the pane's new certification is the page", (tester) async {
+    void onSaved(String id) {}
+    void onCancel() {}
+    late BuildContext context;
+    await tester.pumpWidget(
+      Builder(
+        builder: (c) {
+          context = c;
+          return const SizedBox.shrink();
+        },
+      ),
+    );
+    final page =
+        newCertificationPane(context, onSaved, onCancel)
+            as CertificationDetailPage;
+    expect(page.embedded, isTrue);
+    expect(page.newCertification, isTrue);
+    expect(page.onCreated, same(onSaved));
+  });
+
+  testWidgets('Add on a phone opens the new certification once created', (
+    tester,
+  ) async {
+    final router = GoRouter(
+      initialLocation: '/certifications',
+      routes: [
+        GoRoute(
+          path: '/certifications',
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () => openNewCertification(context),
+              child: const Text('add'),
+            ),
+          ),
+          routes: [
+            GoRoute(
+              path: 'new',
+              builder: (context, _) => Scaffold(
+                body: TextButton(
+                  onPressed: () => context.pop('n1'),
+                  child: const Text('NEW'),
+                ),
+              ),
+            ),
+            GoRoute(
+              path: ':id',
+              builder: (_, state) => Text('CERT ${state.pathParameters['id']}'),
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('add'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('NEW'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('CERT n1'), findsOneWidget);
   });
 }

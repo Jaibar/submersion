@@ -1,0 +1,380 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/number_display.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_finding.dart';
+import 'package:submersion/features/equipment/domain/entities/overdue_service_entry.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_condition_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/condition_finding_text.dart';
+import 'package:submersion/features/equipment/presentation/utils/service_severity_colors.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_trigger_text.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart';
+import 'package:submersion/features/pre_dive/domain/services/checklist_session_engine.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// One checklist row in the session runner: large tap target, state icon,
+/// secondary menu for Skip/Flag/note. Dimmed and inert when the engine says
+/// the item is not actionable (strict order, locked session, resolved).
+class SessionItemTile extends ConsumerWidget {
+  final PreDiveSession session;
+  final List<PreDiveSessionItem> sortedItems;
+  final PreDiveSessionItem item;
+  final VoidCallback onDone;
+  final VoidCallback onSkip;
+  final VoidCallback onFlag;
+  final VoidCallback onEditValue;
+  final VoidCallback onAddNote;
+  final VoidCallback onReset;
+
+  /// The source item's current value, when this is a cell linearity item
+  /// whose frozen air reading no longer matches it. Null means there is no
+  /// discrepancy to report.
+  ///
+  /// Supplied by the page, because a tile cannot see its siblings. The
+  /// frozen figure is never recomputed from this; a resolved item is an
+  /// audit record and only the diver may redo it.
+  final double? staleSourceValue;
+
+  const SessionItemTile({
+    super.key,
+    required this.session,
+    required this.sortedItems,
+    required this.item,
+    required this.onDone,
+    required this.onSkip,
+    required this.onFlag,
+    required this.onEditValue,
+    required this.onAddNote,
+    required this.onReset,
+    this.staleSourceValue,
+  });
+
+  /// The item's linked equipment's service entries to display -- every
+  /// configured clock, not only overdue ones -- paired with the instant they
+  /// should be read against: live-computed from its linked equipment while
+  /// pending (so the display tracks the current service state up to the
+  /// moment of decision), or the frozen snapshot once resolved (so a later
+  /// service log entry cannot silently rewrite what the diver saw when they
+  /// made the call).
+  ///
+  /// The instant matters because [formatServiceTriggerLines] decides between
+  /// "Due {date}" and "Overdue since {date}" by comparing it against the
+  /// entry's dueDate. An entry frozen while overdue on its dives or hours
+  /// trigger can still carry a dueDate in the future, so reading a resolved
+  /// item against the wall clock would silently reword the snapshot once that
+  /// date passes. Resolved items therefore read against completedAt, the same
+  /// instant the repository stamped when it froze the snapshot.
+  (List<OverdueServiceEntry>, DateTime) _serviceEntries(WidgetRef ref) {
+    if (item.state != PreDiveItemState.pending) {
+      return (
+        item.overdueServices ?? const [],
+        item.completedAt ?? DateTime.now(),
+      );
+    }
+    final equipmentId = item.equipmentId;
+    if (equipmentId == null) return (const [], DateTime.now());
+    // One evaluation for the whole session, indexed by this row's gear,
+    // rather than one provider per row.
+    final statuses =
+        ref
+            .watch(sessionServiceClocksProvider(session.id))
+            .value?[equipmentId] ??
+        const [];
+    return (
+      [for (final status in statuses) OverdueServiceEntry.fromStatus(status)],
+      DateTime.now(),
+    );
+  }
+
+  /// Significant, undismissed condition findings on the item's gear
+  /// (condition phase 4b), live for a pending item only: the resolved
+  /// snapshot carries clocks, not findings. The master toggle and the
+  /// disabled rules apply here, at display time.
+  List<EquipmentFinding> _significantFindings(WidgetRef ref) {
+    if (item.state != PreDiveItemState.pending) return const [];
+    final equipmentId = item.equipmentId;
+    if (equipmentId == null) return const [];
+    final settings = ref.watch(
+      settingsProvider.select(
+        (s) => (
+          conditionEngineEnabled: s.conditionEngineEnabled,
+          conditionDisabledRules: s.conditionDisabledRules,
+        ),
+      ),
+    );
+    if (!settings.conditionEngineEnabled) return const [];
+    final findings =
+        ref.watch(equipmentConditionProvider(equipmentId)).value ?? const [];
+    return [
+      for (final f in findings)
+        if (f.severity == ConditionSeverity.significant &&
+            f.dismissedAt == null &&
+            !settings.conditionDisabledRules.contains(f.ruleId.dbValue))
+          f,
+    ];
+  }
+
+  /// Text colour for a service entry's header and trigger lines.
+  /// serviceSeverityDotColor returns surfaceContainerHighest for an OK entry,
+  /// which suits a small dot meant to stay quiet but is near-invisible as
+  /// full-line text on a light theme. Ordinary body text reads fine for
+  /// "everything's fine".
+  Color _serviceEntryColor(
+    BuildContext context,
+    ThemeData theme,
+    ServiceClockSeverity severity,
+  ) => severity == ServiceClockSeverity.ok
+      ? theme.colorScheme.onSurfaceVariant
+      : serviceSeverityDotColor(context, severity);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+    final units = ref.watch(unitFormatterProvider);
+    final (serviceEntries, serviceAsOf) = _serviceEntries(ref);
+    final hasOverdue = serviceEntries.any(
+      (entry) => entry.severity == ServiceClockSeverity.overdue,
+    );
+    final significantFindings = _significantFindings(ref);
+    final actionable = ChecklistSessionEngine.isItemActionable(
+      session,
+      sortedItems,
+      item,
+    );
+    // The overflow menu must respect strict-order gating too: a pending item
+    // that is not yet actionable cannot be skipped/flagged/noted out of order.
+    // Resolved items keep their menu so Reset/Note stay reachable.
+    final showMenu = !session.isLocked && (actionable || item.isResolved);
+
+    final (stateIcon, stateColor) = switch (item.state) {
+      PreDiveItemState.pending => (
+        Icons.radio_button_unchecked,
+        theme.colorScheme.onSurfaceVariant,
+      ),
+      PreDiveItemState.done => (Icons.check_circle, theme.colorScheme.primary),
+      PreDiveItemState.skipped => (
+        Icons.remove_circle_outline,
+        theme.colorScheme.onSurfaceVariant,
+      ),
+      PreDiveItemState.flagged => (Icons.flag, theme.colorScheme.error),
+    };
+
+    // A cell linearity item records a number just as a value item does, so
+    // it renders the same primary line and takes the same tap route.
+    final isValueLike =
+        item.itemType == PreDiveItemType.value || item.isCellLinearity;
+
+    final valueLine = isValueLike
+        ? [
+            if (item.valueLabel != null) item.valueLabel!,
+            if (item.valueNumber != null)
+              '${formatDecimalForDisplay(item.valueNumber!)}'
+                  '${item.valueUnit == null ? '' : ' ${item.valueUnit}'}',
+          ].join(': ')
+        : null;
+
+    // The full working, so the linearity result is readable from the list
+    // without opening the item. Rounding is applied here and nowhere else:
+    // the percentage itself is derived from the exact expected value.
+    final percent = item.linearityPercent;
+    final expected = item.expectedO2Millivolts;
+    final air = item.sourceValueNumber;
+    // Both numbers are localised so the diver reads their own decimal
+    // separator (#1684 did the value line above; this is the same bug on the
+    // same tile, tracked as #1682), but through different helpers, because
+    // they pin their precision differently.
+    //
+    // The air reading keeps the precision the diver entered, because it is
+    // their input and rounding it would show a figure they never typed, so it
+    // takes formatDecimalForDisplay. The expected value is derived and shown
+    // to a fixed 1 dp, which is formatFixedForDisplay's whole purpose.
+    final linearityLine = (percent != null && expected != null && air != null)
+        ? l10n.preDive_runner_linearityLine(
+            formatDecimalForDisplay(air),
+            formatFixedForDisplay(expected, 1),
+            percent.round().toString(),
+          )
+        : null;
+
+    // The advisory warning has to mark the number that actually breached its
+    // threshold. On a value item that is the recorded number itself, but on a
+    // linearity item the threshold is a percentage, so the amber belongs on
+    // the working line rather than on the O2 millivolts, which no threshold
+    // applies to.
+    final primaryOutOfRange = item.valueOutOfRange && !item.isCellLinearity;
+
+    final subtitleChildren = <Widget>[
+      if (valueLine != null && valueLine.isNotEmpty)
+        Text(
+          valueLine,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: primaryOutOfRange
+                ? Colors.amber.shade700
+                : theme.colorScheme.onSurfaceVariant,
+            fontWeight: primaryOutOfRange ? FontWeight.bold : null,
+          ),
+        ),
+      if (linearityLine != null)
+        Text(
+          linearityLine,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: item.valueOutOfRange
+                ? Colors.amber.shade700
+                : theme.colorScheme.onSurfaceVariant,
+            fontWeight: item.valueOutOfRange ? FontWeight.bold : null,
+          ),
+        ),
+      if (staleSourceValue != null)
+        Text(
+          l10n.preDive_runner_sourceChanged,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      if (item.note.isNotEmpty)
+        Text(
+          item.note,
+          style: theme.textTheme.bodySmall?.copyWith(
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      if (item.notes.isNotEmpty)
+        Text(item.notes, style: theme.textTheme.bodySmall),
+      if (serviceEntries.isNotEmpty) ...[
+        if (hasOverdue)
+          Text(
+            l10n.preDive_runner_serviceOverdue,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        // A bullet header per entry, due/usage lines indented underneath and
+        // a gap before the next entry: a wall of same-indent lines read as
+        // one continuous block on a narrow phone screen (issue #3272),
+        // especially once a trigger line itself wraps to two lines.
+        for (final entry in serviceEntries) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              '• ${entry.kindName}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: _serviceEntryColor(context, theme, entry.severity),
+              ),
+            ),
+          ),
+          for (final line in formatServiceTriggerLines(
+            context,
+            units: units,
+            now: serviceAsOf,
+            dueDate: entry.dueDate,
+            divesSinceAnchor: entry.divesSinceAnchor,
+            divesRemaining: entry.divesRemaining,
+            hoursSinceAnchor: entry.hoursSinceAnchor,
+            hoursRemaining: entry.hoursRemaining,
+            usageByUnit: entry.usageByUnit,
+          ))
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: 12),
+              child: Text(
+                line,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: _serviceEntryColor(context, theme, entry.severity),
+                ),
+              ),
+            ),
+        ],
+      ],
+      // Same block, same tone, after the clocks: a significant condition
+      // finding is as informative as an overdue clock and just as much the
+      // diver's call.
+      if (significantFindings.isNotEmpty) ...[
+        Text(
+          l10n.preDive_runner_conditionFindings,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.error,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        for (final finding in significantFindings)
+          Text(
+            conditionFindingShortLabel(finding.ruleId, l10n),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+            ),
+          ),
+      ],
+      // Completion time belongs in the subtitle, not in trailing: a ListTile
+      // measures its trailing widget against the full tile width, so anything
+      // text-bearing there eats into the item title (issue #935).
+      if (item.completedAt != null)
+        Text(
+          units.formatTime(item.completedAt),
+          style: theme.textTheme.bodySmall,
+        ),
+    ];
+
+    final dimmed = !actionable && item.state == PreDiveItemState.pending;
+
+    final tile = ListTile(
+      minVerticalPadding: 12,
+      leading: Icon(stateIcon, color: stateColor, size: 28),
+      title: Text(item.title, style: theme.textTheme.bodyLarge),
+      subtitle: subtitleChildren.isEmpty
+          ? null
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: subtitleChildren,
+            ),
+      trailing: !showMenu
+          ? null
+          : PopupMenuButton<String>(
+              onSelected: (value) {
+                switch (value) {
+                  case 'skip':
+                    onSkip();
+                  case 'flag':
+                    onFlag();
+                  case 'note':
+                    onAddNote();
+                  case 'reset':
+                    onReset();
+                }
+              },
+              itemBuilder: (context) => [
+                if (!item.isRequired && !item.isResolved)
+                  PopupMenuItem(
+                    value: 'skip',
+                    child: Text(l10n.preDive_runner_skip),
+                  ),
+                if (!item.isResolved)
+                  PopupMenuItem(
+                    value: 'flag',
+                    child: Text(l10n.preDive_runner_flag),
+                  ),
+                PopupMenuItem(
+                  value: 'note',
+                  child: Text(l10n.preDive_runner_addNote),
+                ),
+                if (item.isResolved)
+                  PopupMenuItem(
+                    value: 'reset',
+                    child: Text(l10n.preDive_runner_undo),
+                  ),
+              ],
+            ),
+      enabled: actionable,
+      onTap: actionable ? (isValueLike ? onEditValue : onDone) : null,
+    );
+
+    return dimmed ? Opacity(opacity: 0.4, child: tile) : tile;
+  }
+}

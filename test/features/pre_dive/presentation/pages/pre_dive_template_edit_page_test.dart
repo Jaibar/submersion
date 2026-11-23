@@ -1,0 +1,1175 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/theme/full_themes/tropical_theme.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/pre_dive/data/repositories/pre_dive_template_repository.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template_section.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_template_edit_page.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_bar.dart';
+import 'package:submersion/shared/widgets/app_bar_text_action.dart';
+
+import '../../../../helpers/test_app.dart';
+import '../../../../helpers/test_database.dart';
+
+/// Fake repository that stubs the reads the page performs and captures the
+/// writes so save/create/update/saveItems can be asserted without a database.
+class _FakeTemplateRepo implements PreDiveTemplateRepository {
+  _FakeTemplateRepo({
+    this.template,
+    this.items = const [],
+    this.sections = const [],
+    this.gate,
+  });
+
+  final PreDiveChecklistTemplate? template;
+  final List<PreDiveChecklistTemplateItem> items;
+  final List<PreDiveChecklistTemplateSection> sections;
+
+  /// When set, the reads block until it completes, so a test can inspect the
+  /// frame the page renders while the template is still in flight.
+  final Completer<void>? gate;
+
+  PreDiveChecklistTemplate? createdTemplate;
+  PreDiveChecklistTemplate? updatedTemplate;
+  String? savedTemplateId;
+  List<PreDiveChecklistTemplateItem>? savedItems;
+  List<PreDiveChecklistTemplateSection>? savedSections;
+
+  @override
+  Future<List<PreDiveChecklistTemplateSection>> getSectionsForTemplate(
+    String templateId,
+  ) async => sections;
+
+  /// Fake find-or-create: deterministic by title, no real persistence.
+  /// None of this file's save-path tests type a section title, so this is
+  /// never exercised for its return value, only kept so a call to it does
+  /// not hit noSuchMethod.
+  @override
+  Future<String?> findOrCreateSectionId(
+    String templateId,
+    String? title,
+  ) async {
+    final trimmed = title?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : 'sec-$trimmed';
+  }
+
+  @override
+  Future<PreDiveChecklistTemplate?> getTemplateById(String id) async {
+    if (gate != null) await gate!.future;
+    return template;
+  }
+
+  @override
+  Future<List<PreDiveChecklistTemplateItem>> getItemsForTemplate(
+    String templateId,
+  ) async {
+    if (gate != null) await gate!.future;
+    return items;
+  }
+
+  @override
+  Future<PreDiveChecklistTemplate> createTemplate(
+    PreDiveChecklistTemplate template,
+  ) async {
+    createdTemplate = template;
+    return template.copyWith(id: 'created-id');
+  }
+
+  @override
+  Future<void> updateTemplate(PreDiveChecklistTemplate template) async {
+    updatedTemplate = template;
+  }
+
+  @override
+  Future<void> saveItems(
+    String templateId,
+    List<PreDiveChecklistTemplateItem> items,
+  ) async {
+    savedTemplateId = templateId;
+    savedItems = items;
+  }
+
+  @override
+  Future<void> saveSections(
+    String templateId,
+    List<PreDiveChecklistTemplateSection> sections,
+  ) async {
+    savedSections = sections;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  final now = DateTime.fromMillisecondsSinceEpoch(1700000000000);
+
+  // Save runs in one transaction and change log operation, so it needs a
+  // database even with the fake repository.
+  setUp(setUpTestDatabase);
+  tearDown(tearDownTestDatabase);
+
+  PreDiveChecklistTemplateItem itemFixture(
+    String title, {
+    String id = '',
+    String? section,
+    PreDiveItemType type = PreDiveItemType.check,
+    bool required = false,
+    int sortOrder = 0,
+  }) => PreDiveChecklistTemplateItem(
+    id: id.isEmpty ? title : id,
+    templateId: 'tpl-1',
+    // Not resolved to a real section title in these fixtures (the fake
+    // repository's getSectionsForTemplate returns none); no test here
+    // asserts the rendered section subtitle for a pre-loaded item.
+    sectionId: section,
+    title: title,
+    sortOrder: sortOrder,
+    itemType: type,
+    isRequired: required,
+    createdAt: now,
+    updatedAt: now,
+  );
+
+  PreDiveChecklistTemplate templateFixture({
+    String name = 'Backmount Setup',
+    String description = 'Pre-dive prep',
+    String? category = 'Technical',
+    bool strictOrder = true,
+    bool isBuiltIn = false,
+  }) => PreDiveChecklistTemplate(
+    id: 'tpl-1',
+    diverId: 'diver-1',
+    name: name,
+    description: description,
+    category: category,
+    strictOrder: strictOrder,
+    isBuiltIn: isBuiltIn,
+    createdAt: now,
+    updatedAt: now,
+  );
+
+  Future<void> pumpPage(
+    WidgetTester tester, {
+    String? templateId,
+    _FakeTemplateRepo? repo,
+  }) async {
+    await tester.pumpWidget(
+      testApp(
+        locale: const Locale('en'),
+        overrides: [
+          preDiveTemplateRepositoryProvider.overrideWithValue(
+            repo ?? _FakeTemplateRepo(),
+          ),
+          validatedCurrentDiverIdProvider.overrideWith(
+            (ref) async => 'diver-1',
+          ),
+        ],
+        child: PreDiveTemplateEditPage(templateId: templateId),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> openAddItemDialog(WidgetTester tester) async {
+    await tester.ensureVisible(find.text('Add item'));
+    await tester.tap(find.text('Add item'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('new-template mode renders name field and Save', (tester) async {
+    await pumpPage(tester);
+    expect(find.text('New Pre-Dive Checklist'), findsOneWidget);
+    expect(find.text('Name'), findsOneWidget);
+    expect(find.text('Save'), findsOneWidget);
+    expect(find.text('Strict order'), findsOneWidget);
+  });
+
+  testWidgets('Add item opens the item dialog with a type picker', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('Title'), findsOneWidget);
+    // Type dropdown defaults to Checkbox; value fields hidden.
+    expect(find.text('Checkbox'), findsOneWidget);
+    expect(find.text('Value label'), findsNothing);
+  });
+
+  testWidgets('selecting Recorded value reveals the value fields', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    await tester.tap(find.text('Checkbox'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Recorded value').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Value label'), findsOneWidget);
+    expect(find.text('Unit'), findsOneWidget);
+    expect(find.text('Min (warning)'), findsOneWidget);
+    expect(find.text('Max (warning)'), findsOneWidget);
+  });
+
+  testWidgets('switching back from Recorded value hides the value fields', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    await tester.tap(find.text('Checkbox'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Recorded value').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Value label'), findsOneWidget);
+
+    // Equipment set items should not reveal the value fields.
+    await tester.tap(find.text('Recorded value').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Equipment set items').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Value label'), findsNothing);
+  });
+
+  testWidgets('Save with empty name shows validation and stays', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    // An untouched form has nothing to save: a description makes it a
+    // change, so Save runs the checks.
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Description'),
+      'No name yet',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter a name'), findsOneWidget);
+    expect(find.byType(PreDiveTemplateEditPage), findsOneWidget);
+  });
+
+  testWidgets('dialog OK with empty title shows title validation', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Title is required'), findsOneWidget);
+    // Dialog stays open.
+    expect(find.byType(AlertDialog), findsOneWidget);
+  });
+
+  testWidgets('Cancel closes the item dialog without adding an item', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Title'),
+      'Discarded',
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Cancel'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Discarded'), findsNothing);
+  });
+
+  testWidgets('adding an item appends it to the list', (tester) async {
+    await pumpPage(tester);
+
+    // A section must exist before it can be picked in the item dialog --
+    // sections are managed via the editor's own "Add section", not typed
+    // free text in the item dialog.
+    await tester.tap(find.text('Add section'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'New section'),
+      'Gas',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await openAddItemDialog(tester);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Title'),
+      'Check pressure',
+    );
+    await tester.tap(find.text('No section'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gas').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Check pressure'), findsOneWidget);
+    // The item renders grouped under its section's header.
+    expect(find.text('Gas'), findsOneWidget);
+  });
+
+  testWidgets('toggling Required in the dialog marks the item required', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await openAddItemDialog(tester);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Title'),
+      'Buddy check',
+    );
+    await tester.tap(find.widgetWithText(SwitchListTile, 'Required'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Buddy check'), findsOneWidget);
+    // Required marker appears in the list-tile subtitle.
+    expect(find.textContaining('Required'), findsOneWidget);
+  });
+
+  testWidgets('toggling Strict order flips the switch', (tester) async {
+    await pumpPage(tester);
+    final switchFinder = find.widgetWithText(SwitchListTile, 'Strict order');
+    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+
+    await tester.tap(switchFinder);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
+  });
+
+  testWidgets('edit mode loads an existing template and its items', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo(
+      template: templateFixture(),
+      items: [
+        itemFixture('Check O2', id: 'i1', section: 'Gas', required: true),
+        itemFixture(
+          'Set gradient',
+          id: 'i2',
+          type: PreDiveItemType.value,
+          sortOrder: 1,
+        ),
+      ],
+    );
+    await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+    expect(find.text('Edit Pre-Dive Checklist'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+      'Backmount Setup',
+    );
+    expect(find.text('Check O2'), findsOneWidget);
+    expect(find.text('Set gradient'), findsOneWidget);
+    // strictOrder pre-fills to true.
+    expect(
+      tester
+          .widget<SwitchListTile>(
+            find.widgetWithText(SwitchListTile, 'Strict order'),
+          )
+          .value,
+      isTrue,
+    );
+  });
+
+  testWidgets('tapping a loaded item opens the dialog prefilled for edit', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo(
+      template: templateFixture(),
+      items: [itemFixture('Original title', id: 'i1', section: 'Rig')],
+    );
+    await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+    await tester.tap(find.text('Original title'));
+    await tester.pumpAndSettle();
+
+    // Dialog prefilled with the existing title.
+    expect(
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, 'Original title'))
+          .controller!
+          .text,
+      'Original title',
+    );
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Title'),
+      'Edited title',
+    );
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    // The edited item replaces the original in place.
+    expect(find.text('Edited title'), findsOneWidget);
+    expect(find.text('Original title'), findsNothing);
+  });
+
+  testWidgets('deleting a loaded item removes it from the list', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo(
+      template: templateFixture(),
+      items: [
+        itemFixture('Keep me', id: 'i1'),
+        itemFixture('Delete me', id: 'i2', sortOrder: 1),
+      ],
+    );
+    await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+    expect(find.text('Delete me'), findsOneWidget);
+    // Second delete button corresponds to the second item.
+    await tester.tap(find.byIcon(Icons.delete_outline).last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Delete me'), findsNothing);
+    expect(find.text('Keep me'), findsOneWidget);
+  });
+
+  testWidgets('reordering items moves an item to a new position', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo(
+      template: templateFixture(),
+      items: [
+        itemFixture('Item A', id: 'a'),
+        itemFixture('Item B', id: 'b', sortOrder: 1),
+      ],
+    );
+    await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('Item A')),
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await gesture.moveBy(const Offset(0, 80));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 40));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    // Both items are still present after the drag settles.
+    expect(find.text('Item A'), findsOneWidget);
+    expect(find.text('Item B'), findsOneWidget);
+
+    // A's move-down arrow puts it below B; Save writes the new order.
+    await tester.tap(find.byIcon(Icons.keyboard_arrow_down).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(repo.savedItems!.map((i) => i.id), ['b', 'a']);
+    expect(repo.savedItems!.map((i) => i.sortOrder), [0, 1]);
+  });
+
+  testWidgets('save in new mode creates the template and saves items', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo();
+    await pumpPage(tester, repo: repo);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'My checklist',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Description'),
+      'A description',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Category'),
+      'Recreational',
+    );
+
+    // Add one item so saveItems receives content.
+    await openAddItemDialog(tester);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Title'),
+      'Check weights',
+    );
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(repo.createdTemplate, isNotNull);
+    expect(repo.createdTemplate!.name, 'My checklist');
+    expect(repo.createdTemplate!.description, 'A description');
+    expect(repo.createdTemplate!.category, 'Recreational');
+    expect(repo.createdTemplate!.diverId, 'diver-1');
+    // Created under the id the editor opened with, its lists with it.
+    expect(repo.createdTemplate!.id, isNotEmpty);
+    expect(repo.savedTemplateId, repo.createdTemplate!.id);
+    expect(repo.savedItems, isNotNull);
+    expect(repo.savedItems!.length, 1);
+    expect(repo.savedItems!.first.title, 'Check weights');
+    expect(repo.savedItems!.first.sortOrder, 0);
+  });
+
+  testWidgets('empty category is stored as null on save', (tester) async {
+    final repo = _FakeTemplateRepo();
+    await pumpPage(tester, repo: repo);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'No category',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(repo.createdTemplate, isNotNull);
+    expect(repo.createdTemplate!.category, isNull);
+  });
+
+  testWidgets('save in edit mode updates the existing template', (
+    tester,
+  ) async {
+    final repo = _FakeTemplateRepo(
+      template: templateFixture(name: 'Old name'),
+      items: [itemFixture('Existing', id: 'i1')],
+    );
+    await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'New name',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(repo.updatedTemplate, isNotNull);
+    expect(repo.updatedTemplate!.id, 'tpl-1');
+    expect(repo.updatedTemplate!.name, 'New name');
+    // A rename leaves the items as stored: nothing rewrites them.
+    expect(repo.savedItems, isNull);
+    expect(repo.savedSections, isNull);
+  });
+
+  group('a built-in opens as a viewer, not a locked editor', () {
+    Future<void> pumpBuiltIn(WidgetTester tester) => pumpPage(
+      tester,
+      templateId: 'tpl-1',
+      repo: _FakeTemplateRepo(
+        template: templateFixture(name: 'GUE EDGE', isBuiltIn: true),
+        items: [
+          itemFixture('Goal: agree the objective', sortOrder: 0),
+          itemFixture('Gas: analyze and label', sortOrder: 1),
+        ],
+      ),
+    );
+
+    testWidgets('shows the view title and the built-in notice', (tester) async {
+      await pumpBuiltIn(tester);
+      expect(find.text('View Pre-Dive Checklist'), findsOneWidget);
+      expect(
+        find.text('Built-in checklist. Clone it to make an editable copy.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('renders the items a diver came to read', (tester) async {
+      await pumpBuiltIn(tester);
+      expect(find.text('Goal: agree the objective'), findsOneWidget);
+      expect(find.text('Gas: analyze and label'), findsOneWidget);
+      expect(find.text('GUE EDGE'), findsOneWidget);
+    });
+
+    testWidgets('withholds every editing affordance', (tester) async {
+      await pumpBuiltIn(tester);
+      expect(find.text('Save'), findsNothing);
+      expect(find.text('Add item'), findsNothing);
+      expect(find.byIcon(Icons.delete_outline), findsNothing);
+    });
+
+    testWidgets('item rows show nothing that reads as a control', (
+      tester,
+    ) async {
+      // An empty checkbox was standing in as an alignment spacer, but that
+      // glyph reads as "tap to toggle" on rows whose onTap is null. Nothing
+      // in this mode has a leading control to align with, so the column goes
+      // rather than being filled with a lookalike.
+      await pumpBuiltIn(tester);
+      expect(find.byIcon(Icons.check_box_outline_blank), findsNothing);
+      expect(find.byIcon(Icons.check_box), findsNothing);
+      expect(find.byType(Checkbox), findsNothing);
+
+      final tile = tester.widget<ListTile>(
+        find.widgetWithText(ListTile, 'Goal: agree the objective'),
+      );
+      expect(tile.leading, isNull);
+      expect(tile.onTap, isNull, reason: 'read-only rows are not tappable');
+    });
+
+    testWidgets('an editable template keeps its per-item delete', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        templateId: 'tpl-1',
+        repo: _FakeTemplateRepo(
+          template: templateFixture(),
+          items: [itemFixture('Mine')],
+        ),
+      );
+      expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+    });
+
+    testWidgets('a user template keeps its editor', (tester) async {
+      await pumpPage(
+        tester,
+        templateId: 'tpl-1',
+        repo: _FakeTemplateRepo(
+          template: templateFixture(),
+          items: [itemFixture('Mine')],
+        ),
+      );
+      expect(find.text('Edit Pre-Dive Checklist'), findsOneWidget);
+      expect(find.text('Save'), findsOneWidget);
+      expect(find.text('Add item'), findsOneWidget);
+    });
+  });
+
+  group('the loading frame claims no editing it might have to retract', () {
+    testWidgets('an in-flight template offers no Save and no edit title', (
+      tester,
+    ) async {
+      // _readOnly is derived from the fetched row, so on the first frame the
+      // mode is unknown. It must not render the edit chrome there: a built-in
+      // resolving a moment later would have to withdraw a Save button the
+      // diver has already seen.
+      final gate = Completer<void>();
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [itemFixture('Mine')],
+        gate: gate,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            preDiveTemplateRepositoryProvider.overrideWithValue(repo),
+            validatedCurrentDiverIdProvider.overrideWith(
+              (ref) async => 'diver-1',
+            ),
+          ],
+          child: const PreDiveTemplateEditPage(templateId: 'tpl-1'),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Save'), findsNothing);
+      expect(find.text('Edit Pre-Dive Checklist'), findsNothing);
+      expect(find.text('View Pre-Dive Checklist'), findsOneWidget);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      // A user template upgrades to the editing chrome once it is known.
+      expect(find.text('Edit Pre-Dive Checklist'), findsOneWidget);
+      expect(find.text('Save'), findsOneWidget);
+    });
+
+    testWidgets('a built-in never flashes the edit chrome on the way in', (
+      tester,
+    ) async {
+      final gate = Completer<void>();
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(name: 'GUE EDGE', isBuiltIn: true),
+        items: [itemFixture('Goal')],
+        gate: gate,
+      );
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            preDiveTemplateRepositoryProvider.overrideWithValue(repo),
+            validatedCurrentDiverIdProvider.overrideWith(
+              (ref) async => 'diver-1',
+            ),
+          ],
+          child: const PreDiveTemplateEditPage(templateId: 'tpl-1'),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Save'), findsNothing);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('View Pre-Dive Checklist'), findsOneWidget);
+      expect(find.text('Save'), findsNothing);
+    });
+
+    testWidgets('a brand new template shows the tinted bar on its first '
+        'frame, Save disabled until a change', (tester) async {
+      // No fetch happens without a templateId, so nothing should be deferred.
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          overrides: [
+            preDiveTemplateRepositoryProvider.overrideWithValue(
+              _FakeTemplateRepo(),
+            ),
+            validatedCurrentDiverIdProvider.overrideWith(
+              (ref) async => 'diver-1',
+            ),
+          ],
+          child: const PreDiveTemplateEditPage(),
+        ),
+      );
+
+      expect(find.byType(RecordEditBar), findsOneWidget);
+      expect(find.text('New Pre-Dive Checklist'), findsOneWidget);
+      final save = tester
+          .widgetList<AppBarTextAction>(find.byType(AppBarTextAction))
+          .firstWhere((a) => a.label == 'Save');
+      expect(save.onPressed, isNull);
+    });
+  });
+
+  group('cell linearity items (#986)', () {
+    PreDiveChecklistTemplateItem tItem({
+      required String id,
+      required String title,
+      PreDiveItemType type = PreDiveItemType.value,
+      String? valueLabel,
+      String? sourceItemId,
+      int order = 0,
+    }) => PreDiveChecklistTemplateItem(
+      id: id,
+      templateId: 'tpl-1',
+      title: title,
+      sortOrder: order,
+      itemType: type,
+      valueLabel: valueLabel,
+      sourceItemId: sourceItemId,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    testWidgets('choosing the type reveals a source picker and % labels', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(id: 'air1', title: 'Cell 1 mV in air', valueLabel: 'Cell 1'),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+      await openAddItemDialog(tester);
+
+      await tester.tap(find.byType(DropdownButtonFormField<PreDiveItemType>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cell linearity').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Air reading from'), findsOneWidget);
+      expect(find.text('Min linearity % (warning)'), findsOneWidget);
+      expect(find.text('Max linearity % (warning)'), findsOneWidget);
+      // The existing air row is offered as a source, labelled for the diver.
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      expect(find.text('Cell 1 mV in air (Cell 1)'), findsWidgets);
+    });
+
+    testWidgets('the source is required before the item can be saved', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [tItem(id: 'air1', title: 'Cell 1 mV in air')],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+      await openAddItemDialog(tester);
+
+      await tester.enterText(
+        find.byType(TextFormField).first,
+        'Cell 1 mV in O2',
+      );
+      await tester.tap(find.byType(DropdownButtonFormField<PreDiveItemType>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cell linearity').last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Choose the item holding the air reading'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('deleting a source clears its dependants and says so', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(id: 'air1', title: 'Cell 1 mV in air'),
+          tItem(
+            id: 'o2-1',
+            title: 'Cell 1 mV in O2',
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air1',
+            order: 1,
+          ),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      await tester.tap(find.byIcon(Icons.delete_outline).first);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('no longer has an air reading'),
+        findsOneWidget,
+      );
+      expect(find.text('Cell 1 mV in air'), findsNothing);
+      expect(
+        find.text('Cell 1 mV in O2'),
+        findsOneWidget,
+        reason: 'the dependant is kept, only its link is cleared',
+      );
+    });
+
+    testWidgets('a linearity row above its source carries a warning', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(
+            id: 'o2-1',
+            title: 'Cell 1 mV in O2',
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air1',
+          ),
+          tItem(id: 'air1', title: 'Cell 1 mV in air', order: 1),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      expect(
+        find.text('Reads a value recorded later in this list'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a dangling source opens the dialog instead of asserting', (
+      tester,
+    ) async {
+      // Reachable without sync: change the air item's type to check and its
+      // id drops out of the candidate list while the linearity item still
+      // points at it. A DropdownButtonFormField whose initialValue is absent
+      // from its items asserts, taking the whole editor down.
+      // Needs a surviving candidate as well as the dangling link: the
+      // framework assert short-circuits on an empty item list, so a template
+      // with no value items left would not have caught this.
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(id: 'air1', title: 'Cell 1 mV in air'),
+          tItem(
+            id: 'air2',
+            title: 'Was an air reading',
+            type: PreDiveItemType.check,
+            order: 1,
+          ),
+          tItem(
+            id: 'o2-1',
+            title: 'Cell 1 mV in O2',
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air2',
+            order: 2,
+          ),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      // The section editor's drag handle and arrows make each row taller
+      // than the old flat list, so the third item can start below the
+      // test viewport's fold.
+      await tester.drag(find.byType(ListView).first, const Offset(0, -300));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cell 1 mV in O2'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Air reading from'), findsOneWidget);
+      // The validator can then ask for a new source.
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Choose the item holding the air reading'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a stray link on a non-linearity item raises no warning', (
+      tester,
+    ) async {
+      // Malformed data: sourceItemId set on a plain value item, which the
+      // editor cannot author but sync could deliver. The warning talks about
+      // a reading this item never makes, so it must stay silent.
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(id: 'o2-1', title: 'Something else', sourceItemId: 'air1'),
+          tItem(id: 'air1', title: 'Cell 1 mV in air', order: 1),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      expect(
+        find.text('Reads a value recorded later in this list'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the reads-later warning also shows without strict order', (
+      tester,
+    ) async {
+      // Strict order makes the trap unavoidable, but it exists either way: a
+      // diver working top to bottom hits the linearity row before the air
+      // reading exists. Pins the decision not to gate the warning.
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(strictOrder: false),
+        items: [
+          tItem(
+            id: 'o2-1',
+            title: 'Cell 1 mV in O2',
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air1',
+          ),
+          tItem(id: 'air1', title: 'Cell 1 mV in air', order: 1),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      expect(
+        find.text('Reads a value recorded later in this list'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a linearity row below its source carries no warning', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          tItem(id: 'air1', title: 'Cell 1 mV in air'),
+          tItem(
+            id: 'o2-1',
+            title: 'Cell 1 mV in O2',
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air1',
+            order: 1,
+          ),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      expect(
+        find.text('Reads a value recorded later in this list'),
+        findsNothing,
+      );
+    });
+  });
+  testWidgets(
+    'the Save action stays visible on the tropical app bar when creating a '
+    'new template (#1231)',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: tropicalLight,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: const PreDiveTemplateEditPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final style = tester
+          .renderObject<RenderParagraph>(find.text('Save'))
+          .text
+          .style;
+      expect(style?.color, isNotNull);
+      expect(
+        style!.color,
+        isNot(tropicalLight.appBarTheme.backgroundColor),
+        reason:
+            'a bare TextButton paints colorScheme.primary, which this theme '
+            'sets to its own app bar background, so the diver sees no Save '
+            'button at all',
+      );
+    },
+  );
+
+  group('sections', () {
+    PreDiveChecklistTemplateSection sectionFixture(
+      String id,
+      String title,
+      int order,
+    ) => PreDiveChecklistTemplateSection(
+      id: id,
+      templateId: 'tpl-1',
+      title: title,
+      sortOrder: order,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    PreDiveChecklistTemplateItem sectioned(
+      String id,
+      String sectionId,
+      int order, {
+      PreDiveItemType type = PreDiveItemType.check,
+      String? sourceItemId,
+    }) => PreDiveChecklistTemplateItem(
+      id: id,
+      templateId: 'tpl-1',
+      sectionId: sectionId,
+      title: id,
+      sortOrder: order,
+      itemType: type,
+      sourceItemId: sourceItemId,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    testWidgets('editing an equipment item keeps its remembered device', (
+      tester,
+    ) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        items: [
+          PreDiveChecklistTemplateItem(
+            id: 'reg',
+            templateId: 'tpl-1',
+            title: 'Regulator',
+            itemType: PreDiveItemType.equipment,
+            equipmentId: 'eq-1',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      await tester.tap(find.text('Regulator'));
+      await tester.pumpAndSettle();
+      // Confirmed unchanged it is no change: rename it so Save writes it.
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Title'),
+        'Regulator first stage',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(repo.savedItems!.single.equipmentId, 'eq-1');
+    });
+
+    testWidgets('save orders items section by section, as they are shown, '
+        'so strict order matches the screen', (tester) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        sections: [sectionFixture('a', 'A', 0), sectionFixture('b', 'B', 1)],
+        // Stored order puts the B item first; on screen A comes first.
+        items: [sectioned('b-item', 'b', 0), sectioned('a-item', 'a', 1)],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      // An untouched template is not rewritten: change one item so the
+      // items are written, in the order shown.
+      await tester.tap(find.text('a-item'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Title'),
+        'a-item',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Notes'),
+        'changed',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(repo.savedItems!.map((i) => i.title), ['a-item', 'b-item']);
+      expect(repo.savedItems!.map((i) => i.sortOrder), [0, 1]);
+    });
+
+    testWidgets('deleting a section with its items clears a kept linearity '
+        'item\'s link to a deleted source', (tester) async {
+      final repo = _FakeTemplateRepo(
+        template: templateFixture(),
+        sections: [
+          sectionFixture('air', 'Air', 0),
+          sectionFixture('o2', 'O2', 1),
+        ],
+        items: [
+          sectioned('air1', 'air', 0, type: PreDiveItemType.value),
+          sectioned(
+            'o2-1',
+            'o2',
+            1,
+            type: PreDiveItemType.cellLinearity,
+            sourceItemId: 'air1',
+          ),
+        ],
+      );
+      await pumpPage(tester, templateId: 'tpl-1', repo: repo);
+
+      // The first delete icon is the Air section header's.
+      await tester.tap(find.byIcon(Icons.delete_outline).first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete items too'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('no longer has an air reading'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(repo.savedItems!.single.id, 'o2-1');
+      expect(repo.savedItems!.single.sourceItemId, isNull);
+    });
+  });
+}

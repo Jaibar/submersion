@@ -1,4 +1,8 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,14 +14,30 @@ import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_list_content.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_list_tile.dart';
+import 'package:submersion/features/buddies/presentation/widgets/compact_buddy_list_tile.dart';
 import 'package:submersion/features/buddies/presentation/widgets/dense_buddy_list_tile.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_query_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
+import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 
+import '../../../../helpers/list_create_router.dart';
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
+import '../../../../helpers/keyboard_navigation_contract.dart';
+import '../../../../helpers/selection_contract.dart';
 import '../../../../helpers/test_app.dart';
 
 // ---------------------------------------------------------------------------
@@ -57,9 +77,10 @@ BuddyWithDiveCount _makeBuddy({
   required String id,
   required String name,
   String? email,
-  CertificationLevel? certLevel,
-  CertificationAgency? certAgency,
+  String? certLevel,
+  String? certAgency,
   int diveCount = 0,
+  bool isFavorite = false,
 }) {
   return BuddyWithDiveCount(
     buddy: Buddy(
@@ -68,6 +89,7 @@ BuddyWithDiveCount _makeBuddy({
       email: email,
       certificationLevel: certLevel,
       certificationAgency: certAgency,
+      isFavorite: isFavorite,
       createdAt: _now,
       updatedAt: _now,
     ),
@@ -88,16 +110,28 @@ Future<List<Override>> _buildOverrides({
     allBuddiesWithDiveCountProvider.overrideWith((ref) => buddies),
     buddyListNotifierProvider.overrideWith((ref) => _MockBuddyListNotifier()),
     buddyListViewModeProvider.overrideWith((ref) => ListViewMode.table),
+    diveRoleMapProvider.overrideWith((ref) async => <String, DiveRole>{}),
     buddyTableConfigProvider.overrideWith(
       (ref) => _TestBuddyTableConfigNotifier(_testConfig),
     ),
   ];
 }
 
+/// Mutable source for the contract test's filter step, so the visible
+/// list can be narrowed mid-test the way a real filter would.
+/// Moved to make the buddies source reload while holding its previous
+/// value, the way a dependency change does in the app.
+final _buddyReloadProvider = StateProvider<int>((ref) => 0);
+
+final _visibleBuddiesProvider = StateProvider<List<BuddyWithDiveCount>>(
+  (ref) => const [],
+);
+
 Future<List<Override>> _buildPhoneOverrides({
   required List<BuddyWithDiveCount> buddies,
   ListViewMode viewMode = ListViewMode.detailed,
   String? highlightedBuddyId,
+  FutureOr<List<BuddyWithDiveCount>> Function(Ref ref)? loadBuddies,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
@@ -106,9 +140,14 @@ Future<List<Override>> _buildPhoneOverrides({
     sharedPreferencesProvider.overrideWithValue(prefs),
     settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
     currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
-    allBuddiesWithDiveCountProvider.overrideWith((ref) => buddies),
+    allBuddiesWithDiveCountProvider.overrideWith(
+      loadBuddies ?? (ref) => buddies,
+    ),
     buddyListNotifierProvider.overrideWith((ref) => _MockBuddyListNotifier()),
     buddyListViewModeProvider.overrideWith((ref) => viewMode),
+    // Detailed rows resolve the usual-role chip through the role map; keep
+    // it away from the real repository, which has no database here.
+    diveRoleMapProvider.overrideWith((ref) async => <String, DiveRole>{}),
     buddyTableConfigProvider.overrideWith(
       (ref) => _TestBuddyTableConfigNotifier(_testConfig),
     ),
@@ -117,22 +156,278 @@ Future<List<Override>> _buildPhoneOverrides({
 }
 
 void main() {
+  // A selection made outside the list (the map, a deep link, the detail
+  // pane's previous and next) brings its row into view (#3301).
+  testWidgets('scrolls to a buddy selected from outside the list', (
+    tester,
+  ) async {
+    final overrides = await _buildPhoneOverrides(
+      buddies: [
+        for (var i = 0; i < 60; i++)
+          _makeBuddy(id: 'r$i', name: 'Buddy ${i.toString().padLeft(2, '0')}'),
+      ],
+    );
+    final selected = ValueNotifier<String?>(null);
+    addTearDown(selected.dispose);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: ValueListenableBuilder<String?>(
+          valueListenable: selected,
+          builder: (_, id, _) =>
+              BuddyListContent(showAppBar: true, selectedId: id),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    selected.value = 'r50';
+    await tester.pumpAndSettle();
+
+    expect(find.text('Buddy 50'), findsOneWidget);
+  });
+
+  // A list built again after the diver left it comes back to the record they
+  // last opened (#3301).
+  testWidgets('scrolls to the highlighted buddy when built', (tester) async {
+    final overrides = await _buildPhoneOverrides(
+      buddies: [
+        for (var i = 0; i < 60; i++)
+          _makeBuddy(id: 'r$i', name: 'Buddy ${i.toString().padLeft(2, '0')}'),
+      ],
+      highlightedBuddyId: 'r50',
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const BuddyListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Buddy 50'), findsOneWidget);
+  });
+
+  // The title's subtitle counts the list (#2669), in both the phone app bar
+  // and the desktop pane header.
+  group('entry count subtitle', () {
+    for (final showAppBar in const [true, false]) {
+      testWidgets('${showAppBar ? 'app bar' : 'compact bar'} counts the list', (
+        tester,
+      ) async {
+        final overrides = await _buildPhoneOverrides(
+          buddies: [
+            _makeBuddy(id: 'b1', name: 'Ann'),
+            _makeBuddy(id: 'b2', name: 'Bo'),
+          ],
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: BuddyListContent(showAppBar: showAppBar),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.descendant(
+            of: find.byType(FeatureAppBarTitle),
+            matching: find.text('2 buddies'),
+          ),
+          findsOneWidget,
+        );
+      });
+    }
+  });
+  group('selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      final all = <BuddyWithDiveCount>[
+        _makeBuddy(id: 'b1', name: 'Aaa Buddy'),
+        _makeBuddy(id: 'b2', name: 'Bbb Buddy'),
+        _makeBuddy(id: 'b3', name: 'Ccc Buddy'),
+      ];
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        _visibleBuddiesProvider.overrideWith((ref) => all),
+        allBuddiesWithDiveCountProvider.overrideWith(
+          (ref) => ref.watch(_visibleBuddiesProvider),
+        ),
+        buddyListNotifierProvider.overrideWith(
+          (ref) => _MockBuddyListNotifier(),
+        ),
+        buddyListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+        buddyTableConfigProvider.overrideWith(
+          (ref) => _TestBuddyTableConfigNotifier(_testConfig),
+        ),
+        highlightedBuddyIdProvider.overrideWith((ref) => null),
+      ];
+
+      await verifySelectionContract(
+        tester,
+        build: () => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const BuddyListContent(showAppBar: true),
+        ),
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        rowRoot: find.byType(BuddyListTile).first,
+        firstRow: find.text('Aaa Buddy'),
+        applyFilter: (tester) async {
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(BuddyListContent)),
+          );
+          container.read(_visibleBuddiesProvider.notifier).state = [all.first];
+        },
+        visibleAfterFilter: 1,
+      );
+
+      await verifyKeyboardNavigationContract(
+        tester,
+        build: (onItemSelected) => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: BuddyListContent(
+            showAppBar: true,
+            onItemSelected: onItemSelected,
+          ),
+        ),
+        firstRow: find.text('Aaa Buddy'),
+      );
+    });
+  });
+
+  // The desktop pane's own header (showAppBar: false) carries a second
+  // overflow menu, with the same "Select items" entry at its top.
+  group('a reload holding its previous value', () {
+    for (final mode in [ListViewMode.detailed, ListViewMode.table]) {
+      testWidgets('keeps the checks (${mode.name})', (tester) async {
+        final controller = SelectionController();
+        addTearDown(controller.dispose);
+        final all = [
+          _makeBuddy(id: 'b1', name: 'Alice'),
+          _makeBuddy(id: 'b2', name: 'Bob'),
+        ];
+        await tester.pumpWidget(
+          testApp(
+            overrides: await _buildPhoneOverrides(
+              buddies: all,
+              viewMode: mode,
+              // A source that reloads from a moved dependency while it still
+              // holds the previous rows.
+              loadBuddies: (ref) {
+                ref.watch(_buddyReloadProvider);
+                return Future.delayed(
+                  const Duration(milliseconds: 50),
+                  () => all,
+                );
+              },
+            ),
+            locale: const Locale('en'),
+            child: BuddyListContent(
+              showAppBar: true,
+              selectionController: controller,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        controller.enterExplicit();
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+
+        ProviderScope.containerOf(
+          tester.element(find.byType(BuddyListContent)),
+        ).read(_buddyReloadProvider.notifier).state++;
+        // Two frames inside the reload: one builds, the next runs the prune.
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('2 selected'), findsOneWidget);
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+      });
+    }
+  });
+
+  group('compact bar "Select items"', () {
+    testWidgets('is first in the menu and enters selection', (tester) async {
+      final all = <BuddyWithDiveCount>[
+        _makeBuddy(id: 'b1', name: 'Aaa Buddy'),
+        _makeBuddy(id: 'b2', name: 'Bbb Buddy'),
+        _makeBuddy(id: 'b3', name: 'Ccc Buddy'),
+      ];
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        _visibleBuddiesProvider.overrideWith((ref) => all),
+        allBuddiesWithDiveCountProvider.overrideWith(
+          (ref) => ref.watch(_visibleBuddiesProvider),
+        ),
+        buddyListNotifierProvider.overrideWith(
+          (ref) => _MockBuddyListNotifier(),
+        ),
+        buddyListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+        buddyTableConfigProvider.overrideWith(
+          (ref) => _TestBuddyTableConfigNotifier(_testConfig),
+        ),
+        highlightedBuddyIdProvider.overrideWith((ref) => null),
+      ];
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const BuddyListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.checklist), findsNothing);
+
+      await tester.tap(overflowMenuButton);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+        lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+      );
+
+      await tester.tap(find.byKey(selectItemsMenuKey));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+    });
+  });
+
   group('BuddyListContent in table mode', () {
     testWidgets('renders table with column headers', (tester) async {
       final buddies = [
         _makeBuddy(
           id: 'b1',
           name: 'Alice Smith',
-          certLevel: CertificationLevel.openWater,
-          certAgency: CertificationAgency.padi,
+          certLevel: CertificationLevel.openWater.name,
+          certAgency: CertificationAgency.padi.name,
           email: 'alice@example.com',
           diveCount: 10,
         ),
         _makeBuddy(
           id: 'b2',
           name: 'Bob Jones',
-          certLevel: CertificationLevel.advancedOpenWater,
-          certAgency: CertificationAgency.ssi,
+          certLevel: CertificationLevel.advancedOpenWater.name,
+          certAgency: CertificationAgency.ssi.name,
           email: 'bob@example.com',
           diveCount: 25,
         ),
@@ -219,8 +514,8 @@ void main() {
         _makeBuddy(
           id: 'b1',
           name: 'Alice Smith',
-          certLevel: CertificationLevel.openWater,
-          certAgency: CertificationAgency.padi,
+          certLevel: CertificationLevel.openWater.name,
+          certAgency: CertificationAgency.padi.name,
           email: 'alice@example.com',
           diveCount: 10,
         ),
@@ -247,19 +542,19 @@ void main() {
         _makeBuddy(
           id: 'cl1',
           name: 'Diver A',
-          certLevel: CertificationLevel.openWater,
+          certLevel: CertificationLevel.openWater.name,
           diveCount: 5,
         ),
         _makeBuddy(
           id: 'cl2',
           name: 'Diver B',
-          certLevel: CertificationLevel.advancedOpenWater,
+          certLevel: CertificationLevel.advancedOpenWater.name,
           diveCount: 15,
         ),
         _makeBuddy(
           id: 'cl3',
           name: 'Diver C',
-          certLevel: CertificationLevel.diveMaster,
+          certLevel: CertificationLevel.diveMaster.name,
           diveCount: 100,
         ),
       ];
@@ -476,6 +771,344 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(pushedPath, '/buddies/b1');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Modifier and shift clicks seeded by the highlighted row.
+  //
+  // A plain click highlights a buddy without checking it, so the highlight is
+  // the user's on-screen selection. Shift and Cmd/Ctrl clicks must both treat
+  // it as the origin, the way the dive and site lists do.
+  // ---------------------------------------------------------------------------
+
+  group('selection seeded by the highlighted buddy', () {
+    List<BuddyWithDiveCount> fourBuddies() => [
+      _makeBuddy(id: 'b1', name: 'Aaa Buddy'),
+      _makeBuddy(id: 'b2', name: 'Bbb Buddy'),
+      _makeBuddy(id: 'b3', name: 'Ccc Buddy'),
+      _makeBuddy(id: 'b4', name: 'Ddd Buddy'),
+    ];
+
+    // Cmd on macOS, Control elsewhere -- mirrors
+    // SelectableListScope.isModifierPressed so this passes on the macOS dev
+    // machine and the Linux CI runner alike.
+    final modifierKey = defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    Future<DenseBuddyListTile Function(String)> pumpList(
+      WidgetTester tester,
+    ) async {
+      final overrides = await _buildPhoneOverrides(
+        buddies: fourBuddies(),
+        viewMode: ListViewMode.dense,
+        highlightedBuddyId: 'b2',
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const BuddyListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      return (String name) => tester
+          .widgetList<DenseBuddyListTile>(find.byType(DenseBuddyListTile))
+          .firstWhere((t) => t.buddy.name == name);
+    }
+
+    testWidgets('shift-tap extends from the highlighted buddy', (tester) async {
+      final tile = await pumpList(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.tap(find.text('Ddd Buddy'));
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+
+      expect(tile('Aaa Buddy').isChecked, isFalse);
+      expect(tile('Bbb Buddy').isChecked, isTrue);
+      expect(tile('Ccc Buddy').isChecked, isTrue);
+      expect(tile('Ddd Buddy').isChecked, isTrue);
+    });
+
+    testWidgets('modifier-tap checks the highlighted buddy too', (
+      tester,
+    ) async {
+      final tile = await pumpList(tester);
+
+      await tester.sendKeyDownEvent(modifierKey);
+      await tester.tap(find.text('Ddd Buddy'));
+      await tester.sendKeyUpEvent(modifierKey);
+      await tester.pumpAndSettle();
+
+      expect(tile('Bbb Buddy').isChecked, isTrue);
+      expect(tile('Ddd Buddy').isChecked, isTrue);
+      expect(tile('Aaa Buddy').isChecked, isFalse);
+      expect(tile('Ccc Buddy').isChecked, isFalse);
+    });
+
+    // Table rows carry an onDoubleTap, so onTap only resolves once the
+    // double-tap timer expires. The modifier has to stay held across that
+    // wait, because the handler reads the keyboard when the tap fires.
+    testWidgets('table mode: shift-tap extends from the tapped row', (
+      tester,
+    ) async {
+      final overrides = await _buildOverrides(buddies: fourBuddies());
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const BuddyListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Aaa Buddy'));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.tap(find.text('Ccc Buddy'));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+
+      expect(find.text('3 selected'), findsOneWidget);
+    });
+  });
+  group('compact view mode', () {
+    testWidgets('renders CompactBuddyListTile rows', (tester) async {
+      final overrides = await _buildPhoneOverrides(
+        buddies: [_makeBuddy(id: 'b1', name: 'Jane Doe', diveCount: 3)],
+        viewMode: ListViewMode.compact,
+      );
+      await tester.pumpWidget(
+        testApp(overrides: overrides, child: const BuddyListContent()),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CompactBuddyListTile), findsOneWidget);
+      expect(find.byType(BuddyListTile), findsNothing);
+    });
+  });
+
+  group('favorites pinned to top (issue #1336)', () {
+    testWidgets(
+      'a favorite sorts before non-favorites regardless of the alphabet',
+      (tester) async {
+        final overrides = await _buildPhoneOverrides(
+          buddies: [
+            _makeBuddy(id: 'b1', name: 'Aaa Buddy'),
+            _makeBuddy(id: 'b2', name: 'Bbb Buddy'),
+            _makeBuddy(id: 'b3', name: 'Zzz Favorite', isFavorite: true),
+          ],
+          viewMode: ListViewMode.dense,
+        );
+        await tester.pumpWidget(
+          testApp(overrides: overrides, child: const BuddyListContent()),
+        );
+        await tester.pumpAndSettle();
+
+        final order = tester
+            .widgetList<DenseBuddyListTile>(find.byType(DenseBuddyListTile))
+            .map((w) => w.buddy.name)
+            .toList();
+
+        expect(order, ['Zzz Favorite', 'Aaa Buddy', 'Bbb Buddy']);
+      },
+    );
+
+    testWidgets('does not pin favorites in table mode', (tester) async {
+      final overrides = await _buildOverrides(
+        buddies: [
+          _makeBuddy(id: 'b1', name: 'Aaa Buddy'),
+          _makeBuddy(id: 'b2', name: 'Bbb Buddy'),
+          _makeBuddy(id: 'b3', name: 'Zzz Favorite', isFavorite: true),
+        ],
+      );
+      await tester.pumpWidget(
+        testApp(overrides: overrides, child: const BuddyListContent()),
+      );
+      await tester.pumpAndSettle();
+
+      // Table mode is untouched by the favorites-pinning change (issue
+      // #1336): rows stay in the order the provider returned them, with the
+      // favorite ("Zzz Favorite") last rather than pinned to the top.
+      expect(
+        tester.getTopLeft(find.text('Aaa Buddy')).dy <
+            tester.getTopLeft(find.text('Bbb Buddy')).dy,
+        isTrue,
+      );
+      expect(
+        tester.getTopLeft(find.text('Bbb Buddy')).dy <
+            tester.getTopLeft(find.text('Zzz Favorite')).dy,
+        isTrue,
+        reason: 'the favorite must not be pinned to the top in table mode',
+      );
+    });
+  });
+
+  group('query (#2365)', () {
+    final fav = ConditionNode(
+      FieldPath(['favorite']),
+      QueryOp.eq,
+      const BoolValue(true),
+    );
+
+    Future<void> pumpWithQuery(
+      WidgetTester tester, {
+      required Set<String> ids,
+      ListViewMode viewMode = ListViewMode.detailed,
+    }) async {
+      final overrides = await _buildPhoneOverrides(
+        buddies: [
+          _makeBuddy(id: 'b1', name: 'Alice'),
+          _makeBuddy(id: 'b2', name: 'Bob'),
+        ],
+        viewMode: viewMode,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...overrides,
+            buddyQueryProvider.overrideWith((ref) => fav),
+            entityQueryIdsProvider.overrideWith((ref, key) async => ids),
+          ],
+          child: const BuddyListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the query narrows the list and shows its chip', (
+      tester,
+    ) async {
+      await pumpWithQuery(tester, ids: {'b1'});
+      expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('Bob'), findsNothing);
+      expect(find.widgetWithText(InputChip, 'favorite = true'), findsOneWidget);
+    });
+
+    testWidgets('a query that keeps nothing shows the no-match state', (
+      tester,
+    ) async {
+      await pumpWithQuery(tester, ids: const {});
+      expect(find.byType(QueryNoMatchState), findsOneWidget);
+    });
+
+    testWidgets('Retry after an id-set error runs the query again', (
+      tester,
+    ) async {
+      var calls = 0;
+      final overrides = await _buildPhoneOverrides(
+        buddies: [
+          _makeBuddy(id: 'b1', name: 'Alice'),
+          _makeBuddy(id: 'b2', name: 'Bob'),
+        ],
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...overrides,
+            buddyQueryProvider.overrideWith((ref) => fav),
+            entityQueryIdsProvider.overrideWith((ref, key) async {
+              if (calls++ == 0) throw StateError('database busy');
+              return {'b1'};
+            }),
+          ],
+          child: const BuddyListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('database busy'), findsOneWidget);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('Bob'), findsNothing);
+    });
+
+    testWidgets('table mode reads the filtered buddies', (tester) async {
+      await pumpWithQuery(tester, ids: {'b2'}, viewMode: ListViewMode.table);
+      expect(find.text('Bob'), findsOneWidget);
+      expect(find.text('Alice'), findsNothing);
+    });
+  });
+
+  group('empty state beside an open form (issue #3192)', () {
+    Future<GoRouter> pumpEmptyInRouter(
+      WidgetTester tester, {
+      required double width,
+    }) async {
+      final overrides = await _buildOverrides(buddies: []);
+      return pumpListInCreateRouter(
+        tester,
+        overrides: overrides,
+        content: const BuddyListContent(showAppBar: true),
+        listPath: '/buddies',
+        width: width,
+      );
+    }
+
+    testWidgets('the create button opens the full-page form when narrow', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 900);
+
+      await tester.tap(find.text('Add your first buddy'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/buddies/new');
+      expect(find.text(kFullPageCreateForm), findsOneWidget);
+    });
+
+    testWidgets('the create button opens the pane form beside a detail pane', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 1400);
+
+      await tester.tap(find.text('Add your first buddy'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/buddies?mode=new');
+    });
+
+    Future<void> pumpEmpty(
+      WidgetTester tester, {
+      required bool isFormOpen,
+    }) async {
+      final overrides = await _buildOverrides(buddies: []);
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          // The assertions match English button labels.
+          locale: const Locale('en'),
+          child: MasterDetailFormScope(
+            isFormOpen: isFormOpen,
+            child: const BuddyListContent(showAppBar: true),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('offers the create button when no form is open', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: false);
+
+      expect(find.text('Add your first buddy'), findsOneWidget);
+    });
+
+    testWidgets('hides the create button while a form is open beside it', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: true);
+
+      // Beside an open form it reads as the form's submit button, but it only
+      // reopens the create form, so nothing gets saved (issue #3192).
+      expect(find.text('Add your first buddy'), findsNothing);
     });
   });
 }

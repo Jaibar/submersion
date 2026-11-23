@@ -1,0 +1,690 @@
+import 'dart:async';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/equipment/presentation/editing/gear_item_check_ins_sitting.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_observation_repository.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_observation.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_observation_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/check_in_photos_row.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_observation_sheet.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/media_unlink_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/arb/app_localizations_en.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late EquipmentObservationRepository repo;
+
+  final reg = EquipmentItem(
+    id: 'reg',
+    name: 'Apeks XTX',
+    type: EquipmentType.regulator,
+    createdAt: DateTime.utc(2026),
+  );
+  final dive = domain.Dive(
+    id: 'd1',
+    diveNumber: 12,
+    dateTime: DateTime.utc(2026, 9, 9, 10),
+    exitTime: DateTime.utc(2026, 9, 9, 11),
+  );
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    repo = EquipmentObservationRepository(
+      db: db,
+      syncRepository: SyncRepository(database: db),
+    );
+    await db
+        .into(db.equipment)
+        .insert(
+          EquipmentCompanion.insert(
+            id: 'reg',
+            name: 'Apeks XTX',
+            type: 'regulator',
+            createdAt: 1,
+            updatedAt: 1,
+          ),
+        );
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion.insert(
+            id: 'd1',
+            diveDateTime: 1000,
+            createdAt: 1000,
+            updatedAt: 1000,
+          ),
+        );
+    await db
+        .into(db.divers)
+        .insert(
+          DiversCompanion.insert(
+            id: 'kept',
+            name: 'Kept',
+            createdAt: 1,
+            updatedAt: 1,
+          ),
+        );
+  });
+
+  tearDown(tearDownTestDatabase);
+
+  Future<void> pumpAndOpen(
+    WidgetTester tester, {
+    domain.Dive? withDive,
+    List<Override> extra = const [],
+    HeldCheckIn? held,
+    void Function(HeldCheckIn)? onHold,
+    Future<String?> Function()? diverId,
+  }) async {
+    // The editor's photos row (issue #3355) makes it taller than the default
+    // 800x600 window, which would leave Save off screen.
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          currentDiverIdProvider.overrideWith(
+            (ref) => MockCurrentDiverIdNotifier(),
+          ),
+          // The raw id above is null; the validated one falls back to the
+          // default diver, as the real provider does for a stale id.
+          validatedCurrentDiverIdProvider.overrideWith(
+            (ref) => diverId?.call() ?? Future.value('kept'),
+          ),
+          equipmentObservationRepositoryProvider.overrideWithValue(repo),
+          ...extra,
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showEquipmentObservationSheet(
+                  context,
+                  equipment: reg,
+                  dive: withDive,
+                  held: held,
+                  onHold: onHold,
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+  }
+
+  // The item page's sitting (issue #4527, phase 3): held, not written.
+  group('held in an item page\'s sitting', () {
+    testWidgets('it opens on a new check-in; Save writes nothing and hands '
+        'it back', (tester) async {
+      final held = <HeldCheckIn>[];
+      await pumpAndOpen(tester, onHold: held.add);
+
+      // Straight into the editor: there is no list in a sitting.
+      expect(find.text('Save'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(held.single.observation.equipmentId, 'reg');
+      expect(held.single.observation.diverId, 'kept');
+      expect(await repo.getForEquipment('reg'), isEmpty);
+      expect(find.text('Save'), findsNothing);
+    });
+
+    testWidgets('a held check-in is edited where it stands, its photo changes '
+        'kept', (tester) async {
+      final existing = EquipmentObservation(
+        id: 'o9',
+        equipmentId: 'reg',
+        observedAt: DateTime.utc(2026, 9, 1),
+        status: ObservationStatus.ok,
+        note: 'Was fine',
+        createdAt: DateTime.utc(2026, 9, 1),
+        updatedAt: DateTime.utc(2026, 9, 1),
+      );
+      final back = <HeldCheckIn>[];
+      await pumpAndOpen(
+        tester,
+        held: HeldCheckIn(observation: existing, removedPhotoIds: {'p1'}),
+        onHold: back.add,
+      );
+
+      await tester.enterText(find.byType(TextField).last, 'Now leaking');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(back.single.observation.id, 'o9');
+      expect(back.single.observation.note, 'Now leaking');
+      expect(back.single.removedPhotoIds, {'p1'});
+      expect(await repo.getForEquipment('reg'), isEmpty);
+    });
+
+    testWidgets('a second Save tap while the first is held hands back one '
+        'check-in and closes only the sheet', (tester) async {
+      final held = <HeldCheckIn>[];
+      final slow = Completer<String?>();
+      await pumpAndOpen(tester, onHold: held.add, diverId: () => slow.future);
+
+      final save = find.text('Save');
+      await tester.tap(save);
+      await tester.pump();
+      await tester.tap(save, warnIfMissed: false);
+      await tester.pump();
+      slow.complete('kept');
+      await tester.pumpAndSettle();
+
+      expect(held, hasLength(1));
+      // The page under the sheet is still there.
+      expect(find.text('open'), findsOneWidget);
+    });
+
+    // As the stored Save does: the editor stays open and says so.
+    testWidgets('a held Save that fails says to try again and hands back '
+        'nothing', (tester) async {
+      final held = <HeldCheckIn>[];
+      await pumpAndOpen(
+        tester,
+        onHold: held.add,
+        diverId: () => Future<String?>.error(StateError('no diver')),
+      );
+
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(held, isEmpty);
+      expect(find.text('Save'), findsOneWidget);
+      expect(
+        find.text(AppLocalizationsEn().common_error_tryAgain),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Cancel closes the sheet and hands back nothing', (
+      tester,
+    ) async {
+      final held = <HeldCheckIn>[];
+      await pumpAndOpen(tester, onHold: held.add);
+
+      await tester.tap(find.text('Cancel').last);
+      await tester.pumpAndSettle();
+
+      expect(held, isEmpty);
+      expect(find.text('Save'), findsNothing);
+    });
+  });
+
+  testWidgets('adds an issue with tags filtered to the item type', (
+    tester,
+  ) async {
+    await pumpAndOpen(tester, withDive: dive);
+    expect(find.text('Check-in: Apeks XTX'), findsOneWidget);
+    expect(find.text('No check-ins on this dive yet.'), findsOneWidget);
+
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Issue'));
+    await tester.pumpAndSettle();
+    // Regulator tags are offered; a drysuit tag is not.
+    expect(find.text('Free flow'), findsOneWidget);
+    expect(find.text('Neck seal leak'), findsNothing);
+    expect(find.text('Other'), findsOneWidget);
+
+    // Saving without a tag is refused.
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Pick at least one tag for an issue'), findsOneWidget);
+
+    await tester.tap(find.text('Free flow'));
+    await tester.enterText(find.byType(TextField).last, 'At 30 m');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final stored = await repo.getForEquipmentOnDive('reg', 'd1');
+    expect(stored.single.issueTags, [ObservationTag.freeFlow]);
+    expect(stored.single.note, 'At 30 m');
+    expect(stored.single.observedAt, DateTime.utc(2026, 9, 9, 11));
+    // Back on the list, the new row shows.
+    expect(find.text('Free flow'), findsOneWidget);
+  });
+
+  testWidgets('a new check-in is saved under the validated diver', (
+    tester,
+  ) async {
+    // The raw diver id can be stale (a deleted diver) or unset; the
+    // validated one is what every diver-scoped read uses, so a check-in
+    // saved under the raw id would drop out of this diver's list and export.
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await repo.getForDive('d1')).single.diverId, 'kept');
+  });
+
+  testWidgets('a failed save says so and keeps the editor usable', (
+    tester,
+  ) async {
+    // A concurrent sync can delete the item or dive mid-save. The diver has
+    // to be told the check-in was not saved, and be able to try again.
+    repo = _FailingRepository(
+      db: db,
+      syncRepository: SyncRepository(database: db),
+    );
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull, reason: 'not an escaped error');
+    expect(
+      find.text('Something went wrong. Please try again.'),
+      findsOneWidget,
+    );
+    final save = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Save'),
+    );
+    expect(save.onPressed, isNotNull, reason: 'the editor is still open');
+  });
+
+  testWidgets('a double-tapped Save writes one check-in', (tester) async {
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    // Both taps land before the first save completes and closes the editor.
+    await tester.tap(find.text('Save'));
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(await repo.getForDive('d1'), hasLength(1));
+  });
+
+  testWidgets('an OK check needs no tag and edits in place', (tester) async {
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await repo.getForDive('d1')).single.isIssue, isFalse);
+
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'All good');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await repo.getForDive('d1')).single.note, 'All good');
+  });
+
+  testWidgets('saving and deleting a check-in queue the item findings', (
+    tester,
+  ) async {
+    // The stored findings have to follow the write even with no item page
+    // open, so both paths hand the item to the scheduler.
+    final requests = <Set<String>>[];
+    SensorSummaryScheduler.instance.findingsRequestListener = requests.add;
+    addTearDown(
+      () => SensorSummaryScheduler.instance.findingsRequestListener = null,
+    );
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(requests, [
+      {'reg'},
+    ]);
+
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(requests, [
+      {'reg'},
+      {'reg'},
+    ]);
+  });
+
+  testWidgets('an issue with only unknown tags can still be edited', (
+    tester,
+  ) async {
+    // A newer peer's tags are not shown here. Requiring a tag before the
+    // save would strand the row; the unknown ones still count as its tags.
+    final created = await repo.create(
+      equipmentId: 'reg',
+      diveId: 'd1',
+      observedAt: DateTime.utc(2026),
+      status: ObservationStatus.issue,
+    );
+    await (db.update(
+      db.equipmentObservations,
+    )..where((t) => t.id.equals(created.id))).write(
+      const EquipmentObservationsCompanion(issueTags: Value('["futureTag"]')),
+    );
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Checked again');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pick at least one tag for an issue'), findsNothing);
+    final saved = (await repo.getForDive('d1')).single;
+    expect(saved.note, 'Checked again');
+    expect(saved.unrecognizedTags, ['futureTag']);
+  });
+
+  testWidgets('delete asks first and then removes the row', (tester) async {
+    await repo.create(
+      equipmentId: 'reg',
+      diveId: 'd1',
+      observedAt: DateTime.utc(2026),
+      status: ObservationStatus.ok,
+    );
+    await pumpAndOpen(tester, withDive: dive);
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete this check-in?'), findsOneWidget);
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(await repo.getForDive('d1'), isEmpty);
+  });
+
+  testWidgets('deleting a check-in unlinks its photos', (tester) async {
+    // Issue #3355: a check-in's photos go with it; the files stay.
+    final observation = await repo.create(
+      equipmentId: 'reg',
+      diveId: 'd1',
+      observedAt: DateTime.utc(2026),
+      status: ObservationStatus.ok,
+    );
+    final media = MediaRepository();
+    // Real database work outside the widget test's fake clock.
+    final photo = (await tester.runAsync(
+      () => media.createMedia(
+        MediaItem(
+          id: '',
+          equipmentId: 'reg',
+          observationId: observation.id,
+          filePath: '/photos/nick.jpg',
+          mediaType: MediaType.photo,
+          takenAt: DateTime.utc(2026),
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      ),
+    ))!;
+    await pumpAndOpen(
+      tester,
+      withDive: dive,
+      extra: [
+        mediaUnlinkServiceProvider.overrideWithValue(
+          MediaUnlinkService(
+            repository: media,
+            deleteMedia: media.deleteMultipleMedia,
+          ),
+        ),
+      ],
+    );
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Its photo will be removed'), findsOneWidget);
+    await tester.tap(find.text('Delete').last);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 200)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(await repo.getForDive('d1'), isEmpty);
+    expect(await tester.runAsync(() => media.getMediaById(photo.id)), isNull);
+  });
+
+  group('check-in photos (issue #3355)', () {
+    Future<MediaItem> addPhoto(
+      WidgetTester tester,
+      String observationId,
+    ) async => (await tester.runAsync(
+      () => MediaRepository().createMedia(
+        MediaItem(
+          id: '',
+          equipmentId: 'reg',
+          observationId: observationId,
+          filePath: '/photos/${DateTime.now().microsecondsSinceEpoch}.jpg',
+          mediaType: MediaType.photo,
+          takenAt: DateTime.utc(2026),
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      ),
+    ))!;
+
+    List<Override> realUnlink() {
+      final media = MediaRepository();
+      return [
+        mediaUnlinkServiceProvider.overrideWithValue(
+          MediaUnlinkService(
+            repository: media,
+            deleteMedia: media.deleteMultipleMedia,
+          ),
+        ),
+      ];
+    }
+
+    String draftId(WidgetTester tester) => tester
+        .widget<CheckInPhotosRow>(find.byType(CheckInPhotosRow))
+        .observationId;
+
+    Future<void> settle(WidgetTester tester) async {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 400)),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('editor lists the check-in\'s photos', (tester) async {
+      final observation = (await tester.runAsync(
+        () => repo.create(
+          equipmentId: 'reg',
+          diveId: 'd1',
+          observedAt: DateTime.utc(2026),
+          status: ObservationStatus.ok,
+        ),
+      ))!;
+      await addPhoto(tester, observation.id);
+      await pumpAndOpen(tester, withDive: dive);
+
+      await tester.tap(find.byIcon(Icons.edit_outlined));
+      await settle(tester);
+
+      expect(draftId(tester), observation.id);
+      expect(find.byType(MediaThumbnailTile), findsOneWidget);
+    });
+
+    testWidgets('save of a new check-in uses the draft id', (tester) async {
+      await pumpAndOpen(tester, withDive: dive);
+      await tester.tap(find.text('Add check-in'));
+      await tester.pumpAndSettle();
+      final id = draftId(tester);
+      await addPhoto(tester, id);
+
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+
+      expect((await tester.runAsync(() => repo.getById(id)))?.id, id);
+    });
+
+    testWidgets('cancel on a new check-in unlinks its photos', (tester) async {
+      await pumpAndOpen(tester, withDive: dive, extra: realUnlink());
+      await tester.tap(find.text('Add check-in'));
+      await tester.pumpAndSettle();
+      final photo = await addPhoto(tester, draftId(tester));
+
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+
+      expect(
+        await tester.runAsync(() => MediaRepository().getMediaById(photo.id)),
+        isNull,
+      );
+    });
+
+    testWidgets('dismissing the sheet on a new check-in unlinks its photos', (
+      tester,
+    ) async {
+      await pumpAndOpen(tester, withDive: dive, extra: realUnlink());
+      await tester.tap(find.text('Add check-in'));
+      await tester.pumpAndSettle();
+      final photo = await addPhoto(tester, draftId(tester));
+
+      // Tap the barrier above the sheet, the way a diver swipes it away.
+      await tester.tapAt(const Offset(10, 10));
+      await settle(tester);
+
+      expect(find.byType(CheckInPhotosRow), findsNothing);
+      expect(
+        await tester.runAsync(() => MediaRepository().getMediaById(photo.id)),
+        isNull,
+      );
+    });
+
+    testWidgets('cancel on an existing check-in keeps its photos', (
+      tester,
+    ) async {
+      final observation = (await tester.runAsync(
+        () => repo.create(
+          equipmentId: 'reg',
+          diveId: 'd1',
+          observedAt: DateTime.utc(2026),
+          status: ObservationStatus.ok,
+        ),
+      ))!;
+      final photo = await addPhoto(tester, observation.id);
+      await pumpAndOpen(tester, withDive: dive, extra: realUnlink());
+      await tester.tap(find.byIcon(Icons.edit_outlined));
+      await settle(tester);
+
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+
+      expect(
+        await tester.runAsync(() => MediaRepository().getMediaById(photo.id)),
+        isNotNull,
+      );
+    });
+  });
+
+  testWidgets('without a dive the editor offers a bench default', (
+    tester,
+  ) async {
+    await pumpAndOpen(tester);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    expect(find.text('No dive (bench)'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await repo.getForEquipment('reg')).single.diveId, isNull);
+  });
+
+  testWidgets('a bench check-in holds the wall clock, as a dive one does', (
+    tester,
+  ) async {
+    await pumpAndOpen(tester);
+    await tester.tap(find.text('Add check-in'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final saved = (await repo.getForEquipment('reg')).single.observedAt;
+    expect(
+      saved.difference(asWallClockUtc(DateTime.now())).abs(),
+      lessThan(const Duration(minutes: 5)),
+    );
+  });
+
+  testWidgets('a dive-linked check-in can go back to a bench note', (
+    tester,
+  ) async {
+    // Off a dive, the editor must offer a way back to "no dive": the dive
+    // picker's dismissal keeps the current dive, so it cannot clear one.
+    await repo.create(
+      equipmentId: 'reg',
+      diveId: 'd1',
+      observedAt: DateTime.utc(2026),
+      status: ObservationStatus.ok,
+    );
+    await pumpAndOpen(tester);
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
+    expect(find.text('No dive (bench)'), findsNothing);
+    await tester.tap(find.byTooltip('No dive (bench)'));
+    await tester.pumpAndSettle();
+    expect(find.text('No dive (bench)'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect((await repo.getForEquipment('reg')).single.diveId, isNull);
+  });
+
+  test('defaultObservedAt prefers exit time, then start plus runtime', () {
+    expect(defaultObservedAt(dive), DateTime.utc(2026, 9, 9, 11));
+    final noExit = domain.Dive(
+      id: 'd2',
+      dateTime: DateTime.utc(2026, 9, 9, 10),
+      runtime: const Duration(minutes: 50),
+    );
+    expect(defaultObservedAt(noExit), DateTime.utc(2026, 9, 9, 10, 50));
+    expect(
+      defaultObservedAt(
+        domain.Dive(id: 'd3', dateTime: DateTime.utc(2026, 9, 9, 10)),
+      ),
+      DateTime.utc(2026, 9, 9, 10),
+    );
+  });
+}
+
+class _FailingRepository extends EquipmentObservationRepository {
+  _FailingRepository({super.db, super.syncRepository});
+
+  @override
+  Future<EquipmentObservation> create({
+    String? id,
+    required String equipmentId,
+    String? diveId,
+    String? diverId,
+    required DateTime observedAt,
+    required ObservationStatus status,
+    List<ObservationTag> issueTags = const [],
+    List<String> unrecognizedTags = const [],
+    String note = '',
+    DateTime? now,
+  }) async {
+    throw StateError('FOREIGN KEY constraint failed');
+  }
+}

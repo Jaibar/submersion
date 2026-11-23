@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:submersion/core/models/log_entry.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/settings/presentation/log_category_display.dart';
 
 /// Filter bar with category chips, severity dropdown, displayed below the app bar.
 class LogFilterBar extends ConsumerWidget {
@@ -25,7 +27,7 @@ class LogFilterBar extends ConsumerWidget {
                 return Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: FilterChip(
-                    label: Text(category.displayName),
+                    label: Text(category.localizedName(context.l10n)),
                     selected: isActive,
                     onSelected: (_) {
                       ref
@@ -43,9 +45,10 @@ class LogFilterBar extends ConsumerWidget {
           Row(
             children: [
               Text(
-                'Min severity: ',
+                context.l10n.settings_debugLog_minSeverityLabel,
                 style: Theme.of(context).textTheme.bodySmall,
               ),
+              const SizedBox(width: 4),
               DropdownButton<LogLevel>(
                 value: filter.minimumSeverity,
                 isDense: true,

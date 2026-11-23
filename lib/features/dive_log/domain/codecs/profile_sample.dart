@@ -1,0 +1,308 @@
+import 'package:equatable/equatable.dart';
+import 'package:submersion/features/dive_log/domain/codecs/deco_type.dart';
+
+/// One profile sample exactly as the v181 `dive_profiles` table stored it
+/// (the codec's column order), minus the identity columns (`id`, `dive_id`,
+/// `computer_id`, `source_id`, `is_primary`) that live on the series row,
+/// plus the codec v2 fields ([gf99], [n2Load]) and the codec v3 fields
+/// ([aveloBuoyancy], [aveloGasRemaining], [computerRmv]) appended after them.
+///
+/// This is the codec's input and output type. It differs from the domain
+/// `DiveProfilePoint` in one field: the legacy per-sample [pressure]
+/// column, which the v59 migration moved to tank pressure profiles but
+/// which older rows still populate. The codec is lossless over the stored
+/// row, so the field rides along; the conversion drops it, as every read
+/// path does today.
+///
+/// The conversions to and from `DiveProfilePoint` live in
+/// `profile_sample_point.dart`, deliberately: this file is reachable from
+/// `database.dart`, and the entity graph reaches Flutter.
+class ProfileSample extends Equatable {
+  const ProfileSample({
+    required this.timestamp,
+    required this.depth,
+    this.pressure,
+    this.temperature,
+    this.heartRate,
+    this.ascentRate,
+    this.ceiling,
+    this.ndl,
+    this.setpoint,
+    this.ppO2,
+    this.o2Sensor1,
+    this.o2Sensor2,
+    this.o2Sensor3,
+    this.o2Sensor4,
+    this.o2Sensor5,
+    this.o2Sensor6,
+    this.cns,
+    this.tts,
+    this.rbt,
+    this.decoType,
+    this.heartRateSource,
+    this.heading,
+    this.o2SensorMv1,
+    this.o2SensorMv2,
+    this.o2SensorMv3,
+    this.o2SensorMv4,
+    this.o2SensorMv5,
+    this.o2SensorMv6,
+    this.gf99,
+    this.n2Load,
+    this.aveloBuoyancy,
+    this.aveloGasRemaining,
+    this.computerRmv,
+  });
+
+  /// Seconds from dive start.
+  final int timestamp;
+
+  /// Metres.
+  final double depth;
+
+  /// Legacy per-sample pressure in bar; null on every row written after the
+  /// v59 migration.
+  final double? pressure;
+  final double? temperature;
+  final int? heartRate;
+  final double? ascentRate;
+  final double? ceiling;
+  final int? ndl;
+  final double? setpoint;
+  final double? ppO2;
+  final double? o2Sensor1;
+  final double? o2Sensor2;
+  final double? o2Sensor3;
+  final double? o2Sensor4;
+  final double? o2Sensor5;
+  final double? o2Sensor6;
+  final double? cns;
+  final int? tts;
+  final int? rbt;
+  final int? decoType;
+  final String? heartRateSource;
+  final double? heading;
+  final int? o2SensorMv1;
+  final int? o2SensorMv2;
+  final int? o2SensorMv3;
+  final int? o2SensorMv4;
+  final int? o2SensorMv5;
+  final int? o2SensorMv6;
+
+  /// Computer-reported GF99, whole percent. Codec v2; null in every v1 blob.
+  final int? gf99;
+
+  /// Computer-reported aggregate N2 tissue loading, whole percent. Codec v2;
+  /// null in every v1 blob.
+  final int? n2Load;
+
+  /// Shearwater Avelo mode's buoyancy figure, kilograms, negative is heavy.
+  /// Codec v3; null in every v1 and v2 blob.
+  final double? aveloBuoyancy;
+
+  /// Shearwater Avelo mode's gas remaining in the Hydrotank, whole percent.
+  /// Codec v3.
+  final int? aveloGasRemaining;
+
+  /// The dive computer's own respiratory minute volume, litres per minute
+  /// (Shearwater Avelo mode). Codec v3.
+  final double? computerRmv;
+
+  /// This sample without the ceiling a safety stop carried, or this same
+  /// sample when it is no safety stop or has no ceiling.
+  ///
+  /// Imports before #2550 stored a safety stop's depth as the ceiling; a
+  /// safety stop is not an obligation, so no reader may treat it as one.
+  ProfileSample withoutSafetyStopCeiling() {
+    if (decoType != kDecoTypeSafetyStop || ceiling == null) return this;
+    return ProfileSample(
+      timestamp: timestamp,
+      depth: depth,
+      pressure: pressure,
+      temperature: temperature,
+      heartRate: heartRate,
+      ascentRate: ascentRate,
+      ndl: ndl,
+      setpoint: setpoint,
+      ppO2: ppO2,
+      o2Sensor1: o2Sensor1,
+      o2Sensor2: o2Sensor2,
+      o2Sensor3: o2Sensor3,
+      o2Sensor4: o2Sensor4,
+      o2Sensor5: o2Sensor5,
+      o2Sensor6: o2Sensor6,
+      cns: cns,
+      tts: tts,
+      rbt: rbt,
+      decoType: decoType,
+      heartRateSource: heartRateSource,
+      heading: heading,
+      o2SensorMv1: o2SensorMv1,
+      o2SensorMv2: o2SensorMv2,
+      o2SensorMv3: o2SensorMv3,
+      o2SensorMv4: o2SensorMv4,
+      o2SensorMv5: o2SensorMv5,
+      o2SensorMv6: o2SensorMv6,
+      gf99: gf99,
+      n2Load: n2Load,
+      aveloBuoyancy: aveloBuoyancy,
+      aveloGasRemaining: aveloGasRemaining,
+      computerRmv: computerRmv,
+    );
+  }
+
+  /// The same sample [seconds] later (negative moves it earlier). Merge and
+  /// consolidation re-base a segment's samples onto the combined timeline.
+  ProfileSample shiftedBy(int seconds) => ProfileSample(
+    timestamp: timestamp + seconds,
+    depth: depth,
+    pressure: pressure,
+    temperature: temperature,
+    heartRate: heartRate,
+    ascentRate: ascentRate,
+    ceiling: ceiling,
+    ndl: ndl,
+    setpoint: setpoint,
+    ppO2: ppO2,
+    o2Sensor1: o2Sensor1,
+    o2Sensor2: o2Sensor2,
+    o2Sensor3: o2Sensor3,
+    o2Sensor4: o2Sensor4,
+    o2Sensor5: o2Sensor5,
+    o2Sensor6: o2Sensor6,
+    cns: cns,
+    tts: tts,
+    rbt: rbt,
+    decoType: decoType,
+    heartRateSource: heartRateSource,
+    heading: heading,
+    o2SensorMv1: o2SensorMv1,
+    o2SensorMv2: o2SensorMv2,
+    o2SensorMv3: o2SensorMv3,
+    o2SensorMv4: o2SensorMv4,
+    o2SensorMv5: o2SensorMv5,
+    o2SensorMv6: o2SensorMv6,
+    gf99: gf99,
+    n2Load: n2Load,
+    aveloBuoyancy: aveloBuoyancy,
+    aveloGasRemaining: aveloGasRemaining,
+    computerRmv: computerRmv,
+  );
+
+  /// The same sample with exactly these tissue fields: an omitted argument
+  /// clears the field, it does not keep it.
+  ProfileSample withTissue({int? gf99, int? n2Load}) => ProfileSample(
+    timestamp: timestamp,
+    depth: depth,
+    pressure: pressure,
+    temperature: temperature,
+    heartRate: heartRate,
+    ascentRate: ascentRate,
+    ceiling: ceiling,
+    ndl: ndl,
+    setpoint: setpoint,
+    ppO2: ppO2,
+    o2Sensor1: o2Sensor1,
+    o2Sensor2: o2Sensor2,
+    o2Sensor3: o2Sensor3,
+    o2Sensor4: o2Sensor4,
+    o2Sensor5: o2Sensor5,
+    o2Sensor6: o2Sensor6,
+    cns: cns,
+    tts: tts,
+    rbt: rbt,
+    decoType: decoType,
+    heartRateSource: heartRateSource,
+    heading: heading,
+    o2SensorMv1: o2SensorMv1,
+    o2SensorMv2: o2SensorMv2,
+    o2SensorMv3: o2SensorMv3,
+    o2SensorMv4: o2SensorMv4,
+    o2SensorMv5: o2SensorMv5,
+    o2SensorMv6: o2SensorMv6,
+    gf99: gf99,
+    n2Load: n2Load,
+    aveloBuoyancy: aveloBuoyancy,
+    aveloGasRemaining: aveloGasRemaining,
+    computerRmv: computerRmv,
+  );
+
+  /// The same sample with exactly these Avelo fields: an omitted argument
+  /// clears the field, it does not keep it (as [withTissue]).
+  ProfileSample withAvelo({
+    double? aveloBuoyancy,
+    int? aveloGasRemaining,
+    double? computerRmv,
+  }) => ProfileSample(
+    timestamp: timestamp,
+    depth: depth,
+    pressure: pressure,
+    temperature: temperature,
+    heartRate: heartRate,
+    ascentRate: ascentRate,
+    ceiling: ceiling,
+    ndl: ndl,
+    setpoint: setpoint,
+    ppO2: ppO2,
+    o2Sensor1: o2Sensor1,
+    o2Sensor2: o2Sensor2,
+    o2Sensor3: o2Sensor3,
+    o2Sensor4: o2Sensor4,
+    o2Sensor5: o2Sensor5,
+    o2Sensor6: o2Sensor6,
+    cns: cns,
+    tts: tts,
+    rbt: rbt,
+    decoType: decoType,
+    heartRateSource: heartRateSource,
+    heading: heading,
+    o2SensorMv1: o2SensorMv1,
+    o2SensorMv2: o2SensorMv2,
+    o2SensorMv3: o2SensorMv3,
+    o2SensorMv4: o2SensorMv4,
+    o2SensorMv5: o2SensorMv5,
+    o2SensorMv6: o2SensorMv6,
+    gf99: gf99,
+    n2Load: n2Load,
+    aveloBuoyancy: aveloBuoyancy,
+    aveloGasRemaining: aveloGasRemaining,
+    computerRmv: computerRmv,
+  );
+
+  @override
+  List<Object?> get props => [
+    timestamp,
+    depth,
+    pressure,
+    temperature,
+    heartRate,
+    ascentRate,
+    ceiling,
+    ndl,
+    setpoint,
+    ppO2,
+    o2Sensor1,
+    o2Sensor2,
+    o2Sensor3,
+    o2Sensor4,
+    o2Sensor5,
+    o2Sensor6,
+    cns,
+    tts,
+    rbt,
+    decoType,
+    heartRateSource,
+    heading,
+    o2SensorMv1,
+    o2SensorMv2,
+    o2SensorMv3,
+    o2SensorMv4,
+    o2SensorMv5,
+    o2SensorMv6,
+    gf99,
+    n2Load,
+    aveloBuoyancy,
+    aveloGasRemaining,
+    computerRmv,
+  ];
+}

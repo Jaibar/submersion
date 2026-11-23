@@ -1,0 +1,58 @@
+import 'package:http/http.dart' as http;
+
+/// Authentication seam for GoogleDriveStorageProvider.
+///
+/// Two implementations exist: GoogleSignInAuthenticator (iOS/macOS/Android,
+/// native google_sign_in flow) and DesktopOAuthAuthenticator (Windows/Linux,
+/// loopback OAuth). The boundary is deliberately [http.Client] -- both auth
+/// worlds produce an authorized client, and the provider builds its own
+/// DriveApi from it, so neither leaks into the Drive REST code.
+abstract class GoogleDriveAuthenticator {
+  /// Interactive sign-in. May show UI (account sheet or system browser).
+  /// Throws CloudStorageException on failure or user cancellation.
+  ///
+  /// With [expectedAccount], another account throws
+  /// [CloudAccountMismatchException] before anything of it is kept, leaving
+  /// any session already here as it was.
+  Future<void> authenticate({String? expectedAccount});
+
+  /// Non-interactive re-auth from cached state (google_sign_in's
+  /// authorization for the known account, lightweight sign-in on a cold
+  /// launch, or a stored refresh token). Never shows UI. Returns false when
+  /// re-auth is not possible; must not throw.
+  ///
+  /// A token refresh must not depend on lightweight sign-in: on Android it
+  /// needs a foreground activity, so a background sync could never refresh
+  /// through it (#3602).
+  ///
+  /// This MAY touch secure storage. The "don't prompt a user who never asked
+  /// for Google Drive" guarantee is enforced upstream, by reachability rather
+  /// than by a flag: GoogleDriveStorageProvider is only ever asked for its
+  /// auth state when Drive is the selected sync provider, the chosen media
+  /// backend, or a registered connected account. All three are persisted user
+  /// choices, so arriving here at all means the user already opted in.
+  ///
+  /// Deliberately NOT an in-process opt-in flag. Such a flag is false in every
+  /// fresh process, which would make cold-launch silent auth impossible and
+  /// leave sync reporting itself unauthenticated after every restart.
+  Future<bool> attemptSilentAuth();
+
+  /// Whether the last [attemptSilentAuth] failed on an exception rather than
+  /// finding no grant. It says "could not tell": a dropped network looks like
+  /// this, and must not read as the account being refused.
+  bool get lastSilentAuthThrew;
+
+  /// The authorized HTTP client, or null when not authenticated.
+  http.Client? get authClient;
+
+  /// Signed-in account email, or null when unknown.
+  Future<String?> get userEmail;
+
+  /// Sign out and clear stored credentials.
+  Future<void> signOut();
+
+  /// Called after Drive rejects the sign-in: drop the (stale, revoked or
+  /// under-scoped) client state so the next attemptSilentAuth() rebuilds from
+  /// scratch.
+  Future<void> handleAuthFailure();
+}

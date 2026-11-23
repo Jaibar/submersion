@@ -1,8 +1,28 @@
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/surface_pressure_limits.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/features/dive_computer/data/services/libdc_dive_mode.dart';
+import 'package:submersion/features/dive_computer/data/services/parsed_dive_start_time.dart';
+import 'package:submersion/features/dive_computer/data/services/parsed_tank_resolver.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+import 'package:submersion/features/dive_computer/data/services/libdc_sample_units.dart';
+import 'package:submersion/features/dive_log/domain/codecs/deco_type.dart';
 
 /// Convert a Pigeon ParsedDive to the app's DownloadedDive format.
-DownloadedDive parsedDiveToDownloaded(pigeon.ParsedDive parsed) {
+///
+/// [trimAtSurfacing] carries the diver's preference for reading cylinder end
+/// pressure at the moment of surfacing rather than at the end of the recording
+/// (issue #1092); see [resolveParsedTanks]. [vendor] is the computer's
+/// manufacturer, which tells the resolver whether a cylinder role came from
+/// a transmitter's name (issue #2595). [now] supplies the download time used
+/// as the start when the parser reported no date (issue #1640).
+DownloadedDive parsedDiveToDownloaded(
+  pigeon.ParsedDive parsed, {
+  bool trimAtSurfacing = true,
+  String? vendor,
+  DateTime Function() now = DateTime.now,
+}) {
   // Some computers (e.g. Shearwater) don't provide top-level min/max
   // temperature — derive from profile samples when missing.
   final sampleTemps = parsed.samples
@@ -20,26 +40,41 @@ DownloadedDive parsedDiveToDownloaded(pigeon.ParsedDive parsed) {
           ? sampleTemps.reduce((a, b) => a > b ? a : b)
           : null);
 
+  // Gas-mix linking, tankless synthesis, and gas-switch derivation live in
+  // the shared resolver so the download and reparse paths cannot drift
+  // apart; the diluent gas (issue #1879) is derived from that same resolved
+  // list so it always agrees with the Diluent cylinder shown in Gas & Gear.
+  final tanks = resolveParsedTanks(
+    parsed,
+    trimAtSurfacing: trimAtSurfacing,
+    vendor: vendor,
+  );
+  final diluent = resolveDiluentGas(tanks);
+  final reportedStart = parsedDiveStartTime(parsed);
+
   return DownloadedDive(
-    startTime: DateTime.utc(
-      parsed.dateTimeYear,
-      parsed.dateTimeMonth,
-      parsed.dateTimeDay,
-      parsed.dateTimeHour,
-      parsed.dateTimeMinute,
-      parsed.dateTimeSecond,
-    ),
+    // A dive with no clock files at the moment it was downloaded, where the
+    // diver can see it and correct it, rather than at the start of the
+    // logbook.
+    startTime: reportedStart ?? asWallClockUtc(now()),
+    startTimeReported: reportedStart != null,
     durationSeconds: parsed.durationSeconds,
     maxDepth: parsed.maxDepthMeters,
     // libdivecomputer zero-initializes this field; `0.0` means "not reported".
     avgDepth: parsed.avgDepthMeters != 0.0 ? parsed.avgDepthMeters : null,
     minTemperature: minTemp,
     maxTemperature: maxTemp,
+    surfacePressure: plausibleSurfacePressureBar(parsed.surfacePressureBar),
+    entryLatitude: _validCoord(parsed.entryLatitude, parsed.entryLongitude),
+    entryLongitude: _validCoord(parsed.entryLongitude, parsed.entryLatitude),
+    exitLatitude: _validCoord(parsed.exitLatitude, parsed.exitLongitude),
+    exitLongitude: _validCoord(parsed.exitLongitude, parsed.exitLatitude),
     fingerprint: parsed.fingerprint,
     decoAlgorithm: parsed.decoAlgorithm,
     gfLow: parsed.gfLow,
     gfHigh: parsed.gfHigh,
     decoConservatism: parsed.decoConservatism,
+    diveMode: DiveMode.fromCode(mapLibdcDiveModeCode(parsed.diveMode)),
     profile: parsed.samples
         .map(
           (s) => ProfileSample(
@@ -48,34 +83,41 @@ DownloadedDive parsedDiveToDownloaded(pigeon.ParsedDive parsed) {
             temperature: s.temperatureCelsius,
             pressure: s.pressureBar,
             tankIndex: s.tankIndex,
+            tankPressures: s.tankPressuresBar,
             heartRate: s.heartRate,
+            heading: s.heading,
             setpoint: s.setpoint,
             ppo2: s.ppo2,
             cns: s.cns,
-            rbt: s.rbt,
+            rbt: libdcRbtToSeconds(s.rbt),
             decoType: s.decoType,
             decoTime: s.decoTime,
             decoDepth: s.decoDepth,
             tts: s.tts,
             ndl: s.decoType == 0 ? s.decoTime : null,
-            ceiling: s.decoType != null && s.decoType != 0 ? s.decoDepth : null,
+            ceiling: decoStopCeiling(s.decoType, s.decoDepth),
+            o2Sensor1: s.o2Sensor1,
+            o2Sensor2: s.o2Sensor2,
+            o2Sensor3: s.o2Sensor3,
+            o2Sensor4: s.o2Sensor4,
+            o2Sensor5: s.o2Sensor5,
+            o2Sensor6: s.o2Sensor6,
+            o2SensorMv1: s.o2SensorMv1,
+            o2SensorMv2: s.o2SensorMv2,
+            o2SensorMv3: s.o2SensorMv3,
+            o2SensorMv4: s.o2SensorMv4,
+            o2SensorMv5: s.o2SensorMv5,
+            o2SensorMv6: s.o2SensorMv6,
+            aveloBuoyancy: s.aveloBuoyancy,
+            aveloGasRemaining: s.aveloGasRemaining,
+            computerRmv: s.computerRmv,
           ),
         )
         .toList(),
-    tanks: parsed.tanks.map((t) {
-      final gasMix = parsed.gasMixes.firstWhere(
-        (g) => g.index == t.gasMixIndex,
-        orElse: () => pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0),
-      );
-      return DownloadedTank(
-        index: t.index,
-        o2Percent: gasMix.o2Percent,
-        hePercent: gasMix.hePercent,
-        startPressure: t.startPressureBar,
-        endPressure: t.endPressureBar,
-        volumeLiters: t.volumeLiters,
-      );
-    }).toList(),
+    tanks: tanks,
+    gasSwitches: resolveGasSwitches(parsed),
+    diluentO2: diluent?.o2,
+    diluentHe: diluent?.he,
     events: parsed.events
         .map(
           (e) => DownloadedEvent(
@@ -89,4 +131,13 @@ DownloadedDive parsedDiveToDownloaded(pigeon.ParsedDive parsed) {
     rawData: parsed.rawData,
     rawFingerprint: parsed.rawFingerprint,
   );
+}
+
+/// Returns [value] unless it is null or part of a libdivecomputer sentinel
+/// invalid-fix pair: (0,0) or (-1,-1). [other] is the paired coordinate.
+double? _validCoord(double? value, double? other) {
+  if (value == null || other == null) return null;
+  if (value == 0.0 && other == 0.0) return null;
+  if (value == -1.0 && other == -1.0) return null;
+  return value;
 }

@@ -1,25 +1,45 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/deco/entities/deco_status.dart';
-import 'package:submersion/core/deco/entities/tissue_compartment.dart';
+import 'package:submersion/features/dive_log/presentation/info/tissue_loading_info.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_card_title.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_area_chart.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_compartment_detail.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_heat_map.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_heat_map_axes.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_pressure_bar_chart.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+/// Glyph size for every control in the card header.
+const double _headerIconSize = 16;
+
+/// Shared style for every control in the card header.
+///
+/// The header mixes plain [IconButton]s with a [PopupMenuButton], so the only
+/// way the icons stay evenly spaced is for all of them to lay out to the same
+/// box. [ButtonStyle.tapTargetSize] is deliberately left unset so it falls
+/// back to the theme default of [MaterialTapTargetSize.padded]: that is what
+/// gives each control an accessible touch target of
+/// `kMinInteractiveDimension` (48) plus the compact density adjustment (-8),
+/// i.e. 40x40 around a [_headerIconSize] glyph.
+const _headerButtonStyle = ButtonStyle(visualDensity: VisualDensity.compact);
 
 /// Compact card displaying tissue loading visualizations and live data.
 ///
 /// Contains:
-/// - Tissue pressure bar chart (Subsurface-style, 16 compartments)
-/// - Tissue loading heat map over time
-/// - Leading compartment detail panel (updates on hover over either chart)
+/// - Compartment detail panel (load, GF, N2 and He with their directions)
+/// - Tissue pressure bar chart (Subsurface-style, 16 compartments) with a
+///   surface level marker per bar
+/// - Tissue loading heat map or stacked area chart over time
+/// - An info icon in the header explaining the values
 ///
-/// This is the "visualization" half of the original CompactDecoPanel,
-/// now in its own card that spans the full height of the left column
-/// (Deco Status + O2 Toxicity).
+/// Used by the dive detail view and the current dive load page; both show
+/// the same card, so every change here reaches both.
 class CompactTissueLoadingCard extends ConsumerStatefulWidget {
   /// Current decompression status (for bar chart + detail panel)
   final DecoStatus status;
@@ -33,6 +53,14 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
   /// Optional time label (e.g. "at 3:42") shown next to the title on hover
   final String? subtitle;
 
+  /// Seconds on the profile chart's clock, one per [decoStatuses] entry, for
+  /// the heat map's time axis (issue #4503): the times those statuses were
+  /// computed at (`ProfileAnalysis.sampleTimestamps`). Negative for samples
+  /// before the dive's zero point, as from a computer switched on early. The axis is left out when null
+  /// or when it does not match [decoStatuses] (see
+  /// [TissueHeatMapTimeAxis.fits]).
+  final List<int>? profileTimestamps;
+
   /// Called when user hovers over a time index on the heat map.
   final ValueChanged<int?>? onHeatMapHover;
 
@@ -42,14 +70,20 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
   /// (e.g. in the wide two-column layout).
   final bool expandVisualization;
 
+  /// Opens the 3D tissue saturation view. The button is hidden when null,
+  /// keeping this widget free of any dive_3d navigation dependency.
+  final VoidCallback? onOpen3dView;
+
   const CompactTissueLoadingCard({
     super.key,
     required this.status,
     this.decoStatuses,
     this.selectedIndex,
     this.subtitle,
+    this.profileTimestamps,
     this.onHeatMapHover,
     this.expandVisualization = false,
+    this.onOpen3dView,
   });
 
   @override
@@ -77,6 +111,9 @@ class _CompactTissueLoadingCardState
     final vizMode = ref.watch(tissueVizModeProvider);
 
     final expand = widget.expandVisualization;
+    // Once per build: the detail panel, the bar chart's screen reader label
+    // and both visualizations all name this compartment.
+    final leadingIndex = _leadingCompartmentIndex();
     final hasViz =
         widget.decoStatuses != null && widget.decoStatuses!.isNotEmpty;
     final vizWidget = hasViz
@@ -85,15 +122,19 @@ class _CompactTissueLoadingCardState
               context,
               colorScheme,
               textTheme,
+              leadingIndex: leadingIndex,
               expandToFill: expand,
             ),
             TissueVizMode.stackedArea => _buildAreaChartSection(
-              context,
-              colorScheme,
-              textTheme,
+              leadingIndex: leadingIndex,
               expandToFill: expand,
             ),
           }
+        : null;
+
+    final hasCompartments = widget.status.compartments.isNotEmpty;
+    final displayIndex = hasCompartments
+        ? _barChartDisplayIndex(leadingIndex)
         : null;
 
     return Card(
@@ -105,35 +146,68 @@ class _CompactTissueLoadingCardState
           children: [
             Row(
               children: [
-                Text(
-                  context.l10n.diveLog_deco_sectionTissueLoading,
-                  style: textTheme.titleSmall,
+                Expanded(
+                  child: CompactCardTitle(
+                    title: context.l10n.diveLog_deco_sectionTissueLoading,
+                    cursorTime: widget.subtitle,
+                  ),
                 ),
-                if (widget.subtitle != null) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    '@ ${widget.subtitle!}',
-                    style: textTheme.labelSmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
+                // Keeps the cursor time off the first control once the
+                // title has shrunk to make room.
+                const SizedBox(width: 8),
+                // Every control below shares _headerButtonStyle, so each one
+                // lays out to the same box and the gaps stay even. Do not add
+                // manual spacers between them: the icons are built from
+                // different widget types whose intrinsic widths differ, and
+                // uniform spacers on top of non-uniform boxes is exactly what
+                // made the spacing drift before.
+                //
+                // One dropdown picks the view (issue #4437). The colour scheme
+                // is a standing preference that also drives Dive Lab and the
+                // 3D view, so it lives in Settings > Appearance > Dives.
+                _buildViewMenu(vizMode, colorScheme),
+                if (widget.onOpen3dView != null)
+                  _build3dViewButton(colorScheme),
+                // Laid out to the compact buttons' 40 px box, like its
+                // neighbours.
+                HeaderInfoButton(
+                  title: context.l10n.diveLog_deco_sectionTissueLoading,
+                  width: 40,
+                  height: 40,
+                  content: (context) => tissueLoadingInfo(
+                    context.l10n,
+                    infoUnits(context),
+                    view: hasViz ? vizMode : null,
+                    hasHelium: widget.status.compartments.any(
+                      (c) => c.currentPHe > 0.001,
                     ),
                   ),
-                ],
-                const Spacer(),
-                _buildVizModeToggle(colorScheme, vizMode),
-                const SizedBox(width: 4),
-                _buildColorSchemeSelector(colorScheme),
+                ),
               ],
             ),
             const SizedBox(height: 14),
 
             // Compartment detail panel (above charts for proximity to title)
-            if (widget.status.compartments.isNotEmpty) ...[
-              _buildCompartmentDetail(context, colorScheme, textTheme),
+            if (displayIndex != null) ...[
+              TissueCompartmentDetail(
+                status: widget.status,
+                displayIndex: displayIndex,
+                isLeading: displayIndex == leadingIndex,
+              ),
               const SizedBox(height: 6),
             ],
 
             // Tissue pressure bar chart (with per-bar hover)
-            _buildTissuePressureDiagram(context, colorScheme),
+            TissuePressureBarChart(
+              status: widget.status,
+              highlightedIndex: displayIndex,
+              // The compartment the visible "Leading" text names, so the
+              // screen reader announces the same one.
+              leadingIndex: hasCompartments ? leadingIndex : null,
+              onCompartmentHover: (index) =>
+                  _setHoveredCompartment(index, fromBarChart: true),
+              onHoverExit: _clearHoveredCompartment,
+            ),
             const SizedBox(height: 6),
 
             // Visualization (expanded to fill remaining space when possible)
@@ -145,248 +219,111 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  Widget _buildTissuePressureDiagram(
-    BuildContext context,
-    ColorScheme colorScheme,
-  ) {
-    final textTheme = Theme.of(context).textTheme;
-    const chartHeight = 50.0;
-    const maxLoadingPercent = 120.0;
-    const mValueBottom = chartHeight * (100.0 / maxLoadingPercent);
-
-    final labelStyle = textTheme.labelSmall?.copyWith(
-      fontSize: 11,
-      color: colorScheme.onSurfaceVariant,
-    );
-
-    final highlightedIdx = _barChartDisplayIndex();
-    final isDark = colorScheme.brightness == Brightness.dark;
-    final outlineColor = colorScheme.onSurface.withValues(
-      alpha: isDark ? 1.0 : 0.8,
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Semantics(
-          label: chartSummaryLabel(
-            chartType: 'Tissue pressure diagram',
-            description:
-                '${widget.status.compartments.length} compartments showing '
-                'nitrogen and helium loading relative to M-value, leading '
-                'compartment ${widget.status.leadingCompartmentNumber} at '
-                '${widget.status.leadingCompartmentLoading.toStringAsFixed(0)}'
-                ' percent',
-          ),
-          child: SizedBox(
-            height: chartHeight,
-            child: Stack(
-              children: [
-                MouseRegion(
-                  onExit: (_) => _clearHoveredCompartment(),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: widget.status.compartments.asMap().entries.map((
-                      entry,
-                    ) {
-                      final idx = entry.key;
-                      final comp = entry.value;
-                      return Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 0.5),
-                          child: MouseRegion(
-                            onEnter: (_) =>
-                                _setHoveredCompartment(idx, fromBarChart: true),
-                            child: GestureDetector(
-                              onTapDown: (_) => _setHoveredCompartment(
-                                idx,
-                                fromBarChart: true,
-                              ),
-                              child: _buildSubsurfaceBar(
-                                comp,
-                                chartHeight,
-                                maxLoadingPercent,
-                                outlineColor: idx == highlightedIdx
-                                    ? outlineColor
-                                    : null,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-                // M-value reference line
-                Positioned(
-                  bottom: mValueBottom,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    height: 1,
-                    color: colorScheme.error.withValues(alpha: 0.5),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 4),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(context.l10n.diveLog_deco_tissueFast, style: labelStyle),
-            Text(context.l10n.diveLog_deco_tissueSlow, style: labelStyle),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSubsurfaceBar(
-    TissueCompartment comp,
-    double chartHeight,
-    double maxLoading, {
-    Color? outlineColor,
-  }) {
-    final totalLoading = comp.percentLoading.clamp(0.0, maxLoading);
-    final barHeight = chartHeight * (totalLoading / maxLoading);
-
-    final totalGas = comp.totalInertGas;
-    final heRatio = totalGas > 0 ? comp.currentPHe / totalGas : 0.0;
-
-    final n2Height = barHeight * (1.0 - heRatio);
-    final heHeight = barHeight * heRatio;
-
-    final n2Color = _getN2Color(totalLoading);
-
-    final barSegments = <Widget>[
-      if (heHeight > 0.5)
-        Container(
-          height: heHeight,
-          decoration: BoxDecoration(
-            color: Colors.deepPurple.withValues(alpha: 0.8),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(1)),
-          ),
-        ),
-      Container(
-        height: n2Height.clamp(0.0, barHeight),
-        decoration: BoxDecoration(
-          color: n2Color,
-          borderRadius: BorderRadius.vertical(
-            top: heHeight > 0.5 ? Radius.zero : const Radius.circular(1),
-          ),
-        ),
-      ),
-    ];
-
-    // Wrap bar segments in an outline when highlighted.
-    // The outline container is only as tall as the bar itself.
-    final bar = outlineColor != null
-        ? Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: outlineColor, width: 2),
-              borderRadius: BorderRadius.circular(2),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: barSegments,
-            ),
-          )
-        : Column(mainAxisSize: MainAxisSize.min, children: barSegments);
-
-    return Tooltip(
-      message:
-          'Compartment ${comp.compartmentNumber}\n'
-          '${totalLoading.toStringAsFixed(1)}% loaded\n'
-          'N\u2082: ${comp.currentPN2.toStringAsFixed(2)} bar'
-          '${comp.currentPHe > 0 ? '\nHe: ${comp.currentPHe.toStringAsFixed(2)} bar' : ''}\n'
-          'Half-time: ${comp.halfTimeN2.toStringAsFixed(0)} min',
-      child: SizedBox(
-        height: chartHeight,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [bar],
-        ),
-      ),
-    );
-  }
-
+  /// The heat map with its legend above, a compartment axis beside it and
+  /// the dive time below (issue #4503).
+  ///
+  /// Its rows run fast to slow from top to bottom; the axis numbers them
+  /// rather than repeating the bar chart's "Fast"/"Slow" pair just above.
   Widget _buildHeatMapSection(
     BuildContext context,
     ColorScheme colorScheme,
     TextTheme textTheme, {
+    required int leadingIndex,
     bool expandToFill = false,
   }) {
     final tissueScheme = ref.watch(tissueColorSchemeProvider);
     final colorFn = colorFnForScheme(tissueScheme);
+    final statuses = widget.decoStatuses!;
+    final timestamps = widget.profileTimestamps;
 
-    final labelStyle = textTheme.labelSmall?.copyWith(
-      fontSize: 11,
-      color: colorScheme.onSurfaceVariant,
-    );
+    Widget buildStrip({bool flexible = false}) {
+      return TissueHeatMapStrip(
+        decoStatuses: statuses,
+        selectedIndex: widget.selectedIndex,
+        height: 72,
+        flexible: flexible,
+        colorFn: colorFn,
+        hoveredCompartmentIndex: _highlightedCompartmentIndex(leadingIndex),
+        onHoverIndexChanged: widget.onHeatMapHover,
+        onCompartmentHoverChanged: (compIdx) {
+          if (compIdx != null) {
+            _setHoveredCompartment(compIdx);
+          } else {
+            _clearHoveredCompartment();
+          }
+        },
+      );
+    }
 
-    Widget buildStripRow({bool flexible = false}) {
-      return Row(
+    // The strip with its compartment axis beside it and, when the times fit,
+    // the dive time under it. All of it left to right whatever the text
+    // direction, like the painter: time runs left to right and compartment 1
+    // sits at the top.
+    final withTime = TissueHeatMapTimeAxis.fits(timestamps, statuses.length);
+    Widget heatMapWithAxes({required bool expand}) {
+      final strip = Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Column(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          TissueHeatMapCompartmentAxis(
+            compartmentCount: statuses.first.compartments.length,
+          ),
+          Expanded(child: buildStrip(flexible: expand)),
+        ],
+      );
+      return Semantics(
+        label: tissueHeatMapSemantics(
+          context.l10n,
+          compartmentCount: statuses.first.compartments.length,
+          timestamps: withTime ? timestamps : null,
+        ),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Fast', style: labelStyle),
-              Text('Slow', style: labelStyle),
+              if (expand)
+                Expanded(child: strip)
+              else
+                SizedBox(height: 72, child: strip),
+              if (withTime)
+                Padding(
+                  // Under the strip, past the compartment axis.
+                  padding: const EdgeInsets.only(
+                    left: TissueHeatMapCompartmentAxis.width,
+                    top: 2,
+                  ),
+                  child: TissueHeatMapTimeAxis(timestamps: timestamps!),
+                ),
             ],
           ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: TissueHeatMapStrip(
-              decoStatuses: widget.decoStatuses!,
-              selectedIndex: widget.selectedIndex,
-              height: 72,
-              flexible: flexible,
-              colorFn: colorFn,
-              hoveredCompartmentIndex: _highlightedCompartmentIndex(),
-              onHoverIndexChanged: widget.onHeatMapHover,
-              onCompartmentHoverChanged: (compIdx) {
-                if (compIdx != null) {
-                  _setHoveredCompartment(compIdx);
-                } else {
-                  _clearHoveredCompartment();
-                }
-              },
-            ),
-          ),
-        ],
+        ),
       );
     }
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Spacer(),
-            TissueHeatMapLegend(
-              colorScheme: colorScheme,
-              textTheme: textTheme,
-              colorFn: colorFn,
-              leftLabel: tissueScheme.leftLabel,
-              rightLabel: tissueScheme.rightLabel,
-            ),
-          ],
+        // Trailing end, so it follows the text direction (left in RTL).
+        Align(
+          alignment: AlignmentDirectional.centerEnd,
+          // Names its halves itself; see TissueHeatMapLegend for why.
+          child: TissueHeatMapLegend(
+            colorScheme: colorScheme,
+            textTheme: textTheme,
+            colorFn: colorFn,
+          ),
         ),
         const SizedBox(height: 4),
         if (expandToFill)
-          Expanded(child: buildStripRow(flexible: true))
+          Expanded(child: heatMapWithAxes(expand: true))
         else
-          SizedBox(height: 72, child: buildStripRow()),
+          heatMapWithAxes(expand: false),
       ],
     );
   }
 
-  Widget _buildAreaChartSection(
-    BuildContext context,
-    ColorScheme colorScheme,
-    TextTheme textTheme, {
+  Widget _buildAreaChartSection({
+    required int leadingIndex,
     bool expandToFill = false,
   }) {
     final tissueScheme = ref.watch(tissueColorSchemeProvider);
@@ -399,7 +336,7 @@ class _CompactTissueLoadingCardState
       isExpanded: true,
       flexible: expandToFill,
       colorFn: colorFn,
-      leadingCompartmentIndex: _leadingCompartmentIndex(),
+      leadingCompartmentIndex: leadingIndex,
       hoveredCompartmentIndex: _hoveredCompartmentIndex,
       onHoverIndexChanged: widget.onHeatMapHover,
       onCompartmentHoverChanged: (compIdx) {
@@ -412,197 +349,68 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  /// Displays one compartment's key values above the charts.
-  ///
-  /// Bar chart hover shows the specific hovered compartment.
-  /// Heat map, area chart, and dive profile hover show the leading
-  /// compartment (highest subsurface percentage at depth), since those
-  /// charts already provide their own per-compartment tooltips.
-  Widget _buildCompartmentDetail(
-    BuildContext context,
-    ColorScheme colorScheme,
-    TextTheme textTheme,
-  ) {
-    final comps = widget.status.compartments;
-    final ambient = widget.status.ambientPressureBar;
-    final leadingIdx = _leadingCompartmentIndex();
-    final displayIdx = _barChartDisplayIndex();
-    final comp = comps[displayIdx];
-
-    final gf = (comp.gradientFactor(ambient) * 100).clamp(0.0, double.infinity);
-    final isOffgassing = comp.totalInertGas > ambient;
-    final gfColor = _getGfColor(gf);
-
-    final labelStyle = textTheme.labelSmall?.copyWith(
-      fontSize: 11,
-      color: colorScheme.onSurfaceVariant,
-    );
-    final valueStyle = textTheme.labelSmall?.copyWith(
-      fontSize: 12,
-      fontWeight: FontWeight.bold,
-    );
-
-    // Show "Leading" when displaying the leading compartment (whether
-    // auto-selected or hovered), "Compartment" for any other.
-    final titlePrefix = displayIdx == leadingIdx ? 'Leading' : 'Compartment';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 1),
-        const SizedBox(height: 6),
-        // Title row
-        Row(
-          children: [
-            Text(
-              '$titlePrefix: #${comp.compartmentNumber}',
-              style: textTheme.labelSmall?.copyWith(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: isOffgassing
-                    ? Colors.green.withValues(alpha: 0.15)
-                    : Colors.blue.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    isOffgassing ? Icons.arrow_upward : Icons.arrow_downward,
-                    size: 9,
-                    color: isOffgassing
-                        ? Colors.green.shade700
-                        : Colors.blue.shade700,
-                  ),
-                  const SizedBox(width: 2),
-                  Text(
-                    isOffgassing ? 'Offgassing' : 'Ongassing',
-                    style: textTheme.labelSmall?.copyWith(
-                      fontSize: 11,
-                      color: isOffgassing
-                          ? Colors.green.shade700
-                          : Colors.blue.shade700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        // Values row
-        Row(
-          children: [
-            _buildInfoMetric(
-              label: 'Load',
-              value: '${comp.percentLoading.toStringAsFixed(0)}%',
-              labelStyle: labelStyle,
-              valueStyle: valueStyle,
-            ),
-            _buildInfoMetric(
-              label: 'GF',
-              value: '${gf.toStringAsFixed(0)}%',
-              labelStyle: labelStyle,
-              valueStyle: valueStyle?.copyWith(color: gfColor),
-            ),
-            _buildInfoMetric(
-              label: 'N\u2082',
-              value: '${comp.currentPN2.toStringAsFixed(2)} bar',
-              labelStyle: labelStyle,
-              valueStyle: valueStyle,
-            ),
-            if (comp.currentPHe > 0.001)
-              _buildInfoMetric(
-                label: 'He',
-                value: '${comp.currentPHe.toStringAsFixed(2)} bar',
-                labelStyle: labelStyle,
-                valueStyle: valueStyle,
-              ),
-            _buildInfoMetric(
-              label: 't\u00BD',
-              value: '${comp.halfTimeN2.toStringAsFixed(0)} min',
-              labelStyle: labelStyle,
-              valueStyle: valueStyle,
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildVizModeToggle(
-    ColorScheme colorScheme,
-    TissueVizMode currentMode,
-  ) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _modeIcon(
-          Icons.grid_on,
-          TissueVizMode.heatMap,
-          currentMode,
-          colorScheme,
-        ),
-        _modeIcon(
-          Icons.area_chart,
-          TissueVizMode.stackedArea,
-          currentMode,
-          colorScheme,
-        ),
-      ],
-    );
-  }
-
-  Widget _modeIcon(
-    IconData icon,
-    TissueVizMode mode,
-    TissueVizMode currentMode,
-    ColorScheme colorScheme,
-  ) {
-    final isActive = mode == currentMode;
-    return GestureDetector(
-      onTap: () => ref.read(settingsProvider.notifier).setTissueVizMode(mode),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
-        child: Icon(
-          icon,
-          size: 16,
-          color: isActive
-              ? colorScheme.primary
-              : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-        ),
+  /// The header's view dropdown: the current view's icon with a caret,
+  /// opening a menu of both views by icon and name, the current one checked.
+  Widget _buildViewMenu(TissueVizMode current, ColorScheme colorScheme) {
+    final l10n = context.l10n;
+    return PopupMenuButton<TissueVizMode>(
+      tooltip: l10n.diveLog_tissue_viewMenuTooltip,
+      icon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _viewIcon(current),
+            size: _headerIconSize,
+            color: colorScheme.primary,
+          ),
+          Icon(
+            Icons.arrow_drop_down,
+            size: _headerIconSize,
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ],
       ),
+      // No `constraints:` here. On PopupMenuButton that parameter sizes the
+      // popup menu, not the button.
+      padding: EdgeInsets.zero,
+      style: _headerButtonStyle,
+      initialValue: current,
+      itemBuilder: (context) => [
+        for (final mode in TissueVizMode.values)
+          CheckedPopupMenuItem<TissueVizMode>(
+            value: mode,
+            checked: mode == current,
+            child: Row(
+              children: [
+                Icon(_viewIcon(mode), size: 18),
+                const SizedBox(width: 12),
+                Text(tissueVizModeLabel(l10n, mode)),
+              ],
+            ),
+          ),
+      ],
+      onSelected: (mode) =>
+          ref.read(settingsProvider.notifier).setTissueVizMode(mode),
     );
   }
 
-  Widget _buildColorSchemeSelector(ColorScheme colorScheme) {
-    return PopupMenuButton<TissueColorScheme>(
+  static IconData _viewIcon(TissueVizMode mode) => switch (mode) {
+    TissueVizMode.heatMap => Icons.grid_on,
+    TissueVizMode.stackedArea => Icons.area_chart,
+  };
+
+  Widget _build3dViewButton(ColorScheme colorScheme) {
+    return IconButton(
       icon: Icon(
-        Icons.palette_outlined,
-        size: 16,
+        Icons.view_in_ar,
+        size: _headerIconSize,
         color: colorScheme.onSurfaceVariant,
       ),
+      tooltip: context.l10n.dive3d_previewTitle,
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(),
-      style: const ButtonStyle(
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        visualDensity: VisualDensity.compact,
-      ),
-      itemBuilder: (context) => TissueColorScheme.values.map((scheme) {
-        return PopupMenuItem<TissueColorScheme>(
-          value: scheme,
-          child: Text(scheme.displayName),
-        );
-      }).toList(),
-      onSelected: (scheme) {
-        ref.read(settingsProvider.notifier).setTissueColorScheme(scheme);
-      },
+      style: _headerButtonStyle,
+      onPressed: widget.onOpen3dView,
     );
   }
 
@@ -626,18 +434,20 @@ class _CompactTissueLoadingCardState
 
   /// Returns the compartment index to visually emphasize on cross-chart
   /// widgets (heat map outline, area chart bold line): whichever compartment
-  /// is hovered, regardless of source, or the leading compartment.
-  int _highlightedCompartmentIndex() {
-    return _hoveredCompartmentIndex ?? _leadingCompartmentIndex();
+  /// is hovered, regardless of source, or the leading compartment
+  /// ([leadingIndex], from [_leadingCompartmentIndex]).
+  int _highlightedCompartmentIndex(int leadingIndex) {
+    return _hoveredCompartmentIndex ?? leadingIndex;
   }
 
   /// Returns the compartment index for the bar chart and detail panel:
-  /// only bar-chart hovers override the leading compartment, since the
-  /// heat map and area chart have their own per-compartment tooltips.
-  int _barChartDisplayIndex() {
+  /// only bar-chart hovers override the leading compartment
+  /// ([leadingIndex]), since the heat map and area chart have their own
+  /// per-compartment tooltips.
+  int _barChartDisplayIndex(int leadingIndex) {
     return (_hoveredCompartmentIndex != null && _hoverFromBarChart)
         ? _hoveredCompartmentIndex!
-        : _leadingCompartmentIndex();
+        : leadingIndex;
   }
 
   void _setHoveredCompartment(int index, {bool fromBarChart = false}) {
@@ -652,41 +462,5 @@ class _CompactTissueLoadingCardState
       _hoveredCompartmentIndex = null;
       _hoverFromBarChart = false;
     });
-  }
-
-  Widget _buildInfoMetric({
-    required String label,
-    required String value,
-    required TextStyle? labelStyle,
-    required TextStyle? valueStyle,
-  }) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
-        child: Column(
-          children: [
-            FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(value, style: valueStyle, maxLines: 1),
-            ),
-            Text(label, style: labelStyle),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Color _getN2Color(double loading) {
-    if (loading >= 100) return Colors.red;
-    if (loading >= 80) return Colors.orange;
-    if (loading >= 60) return Colors.amber;
-    return Colors.green;
-  }
-
-  Color _getGfColor(double gfPercent) {
-    if (gfPercent >= 100) return Colors.red;
-    if (gfPercent >= 80) return Colors.orange;
-    if (gfPercent >= 60) return Colors.amber;
-    return Colors.green;
   }
 }

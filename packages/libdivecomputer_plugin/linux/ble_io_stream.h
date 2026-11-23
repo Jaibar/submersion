@@ -5,6 +5,7 @@
 #include <glib.h>
 
 #include "libdc_wrapper.h"
+#include "ble_read_poll.h"
 
 G_BEGIN_DECLS
 
@@ -17,12 +18,52 @@ typedef struct {
     gchar* notify_path;    // GATT characteristic object path for notify
     guint properties_sub;  // PropertiesChanged signal subscription
 
+    // Terminal I/O credit flow control. Both paths are NULL unless the device
+    // exposes a complete Telit or u-blox layout. On u-blox the same
+    // characteristic serves both roles.
+    gchar* credits_write_path;   // Credits RX (client -> module)
+    gchar* credits_notify_path;  // Credits TX (module -> client)
+    // Credit balance, refcounted so the asynchronous grant completion can
+    // settle it even if this stream is freed first.
+    struct BleCreditBalance* credits;
+    // Whether a failed opening grant is fatal (Telit) or falls back to running
+    // without flow control (u-blox, where it is optional).
+    gboolean credits_required;
+    // Set once the fallback has been taken, so no further credit work is
+    // attempted. Distinct from the balance's `open` flag, which is also FALSE
+    // before the opening grant and so cannot say whether one is still wanted.
+    // Only touched on the download thread, during connect.
+    gboolean credits_abandoned;
+
     GMutex read_mutex;
     GCond read_cond;
-    GByteArray* read_buffer;
+    // Queue of GByteArray*, one entry per GATT notification.
+    // libdivecomputer's packet parsers require each read to return bytes
+    // from at most one notification; coalescing them into a flat buffer
+    // loses packet boundaries.
+    GQueue* read_chunks;
+
+    // Non-NULL only when the read-poll tier was selected (issue #1454). Read,
+    // poll and purge go to it instead of read_chunks, and notify_path stays
+    // NULL: there is nothing to subscribe to.
+    BleReadPoller* read_poller;
 
     gint timeout_ms;
     gchar* device_name;
+
+    // Every GATT characteristic under the device, UUID (lowercase) -> object
+    // path, for DC_IOCTL_BLE_CHARACTERISTIC_READ (issue #422).
+    GHashTable* characteristic_paths;
+    // A characteristic read of the notify characteristic makes BlueZ emit a
+    // PropertiesChanged "Value" for it as well; that echo is not download
+    // data. D-Bus gives the echo and a notification the same shape, so the
+    // echo is recognised by timing: a byte-equal chunk queued while the read
+    // was in flight, or one arriving before suppress_echo_deadline (monotonic
+    // microseconds). All three fields are guarded by read_mutex.
+    GByteArray* suppress_notify_echo;
+    gint64 suppress_echo_deadline;
+    // Chunks ever queued, so a read can tell which arrived during it.
+    guint64 chunks_pushed;
 
     GMutex pin_mutex;
     GCond pin_cond;
@@ -33,6 +74,14 @@ typedef struct {
     // Callback when PIN code is needed.
     void (*on_pin_code_required)(const gchar* address, gpointer user_data);
     gpointer pin_callback_data;
+
+    // Polled while connect waits on BlueZ, so a cancelled download stops
+    // waiting instead of holding the link. NULL when nothing can cancel.
+    gboolean (*is_cancelled)(gpointer user_data);
+    gpointer cancel_data;
+
+    // Why the last ble_io_stream_connect returned FALSE, or NULL.
+    gchar* connect_failure;
 } BleIoStream;
 
 // Create a new BLE I/O stream.
@@ -65,6 +114,16 @@ void ble_io_stream_set_pin_callback(
     BleIoStream* stream,
     void (*callback)(const gchar* address, gpointer user_data),
     gpointer user_data);
+
+// Set the check ble_io_stream_connect polls while it waits for BlueZ to
+// resolve the GATT services. Called on the thread that runs connect.
+void ble_io_stream_set_cancel_check(BleIoStream* stream,
+                                    gboolean (*is_cancelled)(gpointer user_data),
+                                    gpointer user_data);
+
+// Why the last ble_io_stream_connect failed, for the diver's diagnostic
+// details, or NULL. Owned by the stream.
+const gchar* ble_io_stream_connect_failure(const BleIoStream* stream);
 
 G_END_DECLS
 

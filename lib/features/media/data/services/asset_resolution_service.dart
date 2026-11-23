@@ -1,8 +1,11 @@
 import 'dart:async';
 
+import 'package:submersion/core/models/log_entry.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/media/data/repositories/local_asset_cache_repository.dart';
+import 'package:submersion/features/media/data/services/cloud_identifier_source.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 
 /// Status of an asset resolution attempt.
@@ -10,8 +13,20 @@ enum ResolutionStatus {
   /// Asset ID was resolved successfully (from cache, original ID, or matching).
   resolved,
 
-  /// No matching asset found on this device.
+  /// No matching asset found on this device. A POSITIVE finding: the gallery
+  /// was consulted and does not have it. Callers may treat this as evidence
+  /// the asset is gone.
   unavailable,
+
+  /// The gallery could not be consulted, so nothing was learned about the
+  /// asset. Never evidence of absence: the asset is probably fine and the
+  /// user can restore access by granting permission.
+  ///
+  /// Kept distinct from [unavailable] because a caller that orphans rows on
+  /// a negative finding would otherwise mark an entire library missing the
+  /// moment photo permission is revoked, and sync would replicate that
+  /// damage to every other device.
+  accessDenied,
 }
 
 /// Result of resolving a media item's asset ID on the current device.
@@ -19,15 +34,24 @@ class ResolutionResult {
   final String? localAssetId;
   final ResolutionStatus status;
 
-  const ResolutionResult({this.localAssetId, required this.status});
+  /// With [ResolutionStatus.accessDenied] only: the gallery was searched
+  /// through a limited selection, so a miss may be a photo the user did not
+  /// select rather than one that is gone.
+  final bool limitedAccess;
+
+  const ResolutionResult({
+    this.localAssetId,
+    required this.status,
+    this.limitedAccess = false,
+  });
 }
 
 /// Service for resolving cross-device photo asset IDs.
 ///
 /// When a database is synced from another device, the platformAssetId
 /// values won't resolve locally. This service finds the matching local
-/// asset by metadata (filename, timestamp, dimensions) and caches the
-/// mapping for future lookups.
+/// asset by its iCloud identifier, else by metadata (filename, timestamp,
+/// dimensions), and caches the mapping for future lookups.
 ///
 /// Gallery query coalescing: when multiple photos from the same dive
 /// trigger resolution concurrently (e.g., opening a dive with 20 photos),
@@ -37,10 +61,19 @@ class ResolutionResult {
 class AssetResolutionService {
   final LocalAssetCacheRepository _cacheRepository;
   final PhotoPickerService _photoPickerService;
-  final _log = LoggerService.forClass(AssetResolutionService);
+  final CloudIdentifierSource? _cloudIdentifiers;
+  final _log = LoggerService.forClass(
+    AssetResolutionService,
+    category: LogCategory.media,
+  );
 
   /// In-flight resolution futures keyed by mediaId to prevent duplicate work.
   final Map<String, Future<ResolutionResult>> _pendingResolutions = {};
+
+  /// Short-lived cloud id lookups keyed by candidate set, so the rows of one
+  /// dive, resolving together over one time window, share one platform call
+  /// the way they share one gallery query.
+  final Map<String, _CloudIdLookup> _cloudIdLookups = {};
 
   /// Short-lived cache of gallery query results to coalesce concurrent queries.
   /// Keyed by a time-range bucket string (start~end in ms epoch).
@@ -49,22 +82,22 @@ class AssetResolutionService {
   AssetResolutionService({
     required LocalAssetCacheRepository cacheRepository,
     required PhotoPickerService photoPickerService,
+    CloudIdentifierSource? cloudIdentifiers,
   }) : _cacheRepository = cacheRepository,
-       _photoPickerService = photoPickerService;
+       _photoPickerService = photoPickerService,
+       _cloudIdentifiers = cloudIdentifiers;
 
   /// Resolve the local asset ID for a media item.
   ///
   /// Resolution order:
   /// 1. Check local cache
   /// 2. Try original platformAssetId (works on originating device)
-  /// 3. Search gallery by metadata (tiered matching)
+  /// 3. Search the gallery's time window by iCloud identifier, then by
+  ///    metadata (tiered matching)
   Future<ResolutionResult> resolveAssetId(MediaItem item) async {
     // Desktop platforms don't use gallery asset IDs
     if (!_photoPickerService.supportsGalleryBrowsing) {
-      return ResolutionResult(
-        localAssetId: item.platformAssetId,
-        status: ResolutionStatus.resolved,
-      );
+      return _withoutGallery(item);
     }
 
     if (item.platformAssetId == null) {
@@ -74,26 +107,24 @@ class AssetResolutionService {
     // Check cache first
     final cachedId = await _cacheRepository.getCachedAssetId(item.id);
     if (cachedId != null) {
-      // Verify the cached asset is still loadable (may have been deleted)
-      final stillLoadable = await _verifyAssetLoadable(cachedId);
-      if (stillLoadable) {
-        return ResolutionResult(
-          localAssetId: cachedId,
-          status: ResolutionStatus.resolved,
-        );
-      }
-      // Cached ID is stale -- clear it and fall through to re-resolution
-      _log.info('Cached asset $cachedId no longer loadable, clearing cache');
-      await _cacheRepository.clearEntry(item.id);
+      // The cached mapping is trusted rather than proven. Verifying it here
+      // meant fetching a 50px thumbnail and discarding the bytes, on every
+      // resolution, purely to learn something the caller's real thumbnail
+      // fetch discovers for free moments later -- 1,568 wasted PhotoKit
+      // round-trips and 150s of wall time in one measured scroll of a
+      // 434-photo library. A caller whose fetch comes back empty calls
+      // [reresolve] to drop the mapping and search again.
+      return ResolutionResult(
+        localAssetId: cachedId,
+        status: ResolutionStatus.resolved,
+      );
     }
 
     // Check if we have an unexpired unresolved entry
     final cacheEntry = await _cacheRepository.getCacheEntry(item.id);
     if (cacheEntry != null && cacheEntry.localAssetId == null) {
       final expired = await _cacheRepository.isExpired(item.id);
-      if (!expired) {
-        return const ResolutionResult(status: ResolutionStatus.unavailable);
-      }
+      if (!expired) return _backedOff(item);
     }
 
     // Deduplicate concurrent resolution requests for the same media
@@ -111,9 +142,42 @@ class AssetResolutionService {
     }
   }
 
+  /// Drops [item]'s cached mapping and resolves again from the gallery.
+  ///
+  /// Called when a cached asset id failed to produce bytes -- the signal that
+  /// used to come from the speculative pre-check in [resolveAssetId]. Going
+  /// straight to [_resolveFromGallery] (rather than back through the cache
+  /// read we just invalidated) keeps the intent explicit.
+  ///
+  /// Self-limiting: a genuinely dead item ends up cached as `unresolved`, and
+  /// the backoff branch in [resolveAssetId] then short-circuits later renders
+  /// before any caller can reach this method again.
+  ///
+  /// Where there is no photo library to search (Windows and Linux),
+  /// [_resolveFromGallery] returns the stored id without searching, so
+  /// nothing is cached and no backoff applies; the answer is the one
+  /// [resolveAssetId] gives there.
+  Future<ResolutionResult> reresolve(MediaItem item) async {
+    if (item.platformAssetId == null) {
+      return const ResolutionResult(status: ResolutionStatus.unavailable);
+    }
+    _log.info('Re-resolving media ${item.id} after a failed thumbnail fetch');
+    await _cacheRepository.clearEntry(item.id);
+    return _resolveFromGallery(item);
+  }
+
   /// Attempt to resolve by trying the original ID, then metadata matching.
   Future<ResolutionResult> _resolveFromGallery(MediaItem item) async {
-    _log.info('Resolving asset for media ${item.id}');
+    // Every path into the gallery search funnels through here, so this is
+    // where the no-gallery guard has to live. On Windows and Linux the
+    // picker's getAssetsInDateRange is not a query but an interactive file
+    // dialog; reaching it from a thumbnail fetch opened one dialog per photo
+    // and time reading, and reopened it on every cancel.
+    if (!_photoPickerService.supportsGalleryBrowsing) {
+      return _withoutGallery(item);
+    }
+
+    _log.debug('Resolving asset for media ${item.id}');
 
     // Step 2: Try original platformAssetId
     final originalWorks = await _verifyAssetLoadable(item.platformAssetId!);
@@ -123,29 +187,200 @@ class AssetResolutionService {
         localAssetId: item.platformAssetId!,
         method: 'original_id',
       );
-      _log.info('Resolved via original ID: ${item.platformAssetId}');
+      _log.debug('Resolved via original ID: ${item.platformAssetId}');
       return ResolutionResult(
         localAssetId: item.platformAssetId,
         status: ResolutionStatus.resolved,
       );
     }
 
-    // Step 3: Search gallery by metadata (with query coalescing)
-    const timeWindow = Duration(seconds: 5);
-    final start = item.takenAt.subtract(timeWindow);
-    final end = item.takenAt.add(timeWindow);
+    return _searchGallery(item);
+  }
 
-    List<AssetInfo> candidates;
+  /// Finds [item] in the photo library by the metadata tiers alone, for a
+  /// row whose stored pointer no longer reads: a file whose Android read
+  /// grant was lost, which is usually still in the library (media sync
+  /// program spec 6.3). Needs no stored asset id. Honors the same cache and
+  /// backoff as [resolveAssetId], and shares its in-flight searches.
+  ///
+  /// Unlike [resolveAssetId], a cached mapping is proven before it is
+  /// trusted. This runs only after a read has already failed, so the check
+  /// costs nothing on the hot path, and a mapping gone stale (a second
+  /// re-index) would otherwise be served as nothing on every render, which
+  /// reads as notFound on the linking device.
+  Future<ResolutionResult> findInLibrary(MediaItem item) async {
+    if (!_photoPickerService.supportsGalleryBrowsing) {
+      return const ResolutionResult(status: ResolutionStatus.unavailable);
+    }
+    final cachedId = await _cacheRepository.getCachedAssetId(item.id);
+    if (cachedId != null) {
+      if (await _verifyAssetLoadable(cachedId)) {
+        return ResolutionResult(
+          localAssetId: cachedId,
+          status: ResolutionStatus.resolved,
+        );
+      }
+      _log.info('Cached library match for media ${item.id} is gone');
+      await _cacheRepository.clearEntry(item.id);
+    }
+    final cacheEntry = await _cacheRepository.getCacheEntry(item.id);
+    if (cacheEntry != null &&
+        cacheEntry.localAssetId == null &&
+        !await _cacheRepository.isExpired(item.id)) {
+      return _backedOff(item);
+    }
+    final pending = _pendingResolutions[item.id];
+    if (pending != null) return pending;
+    final future = _searchGallery(item);
+    _pendingResolutions[item.id] = future;
     try {
-      candidates = await _getAssetsCoalesced(start, end);
-    } catch (e) {
-      _log.error('Gallery query failed for media ${item.id}', error: e);
+      return await future;
+    } finally {
+      _pendingResolutions.remove(item.id);
+    }
+  }
+
+  /// Drops the shared gallery queries, so the next search sees the library
+  /// as it is now. Called when the user comes back from changing photo
+  /// access, since a changed limited selection keeps the same permission.
+  void forgetGalleryQueries() => _galleryQueryCache.clear();
+
+  /// The answer for a row whose earlier search gave up and is backing off.
+  /// That miss is evidence the photo is gone only if the search saw the
+  /// whole library, and it may not have: every build before this one cached
+  /// a miss under limited access, and the user may have narrowed access
+  /// since (spec 6.3). So it stands only under full access, read without
+  /// prompting; anything less is inconclusive. Only backed-off rows pay for
+  /// the read.
+  Future<ResolutionResult> _backedOff(MediaItem item) async {
+    final PhotoPermissionStatus permission;
+    try {
+      permission = await _photoPickerService.currentPermission();
+    } on Object catch (e, stackTrace) {
+      _log.error(
+        'Permission check failed for backed-off media ${item.id}',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return const ResolutionResult(status: ResolutionStatus.accessDenied);
+    }
+    return switch (permission) {
+      PhotoPermissionStatus.authorized => const ResolutionResult(
+        status: ResolutionStatus.unavailable,
+      ),
+      PhotoPermissionStatus.limited => const ResolutionResult(
+        status: ResolutionStatus.accessDenied,
+        limitedAccess: true,
+      ),
+      _ => const ResolutionResult(status: ResolutionStatus.accessDenied),
+    };
+  }
+
+  /// The permission gate and the metadata tiers: everything a search does
+  /// once the stored id has failed or there is none.
+  Future<ResolutionResult> _searchGallery(MediaItem item) async {
+    // A gallery query against a library the app cannot access yet returns
+    // zero candidates -- indistinguishable from "genuinely no matching
+    // photo" unless permission is checked directly. Skip the query (and,
+    // critically, skip caching an unresolved result) when permission isn't
+    // in place: caching would apply the 24h+ backoff to a transient,
+    // user-recoverable condition, leaving the item stuck as unavailable
+    // long after permission is granted.
+    //
+    // Both exits below report accessDenied rather than unavailable, which is
+    // what lets a caller tell "the gallery says no" apart from "the gallery
+    // would not answer". A caller that orphans rows on unavailable would
+    // otherwise mark the whole library missing the moment permission lapses.
+    //
+    // Read, never asked: this runs from thumbnail renders, and on a phone
+    // asking shows the OS prompt, which must come only from the picker or
+    // the "Allow full access" action (media sync program spec 6.3).
+    final PhotoPermissionStatus permission;
+    try {
+      permission = await _photoPickerService.currentPermission();
+    } on Object catch (e, stackTrace) {
+      // The read ultimately hits platform code; treat a platform-channel
+      // failure like any other gallery failure rather than letting it bubble
+      // out of resolveAssetId() and break a Riverpod provider watching it.
+      // Logged under the media category, with the exception, so a health
+      // report export shows why the row was inconclusive.
+      _log.error(
+        'Permission check failed for media ${item.id}',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return const ResolutionResult(status: ResolutionStatus.accessDenied);
+    }
+    if (permission != PhotoPermissionStatus.authorized &&
+        permission != PhotoPermissionStatus.limited) {
+      _log.info(
+        'Skipping gallery search for media ${item.id}: permission is $permission',
+      );
+      return const ResolutionResult(status: ResolutionStatus.accessDenied);
+    }
+
+    // Step 3: Search gallery by metadata (with query coalescing). The gallery
+    // API takes LOCAL bounds, so one narrow window is queried per reading the
+    // matchers below will compare against -- see [_galleryReadings]. Two
+    // +-5s windows keep each query cheap; spanning a single window across both
+    // would cover the whole UTC offset and pull in hours of unrelated assets.
+    const timeWindow = Duration(seconds: 5);
+    final byId = <String, AssetInfo>{};
+    for (final reading in _galleryReadings(item.takenAt)) {
+      try {
+        final found = await _getAssetsCoalesced(
+          reading.subtract(timeWindow),
+          reading.add(timeWindow),
+          permission,
+        );
+        for (final asset in found) {
+          byId[asset.id] = asset;
+        }
+      } on Object catch (e, stackTrace) {
+        // The gallery could not be consulted, which says nothing about the
+        // photo: unavailable would read as notFound on the device that
+        // linked it and orphan the row everywhere.
+        _log.error(
+          'Gallery query failed for media ${item.id}',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        return const ResolutionResult(status: ResolutionStatus.accessDenied);
+      }
+    }
+    final candidates = byId.values.toList();
+
+    // A limited selection hides photos the device does have (spec 6.3): a
+    // miss under it is not evidence of absence, and caching it would back
+    // off a photo the user can make visible in a moment.
+    final limited = permission == PhotoPermissionStatus.limited;
+    const limitedMiss = ResolutionResult(
+      status: ResolutionStatus.accessDenied,
+      limitedAccess: true,
+    );
+
+    if (candidates.isEmpty) {
+      if (limited) return limitedMiss;
+      await _cacheUnresolved(item.id);
       return const ResolutionResult(status: ResolutionStatus.unavailable);
     }
 
-    if (candidates.isEmpty) {
-      await _cacheUnresolved(item.id);
-      return const ResolutionResult(status: ResolutionStatus.unavailable);
+    // Tier 0: the iCloud identifier (media sync program spec 6.2). It names
+    // one photo on every device sharing the library, so it separates what
+    // metadata cannot (a burst pair shot in the same second), and it wins
+    // before any metadata tier.
+    final cloudMatch = await _matchByCloudIdentifier(item, candidates);
+    if (cloudMatch != null) {
+      await _cacheRepository.cacheResolution(
+        mediaId: item.id,
+        localAssetId: cloudMatch,
+        method: 'cloud_id',
+      );
+      _log.debug('Resolved via cloud identifier: $cloudMatch');
+      return ResolutionResult(
+        localAssetId: cloudMatch,
+        status: ResolutionStatus.resolved,
+      );
     }
 
     // Tier 1: filename + timestamp
@@ -156,35 +391,76 @@ class AssetResolutionService {
         localAssetId: tier1Match,
         method: 'filename_timestamp',
       );
-      _log.info('Resolved via filename+timestamp: $tier1Match');
+      _log.debug('Resolved via filename+timestamp: $tier1Match');
       return ResolutionResult(
         localAssetId: tier1Match,
         status: ResolutionStatus.resolved,
       );
     }
 
-    // Tier 2: timestamp + dimensions
-    final tier2Match = matchByTimestampAndDimensions(item, candidates);
-    if (tier2Match != null) {
+    // Tier 2: exact capture second + dimensions. This runs BEFORE the fuzzy
+    // window below because widening the window destroys the signal for an
+    // interval/burst sequence: frames shot every two seconds share their
+    // dimensions and carry no usable filename, so +-2s sees the neighbours and
+    // gives up, while the exact second identifies the frame outright. Capture
+    // timestamps survive an iCloud round-trip unchanged, so an exact hit is
+    // trustworthy even when the asset ID came from another device.
+    final exactMatch = matchByTimestampAndDimensions(
+      item,
+      candidates,
+      tolerance: Duration.zero,
+    );
+    if (exactMatch != null) {
       await _cacheRepository.cacheResolution(
         mediaId: item.id,
-        localAssetId: tier2Match,
-        method: 'timestamp_dimensions',
+        localAssetId: exactMatch,
+        method: 'exact_timestamp_dimensions',
       );
-      _log.info('Resolved via timestamp+dimensions: $tier2Match');
+      _log.debug('Resolved via exact timestamp+dimensions: $exactMatch');
       return ResolutionResult(
-        localAssetId: tier2Match,
+        localAssetId: exactMatch,
         status: ResolutionStatus.resolved,
       );
     }
 
-    // Tier 3: unresolved
+    // Tier 3: timestamp within +-2s + dimensions, for rows whose stored
+    // capture time drifted from the gallery's (re-imports, editors that
+    // rewrite EXIF).
+    final tier3Match = matchByTimestampAndDimensions(item, candidates);
+    if (tier3Match != null) {
+      await _cacheRepository.cacheResolution(
+        mediaId: item.id,
+        localAssetId: tier3Match,
+        method: 'timestamp_dimensions',
+      );
+      _log.debug('Resolved via timestamp+dimensions: $tier3Match');
+      return ResolutionResult(
+        localAssetId: tier3Match,
+        status: ResolutionStatus.resolved,
+      );
+    }
+
+    // Tier 4: unresolved
+    if (limited) return limitedMiss;
     await _cacheUnresolved(item.id);
     _log.info('Could not resolve media ${item.id} -- marked unresolved');
     return const ResolutionResult(status: ResolutionStatus.unavailable);
   }
 
+  /// The answer on a platform with no photo library to search: the stored id,
+  /// passed through unchanged. Deliberately not [ResolutionStatus.unavailable],
+  /// which is a positive "gone" finding a caller may orphan the row on, when
+  /// nothing was actually consulted.
+  ResolutionResult _withoutGallery(MediaItem item) => ResolutionResult(
+    localAssetId: item.platformAssetId,
+    status: ResolutionStatus.resolved,
+  );
+
   /// Verify that a platformAssetId actually loads on this device.
+  ///
+  /// Only used during cold resolution, where the answer decides whether to
+  /// fall through to a gallery search. It is deliberately NOT used to
+  /// re-prove an already-cached mapping -- see [resolveAssetId].
   Future<bool> _verifyAssetLoadable(String assetId) async {
     try {
       final thumbnail = await _photoPickerService.getThumbnail(
@@ -195,6 +471,71 @@ class AssetResolutionService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// The one candidate whose iCloud identifier is [item]'s, or null: when
+  /// the row has none (null, or empty after a relink that found none),
+  /// when there is no source, when the lookup fails, or when the match is
+  /// not unique. The candidates are the ones the metadata tiers already
+  /// fetched for the photo's time window, looked up in one batch; PhotoKit
+  /// has no cloud-to-local lookup, so this maps them forward.
+  Future<String?> _matchByCloudIdentifier(
+    MediaItem item,
+    List<AssetInfo> candidates,
+  ) async {
+    final cloudId = item.cloudAssetId;
+    final source = _cloudIdentifiers;
+    if (source == null ||
+        !source.isSupported ||
+        cloudId == null ||
+        cloudId.isEmpty) {
+      return null;
+    }
+    final Map<String, String> ids;
+    try {
+      ids = await _cloudIdsCoalesced(source, [
+        for (final c in candidates) c.id,
+      ]);
+    } on Object catch (e) {
+      _log.warning(
+        'Cloud identifier lookup failed for media ${item.id}; '
+        'matching by metadata',
+        error: e,
+      );
+      return null;
+    }
+    final matches = [
+      for (final c in candidates)
+        if (ids[c.id] == cloudId) c.id,
+    ];
+    return matches.length == 1 ? matches.single : null;
+  }
+
+  /// [source]'s cloud ids for [ids], shared with any lookup of the same set
+  /// made in the last 30 seconds or still in flight. A lookup that fails is
+  /// dropped, so the next row asks again.
+  Future<Map<String, String>> _cloudIdsCoalesced(
+    CloudIdentifierSource source,
+    List<String> ids,
+  ) {
+    final key = ([...ids]..sort()).join('|');
+    _cloudIdLookups.removeWhere((_, lookup) => lookup.isExpired);
+    final cached = _cloudIdLookups[key];
+    if (cached != null) return cached.result;
+    final result = source.cloudIdentifiers(ids);
+    _cloudIdLookups[key] = _CloudIdLookup(
+      result: result,
+      createdAt: DateTime.now(),
+    );
+    result.then<void>(
+      (_) {},
+      onError: (Object _) {
+        if (identical(_cloudIdLookups[key]?.result, result)) {
+          _cloudIdLookups.remove(key);
+        }
+      },
+    );
+    return result;
   }
 
   Future<void> _cacheUnresolved(String mediaId) async {
@@ -212,33 +553,64 @@ class AssetResolutionService {
     }
   }
 
+  /// The 1-minute local bucket enclosing [start]..[end], used both as the
+  /// gallery query window and as the coalescing cache key.
+  ///
+  /// **`toLocal()` is the load-bearing part.** `DateTime(y, m, d, h, min)`
+  /// always builds a LOCAL instant out of whatever calendar fields it is
+  /// handed, so feeding it a UTC `DateTime` silently reinterprets those UTC
+  /// fields as local -- shifting the window by the whole UTC offset. That is
+  /// exactly the transformation [_galleryReadings] applies to produce its
+  /// *restated* reading, so without this conversion both readings collapsed
+  /// onto the same bucket and the RAW-instant reading was never queried at
+  /// all. On this developer's library that silently stranded 112 of 116
+  /// unresolvable rows: every one had exactly one matching asset sitting in
+  /// the Photos library at its raw capture second, 4-5 hours outside the only
+  /// window ever searched.
+  ///
+  /// Note the bug is invisible at UTC, where the two readings coincide -- see
+  /// the tests for what that means for coverage.
+  static (DateTime, DateTime) galleryQueryBucket(DateTime start, DateTime end) {
+    final localStart = start.toLocal();
+    final localEnd = end.toLocal();
+    return (
+      DateTime(
+        localStart.year,
+        localStart.month,
+        localStart.day,
+        localStart.hour,
+        localStart.minute,
+      ),
+      // minute + 1 so the bucket encloses `end`; Dart normalises the overflow.
+      DateTime(
+        localEnd.year,
+        localEnd.month,
+        localEnd.day,
+        localEnd.hour,
+        localEnd.minute + 1,
+      ),
+    );
+  }
+
   /// Get gallery assets for a time range, coalescing concurrent queries.
   ///
   /// When opening a dive with many photos, all providers fire near-simultaneously
   /// with overlapping time windows. This method caches the gallery query results
   /// for 30 seconds so only one actual gallery scan is performed per time window.
+  ///
+  /// Keyed by [permission] too: a query taken under full access shows photos
+  /// a limited selection hides, and answering a limited search with it would
+  /// match a photo this device can no longer read (spec 6.3). A change of
+  /// selection under the same permission goes through [forgetGalleryQueries].
   Future<List<AssetInfo>> _getAssetsCoalesced(
     DateTime start,
     DateTime end,
+    PhotoPermissionStatus permission,
   ) async {
-    // Round to 1-minute buckets to maximize cache hits across photos
-    // from the same dive (whose +-5s windows will overlap heavily)
-    final bucketStart = DateTime(
-      start.year,
-      start.month,
-      start.day,
-      start.hour,
-      start.minute,
-    );
-    final bucketEnd = DateTime(
-      end.year,
-      end.month,
-      end.day,
-      end.hour,
-      end.minute + 1,
-    );
+    final (bucketStart, bucketEnd) = galleryQueryBucket(start, end);
     final cacheKey =
-        '${bucketStart.millisecondsSinceEpoch}~${bucketEnd.millisecondsSinceEpoch}';
+        '${permission.name}:${bucketStart.millisecondsSinceEpoch}~'
+        '${bucketEnd.millisecondsSinceEpoch}';
 
     // Check for a valid cached result
     final cached = _galleryQueryCache[cacheKey];
@@ -264,36 +636,132 @@ class AssetResolutionService {
 
   /// Tier 1: Match by original filename and timestamp within +/-5 seconds.
   /// Returns the matching asset ID, or null if zero or multiple matches.
+  ///
+  /// An EMPTY filename counts as absent, on either side. photo_manager's
+  /// darwin layer serializes an asset title as "" (not null) unless
+  /// FilterOption.needTitle is set, and imports store that "" verbatim, so
+  /// without this guard a null-only check lets '' == '' satisfy the filename
+  /// test and quietly degrades this tier into a timestamp-only match that can
+  /// bind the wrong asset.
   static String? matchByFilenameAndTimestamp(
     MediaItem item,
     List<AssetInfo> candidates,
   ) {
-    if (item.originalFilename == null) return null;
+    final filename = item.originalFilename;
+    if (filename == null || filename.isEmpty) return null;
 
+    final readings = _galleryReadings(item.takenAt);
     final matches = candidates.where((c) {
-      if (c.filename != item.originalFilename) return false;
-      final diff = c.createDateTime.difference(item.takenAt).abs();
-      return diff <= const Duration(seconds: 5);
+      final candidateName = c.filename;
+      if (candidateName == null || candidateName.isEmpty) return false;
+      if (candidateName != filename) return false;
+      return readings.any(
+        (r) =>
+            c.createDateTime.difference(r).abs() <= const Duration(seconds: 5),
+      );
     }).toList();
 
     return matches.length == 1 ? matches.first.id : null;
   }
 
-  /// Tier 2: Match by dimensions and timestamp within +/-2 seconds.
+  /// Tier 2/3: Match by dimensions and timestamp within [tolerance].
   /// Returns the matching asset ID, or null if zero or multiple matches.
+  ///
+  /// [tolerance] is caller-supplied because the two useful widths trade off
+  /// against each other. [Duration.zero] demands the exact capture second,
+  /// which is what separates the frames of an interval/burst sequence
+  /// (identical dimensions, no usable filename, neighbours a second or two
+  /// away); the default +-2s absorbs clock drift between the stored row and
+  /// the gallery but sees those neighbours and refuses to guess.
   static String? matchByTimestampAndDimensions(
     MediaItem item,
-    List<AssetInfo> candidates,
-  ) {
-    if (item.width == null || item.height == null) return null;
-
-    final matches = candidates.where((c) {
-      if (c.width != item.width || c.height != item.height) return false;
-      final diff = c.createDateTime.difference(item.takenAt).abs();
-      return diff <= const Duration(seconds: 2);
-    }).toList();
+    List<AssetInfo> candidates, {
+    Duration tolerance = const Duration(seconds: 2),
+  }) {
+    final matches = candidates
+        .where(
+          (c) => _matchesTimestampAndDimensions(item, c, tolerance: tolerance),
+        )
+        .toList();
 
     return matches.length == 1 ? matches.first.id : null;
+  }
+
+  /// The capture seconds (whole seconds since the epoch) a gallery asset of
+  /// [item] could carry on this device: one per reading of its stored time,
+  /// see [_galleryReadings]. An asset matches [item]'s capture second exactly
+  /// when its `createDateTime` falls in one of these.
+  static Set<int> captureSecondsOf(MediaItem item) => {
+    for (final r in _galleryReadings(item.takenAt))
+      _truncateToSecond(r).millisecondsSinceEpoch ~/ 1000,
+  };
+
+  /// Whether [candidate] has [item]'s dimensions and was captured within
+  /// [tolerance] of either reading of its stored time (see
+  /// [_galleryReadings]): the per-candidate test behind
+  /// [matchByTimestampAndDimensions].
+  static bool _matchesTimestampAndDimensions(
+    MediaItem item,
+    AssetInfo candidate, {
+    Duration tolerance = const Duration(seconds: 2),
+  }) {
+    if (item.width == null || item.height == null) return false;
+    if (candidate.width != item.width || candidate.height != item.height) {
+      return false;
+    }
+    final candidateSecond = _truncateToSecond(candidate.createDateTime);
+    return _galleryReadings(item.takenAt).any(
+      (r) =>
+          candidateSecond.difference(_truncateToSecond(r)).abs() <= tolerance,
+    );
+  }
+
+  /// The readings of a stored [MediaItem.takenAt] that could line up with a
+  /// gallery candidate's LOCAL [AssetInfo.createDateTime].
+  ///
+  /// `taken_at` is meant to hold wall-clock-as-UTC (the same convention as dive
+  /// entry times), so restating its calendar fields as local is the correct
+  /// reading and is listed first.
+  ///
+  /// Rows written by the import path before it normalised, however, hold the
+  /// INSTANT of a local [DateTime]; [MediaRepository] hydrates every row as UTC
+  /// regardless, so those rows arrive with their fields shifted by the offset
+  /// that was in force at import and it is the RAW value that already lines up
+  /// with a candidate's instant. Nothing in the schema distinguishes the two
+  /// populations, so both readings are offered rather than guessing: comparing
+  /// only the restated one would make every photo linked before the fix
+  /// unresolvable the moment its `platformAssetId` went stale.
+  ///
+  /// Callers accept a candidate matching EITHER reading, and the tiers keep
+  /// refusing whenever more than one candidate qualifies -- so a library that
+  /// happens to hold a second plausible asset exactly one UTC offset away is
+  /// declined rather than mis-bound.
+  ///
+  /// On a host running at UTC the two coincide and the list collapses to one.
+  static List<DateTime> _galleryReadings(DateTime takenAt) {
+    final restated = TripMediaScanner.wallClockUtcToLocal(takenAt);
+    if (restated.isAtSameMomentAs(takenAt)) return [restated];
+    return [restated, takenAt];
+  }
+
+  /// Both sides are compared at second granularity so [Duration.zero] means
+  /// "the same capture second" rather than "the same instant".
+  ///
+  /// The two sides do not carry the same precision: photo_manager derives
+  /// createDateTime from an integer `createDateSecond`, so a gallery candidate
+  /// can never have a sub-second component, while a stored takenAt is epoch
+  /// MILLISECONDS and could acquire one from a non-gallery import path. Without
+  /// this, such a row could never satisfy the exact tier - no candidate would
+  /// be reachable - and it would silently fall through to the ambiguous fuzzy
+  /// window that this tier exists to bypass.
+  static DateTime _truncateToSecond(DateTime t) {
+    final micros = t.microsecondsSinceEpoch;
+    // Dart's % is non-negative for a positive divisor, so this floors
+    // correctly on both sides of the epoch.
+    return DateTime.fromMicrosecondsSinceEpoch(
+      micros - (micros % Duration.microsecondsPerSecond),
+      isUtc: t.isUtc,
+    );
   }
 }
 
@@ -309,4 +777,15 @@ class _GalleryQueryCacheEntry {
   _GalleryQueryCacheEntry({required this.results, required this.createdAt});
 
   bool get isExpired => DateTime.now().isAfter(createdAt.add(_ttl));
+}
+
+/// One shared cloud id lookup, kept as long as a gallery query result.
+class _CloudIdLookup {
+  final Future<Map<String, String>> result;
+  final DateTime createdAt;
+
+  _CloudIdLookup({required this.result, required this.createdAt});
+
+  bool get isExpired =>
+      DateTime.now().isAfter(createdAt.add(_GalleryQueryCacheEntry._ttl));
 }

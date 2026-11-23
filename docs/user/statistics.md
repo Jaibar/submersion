@@ -1,0 +1,324 @@
+# Insights and Records
+
+Insights turns your logged dives into numbers and charts: an Overview of your
+whole diving career, focused dashboards for deeper analysis, observations about
+how your diving is changing, and a Dive Records page for your personal bests.
+Everything is computed from the dives already in your log.
+
+> [!NOTE]
+> **Where to find it:** **Insights** in the navigation. On a phone you land on
+> the list of dashboards; on a tablet or desktop the list sits beside the
+> selected dashboard. The trophy button in the top bar opens **Dive Records**.
+
+<!-- screenshot: images/statistics/overview.png: insights overview -->
+
+## Choosing which dives count
+
+Insights covers the active diver profile's dives (see
+[Diver Profile & Multi-Diver](diver-profile.md)). To narrow it down, tap
+**Filter insights** and choose any of the filters the dive list offers, such as
+a date range, a site, a buddy, a trip or a tag. While a filter is on, a bar at
+the top shows how many dives it matches, with **Clear filter** beside it.
+
+The Insights filter is separate from the dive list's: filtering Insights does
+not change what the dive list or the Dashboard shows, and the reverse.
+
+Two things ignore the filter:
+
+- **Observations** always look at your whole log, because they compare recent
+  dives with older ones.
+- Dives you have left out of statistics (see
+  [Logging Dives](dive-logging.md)) never count. The Overview says how many
+  are left out.
+
+> [!TIP]
+> The more you fill in when you log a dive (depth, time, water temperature,
+> visibility, gas, buddies, equipment), the more of these dashboards have
+> something to show. An empty card means that detail has not been logged yet.
+
+## Opening the dives behind a number
+
+When a number looks odd, you can open the dives that make it up. Most charts
+that count dives by category work this way: depth ranges, dive types, days,
+months and years, water type, the weather and water movement cards, gas mixes,
+tank configurations, solo and buddy dives, and more.
+
+- **Bars and pie slices** show their number first. Tap one to mark it, and a
+  strip under the chart gives its count and **View dives**. Tap the mark again
+  to clear it. This keeps a tap for reading a number from taking you away from
+  the chart.
+- **Rows** open straight away, because they already show their number. That
+  covers pie legends, horizontal bars and ranked lists of countries and regions.
+  A chevron marks anything that opens this way.
+- **"Based on 42 of 310 dives"** under a Conditions card opens the dives with
+  nothing recorded for that card.
+- **The Deco and No deco tiles** open their dives too, as does the line saying
+  how many dives have no deco data. The deco rate does not, because it is a
+  share rather than a count.
+
+The dive list opens with one chip naming what you opened, such as
+`Dives by Day of Week: Sat (142)`, and holds exactly the dives the number counted
+under your Insights filter. Dives excluded from statistics stay out. The list is
+a snapshot: if you edit a dive so that it no longer belongs, it stays in the
+list until you go back, and the chart then shows the new number. Back returns
+you to Insights, and removing the chip shows all your dives.
+
+Time at depth does not open dives, because it shows time rather than
+counts. Its bands are 10 m or 30 ft wide, following your depth unit, and run
+down to the deepest band you have logged time in, with a final open band such
+as 70+ m when there are more than eight. Once the largest bar passes ten hours
+the chart reads in hours instead of minutes. Rankings of buddies, sites, gear
+and species open that item's own page.
+
+## Overview
+
+The **Overview** is the first item in the list.
+
+### Observations
+
+At the top of the Overview, **Observations** point out what is changing or worth
+noticing, for example:
+
+- trends in your SAC, RMV, depth, dive time, weight or how often you dive
+- milestones in dive count and hours
+- a new deepest or longest dive, a new country, a new species
+- a long gap since your last dive
+- your favourite site, a regular buddy, your busiest month
+- fast ascents
+
+**See all** opens the full list. From an observation's menu you can
+**Dismiss** it, or choose **Don't show this kind** to stop that kind of
+observation; **Muted kinds** lists what you have turned off and lets you
+**Unmute** it.
+
+### Career totals
+
+| Card | What it shows |
+|------|---------------|
+| **Total Dives** | Your dive count |
+| **Total Time** | Your time underwater |
+| **Max Depth** | The deepest you have been |
+| **Avg Depth** | Your average maximum depth |
+| **Avg Dives / Month** and **Avg Dives / Year** | How often you dive |
+| **Dives This Year** | Dives since 1 January |
+| **Sites Visited** | Distinct [dive sites](dive-sites.md) |
+| **Avg Water Temp** | Your average water temperature |
+
+If you entered prior experience on your
+[Diver Profile](diver-profile.md), **Total Dives** and **Total Time** include
+it and show the split, for example "120 logged + 380 prior". A "Diving since"
+line appears when you set the year you started.
+
+**Total Time** adds up runtime, the time from entry to exit. A dive logged with
+only a bottom time counts toward **Total Dives** but adds nothing to it, because
+bottom time is not a runtime. To count those dives, fill in their runtime, or
+enter the hours as prior experience.
+
+### Personal records, sites and distributions
+
+- **Personal Records:** your first, deepest, longest, coldest and warmest dives.
+  Tap one to open the dive.
+- **Most Visited Sites:** your top sites by number of dives.
+- **Distributions:** your dives by depth range and by dive type.
+
+## The dashboards
+
+Each dashboard is a set of cards, most of them interactive charts. Trend charts
+plot **Every dive** or a **Weekly average** or **Monthly average**, can add a
+rolling average and an overall trend line, and let you choose the range shown.
+
+| Dashboard | What you will find |
+|-----------|--------------------|
+| **Connections** | A map of how your buddies, sites and gear link through your dives |
+| **Air Consumption** | SAC or RMV over time, gas mixes, consumption by cylinder role, rebreather gas use, and your best and highest consumption |
+| **Progression** | Maximum depth and bottom time over time, dives per year, dives by suit thickness, and your cumulative dive count |
+| **Dive focus** | A chosen group of dives and what they have in common (see below) |
+| **Conditions** | Visibility, water type, site types, entry method, and water temperature over time, by month and by band |
+| **Social** | Solo versus buddy dives, your top buddies, and your top dive centers |
+| **Geographic** | Dives by country, by region and by trip |
+| **Species** | Species spotted, your most common sightings, and the sites with the most variety |
+| **Time Patterns** | Dives by day of week, time of day and month, the calendar days you have dived on, and your surface intervals |
+| **Equipment** | Your most used gear, gear exposure, condition findings, reported issues, and your weight trend |
+| **Profile Analysis** | Average ascent and descent rates, time at depth ranges, and how many of your dives needed decompression stops |
+
+> [!NOTE]
+> **SAC** (surface air consumption) and **RMV** (respiratory minute volume) both
+> measure how fast you breathe, scaled to the surface so dives at different
+> depths compare. SAC is in pressure per minute, RMV in volume per minute. Lower
+> is more efficient. See the [Glossary](glossary.md).
+>
+> CCR and SCR dives are left out of the SAC and RMV averages, trends and records
+> automatically, as gauge dives are. On a rebreather the cylinders do not empty
+> as you breathe, so their pressure drop is not a breathing rate, and the dive
+> shows no SAC or RMV of its own. Rebreather dives still count toward gas
+> mixes and gas used.
+>
+> CCR dives have their own **Rebreather gas use** card instead, which appears
+> once your dives have a rate to show. It charts your O₂ and diluent use in
+> litres per minute on the loop, with no depth correction and leaving out
+> bailout time. To keep a dive out of it, such as one with O₂ flushes, tick
+> "exclude from gas statistics" on the dive.
+
+### Consumption by cylinder role
+
+The **Consumption by cylinder role** card draws one line per kind of cylinder:
+**Bottom gas**, **Stage**, **Deco**, **Pony** and **Bailout**, each only once
+you have a dive with a rate for it. Each dot is one dive, and the tiles above
+the chart give each line's average. Tap a dot to open the dive.
+
+- Each rate covers only the time you breathed that cylinder and the depth you
+  were at then, so a deco gas breathed for ten minutes at 6 m reads as a deco
+  rate, not as a share of the whole dive. Where only one cylinder of a kind
+  was breathed, it is the figure the dive shows for that cylinder, to within a
+  few percent.
+- **Bottom gas** is your primary gas however you wear it: back gas, a twin set,
+  or both cylinders of a sidemount pair together.
+- The gas switches on a dive say when each cylinder was breathed. A dive where
+  a stage, deco, pony or bailout cylinder lost gas with no gas switch onto it
+  is left out of every line, since nothing says when that gas was used, and a
+  line on the card counts those dives. Add the missing switch on the dive to
+  bring it back.
+- A cylinder you only carried can still read a little lower at the end, as the
+  fill cools to the water. A drop of up to 15 bar (about 220 psi), or 7% of the
+  start pressure on a fuller fill, counts as carried, so the dive stays in.
+- A **Suit Inflation** cylinder is on no line and never leaves a dive out,
+  however much gas it lost: it inflates your drysuit, it is not breathed.
+- Open-circuit lines leave out CCR and SCR dives. A CCR dive counts only on the
+  **Bailout** line, with the open-circuit rate while you were bailed out. The
+  same rule applies there: a bailout, stage, deco or pony cylinder that lost
+  gas with no gas switch onto it leaves the dive out, and the card counts it.
+- The SAC on this card follows the gas model in your settings, as the dive's own
+  cylinders do, so it can differ by a few percent from the SAC trend above,
+  which uses the plain pressure drop.
+
+The dive planner's "from your log" breathing rate is your **Bottom gas**
+average from this card.
+
+<!-- screenshot: images/statistics/gas-sac.png: air consumption dashboard -->
+
+### Connections
+
+Connections draws how your buddies, sites, trips, gear, species and dive
+centers link through the dives they share. **Map** shows a whole kind-to-kind
+map; **Around** centres on one entity and what it links to.
+
+**Views.** The view button in the top bar switches between:
+
+- **Graph**: the map itself.
+- **Pairs**: one row per connection, with the dives the two share and the
+  last and first shared dive.
+- **Entities**: one row per entity, with its dives, how many entities it links
+  to and its strongest connection.
+- **Matrix**: a grid of shared dives between every pair. On a map of two kinds
+  (buddies and sites, for example) one kind runs down the side and the other
+  across the top.
+
+Tap a column heading to sort a table, and again to reverse it. Tapping a row,
+a cell or a heading selects that entity or pair, just as tapping the graph does.
+
+**Layouts.** In the Graph view, the **Display** section of the **View** tab
+chooses how nodes are arranged:
+
+| Layout | Arrangement |
+|--------|-------------|
+| **Web** | Linked entities pull together (Map only) |
+| **Radial** | The centre in the middle, the rest in rings (Around only) |
+| **Circle** | Every entity on one ring, grouped by kind |
+| **Columns** | One column per kind, busiest at the top |
+| **Clusters** | Each group of entities that dive together in its own cluster |
+| **Timeline** | Left to right by the year of each entity's first dive, one row per kind |
+
+**Display options.** **Labels** shows names automatically as you zoom, on
+every node, or not at all. **Node size** sizes each node by its dives or draws
+them all the same. **Lines** draws connections by strength, all thin, or only
+for what you select. **Hide unconnected** leaves out entities with no link on
+the map. **Spacing** spreads the map out or packs it tighter. Connections
+remembers these on this device.
+
+**Moving a node.** With a mouse or trackpad, press on a node and drag it. On a
+touch screen, press and hold a node, then drag. A moved node stays where you
+put it until the map changes; **Lay out again** puts every node back.
+
+### Dive focus
+
+Dive focus shows what a group of your dives has in common. Build the group as
+a sentence: "Show the **10** dives with the **best** **RMV**", or "Show the
+dives with **RMV** **above** **15 L/min**". Fourteen metrics are available,
+grouped as Gas (RMV, SAC, gas used), Depth and time (max depth, average
+depth, bottom time, surface interval), Conditions (water temp, air temp,
+visibility, altitude), Exposure (CNS at end, OTU) and Kit (weight). Gas
+metrics offer **best** and **worst**; the others offer **lowest** and
+**highest**. A threshold starts at your average for that metric.
+
+**What stands out** lists the strongest differences between the group and
+every dive that has the value: "All 10 were boat entries (64% of all your
+dives)", "Average depth 2.1 m shallower (11.3 m vs 13.4 m)". The chart
+below marks the group in the accent colour and draws your threshold as a
+dashed line. **Full comparison** gives every factor with the group's value,
+the value across all dives and the difference; rows that say nothing fold
+behind **Show more factors**. **The dives** lists the group, five at a time,
+and opens any dive you tap. Dive focus needs at least three dives to compare.
+
+Percentages for a factor such as entry method or water type count only the
+dives that have that factor recorded, because a dive with nothing recorded
+is unknown rather than a dive with some other value. When some dives are
+missing it, Dive focus says so: "All 3 were Boat (60% of the 5 of 10 dives
+with this recorded)", and **Full comparison** shows "5 of 10 dives" under the
+percentages.
+
+### Calendar days
+
+Calendar days, on Time Patterns, counts your dives on each date of the year
+across every year you have logged: twelve rows for the months, 31 columns for
+the days. The more strongly coloured a cell, the more dives on that date; a
+plain grey cell showing 0 is a date you have never dived on, and dates that do
+not exist (30 February) show an **×**. The headline tells you how many of the 366 possible dates you have
+covered, 29 February included, and names your busiest month and busiest day
+of the month, which are also outlined in the totals. Each row ends with its
+month's total, each column with that day's total, and the corner holds the
+grand total.
+
+Tap a cell to open the dives logged on that date in every year, under your
+Insights filter. When the year is wider than the card (on a phone, or beside
+the list on a desktop) the days scroll sideways under a scrollbar while the
+month names stay put.
+
+A dive counts on the date it was logged, by the dive's own clock, so a night
+dive at 23:30 on 6 May counts on 6 May wherever you view it. Dives excluded
+from statistics are not counted, and the list a cell opens leaves them out too.
+
+### Profile Analysis
+
+Profile Analysis and Air Consumption work best with dives downloaded from a
+[dive computer](dive-computer.md): detailed depth and pressure samples give far
+better ascent-rate, time-at-depth and consumption figures than hand-entered
+averages. Dives with no recorded or computable deco data are left out of the
+deco rate, and the card says how many.
+
+## Dive Records
+
+Tap the trophy button at the top of Insights to open **Dive Records**: your
+personal bests, each as a card that opens the dive.
+
+| Record | The dive with the |
+|--------|-------------------|
+| **Deepest Dive** | greatest maximum depth |
+| **Shallowest Dive** | smallest maximum depth |
+| **Longest Dive** | longest runtime |
+| **Coldest Dive** | lowest water temperature |
+| **Warmest Dive** | highest water temperature |
+
+Under **Milestones** are your **First Dive** and **Most Recent Dive**. Each card
+shows the site, the date and the dive number. Records follow the Insights
+filter, so you can see, for example, your deepest dive on one trip. Tap
+**Refresh records** to recompute them.
+
+<!-- screenshot: images/statistics/records.png: personal records -->
+
+## See also
+
+- [The Dashboard](dashboard.md): your home screen and its status chips
+- [Diver Profile & Multi-Diver](diver-profile.md): prior experience for complete career totals
+- [Dive Profiles & Deco](dive-profiles.md): the depth data behind Profile Analysis
+- [Equipment](equipment.md): exposure and condition findings
+- [Glossary](glossary.md): SAC, RMV, deco and other terms

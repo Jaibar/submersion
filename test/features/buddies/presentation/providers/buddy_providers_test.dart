@@ -1,0 +1,786 @@
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/database/database.dart' as db;
+import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/database_service.dart';
+
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../../../helpers/test_database.dart';
+import '../../../../helpers/wait_until.dart';
+
+Buddy _makeBuddy({
+  String id = '',
+  String name = 'Test Buddy',
+  String? diverId,
+}) {
+  final now = DateTime(2024);
+  return Buddy(
+    id: id,
+    name: name,
+    diverId: diverId,
+    createdAt: now,
+    updatedAt: now,
+  );
+}
+
+BuddyWithDiveCount _withCount(
+  String name, {
+  int diveCount = 0,
+  bool isFavorite = false,
+  DateTime? lastDiveAt,
+}) {
+  return BuddyWithDiveCount(
+    buddy: _makeBuddy(id: name, name: name).copyWith(isFavorite: isFavorite),
+    diveCount: diveCount,
+    lastDiveAt: lastDiveAt,
+  );
+}
+
+/// Inserts a dive row directly into the `dives` table, mirroring a sync apply
+/// that writes rows without going through any list notifier. This fires the
+/// `dives` table-change tick that count-aware providers subscribe to.
+Future<void> _insertDive(db.AppDatabase database, {required String id}) async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  await database
+      .into(database.dives)
+      .insert(
+        db.DivesCompanion(
+          id: Value(id),
+          diveDateTime: Value(now),
+          createdAt: Value(now),
+          updatedAt: Value(now),
+        ),
+      );
+}
+
+/// Like [_insertDive] but with a caller-chosen dive date, for ordering tests.
+Future<void> _insertDiveAt(
+  db.AppDatabase database, {
+  required String id,
+  required DateTime diveDateTime,
+}) async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  await database
+      .into(database.dives)
+      .insert(
+        db.DivesCompanion(
+          id: Value(id),
+          diveDateTime: Value(diveDateTime.millisecondsSinceEpoch),
+          createdAt: Value(now),
+          updatedAt: Value(now),
+        ),
+      );
+}
+
+void main() {
+  late SharedPreferences prefs;
+  late BuddyRepository buddyRepo;
+  late DiverRepository diverRepo;
+  late db.AppDatabase database;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    await setUpTestDatabase();
+    buddyRepo = BuddyRepository();
+    diverRepo = DiverRepository();
+    database = DatabaseService.instance.database;
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  ProviderContainer makeContainer() {
+    return ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+  }
+
+  Future<Diver> seedCurrentDiver() async {
+    final diver = await diverRepo.createDiver(
+      Diver(
+        id: '',
+        name: 'D',
+        isDefault: true,
+        createdAt: DateTime(2024),
+        updatedAt: DateTime(2024),
+      ),
+    );
+    await prefs.setString(currentDiverIdKey, diver.id);
+    return diver;
+  }
+
+  group('allBuddiesProvider', () {
+    test('auto-refreshes after a buddy is written directly to the DB '
+        '(sync scenario)', () async {
+      final diver = await seedCurrentDiver();
+
+      final container = makeContainer();
+      addTearDown(container.dispose);
+
+      // An active listener keeps the provider (and its buddies table-change
+      // subscription) alive, mirroring a widget that watches the list.
+      final sub = container.listen(allBuddiesProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      expect(await container.read(allBuddiesProvider.future), isEmpty);
+
+      // A sync applies a remote buddy straight to the DB (no notifier
+      // mutation). The watchBuddiesChanges tick must invalidate the provider
+      // so the new row surfaces.
+      await buddyRepo.createBuddy(
+        _makeBuddy(name: 'Synced Buddy', diverId: diver.id),
+      );
+
+      var names = <String>[];
+      for (var i = 0; i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        names = (await container.read(
+          allBuddiesProvider.future,
+        )).map((b) => b.name).toList();
+        if (names.contains('Synced Buddy')) break;
+      }
+
+      expect(
+        names,
+        contains('Synced Buddy'),
+        reason:
+            'allBuddiesProvider should auto-refresh after a direct table '
+            'write without any manual invalidation',
+      );
+    });
+  });
+
+  group('allBuddiesWithDiveCountProvider', () {
+    test(
+      'auto-refreshes on both buddies and dives table writes (sync scenario)',
+      () async {
+        final diver = await seedCurrentDiver();
+
+        final container = makeContainer();
+        addTearDown(container.dispose);
+
+        // Keep the provider alive so both its buddies and dives table-change
+        // subscriptions stay open.
+        final sub = container.listen(
+          allBuddiesWithDiveCountProvider,
+          (_, _) {},
+        );
+        addTearDown(sub.close);
+
+        expect(
+          await container.read(allBuddiesWithDiveCountProvider.future),
+          isEmpty,
+        );
+
+        // Buddies-table tick: a synced buddy applied straight to the DB.
+        await buddyRepo.createBuddy(
+          _makeBuddy(name: 'Counted Buddy', diverId: diver.id),
+        );
+
+        // Dives-table tick: a synced dive applied straight to the DB exercises
+        // the separate dives subscription that also invalidates this provider.
+        await _insertDive(database, id: 'count-dive-1');
+
+        var names = <String>[];
+        for (var i = 0; i < 50; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          names = (await container.read(
+            allBuddiesWithDiveCountProvider.future,
+          )).map((b) => b.buddy.name).toList();
+          if (names.contains('Counted Buddy')) break;
+        }
+
+        expect(
+          names,
+          contains('Counted Buddy'),
+          reason:
+              'allBuddiesWithDiveCountProvider should auto-refresh after '
+              'direct buddies/dives table writes',
+        );
+      },
+    );
+  });
+
+  group('buddySearchWithDiveCountProvider (issue #2084)', () {
+    test('auto-refreshes on a dive_buddies-only write, e.g. a synced buddy '
+        'link that never restamps the parent dive (#1769/#1915)', () async {
+      final diver = await seedCurrentDiver();
+      final buddy = await buddyRepo.createBuddy(
+        _makeBuddy(name: 'Umberto', diverId: diver.id),
+      );
+      await _insertDive(database, id: 'shared-dive-1');
+
+      final container = makeContainer();
+      addTearDown(container.dispose);
+
+      // Keep the search family instance alive, mirroring the "Add buddy"
+      // picker sheet staying open while the search query does not change.
+      final sub = container.listen(
+        buddySearchWithDiveCountProvider('umb'),
+        (_, _) {},
+      );
+      addTearDown(sub.close);
+
+      var results = await container.read(
+        buddySearchWithDiveCountProvider('umb').future,
+      );
+      expect(results.single.diveCount, 0);
+
+      // A direct dive_buddies insert, not buddyRepo.addBuddyToDive, since
+      // that also restamps `dives` and would pass even against the old,
+      // buggy provider that watched only `dives` and `buddies`.
+      await database
+          .into(database.diveBuddies)
+          .insert(
+            db.DiveBuddiesCompanion(
+              id: const Value('search-link-1'),
+              diveId: const Value('shared-dive-1'),
+              buddyId: Value(buddy.id),
+              role: const Value(DiveRole.buddyId),
+              createdAt: Value(DateTime.now().millisecondsSinceEpoch),
+            ),
+          );
+
+      await waitUntil(() async {
+        results = await container.read(
+          buddySearchWithDiveCountProvider('umb').future,
+        );
+        return results.single.diveCount == 1;
+      });
+    });
+  });
+
+  group('buddyStatsProvider / diveIdsForBuddyProvider (issue #2084)', () {
+    test('both auto-refresh on a dive_buddies-only write, e.g. a synced buddy '
+        'link that never restamps the parent dive (#1769/#1915)', () async {
+      final diver = await seedCurrentDiver();
+      final buddy = await buddyRepo.createBuddy(
+        _makeBuddy(name: 'Stats Buddy', diverId: diver.id),
+      );
+      await _insertDive(database, id: 'stats-dive-1');
+
+      final container = makeContainer();
+      addTearDown(container.dispose);
+
+      final statsSub = container.listen(
+        buddyStatsProvider(buddy.id),
+        (_, _) {},
+      );
+      addTearDown(statsSub.close);
+      final idsSub = container.listen(
+        diveIdsForBuddyProvider(buddy.id),
+        (_, _) {},
+      );
+      addTearDown(idsSub.close);
+
+      expect(
+        (await container.read(buddyStatsProvider(buddy.id).future)).totalDives,
+        0,
+      );
+      expect(
+        await container.read(diveIdsForBuddyProvider(buddy.id).future),
+        isEmpty,
+      );
+
+      // A sync pull applies a remote buddy link straight to dive_buddies
+      // and deliberately never restamps the parent dive row (#1769), so
+      // this -- unlike buddyRepo.addBuddyToDive, which also touches
+      // `dives` -- is the write that actually exercises the old
+      // watchDivesChanges()-only subscription's blind spot.
+      await database
+          .into(database.diveBuddies)
+          .insert(
+            db.DiveBuddiesCompanion(
+              id: const Value('link-1'),
+              diveId: const Value('stats-dive-1'),
+              buddyId: Value(buddy.id),
+              role: const Value(DiveRole.buddyId),
+              createdAt: Value(DateTime.now().millisecondsSinceEpoch),
+            ),
+          );
+
+      await waitUntil(() async {
+        final totalDives = (await container.read(
+          buddyStatsProvider(buddy.id).future,
+        )).totalDives;
+        final diveIds = await container.read(
+          diveIdsForBuddyProvider(buddy.id).future,
+        );
+        return totalDives == 1 && diveIds.singleOrNull == 'stats-dive-1';
+      });
+    });
+  });
+
+  group('BuddyListNotifier', () {
+    test('silently reloads the list when a buddy is written directly to the '
+        'DB (sync scenario)', () async {
+      final diver = await seedCurrentDiver();
+
+      final container = makeContainer();
+      addTearDown(container.dispose);
+
+      // Active listener keeps the notifier (and its table-change subscription)
+      // alive, mirroring the on-screen buddy list.
+      final sub = container.listen(buddyListNotifierProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      while (container.read(buddyListNotifierProvider).isLoading) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(container.read(buddyListNotifierProvider).value, isEmpty);
+
+      // A sync applies a remote buddy straight to the DB (no addBuddy call).
+      // The watchBuddiesChanges tick must trigger _silentReloadBuddies.
+      await buddyRepo.createBuddy(
+        _makeBuddy(name: 'Silent Buddy', diverId: diver.id),
+      );
+
+      var names = <String>[];
+      for (var i = 0; i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        names = (container.read(buddyListNotifierProvider).value ?? [])
+            .map((b) => b.name)
+            .toList();
+        if (names.contains('Silent Buddy')) break;
+      }
+
+      expect(
+        names,
+        contains('Silent Buddy'),
+        reason:
+            'BuddyListNotifier should silently reload after a direct DB write '
+            'without any manual refresh() call',
+      );
+    });
+  });
+
+  group('applyBuddyWithDiveCountSorting (issue #638)', () {
+    test('sorts by dive count descending by default', () {
+      final buddies = [
+        _withCount('Low', diveCount: 1),
+        _withCount('High', diveCount: 10),
+        _withCount('Mid', diveCount: 5),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.diveCount,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['High', 'Mid', 'Low']);
+    });
+
+    test('dive count ascending reverses the order', () {
+      final buddies = [
+        _withCount('Low', diveCount: 1),
+        _withCount('High', diveCount: 10),
+        _withCount('Mid', diveCount: 5),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.diveCount,
+          direction: SortDirection.ascending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['Low', 'Mid', 'High']);
+    });
+
+    test('name sort is alphabetical regardless of dive count', () {
+      final buddies = [
+        _withCount('Charlie', diveCount: 99),
+        _withCount('Alice', diveCount: 0),
+        _withCount('Bob', diveCount: 50),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.name,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['Alice', 'Bob', 'Charlie']);
+    });
+
+    test('an accented name sorts beside its plain letter (#4498)', () {
+      final buddies = [
+        _withCount('Joachim'),
+        _withCount('Zoé'),
+        _withCount('Jérémie'),
+        _withCount('Éric'),
+        _withCount('Łukasz'),
+        _withCount('Mia'),
+      ];
+      const byName = SortState(
+        field: BuddySortField.name,
+        direction: SortDirection.descending,
+      );
+
+      expect(
+        applyBuddyWithDiveCountSorting(
+          buddies,
+          byName,
+        ).map((b) => b.buddy.name),
+        ['Éric', 'Jérémie', 'Joachim', 'Łukasz', 'Mia', 'Zoé'],
+      );
+      expect(
+        applyBuddySorting([
+          for (final b in buddies) b.buddy,
+        ], byName).map((b) => b.name),
+        ['Éric', 'Jérémie', 'Joachim', 'Łukasz', 'Mia', 'Zoé'],
+      );
+    });
+
+    test('dive count ties break by name, accents folded (#4498)', () {
+      final sorted = applyBuddyWithDiveCountSorting(
+        [_withCount('Joachim'), _withCount('Jérémie')],
+        const SortState(
+          field: BuddySortField.diveCount,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['Jérémie', 'Joachim']);
+    });
+
+    test('does not mutate the input list', () {
+      final buddies = [
+        _withCount('Low', diveCount: 1),
+        _withCount('High', diveCount: 10),
+      ];
+      final original = List.of(buddies);
+
+      applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.diveCount,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(buddies, original);
+    });
+  });
+
+  group('applyBuddyWithDiveCountSorting by last dive (issue #1264)', () {
+    test('descending puts the most recently dived-with buddy first', () {
+      final buddies = [
+        _withCount('Old', lastDiveAt: DateTime(2022, 3, 1)),
+        _withCount('Recent', lastDiveAt: DateTime(2026, 8, 15)),
+        _withCount('Mid', lastDiveAt: DateTime(2024, 6, 10)),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['Recent', 'Mid', 'Old']);
+    });
+
+    test('ascending reverses the dated order', () {
+      final buddies = [
+        _withCount('Old', lastDiveAt: DateTime(2022, 3, 1)),
+        _withCount('Recent', lastDiveAt: DateTime(2026, 8, 15)),
+        _withCount('Mid', lastDiveAt: DateTime(2024, 6, 10)),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.ascending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), ['Old', 'Mid', 'Recent']);
+    });
+
+    test('buddies never dived with sort last in both directions', () {
+      final buddies = [
+        _withCount('Never'),
+        _withCount('Recent', lastDiveAt: DateTime(2026, 8, 15)),
+        _withCount('Old', lastDiveAt: DateTime(2022, 3, 1)),
+      ];
+
+      final descending = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.descending,
+        ),
+      );
+      final ascending = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.ascending,
+        ),
+      );
+
+      expect(descending.map((b) => b.buddy.name), ['Recent', 'Old', 'Never']);
+      expect(ascending.map((b) => b.buddy.name), ['Old', 'Recent', 'Never']);
+    });
+
+    test('ties break alphabetically for a deterministic order', () {
+      final sameDay = DateTime(2025, 1, 1);
+      final buddies = [
+        _withCount('Charlie', lastDiveAt: sameDay),
+        _withCount('Alice', lastDiveAt: sameDay),
+        _withCount('Neither B'),
+        _withCount('Neither A'),
+      ];
+
+      final sorted = applyBuddyWithDiveCountSorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(sorted.map((b) => b.buddy.name), [
+        'Alice',
+        'Charlie',
+        'Neither A',
+        'Neither B',
+      ]);
+    });
+  });
+
+  group('pinFavoriteBuddiesToTop (issue #1336)', () {
+    test('splits favorites and others, each sorted independently', () {
+      final buddies = [
+        _withCount('Zeta', diveCount: 1, isFavorite: true),
+        _withCount('Alpha', diveCount: 10),
+        _withCount('Mid Fave', diveCount: 5, isFavorite: true),
+        _withCount('Beta', diveCount: 3),
+      ];
+
+      final result = pinFavoriteBuddiesToTop(
+        buddies,
+        const SortState(
+          field: BuddySortField.diveCount,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(result.favorites.map((b) => b.buddy.name), [
+        'Mid Fave',
+        'Zeta',
+      ], reason: 'favorites still follow the chosen sort among themselves');
+      expect(result.others.map((b) => b.buddy.name), ['Alpha', 'Beta']);
+    });
+
+    test('an empty favorites list yields an empty favorites partition', () {
+      final buddies = [_withCount('Alpha'), _withCount('Beta')];
+
+      final result = pinFavoriteBuddiesToTop(
+        buddies,
+        const SortState(
+          field: BuddySortField.name,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(result.favorites, isEmpty);
+      expect(result.others.map((b) => b.buddy.name), ['Alpha', 'Beta']);
+    });
+
+    test('does not mutate the input list', () {
+      final buddies = [
+        _withCount('Fave', isFavorite: true),
+        _withCount('Plain'),
+      ];
+      final original = List.of(buddies);
+
+      pinFavoriteBuddiesToTop(
+        buddies,
+        const SortState(
+          field: BuddySortField.name,
+          direction: SortDirection.descending,
+        ),
+      );
+
+      expect(buddies, original);
+    });
+  });
+
+  group('applyBuddySorting fallback (plain Buddy, no aggregates)', () {
+    test('lastDive falls back to name sorting, like diveCount', () {
+      final buddies = [
+        _makeBuddy(id: 'c', name: 'Charlie'),
+        _makeBuddy(id: 'a', name: 'Alice'),
+        _makeBuddy(id: 'b', name: 'Bob'),
+      ];
+
+      final descending = applyBuddySorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.descending,
+        ),
+      );
+      final ascending = applyBuddySorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.lastDive,
+          direction: SortDirection.ascending,
+        ),
+      );
+
+      expect(ascending.map((b) => b.name), ['Alice', 'Bob', 'Charlie']);
+      expect(descending.map((b) => b.name), ['Charlie', 'Bob', 'Alice']);
+    });
+
+    test('name keeps its inverted direction, unlike the fallbacks', () {
+      // The name field reads descending as A to Z, which is the opposite of
+      // what the fallback fields above do. Pinned because the two now share
+      // one comparison and only the inversion tells them apart.
+      final buddies = [
+        _makeBuddy(id: 'c', name: 'Charlie'),
+        _makeBuddy(id: 'a', name: 'Alice'),
+        _makeBuddy(id: 'b', name: 'Bob'),
+      ];
+
+      final descending = applyBuddySorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.name,
+          direction: SortDirection.descending,
+        ),
+      );
+      final ascending = applyBuddySorting(
+        buddies,
+        const SortState(
+          field: BuddySortField.name,
+          direction: SortDirection.ascending,
+        ),
+      );
+
+      expect(descending.map((b) => b.name), ['Alice', 'Bob', 'Charlie']);
+      expect(ascending.map((b) => b.name), ['Charlie', 'Bob', 'Alice']);
+    });
+  });
+
+  group('buddyPickerSortProvider (issue #638)', () {
+    test('defaults to dive count descending, not alphabetical', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      final sort = container.read(buddyPickerSortProvider);
+
+      expect(sort.field, BuddySortField.diveCount);
+      expect(sort.direction, SortDirection.descending);
+    });
+  });
+
+  // Issue #982: the buddy detail page's shared-dives preview showed an
+  // arbitrary five dives because the ids arrived in `dive_buddies.created_at`
+  // order (when the link was written) and only the surviving five were sorted
+  // by dive date. A dive from a previous year outranked the newest one.
+  // The provider re-sorts a list the repository has already ordered, so a
+  // provider-level test cannot tell a faithful comparator from a sloppy one.
+  // These exercise the comparator directly instead.
+  group('compareSharedDivesForPreview (#982)', () {
+    domain.Dive diveWith({required String id, int? diveNumber}) => domain.Dive(
+      id: id,
+      diveNumber: diveNumber,
+      dateTime: DateTime(2026, 3, 28),
+    );
+
+    List<String> sorted(List<domain.Dive> dives) =>
+        (dives.toList()..sort(compareSharedDivesForPreview))
+            .map((d) => d.id)
+            .toList();
+
+    test('places a null dive number last, behind zero and negatives', () {
+      // SQLite sorts NULL below every value, so DESC puts it last. Coalescing
+      // null to 0 would rank it above -1 and tie it with a real 0.
+      final dives = [
+        diveWith(id: 'null', diveNumber: null),
+        diveWith(id: 'negative', diveNumber: -1),
+        diveWith(id: 'zero', diveNumber: 0),
+        diveWith(id: 'three', diveNumber: 3),
+      ];
+
+      expect(sorted(dives), equals(['three', 'zero', 'negative', 'null']));
+    });
+
+    test('falls back to id when dive numbers are both null', () {
+      final dives = [
+        diveWith(id: 'zzz', diveNumber: null),
+        diveWith(id: 'aaa', diveNumber: null),
+      ];
+
+      expect(sorted(dives), equals(['aaa', 'zzz']));
+    });
+  });
+
+  group('divesForBuddyProvider ordering (#982)', () {
+    test('previews the five newest dives, newest first', () async {
+      final diver = await seedCurrentDiver();
+      final buddy = await buddyRepo.createBuddy(
+        _makeBuddy(name: 'Dive Partner', diverId: diver.id),
+      );
+
+      // Six dives. The link timestamps are written in the exact reverse of the
+      // dive order, so an implementation that truncates before sorting keeps
+      // the five OLDEST dives.
+      final diveIds = ['d1', 'd2', 'd3', 'd4', 'd5', 'd6'];
+      for (var i = 0; i < diveIds.length; i++) {
+        await _insertDiveAt(
+          database,
+          id: diveIds[i],
+          diveDateTime: DateTime(2020 + i, 6, 1),
+        );
+        await buddyRepo.addBuddyToDive(diveIds[i], buddy.id, DiveRole.buddyId);
+        await database.customStatement(
+          'UPDATE dive_buddies SET created_at = ? '
+          'WHERE dive_id = ? AND buddy_id = ?',
+          [diveIds.length - i, diveIds[i], buddy.id],
+        );
+      }
+
+      final container = makeContainer();
+      addTearDown(container.dispose);
+
+      final dives = await container.read(
+        divesForBuddyProvider(buddy.id).future,
+      );
+
+      expect(
+        dives.map((d) => d.id).toList(),
+        equals(['d6', 'd5', 'd4', 'd3', 'd2']),
+        reason:
+            'the preview must take the five newest dives, not the first five '
+            'buddy links',
+      );
+    });
+  });
+}

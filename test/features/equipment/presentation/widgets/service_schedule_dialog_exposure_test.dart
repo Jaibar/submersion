@@ -1,0 +1,118 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/equipment/domain/entities/exposure_unit.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_schedule_dialogs.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+
+/// No service records: the override dialog reads them to decide whether the
+/// stored baseline is still the one the clock counts from.
+class _NoServiceRecords extends ServiceRecordRepository {
+  @override
+  Future<List<ServiceRecord>> getRecordsForEquipment(
+    String equipmentId,
+  ) async => const [];
+}
+
+void main() {
+  final t0 = DateTime(2025, 1, 1);
+
+  testWidgets('the dialog shows kind defaults as hints and saves overrides', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 3000);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    ServiceSchedule? saved;
+    final schedule = ServiceSchedule(
+      id: 'sch1',
+      equipmentId: 'e1',
+      serviceKindId: 'regulator-service',
+      createdAt: t0,
+      updatedAt: t0,
+    );
+    final kind = ServiceKind(
+      id: 'regulator-service',
+      name: 'Regulator service',
+      exposureIntervals: const {ExposureUnit.coldDives: 50},
+      createdAt: t0,
+      updatedAt: t0,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          serviceRecordRepositoryProvider.overrideWithValue(
+            _NoServiceRecords(),
+          ),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => showScheduleOverrideDialog(
+                    context,
+                    ref,
+                    schedule: schedule,
+                    kind: kind,
+                    onHold: (s) => saved = s,
+                  ),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Interval (cold dives)'), findsOneWidget);
+    expect(find.text('Default: 50'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const Key('service-schedule-exposure-coldDives')),
+      '25',
+    );
+    await tester.enterText(
+      find.byKey(const Key('service-schedule-exposure-saltHours')),
+      '150.5',
+    );
+    // A count unit takes whole numbers only. A fraction used to read as "no
+    // trigger" without a word; it now blocks the save and says why (#1900).
+    await tester.enterText(
+      find.byKey(const Key('service-schedule-exposure-deepCycles')),
+      '2.5',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Enter a whole number'), findsOneWidget);
+    expect(saved, isNull);
+
+    await tester.enterText(
+      find.byKey(const Key('service-schedule-exposure-deepCycles')),
+      '',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(saved, isNotNull);
+    expect(saved!.exposureIntervals, {
+      ExposureUnit.coldDives: 25.0,
+      ExposureUnit.saltHours: 150.5,
+    });
+  });
+}

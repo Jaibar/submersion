@@ -1,0 +1,111 @@
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:submersion/core/network/proxy/proxy_controller.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/features/dive_computer/data/clock_sync_preferences.dart';
+import 'package:submersion/features/dive_computer/presentation/providers/auto_connect_settings_provider.dart';
+import 'package:submersion/features/dive_computer/presentation/providers/clock_sync_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/built_in_map_layers_provider.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/media_badge_settings_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/media_cache_settings_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/network_proxy_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/viewer_fullscreen_mode_provider.dart';
+import 'package:submersion/shared/services/incoming_share.dart';
+import 'package:submersion/shared/services/navigation_ready_gate.dart';
+import 'package:submersion/features/species_id/presentation/providers/label_providers.dart';
+import 'package:submersion/features/species_id/presentation/providers/species_download_prompt_providers.dart';
+import 'package:submersion/features/species_id/presentation/providers/species_id_providers.dart';
+
+/// The provider overrides the app's root [ProviderScope] installs.
+///
+/// Shared with the post-restore safety sweep, which builds a second, throwaway
+/// container against the freshly restored database. Both must install the same
+/// overrides: [logFileServiceProvider] throws unless overridden, and a
+/// container missing [sharedPreferencesProvider] cannot resolve settings. Keep
+/// this the single definition so the two cannot drift apart.
+///
+/// Returns `List<dynamic>` because Riverpod 3 does not export its `Override`
+/// type, so it cannot be named in a signature -- the same constraint that
+/// makes `test/helpers/test_app.dart` take `List<dynamic>`. Call sites pass the
+/// result to `overrides:` with `.cast()`, which infers the real element type
+/// from context.
+///
+/// [incomingShares] is the app's one share gate, made once per process so a
+/// share held when `restartApp` rebuilds the scope is still opened after it.
+/// The safety sweep's throwaway container never opens a share and passes
+/// none, leaving it the default per-container gate.
+List<dynamic> rootProviderOverrides({
+  required SharedPreferences prefs,
+  required LogFileService logFileService,
+  NavigationReadyGate<IncomingShare>? incomingShares,
+  ProxyController? proxyController,
+}) {
+  return [
+    if (incomingShares != null)
+      incomingShareGateProvider.overrideWithValue(incomingShares),
+    // Made once per process in main(), before the first request, so the
+    // HttpOverrides and the Network settings page share one snapshot
+    // (#3217). The safety sweep's throwaway container passes none.
+    if (proxyController != null)
+      proxyControllerProvider.overrideWithValue(proxyController),
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    logFileServiceProvider.overrideWithValue(logFileService),
+    // The default is a fixed "enabled" with nothing behind it, because the
+    // provider is watched from inside a grid tile and must not be able to
+    // error there. This is where it gains the ability to read and persist the
+    // diver's actual choice.
+    mediaProvenanceBadgesProvider.overrideWith(
+      (ref) => MediaProvenanceBadgesNotifier(prefs),
+    ),
+    mediaTagBadgesProvider.overrideWith((ref) => MediaTagBadgesNotifier(prefs)),
+    identifyFishOnOpenProvider.overrideWith(
+      (ref) => IdentifyFishOnOpenNotifier(prefs),
+    ),
+    autoApplyProvider.overrideWith((ref) => AutoApplyNotifier(prefs)),
+    speciesDownloadPromptDismissedNotifierProvider.overrideWith(
+      (ref) => SpeciesDownloadPromptDismissedNotifier(prefs),
+    ),
+    sightingTimingProvider.overrideWith((ref) => SightingTimingNotifier(prefs)),
+    namingLevelNotifierProvider.overrideWith(
+      (ref) => NamingLevelNotifier(prefs),
+    ),
+    labelModeNotifierProvider.overrideWith((ref) => LabelModeNotifier(prefs)),
+    // Unstored by default for the same reason; here the media cache sizes
+    // gain persistence, and a smaller disk size trims the thumbnail pool at
+    // once instead of at the next download (issue #3337).
+    mediaCacheSettingsProvider.overrideWith(
+      (ref) => MediaCacheSettingsNotifier(
+        prefs,
+        onDiskCapChanged: () async =>
+            (await openMediaCacheStore(prefs)).evictIfNeeded(),
+        onEmptyDiskCache: () => emptyThumbnailCache(prefs),
+      ),
+    ),
+    // Same reasoning as the badges: the default is unstored so pages that
+    // watch it never error in a container without prefs; here it gains
+    // persistence (issue #1216).
+    clockSyncSettingsNotifierProvider.overrideWith(
+      (ref) => ClockSyncSettingsNotifier(ClockSyncPreferences(prefs)),
+    ),
+    // Unstored by default so viewers in a container without prefs keep
+    // their full-window behaviour; here it gains persistence (issue #3178).
+    viewerFullscreenModeProvider.overrideWith(
+      (ref) => ViewerFullscreenModeNotifier(prefs),
+    ),
+    // Unstored defaults so a map in a container without prefs still draws
+    // built-in sites; here the diver's choice of layers gains persistence
+    // (issue #4514).
+    builtInMapLayersNotifierProvider.overrideWith(
+      (ref) => BuiltInMapLayersNotifier(prefs),
+    ),
+    // Unstored (enabled) by default so a container without prefs still
+    // scans; here it gains persistence (issue #3361).
+    autoConnectKnownComputersProvider.overrideWith(
+      (ref) => AutoConnectKnownComputersNotifier(prefs),
+    ),
+  ];
+}

@@ -1,17 +1,32 @@
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/accounts/account_kind.dart';
+import 'package:submersion/core/services/backup_bookmark_service.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/restore_source_missing_exception.dart';
+import 'package:submersion/core/services/sync/crypto/keyslots.dart';
+import 'package:submersion/core/services/sync/library_epoch_store.dart';
+import 'package:submersion/core/services/sync/post_restore_sync_store.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_attribution.dart';
+import 'package:submersion/features/backup/data/services/backup_copy_guard.dart';
+import 'package:submersion/features/backup/data/services/backup_crypto.dart';
 import 'package:submersion/features/backup/data/services/backup_service.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
 import 'package:submersion/features/backup/domain/entities/backup_type.dart';
+import 'package:submersion/features/backup/domain/entities/restore_mode.dart';
+
+import '../../../../helpers/mock_channels.dart';
 
 // =============================================================================
 // Test Doubles
@@ -22,12 +37,23 @@ class FakeBackupDatabaseAdapter implements BackupDatabaseAdapter {
   int backupCallCount = 0;
   int restoreCallCount = 0;
   String? lastBackupPath;
+  String? lastBackupNote;
   String? lastRestorePath;
 
+  /// When set, [restore] records the call and then throws this, modelling a
+  /// swap that DatabaseService refused (e.g. the source vanished between
+  /// materialization and the swap, issue #1344).
+  Object? restoreError;
+
+  /// Runs while the backup is being written, to change settings mid-write.
+  Future<void> Function()? duringBackup;
+
   @override
-  Future<void> backup(String destinationPath) async {
+  Future<void> backup(String destinationPath, {String? note}) async {
+    await duringBackup?.call();
     backupCallCount++;
     lastBackupPath = destinationPath;
+    lastBackupNote = note;
     // Create the file so callers that check size don't throw
     final file = File(destinationPath);
     await file.parent.create(recursive: true);
@@ -35,9 +61,14 @@ class FakeBackupDatabaseAdapter implements BackupDatabaseAdapter {
   }
 
   @override
-  Future<void> restore(String backupPath) async {
+  Future<void> restore(
+    String backupPath, {
+    void Function(int, int)? onMigrationProgress,
+  }) async {
     restoreCallCount++;
     lastRestorePath = backupPath;
+    final error = restoreError;
+    if (error != null) throw error;
   }
 
   @override
@@ -46,9 +77,83 @@ class FakeBackupDatabaseAdapter implements BackupDatabaseAdapter {
   @override
   AppDatabase get database =>
       throw UnimplementedError('Fake database does not support direct queries');
+
+  @override
+  String? get databaseKeyHex => null;
+}
+
+/// Sync repository whose device id is fixed by the test, including the empty
+/// string a corrupt or half-initialized metadata row can hand back.
+class _FixedDeviceIdSyncRepository extends SyncRepository {
+  _FixedDeviceIdSyncRepository(this.deviceId);
+
+  final String deviceId;
+
+  @override
+  Future<String> getDeviceId() async => deviceId;
+}
+
+/// Spy sync repository: records the post-restore re-baseline without touching a
+/// database, so the restore wiring can be asserted in isolation.
+class _SpySyncRepository extends SyncRepository {
+  int rebaselineCalls = 0;
+  String? preservedDeviceId;
+  String? preservedEpochId;
+
+  @override
+  Future<String> getDeviceId() async => 'live-device-id';
+
+  @override
+  Future<String?> getLastAcceptedEpochId() async => null;
+
+  @override
+  Future<void> rebaselineAfterRestore({
+    String? preserveDeviceId,
+    String? preserveEpochId,
+  }) async {
+    rebaselineCalls++;
+    preservedDeviceId = preserveDeviceId;
+    preservedEpochId = preserveEpochId;
+  }
+}
+
+/// A spy whose [getDeviceId] throws, to exercise the restore path's fallback
+/// when the live device id cannot be captured before the swap.
+class _CaptureFailSyncRepository extends SyncRepository {
+  int rebaselineCalls = 0;
+  String? preservedDeviceId;
+
+  @override
+  Future<String> getDeviceId() async => throw StateError('cannot read id');
+
+  @override
+  Future<String?> getLastAcceptedEpochId() async =>
+      throw StateError('cannot read epoch');
+
+  @override
+  Future<void> rebaselineAfterRestore({
+    String? preserveDeviceId,
+    String? preserveEpochId,
+  }) async {
+    rebaselineCalls++;
+    preservedDeviceId = preserveDeviceId;
+  }
 }
 
 /// Fake cloud storage provider for testing
+/// Names the connected account driving sync, without a database.
+class _SyncAccountRepository extends Fake implements SyncRepository {
+  _SyncAccountRepository(this.accountId);
+  String? accountId;
+  int reads = 0;
+
+  @override
+  Future<String?> getSyncAccountId() async {
+    reads++;
+    return accountId;
+  }
+}
+
 class FakeCloudStorageProvider implements CloudStorageProvider {
   final List<String> uploadedFiles = [];
   final List<String> deletedFiles = [];
@@ -56,8 +161,16 @@ class FakeCloudStorageProvider implements CloudStorageProvider {
   bool shouldFailUpload = false;
   bool shouldFailDelete = false;
   bool shouldFailDownload = false;
+
+  /// Models a provider that is reachable for auth but cannot serve the backup
+  /// folder (offline, revoked scope, quota) -- the path where the upload is
+  /// abandoned before any bytes are sent.
+  bool shouldFailCreateFolder = false;
   String? createdFolder;
   int uploadCallCount = 0;
+
+  /// Runs while a file uploads, to change state mid-upload.
+  void Function()? duringUpload;
 
   @override
   String get providerName => 'Fake';
@@ -82,6 +195,7 @@ class FakeCloudStorageProvider implements CloudStorageProvider {
     String? folderId,
   }) async {
     uploadCallCount++;
+    duringUpload?.call();
     if (shouldFailUpload) {
       throw const CloudStorageException('Upload failed');
     }
@@ -97,6 +211,22 @@ class FakeCloudStorageProvider implements CloudStorageProvider {
       throw const CloudStorageException('Download failed');
     }
     return storedFiles[fileId] ?? Uint8List(0);
+  }
+
+  @override
+  Future<UploadResult> uploadFileFromPath(
+    String sourcePath,
+    String filename, {
+    String? folderId,
+  }) async {
+    final data = await File(sourcePath).readAsBytes();
+    return uploadFile(data, filename, folderId: folderId);
+  }
+
+  @override
+  Future<void> downloadToFile(String fileId, String destinationPath) async {
+    final bytes = await downloadFile(fileId);
+    await File(destinationPath).writeAsBytes(bytes, flush: true);
   }
 
   @override
@@ -128,6 +258,9 @@ class FakeCloudStorageProvider implements CloudStorageProvider {
     String folderName, {
     String? parentFolderId,
   }) async {
+    if (shouldFailCreateFolder) {
+      throw const CloudStorageException('Folder unavailable');
+    }
     createdFolder = folderName;
     return 'folder-$folderName';
   }
@@ -140,7 +273,32 @@ class FakeCloudStorageProvider implements CloudStorageProvider {
 // Tests
 // =============================================================================
 
+/// Per-file temp root, so the backup service's fixed `Submersion/Backups`
+/// subtree does not collide with the other suites that mock path_provider the
+/// same way. `flutter test` runs files in parallel isolates against one real
+/// $TMPDIR, so sharing it let one suite truncate or encrypt another's artifact
+/// mid-assert.
+final _isolatedTempDir = Directory.systemTemp.createTempSync(
+  'backup_svc_test_',
+);
+
+/// Whether [dir] lets this process add an entry, which is the same
+/// directory-write permission `unlink` needs to remove one.
+Future<bool> _acceptsNewEntries(Directory dir) async {
+  try {
+    await File('${dir.path}/probe').create();
+    return true;
+  } on FileSystemException {
+    return false;
+  }
+}
+
 void main() {
+  tearDownAll(() {
+    if (_isolatedTempDir.existsSync()) {
+      _isolatedTempDir.deleteSync(recursive: true);
+    }
+  });
   group('BackupService', () {
     late BackupPreferences preferences;
     late FakeCloudStorageProvider fakeCloud;
@@ -153,15 +311,16 @@ void main() {
             const MethodChannel('plugins.flutter.io/path_provider'),
             (MethodCall methodCall) async {
               if (methodCall.method == 'getTemporaryDirectory') {
-                return Directory.systemTemp.path;
+                return _isolatedTempDir.path;
               }
               if (methodCall.method == 'getApplicationDocumentsDirectory') {
-                return Directory.systemTemp.path;
+                return _isolatedTempDir.path;
               }
               return null;
             },
           );
     });
+    tearDownAll(clearPathAndShareChannelMocks);
 
     setUp(() async {
       SharedPreferences.setMockInitialValues({});
@@ -169,6 +328,309 @@ void main() {
       preferences = BackupPreferences(prefs);
       fakeCloud = FakeCloudStorageProvider();
       fakeDb = FakeBackupDatabaseAdapter();
+    });
+
+    group('backup filename attribution', () {
+      Future<BackupRecord> backupWithDeviceId(String deviceId) => BackupService(
+        dbAdapter: fakeDb,
+        preferences: preferences,
+        syncRepository: _FixedDeviceIdSyncRepository(deviceId),
+      ).performBackup();
+
+      test('the injected repository supplies the tag', () async {
+        // Also the regression guard for the naming path reaching around the
+        // constructor: a fresh SyncRepository() here would hit the real
+        // DatabaseService singleton, throw, and silently produce the legacy
+        // name, with nothing in the test able to see it.
+        final record = await backupWithDeviceId('live-device-id');
+
+        expect(
+          backupDeviceTagFromFilename(record.filename),
+          deviceTag('live-device-id'),
+        );
+      });
+
+      test(
+        'an empty device id writes the historic unattributed name',
+        () async {
+          // sha1('') is a constant, so tagging with it would stamp the same
+          // da39a3ee... tag on every device in this state, and in a shared
+          // folder they would claim each other's backups. An empty id is not an
+          // id; it degrades the same way an unreadable one does.
+          final record = await backupWithDeviceId('');
+
+          expect(backupDeviceTagFromFilename(record.filename), isNull);
+          expect(record.filename, startsWith('submersion_backup_'));
+          expect(record.filename, endsWith('.db'));
+        },
+      );
+    });
+
+    group('post-restore sync intent', () {
+      test('Merge restore sets the post-restore sync intent', () async {
+        final intentStore = PostRestoreSyncStore(
+          await SharedPreferences.getInstance(),
+        );
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: _SpySyncRepository(),
+          postRestoreSyncStore: intentStore,
+        );
+        final src = File(
+          p.join(
+            _isolatedTempDir.path,
+            'restore_merge_${DateTime.now().microsecondsSinceEpoch}.db',
+          ),
+        );
+        await src.writeAsString('db');
+        addTearDown(() async {
+          if (await src.exists()) await src.delete();
+        });
+
+        await service.restoreFromFile(src.path); // mode defaults to merge
+
+        expect(
+          intentStore.pending,
+          isTrue,
+          reason: 'a Merge restore must arm the post-restore sync intent',
+        );
+      });
+
+      test('Replace restore does NOT set the merge intent', () async {
+        final prefs = await SharedPreferences.getInstance();
+        final intentStore = PostRestoreSyncStore(prefs);
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: _SpySyncRepository(),
+          epochStore: LibraryEpochStore(prefs),
+          postRestoreSyncStore: intentStore,
+        );
+        final src = File(
+          p.join(
+            _isolatedTempDir.path,
+            'restore_replace_${DateTime.now().microsecondsSinceEpoch}.db',
+          ),
+        );
+        await src.writeAsString('db');
+        addTearDown(() async {
+          if (await src.exists()) await src.delete();
+        });
+
+        await service.restoreFromFile(src.path, mode: RestoreMode.replace);
+
+        expect(
+          intentStore.pending,
+          isFalse,
+          reason: 'Replace uses pendingReplace, not the merge intent',
+        );
+      });
+    });
+
+    group('missing restore source (issue #1344)', () {
+      // DatabaseService.restore leaves the live database untouched when the
+      // source file is gone and reports that as RestoreSourceMissingException.
+      // BackupService must let that through unchanged, so the notifier can
+      // land on an error instead of restoreComplete, and must not treat the
+      // untouched live library as freshly restored on the way out.
+      Future<File> vanishingSource(String tag) async {
+        final src = File(
+          p.join(
+            _isolatedTempDir.path,
+            'restore_${tag}_${DateTime.now().microsecondsSinceEpoch}.db',
+          ),
+        );
+        await src.writeAsString('db');
+        addTearDown(() async {
+          if (await src.exists()) await src.delete();
+        });
+        return src;
+      }
+
+      test('a merge restore propagates it and arms no sync fix-up', () async {
+        final prefs = await SharedPreferences.getInstance();
+        final intentStore = PostRestoreSyncStore(prefs);
+        final spy = _SpySyncRepository();
+        fakeDb.restoreError = const RestoreSourceMissingException('/gone.db');
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: spy,
+          postRestoreSyncStore: intentStore,
+        );
+        final src = await vanishingSource('missing_merge');
+
+        await expectLater(
+          service.restoreFromFile(src.path),
+          throwsA(isA<RestoreSourceMissingException>()),
+        );
+
+        expect(fakeDb.restoreCallCount, 1);
+        expect(
+          spy.rebaselineCalls,
+          0,
+          reason:
+              'nothing was swapped in, so there is no restored sync '
+              'position to re-baseline',
+        );
+        expect(
+          intentStore.pending,
+          isFalse,
+          reason:
+              'a restore that did not happen must not arm the '
+              'post-restore reconciling sync',
+        );
+      });
+
+      test('a replace restore propagates it and mints no replace', () async {
+        final prefs = await SharedPreferences.getInstance();
+        final epochStore = LibraryEpochStore(prefs);
+        fakeDb.restoreError = const RestoreSourceMissingException('/gone.db');
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: _SpySyncRepository(),
+          epochStore: epochStore,
+          postRestoreSyncStore: PostRestoreSyncStore(prefs),
+        );
+        final src = await vanishingSource('missing_replace');
+
+        await expectLater(
+          service.restoreFromFile(src.path, mode: RestoreMode.replace),
+          throwsA(isA<RestoreSourceMissingException>()),
+        );
+
+        expect(
+          epochStore.pendingReplace,
+          isNull,
+          reason:
+              'minting a replace here would push the UNTOUCHED live '
+              'library to every synced device as the "restored" one',
+        );
+      });
+    });
+
+    group('backup notes', () {
+      test('Backup Now passes the note to the copy and records it', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+        final record = await service.performBackup(
+          note: 'Before merging sites',
+        );
+        expect(fakeDb.lastBackupNote, 'Before merging sites');
+        expect(record.note, 'Before merging sites');
+        expect(preferences.getHistory().single.note, 'Before merging sites');
+      });
+
+      test('an automatic backup ignores a note it is handed', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+        final record = await service.performBackup(
+          isAutomatic: true,
+          note: 'Should not stick',
+        );
+        expect(fakeDb.lastBackupNote, isNull);
+        expect(record.note, isNull);
+      });
+
+      test('an automatic backup carries no note', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+        final record = await service.performBackup(isAutomatic: true);
+        expect(fakeDb.backupCallCount, 1);
+        expect(fakeDb.lastBackupNote, isNull);
+        expect(record.note, isNull);
+      });
+    });
+
+    group('restore re-baselines sync', () {
+      test('restoreFromFile replaces the DB and re-baselines sync, preserving '
+          'the live device id', () async {
+        final spy = _SpySyncRepository();
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: spy,
+        );
+
+        final src = File(
+          p.join(
+            _isolatedTempDir.path,
+            'restore_src_${DateTime.now().microsecondsSinceEpoch}.db',
+          ),
+        );
+        await src.writeAsString('db');
+        addTearDown(() async {
+          if (await src.exists()) await src.delete();
+        });
+
+        await service.restoreFromFile(src.path);
+
+        expect(
+          fakeDb.restoreCallCount,
+          1,
+          reason: 'the database is replaced from the restore source',
+        );
+        expect(
+          spy.rebaselineCalls,
+          1,
+          reason:
+              'sync must be re-baselined after the DB is replaced, otherwise '
+              "the backup's stale sync position stalls sync and resurrects "
+              'deletes',
+        );
+        expect(
+          spy.preservedDeviceId,
+          'live-device-id',
+          reason:
+              'the live device identity captured before the restore must be '
+              "preserved, not overwritten by the backup's device id",
+        );
+      });
+
+      test('preserves a fresh device id when the live id cannot be captured '
+          '(never adopts the backup id)', () async {
+        final spy = _CaptureFailSyncRepository();
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: spy,
+        );
+
+        final src = File(
+          p.join(
+            _isolatedTempDir.path,
+            'restore_src_${DateTime.now().microsecondsSinceEpoch}.db',
+          ),
+        );
+        await src.writeAsString('db');
+        addTearDown(() async {
+          if (await src.exists()) await src.delete();
+        });
+
+        await service.restoreFromFile(src.path);
+
+        expect(spy.rebaselineCalls, 1);
+        expect(
+          spy.preservedDeviceId,
+          isNotNull,
+          reason:
+              'a capture failure must still preserve a device id, not pass '
+              'null (which would let the restore adopt the backup id)',
+        );
+        expect(
+          spy.preservedDeviceId,
+          isNotEmpty,
+          reason: 'the fallback must be a fresh, non-empty device id',
+        );
+      });
     });
 
     group('pruneOldBackups', () {
@@ -289,6 +751,251 @@ void main() {
         // Records still removed from preferences
         final history = preferences.getHistory();
         expect(history, hasLength(1));
+      });
+
+      test(
+        'continues pruning past a local file the platform refuses to '
+        'delete, and keeps that record for a retry next time',
+        () async {
+          // A read-only containing directory makes File.delete() throw
+          // PathAccessException on the file inside it (unlink needs write
+          // access to the directory, not the file) -- the same failure shape
+          // as a macOS sandbox permission denial on a custom backup folder.
+          final tempDir = await Directory.systemTemp.createTemp(
+            'backup_prune_test_',
+          );
+          addTearDown(() async {
+            await Process.run('chmod', ['755', tempDir.path]);
+            await tempDir.delete(recursive: true);
+          });
+          final lockedPath = '${tempDir.path}/locked_backup.db';
+          await File(lockedPath).writeAsString('fake backup data');
+          await Process.run('chmod', ['555', tempDir.path]);
+          // Root (and any run where chmod was unavailable or ignored)
+          // bypasses the mode bits, so the locked file would delete cleanly
+          // and the assertions below would fail without exercising the
+          // regression. Probe the directory the same way unlink will
+          // (creating an entry needs the same write access as removing
+          // one) and skip when the denial is not in effect.
+          if (await _acceptsNewEntries(tempDir)) {
+            markTestSkipped('running with permissions that bypass chmod');
+            return;
+          }
+
+          await preferences.addRecord(
+            BackupRecord(
+              id: 'locked',
+              filename: 'locked_backup.db',
+              timestamp: DateTime(2025, 6, 1),
+              sizeBytes: 1000,
+              location: BackupLocation.local,
+              diveCount: 5,
+              siteCount: 2,
+              localPath: lockedPath,
+            ),
+          );
+          for (var i = 0; i < 3; i++) {
+            await preferences.addRecord(
+              BackupRecord(
+                id: 'r$i',
+                filename: 'backup_$i.db',
+                timestamp: DateTime(2025, 6, i + 2),
+                sizeBytes: 1000,
+                location: BackupLocation.local,
+                diveCount: 5,
+                siteCount: 2,
+              ),
+            );
+          }
+
+          final service = BackupService(
+            dbAdapter: fakeDb,
+            preferences: preferences,
+          );
+
+          // Keep 1: everything but the newest is eligible, including the
+          // locked one. Must not throw.
+          await service.pruneOldBackups(1);
+
+          final history = preferences.getHistory();
+          // The newest survives (kept); the locked record survives too
+          // (its delete failed, so it was never removed) -- everything
+          // else prunes normally.
+          expect(history.map((r) => r.id), containsAll(['r2', 'locked']));
+          expect(history.map((r) => r.id), isNot(contains('r0')));
+          expect(history.map((r) => r.id), isNot(contains('r1')));
+        },
+        skip: Platform.isWindows
+            ? 'chmod-based permission denial is not portable to Windows'
+            : null,
+      );
+    });
+
+    group('a cloud copy in another account', () {
+      BackupRecord cloudOnly(String id, {String? account}) => BackupRecord(
+        id: id,
+        filename: 'submersion_backup_$id.db',
+        timestamp: DateTime(2026, 1, 1),
+        sizeBytes: 10,
+        location: BackupLocation.cloud,
+        cloudFileId: 'cloud-$id',
+        cloudAccountId: account,
+      );
+
+      // The copy is pinned to acct-b (unless [pinned] says otherwise); sync
+      // uses acct-sync.
+      BackupService service({String? pinned = 'acct-b'}) => BackupService(
+        dbAdapter: fakeDb,
+        preferences: preferences,
+        cloudProvider: fakeCloud,
+        syncRepository: _SyncAccountRepository('acct-sync'),
+        copyAccountId: pinned,
+      );
+
+      test('a destination change during the upload is not recorded', () async {
+        await preferences.setCloudBackupEnabled(true);
+        fakeCloud.duringUpload = () => preferences.setCopyDestination(
+          accountId: 'acct-c',
+          kind: AccountKind.s3,
+        );
+
+        final record = await service().performBackup();
+
+        expect(record.cloudAccountId, 'acct-b');
+      });
+
+      test('an adopted legacy row notes the sync account it is in', () async {
+        final record = cloudOnly('r1');
+        fakeCloud.storedFiles['cloud-r1'] = Uint8List.fromList([1]);
+
+        await service(pinned: null).pinRecord(record);
+
+        expect(preferences.getHistory().single.cloudAccountId, 'acct-sync');
+      });
+
+      test('the copy account is the pinned one, else sync', () async {
+        expect(await service().cloudCopyAccountId(), 'acct-b');
+        expect(await service(pinned: null).cloudCopyAccountId(), 'acct-sync');
+      });
+
+      test(
+        'a record from before accounts were noted belongs to sync',
+        () async {
+          final legacy = cloudOnly('r1');
+          await preferences.addRecord(legacy);
+
+          // Pinned elsewhere: the legacy copy is in sync's account, not acct-b.
+          await service().deleteBackup(legacy);
+          expect(fakeCloud.deletedFiles, isEmpty);
+
+          // Pinned to the sync account itself: it is reachable.
+          await preferences.addRecord(legacy);
+          await service(pinned: 'acct-sync').deleteBackup(legacy);
+          expect(fakeCloud.deletedFiles, ['cloud-r1']);
+        },
+      );
+
+      test(
+        'pinned with no sync account, a legacy copy is left alone',
+        () async {
+          final legacy = cloudOnly('r1');
+          await preferences.addRecord(legacy);
+
+          await BackupService(
+            dbAdapter: fakeDb,
+            preferences: preferences,
+            cloudProvider: fakeCloud,
+            syncRepository: _SyncAccountRepository(null),
+            copyAccountId: 'acct-b',
+          ).deleteBackup(legacy);
+
+          expect(fakeCloud.deletedFiles, isEmpty);
+        },
+      );
+
+      test('pruning reads the sync account once, not per record', () async {
+        for (final id in ['r1', 'r2', 'r3', 'r4']) {
+          await preferences.addRecord(cloudOnly(id));
+        }
+        final sync = _SyncAccountRepository('acct-sync');
+
+        await BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          cloudProvider: fakeCloud,
+          syncRepository: sync,
+          copyAccountId: 'acct-b',
+        ).pruneOldBackups(1);
+
+        expect(sync.reads, 1);
+      });
+
+      test('following sync, a legacy record is reachable as before', () async {
+        final legacy = cloudOnly('r1');
+        await preferences.addRecord(legacy);
+
+        await service(pinned: null).deleteBackup(legacy);
+
+        expect(fakeCloud.deletedFiles, ['cloud-r1']);
+      });
+
+      test('a new cloud copy records the copy account, not sync', () async {
+        await preferences.setCloudBackupEnabled(true);
+
+        final record = await service().performBackup();
+
+        expect(record.location, BackupLocation.both);
+        expect(record.cloudAccountId, 'acct-b');
+        expect(preferences.getSettings().lastBackupCloudAccountId, 'acct-b');
+      });
+
+      test('delete never deletes a cloud file in another account', () async {
+        final record = cloudOnly('r1', account: 'acct-a');
+        await preferences.addRecord(record);
+
+        await service().deleteBackup(record);
+
+        expect(fakeCloud.deletedFiles, isEmpty);
+        expect(preferences.getHistory(), isEmpty);
+      });
+
+      test('delete still deletes a copy in the current account', () async {
+        final record = cloudOnly('r1', account: 'acct-b');
+        await preferences.addRecord(record);
+
+        await service().deleteBackup(record);
+
+        expect(fakeCloud.deletedFiles, ['cloud-r1']);
+      });
+
+      test('pruning skips a cloud copy in another account', () async {
+        for (final id in ['r1', 'r2', 'r3']) {
+          await preferences.addRecord(cloudOnly(id, account: 'acct-a'));
+        }
+
+        await service().pruneOldBackups(1);
+
+        expect(fakeCloud.deletedFiles, isEmpty);
+        expect(preferences.getHistory(), hasLength(1));
+      });
+
+      test('restoring a cloud-only copy in another account says so', () async {
+        final record = cloudOnly('r1', account: 'acct-a');
+        fakeCloud.storedFiles['cloud-r1'] = Uint8List.fromList([1]);
+
+        await expectLater(
+          service().restoreFromBackup(record),
+          throwsA(isA<BackupCopyInOtherAccountException>()),
+        );
+      });
+
+      test('an untracked copy in another account is never adopted', () async {
+        final record = cloudOnly('r1', account: 'acct-a');
+        fakeCloud.storedFiles['cloud-r1'] = Uint8List.fromList([1]);
+
+        await service().pinRecord(record);
+
+        expect(preferences.getHistory(), isEmpty);
       });
     });
 
@@ -483,7 +1190,7 @@ void main() {
         final db = sqlite3.sqlite3.open(dbFile.path);
         db.execute('CREATE TABLE dives (id TEXT PRIMARY KEY)');
         db.execute('CREATE TABLE dive_sites (id TEXT PRIMARY KEY)');
-        db.dispose();
+        db.close();
 
         final service = BackupService(
           dbAdapter: fakeDb,
@@ -515,7 +1222,7 @@ void main() {
             'CREATE TABLE dive_sites (id TEXT PRIMARY KEY, name TEXT)',
           );
           db.execute('PRAGMA user_version = 20');
-          db.dispose();
+          db.close();
 
           final service = BackupService(
             dbAdapter: fakeDb,
@@ -539,7 +1246,7 @@ void main() {
                   .toList();
               expect(columnNames, isNot(contains('wearable_source')));
             } finally {
-              verifyDb.dispose();
+              verifyDb.close();
             }
           } finally {
             await tempDir.delete(recursive: true);
@@ -574,7 +1281,7 @@ void main() {
 
           final db = sqlite3.sqlite3.open(dbFile.path);
           db.execute('CREATE TABLE some_other_table (id TEXT PRIMARY KEY)');
-          db.dispose();
+          db.close();
 
           final service = BackupService(
             dbAdapter: fakeDb,
@@ -605,6 +1312,29 @@ void main() {
     });
 
     group('exportBackupToPath', () {
+      test('passes the note to the copy and records it', () async {
+        final tempDir = await Directory.systemTemp.createTemp('backup_test_');
+        final destPath = p.join(tempDir.path, 'my_backup.db');
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+        try {
+          final record = await service.exportBackupToPath(
+            destPath,
+            note: '  Before the Cozumel trip ',
+          );
+          expect(fakeDb.lastBackupNote, 'Before the Cozumel trip');
+          expect(record.note, 'Before the Cozumel trip');
+          expect(
+            preferences.getHistory().single.note,
+            'Before the Cozumel trip',
+          );
+        } finally {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
       test('copies database to specified path', () async {
         final tempDir = await Directory.systemTemp.createTemp('backup_test_');
         final destPath = '${tempDir.path}/my_backup.db';
@@ -621,6 +1351,12 @@ void main() {
           expect(fakeDb.backupCallCount, 1);
           expect(record.localPath, destPath);
           expect(record.filename, 'my_backup.db');
+          // A saved file is a copy the app does not track, so Settings >
+          // Data claims no cloud or folder copy for it.
+          expect(
+            preferences.getSettings().lastBackupDestination,
+            LastBackupDestination.file,
+          );
         } finally {
           await tempDir.delete(recursive: true);
         }
@@ -648,6 +1384,15 @@ void main() {
     });
 
     group('exportBackupToTemp', () {
+      test('passes the note to the copy', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+        await service.exportBackupToTemp(note: 'Shared with my buddy');
+        expect(fakeDb.lastBackupNote, 'Shared with my buddy');
+      });
+
       test('copies database to temp directory', () async {
         final service = BackupService(
           dbAdapter: fakeDb,
@@ -716,6 +1461,9 @@ void main() {
       });
 
       test('pre-restore backup uses configured backup location', () async {
+        // Desktop bare-path semantics (on Apple a bookmark would be required).
+        BackupBookmarkService.debugSupportedOverride = false;
+        addTearDown(() => BackupBookmarkService.debugSupportedOverride = null);
         final tempDir = await Directory.systemTemp.createTemp('backup_test_');
         final customDir = await Directory.systemTemp.createTemp('custom_');
         final backupFile = File('${tempDir.path}/test.db');
@@ -747,6 +1495,10 @@ void main() {
 
     group('performBackup with custom location', () {
       test('uses custom backup location from settings', () async {
+        // On Apple a custom location is reached via a security-scoped bookmark;
+        // this bare-path test models the desktop case where paths persist.
+        BackupBookmarkService.debugSupportedOverride = false;
+        addTearDown(() => BackupBookmarkService.debugSupportedOverride = null);
         final tempDir = await Directory.systemTemp.createTemp('backup_test_');
 
         await preferences.setBackupLocation(tempDir.path);
@@ -760,10 +1512,42 @@ void main() {
           await service.performBackup();
 
           expect(fakeDb.lastBackupPath, startsWith(tempDir.path));
+          // Settings > Data says where the last backup went (issue #3482).
+          expect(
+            preferences.getSettings().lastBackupDestination,
+            LastBackupDestination.folder,
+          );
         } finally {
           await tempDir.delete(recursive: true);
         }
       });
+
+      // PR #3500 review: the destination is the target the write went to,
+      // not whatever the settings say once the write finishes.
+      test(
+        'a folder cleared during the write still reads as the folder',
+        () async {
+          BackupBookmarkService.debugSupportedOverride = false;
+          addTearDown(
+            () => BackupBookmarkService.debugSupportedOverride = null,
+          );
+          final tempDir = await Directory.systemTemp.createTemp('backup_test_');
+          addTearDown(() => tempDir.delete(recursive: true));
+          await preferences.setBackupLocation(tempDir.path);
+          fakeDb.duringBackup = () => preferences.setBackupLocation(null);
+
+          await BackupService(
+            dbAdapter: fakeDb,
+            preferences: preferences,
+          ).performBackup();
+
+          expect(fakeDb.lastBackupPath, startsWith(tempDir.path));
+          expect(
+            preferences.getSettings().lastBackupDestination,
+            LastBackupDestination.folder,
+          );
+        },
+      );
 
       test('falls back to default location when no custom location', () async {
         final service = BackupService(
@@ -776,6 +1560,141 @@ void main() {
         // Default location uses the _localBackupFolder path
         expect(fakeDb.lastBackupPath, contains('Submersion'));
         expect(fakeDb.lastBackupPath, contains('Backups'));
+        expect(
+          preferences.getSettings().lastBackupDestination,
+          LastBackupDestination.device,
+        );
+      });
+    });
+
+    group('performBackup cloud upload', () {
+      test('records both locations when the upload lands', () async {
+        await preferences.setCloudBackupEnabled(true);
+
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          cloudProvider: fakeCloud,
+        );
+
+        final record = await service.performBackup(isAutomatic: true);
+
+        expect(fakeCloud.uploadedFiles, hasLength(1));
+        expect(record.location, BackupLocation.both);
+        expect(record.cloudFileId, isNotNull);
+        expect(
+          preferences.getSettings().lastBackupDestination,
+          LastBackupDestination.cloud,
+        );
+      });
+
+      // PR #3500 review: the Data row names the account the copy went to,
+      // so the backup remembers it rather than reading today's sync account.
+      test('remembers the sync account the cloud copy went to', () async {
+        await preferences.setCloudBackupEnabled(true);
+
+        await BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          cloudProvider: fakeCloud,
+          syncRepository: _SyncAccountRepository('acct-drive'),
+        ).performBackup();
+
+        expect(
+          preferences.getSettings().lastBackupCloudAccountId,
+          'acct-drive',
+        );
+      });
+
+      // PR #3500 review: the provider uploads through the account it was
+      // built with, so a switch during the upload must not be recorded.
+      test('a sync account switch during the upload is not recorded', () async {
+        await preferences.setCloudBackupEnabled(true);
+        final sync = _SyncAccountRepository('acct-old');
+        fakeCloud.duringUpload = () => sync.accountId = 'acct-new';
+
+        await BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          cloudProvider: fakeCloud,
+          syncRepository: sync,
+        ).performBackup();
+
+        expect(fakeCloud.uploadedFiles, hasLength(1));
+        expect(preferences.getSettings().lastBackupCloudAccountId, 'acct-old');
+      });
+
+      test('a backup that stays local forgets the cloud account', () async {
+        await preferences.setLastBackupDestination(
+          LastBackupDestination.cloud,
+          cloudAccountId: 'acct-drive',
+        );
+
+        await BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: _SyncAccountRepository('acct-drive'),
+        ).performBackup();
+
+        expect(preferences.getSettings().lastBackupCloudAccountId, isNull);
+      });
+
+      test(
+        'records local-only when the cloud folder cannot be reached: '
+        'history must never claim a cloud copy that does not exist',
+        () async {
+          await preferences.setCloudBackupEnabled(true);
+          fakeCloud.shouldFailCreateFolder = true;
+
+          final service = BackupService(
+            dbAdapter: fakeDb,
+            preferences: preferences,
+            cloudProvider: fakeCloud,
+          );
+
+          final record = await service.performBackup();
+
+          expect(fakeCloud.uploadedFiles, isEmpty);
+          expect(record.cloudFileId, isNull);
+          expect(record.location, BackupLocation.local);
+          expect(
+            preferences.getSettings().lastBackupDestination,
+            LastBackupDestination.device,
+          );
+        },
+      );
+    });
+
+    group('resolveBackupsDirectory', () {
+      test('creates and returns the custom location; else default', () async {
+        final base = await Directory.systemTemp.createTemp('rbd_');
+        addTearDown(() => base.delete(recursive: true));
+        final sub = '${base.path}/backups_sub'; // does not exist yet
+
+        await preferences.setBackupLocation(sub);
+        expect(await BackupService.resolveBackupsDirectory(preferences), sub);
+        expect(await Directory(sub).exists(), isTrue); // created
+
+        await preferences.setBackupLocation(null);
+        final def = await BackupService.resolveBackupsDirectory(preferences);
+        expect(def, contains('Submersion'));
+        expect(def, contains('Backups'));
+      });
+    });
+
+    group('resolveDefaultBackupsDirectory', () {
+      test('returns the sandbox Submersion/Backups path even when a custom '
+          'location is configured', () async {
+        // The default resolver is the safe fallback the pre-migration backup
+        // uses when the custom location is unreachable, so it must ignore
+        // backupLocation entirely and always target the app sandbox.
+        await preferences.setBackupLocation('/some/custom/icloud/path');
+
+        final path = await BackupService.resolveDefaultBackupsDirectory();
+
+        expect(path, contains('Submersion'));
+        expect(path, contains('Backups'));
+        expect(path, isNot(contains('icloud')));
       });
     });
 
@@ -1153,6 +2072,123 @@ void main() {
             frequency: BackupFrequency.monthly,
           ).frequencyDuration,
           const Duration(days: 30),
+        );
+      });
+    });
+
+    // Restoring an ENCRYPTED (.sbe) backup on a freshly installed system failed
+    // with `PathNotFoundException: Cannot open file, path = '.../Library/Caches/
+    // app.submersion/restore_<uuid>.db' (errno = 2)`. getTemporaryDirectory()
+    // maps to the sandbox Library/Caches/<bundleId> dir, which path_provider
+    // returns but never creates; on a fresh install it is absent, so decrypting
+    // the artifact to a temp .db threw. Same root cause as the sync #554 fix
+    // (resolveSyncTempDir does create(recursive: true)) but on the backup
+    // restore path. Mirrors sync_temp_dir_test.dart.
+    group('encrypted restore into a missing temp dir (fresh install)', () {
+      const passphrase = 'correct horse battery staple';
+      const keyId = '8f14e45f-ceea-467f-ab37-a10a8d5f4c11';
+      const fastKdf = KdfParams(m: 1024, t: 3, p: 1);
+      late Directory sandbox;
+      late Directory missingTemp;
+      late Uint8List keyslotBytes;
+      late SecretKey mlk;
+
+      setUp(() async {
+        // Assign `sandbox` before any awaited work so a throw from the crypto
+        // setup below cannot leave it uninitialized -- `tearDown` always runs
+        // and reads it, and an uninitialized `late` read would throw a
+        // LateInitializationError that masks the real setUp failure.
+        sandbox = Directory.systemTemp.createTempSync('backup_fresh_');
+        // path_provider hands back this path but has NOT created it -- the
+        // macOS Library/Caches situation on a fresh install.
+        missingTemp = Directory(
+          '${sandbox.path}/Library/Caches/app.submersion',
+        );
+        expect(
+          missingTemp.existsSync(),
+          isFalse,
+          reason: 'precondition: the temp dir does not exist yet',
+        );
+
+        mlk = SecretKey(List<int>.generate(32, (i) => (i * 13 + 5) % 256));
+        keyslotBytes = KeyslotFile(
+          version: 1,
+          libraryKeyId: keyId,
+          slots: [
+            await Keyslots.createSlot(
+              type: 'passphrase',
+              secret: passphrase,
+              mlk: mlk,
+              kdf: fastKdf,
+            ),
+          ],
+        ).toJsonBytes();
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('plugins.flutter.io/path_provider'),
+              (call) async {
+                if (call.method == 'getTemporaryDirectory') {
+                  return missingTemp.path;
+                }
+                // The pre-restore backup writes into the documents dir, which
+                // must exist for the flow to reach the decrypt step.
+                if (call.method == 'getApplicationDocumentsDirectory') {
+                  return sandbox.path;
+                }
+                return null;
+              },
+            );
+      });
+
+      tearDown(() async {
+        // Restore the file-wide handler installed in setUpAll.
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('plugins.flutter.io/path_provider'),
+              (call) async =>
+                  call.method == 'getTemporaryDirectory' ||
+                      call.method == 'getApplicationDocumentsDirectory'
+                  ? _isolatedTempDir.path
+                  : null,
+            );
+        if (sandbox.existsSync()) await sandbox.delete(recursive: true);
+      });
+
+      test('restoreFromFile decrypts and restores without a pre-created '
+          'temp dir', () async {
+        // A real database: restore deep-checks the decrypted copy.
+        final plain = File(p.join(sandbox.path, 'plain.db'));
+        final db = sqlite3.sqlite3.open(plain.path);
+        try {
+          db.execute('CREATE TABLE dives (id TEXT PRIMARY KEY)');
+          db.execute('CREATE TABLE dive_sites (id TEXT PRIMARY KEY)');
+        } finally {
+          db.close();
+        }
+        final sbe = File('${sandbox.path}/backup${BackupCrypto.fileExtension}');
+        await BackupCrypto.encryptFile(
+          inPath: plain.path,
+          outPath: sbe.path,
+          mlk: mlk,
+          libraryKeyId: keyId,
+          keyslotBytes: keyslotBytes,
+        );
+
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+          syncRepository: _SpySyncRepository(),
+        );
+
+        await service.restoreFromFile(sbe.path, encryptionSecret: passphrase);
+
+        expect(
+          fakeDb.restoreCallCount,
+          1,
+          reason:
+              'the decrypted DB must be restored even though the temp dir '
+              'did not exist on a fresh install',
         );
       });
     });

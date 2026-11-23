@@ -8,8 +8,8 @@ import 'package:submersion/features/universal_import/data/models/import_enums.da
 
 void main() {
   group('built-in presets', () {
-    test('contains exactly 7 presets', () {
-      expect(builtInCsvPresets.length, 7);
+    test('contains exactly 8 presets', () {
+      expect(builtInCsvPresets.length, 8);
     });
 
     test('all presets have unique IDs', () {
@@ -80,6 +80,66 @@ void main() {
           reason: 'Missing hePercent_$i',
         );
       }
+    });
+
+    test('every preset that maps a suit column imports equipment (#1824)', () {
+      final suitPresets = builtInCsvPresets.where(
+        (p) => p.mappings.values.any(
+          (m) => m.columns.any((c) => c.targetField == 'suit'),
+        ),
+      );
+      // Submersion's own export has no suit column (#1820), so only the
+      // Subsurface preset maps one today; the loop covers any future preset.
+      expect(suitPresets.map((p) => p.id), contains('subsurface'));
+      for (final preset in suitPresets) {
+        expect(
+          preset.supportedEntities,
+          contains(ImportEntityType.equipment),
+          reason: '${preset.name} maps a suit column but drops the suit',
+        );
+      }
+    });
+
+    // A mapped site, buddy or tags column only becomes a linked record when
+    // the correlator extracts that entity type; otherwise every dive imports
+    // with no site, buddies stay free text (#1830), and tags are dropped.
+    // This table is kept separate from the parser's own rule so a preset
+    // cannot silently drift.
+    const entityTypeForTargetField = {
+      'siteName': ImportEntityType.sites,
+      'site': ImportEntityType.sites,
+      'buddy': ImportEntityType.buddies,
+      'tags': ImportEntityType.tags,
+    };
+
+    test('every preset imports the entity types its mapped columns need', () {
+      for (final preset in builtInCsvPresets) {
+        for (final mapping in preset.mappings.values) {
+          for (final column in mapping.columns) {
+            final required = entityTypeForTargetField[column.targetField];
+            if (required == null) continue;
+            expect(
+              preset.supportedEntities,
+              contains(required),
+              reason:
+                  '${preset.name} maps "${column.sourceColumn}" to '
+                  '${column.targetField} but does not import '
+                  '${required.name}',
+            );
+          }
+        }
+      }
+    });
+
+    test('MySSI imports dives, sites, buddies (#1830) and dive centres '
+        '(#3629)', () {
+      final myssi = builtInCsvPresets.firstWhere((p) => p.id == 'myssi');
+      expect(myssi.supportedEntities, {
+        ImportEntityType.dives,
+        ImportEntityType.sites,
+        ImportEntityType.buddies,
+        ImportEntityType.diveCenters,
+      });
     });
 
     test('all presets are builtIn source', () {

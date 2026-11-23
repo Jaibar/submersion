@@ -1,6 +1,22 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+
+/// Wraps a header's trailing widget so it yields space instead of starving the
+/// title.
+///
+/// Laid out plainly, a trailing widget is inflexible: [Row] gives it its full
+/// natural width first and leaves the title whatever remains, which can be
+/// nothing at all once a card is only half a pane wide (the side-by-side
+/// section pairs on the dive detail page). Making it [Flexible] caps it at
+/// half the free space; the [Align] keeps it flush right whenever it fits
+/// inside that cap, so nothing moves on a full-width card.
+Widget _flexibleTrailing(Widget trailing) {
+  return Flexible(
+    child: Align(alignment: Alignment.centerRight, child: trailing),
+  );
+}
 
 /// A collapsible section widget that wraps content with an expandable header.
 ///
@@ -19,6 +35,14 @@ class CollapsibleSection extends StatelessWidget {
   /// Optional trailing widget (e.g., status badge)
   final Widget? trailing;
 
+  /// Optional actions shown in the header, left of the chevron, in both the
+  /// expanded and the collapsed state (a menu button, say). Unlike
+  /// [trailing], which is a collapsed-only summary, this stays put so an
+  /// action is reachable without expanding the section first. The header's
+  /// vertical padding shrinks to make room for a compact button so the
+  /// header keeps its height.
+  final Widget? headerActions;
+
   /// Optional subtitle text
   final String? subtitle;
 
@@ -31,16 +55,22 @@ class CollapsibleSection extends StatelessWidget {
   /// The content to show when expanded
   final Widget child;
 
+  /// What the section's info icon explains; null shows no icon. The icon
+  /// sits immediately before the expand arrow.
+  final InfoContentBuilder? info;
+
   const CollapsibleSection({
     super.key,
     required this.title,
     required this.icon,
     this.iconColor,
     this.trailing,
+    this.headerActions,
     this.subtitle,
     required this.isExpanded,
     required this.onToggle,
     required this.child,
+    this.info,
   });
 
   @override
@@ -64,7 +94,10 @@ class CollapsibleSection extends StatelessWidget {
             child: InkWell(
               onTap: () => onToggle(!isExpanded),
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: headerActions != null ? 8 : 16,
+                ),
                 child: Row(
                   children: [
                     Icon(
@@ -94,9 +127,15 @@ class CollapsibleSection extends StatelessWidget {
                       ),
                     ),
                     if (trailing != null && !isExpanded) ...[
-                      trailing!,
+                      _flexibleTrailing(trailing!),
                       const SizedBox(width: 8),
                     ],
+                    if (headerActions != null) ...[
+                      headerActions!,
+                      const SizedBox(width: 4),
+                    ],
+                    if (info case final builder?)
+                      HeaderInfoButton(title: title, content: builder),
                     AnimatedRotation(
                       turns: isExpanded ? 0.5 : 0,
                       duration: const Duration(milliseconds: 200),
@@ -158,6 +197,10 @@ class CollapsibleCardSection extends StatelessWidget {
   /// The content to show when expanded (this replaces the child's Card wrapper)
   final Widget Function(BuildContext context) contentBuilder;
 
+  /// What the section's info icon explains; null shows no icon. The icon
+  /// sits immediately before the expand arrow.
+  final InfoContentBuilder? info;
+
   const CollapsibleCardSection({
     super.key,
     required this.title,
@@ -169,6 +212,7 @@ class CollapsibleCardSection extends StatelessWidget {
     required this.isExpanded,
     required this.onToggle,
     required this.contentBuilder,
+    this.info,
   });
 
   @override
@@ -226,9 +270,11 @@ class CollapsibleCardSection extends StatelessWidget {
                     ],
                     // Always show the trailing widget
                     if (trailing != null) ...[
-                      trailing!,
+                      _flexibleTrailing(trailing!),
                       const SizedBox(width: 8),
                     ],
+                    if (info case final builder?)
+                      HeaderInfoButton(title: title, content: builder),
                     AnimatedRotation(
                       turns: isExpanded ? 0.5 : 0,
                       duration: const Duration(milliseconds: 200),

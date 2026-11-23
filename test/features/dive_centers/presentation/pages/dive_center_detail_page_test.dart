@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
@@ -6,10 +7,15 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/maps/presentation/widgets/locked_map_scroll_passthrough.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
+import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_view.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../support/clipboard_recorder.dart';
 
 void main() {
   group('DiveCenterDetailPage desktop redirect', () {
@@ -109,6 +115,7 @@ void main() {
             diveCenterListViewModeProvider.overrideWith(
               (ref) => ListViewMode.table,
             ),
+            diveCenterDiveCountsProvider.overrideWith((ref) => const {}),
             diveCenterByIdProvider(
               center.id,
             ).overrideWith((ref) async => center),
@@ -127,5 +134,332 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('DIVE_CENTER_LIST_PAGE'), findsNothing);
     });
+
+    testWidgets('Open in Connections centres the map on the center', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      final router = GoRouter(
+        initialLocation: '/dive-centers/center-1',
+        routes: [
+          GoRoute(
+            path: '/dive-centers',
+            builder: (context, state) =>
+                const Scaffold(body: Text('DIVE_CENTER_LIST_PAGE')),
+          ),
+          GoRoute(
+            path: '/dive-centers/:id',
+            builder: (context, state) =>
+                DiveCenterDetailPage(centerId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/insights/connections',
+            builder: (context, state) =>
+                Scaffold(body: Text('CONNECTIONS ${state.uri.query}')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveCenterListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.table,
+            ),
+            diveCenterDiveCountsProvider.overrideWith((ref) => const {}),
+            diveCenterByIdProvider(
+              center.id,
+            ).overrideWith((ref) async => center),
+            diveCenterDiveCountProvider(
+              center.id,
+            ).overrideWith((ref) async => 0),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(PopupMenuButton<String>).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open in Connections'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('CONNECTIONS mode=around&focus=diveCenter:center-1'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('notes draw as Markdown (#3683)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(600, 2000);
+    addTearDown(tester.view.reset);
+    final center = DiveCenter(
+      id: 'center-notes',
+      name: 'Reef Divers',
+      notes: '**Ask** for Ana',
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    final overrides = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...overrides,
+          diveCenterByIdProvider(center.id).overrideWith((ref) async => center),
+          diveCenterDiveCountProvider(center.id).overrideWith((ref) async => 0),
+        ].cast(),
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: DiveCenterDetailPage(centerId: center.id),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(MarkdownNotesView), findsOneWidget);
+    expect(find.text('Ask for Ana'), findsOneWidget);
+  });
+
+  testWidgets('a long press on a contact row copies it, with a message', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(600, 2000);
+    addTearDown(tester.view.reset);
+    final calls = recordClipboardCalls();
+    final center = DiveCenter(
+      id: 'center-contact',
+      name: 'Reef Divers',
+      phone: '+599 717 0000',
+      notes: '',
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    final overrides = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...overrides,
+          diveCenterByIdProvider(center.id).overrideWith((ref) async => center),
+          diveCenterDiveCountProvider(center.id).overrideWith((ref) async => 0),
+        ].cast(),
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: DiveCenterDetailPage(centerId: center.id),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    await tester.longPress(find.text('+599 717 0000'));
+    await tester.pump();
+
+    expect(copiedText(calls), '+599 717 0000');
+    expect(find.text('Copied to clipboard'), findsOneWidget);
+  });
+
+  group('DiveCenterDetailPage map section', () {
+    final locatedCenter = DiveCenter(
+      id: 'center-loc',
+      name: 'Reef Divers',
+      notes: '',
+      latitude: 12.34,
+      longitude: 56.78,
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+
+    testWidgets('renders map when center has coordinates', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(600, 900);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveCenterByIdProvider(
+              locatedCenter.id,
+            ).overrideWith((ref) async => locatedCenter),
+            diveCenterDiveCountProvider(
+              locatedCenter.id,
+            ).overrideWith((ref) async => 0),
+          ].cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveCenterDetailPage(centerId: locatedCenter.id),
+          ),
+        ),
+      );
+
+      // Avoid pumpAndSettle: the FlutterMap tile layer animates indefinitely.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(FlutterMap), findsWidgets);
+    });
+
+    testWidgets(
+      'the inline map is locked so the page scrolls over it (#3156)',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(600, 900);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await getBaseOverrides();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              diveCenterByIdProvider(
+                locatedCenter.id,
+              ).overrideWith((ref) async => locatedCenter),
+              diveCenterDiveCountProvider(
+                locatedCenter.id,
+              ).overrideWith((ref) async => 0),
+            ].cast(),
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveCenterDetailPage(centerId: locatedCenter.id),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        final map = tester.widget<FlutterMap>(find.byType(FlutterMap).first);
+        expect(map.options.interactionOptions.flags, InteractiveFlag.none);
+        expect(find.byType(TrackpadZoomMap), findsNothing);
+        expect(find.byType(LockedMapScrollPassthrough), findsOneWidget);
+      },
+    );
+
+    testWidgets('fullscreen button opens the full-screen map', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(600, 900);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveCenterByIdProvider(
+              locatedCenter.id,
+            ).overrideWith((ref) async => locatedCenter),
+            diveCenterDiveCountProvider(
+              locatedCenter.id,
+            ).overrideWith((ref) async => 0),
+          ].cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveCenterDetailPage(centerId: locatedCenter.id),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // The locked preview carries no map style switcher (issue #3473).
+      expect(find.byType(MapStyleButton), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.fullscreen));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // The full-screen route adds its own FlutterMap (now two in the tree),
+      // and the switcher with it.
+      expect(find.byType(FlutterMap), findsWidgets);
+      expect(find.byType(MapStyleButton), findsOneWidget);
+    });
+
+    testWidgets(
+      'switching style on the full-screen map swaps its tiles (#3386)',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(600, 900);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await getBaseOverrides();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              diveCenterByIdProvider(
+                locatedCenter.id,
+              ).overrideWith((ref) async => locatedCenter),
+              diveCenterDiveCountProvider(
+                locatedCenter.id,
+              ).overrideWith((ref) async => 0),
+            ].cast(),
+            child: MaterialApp(
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveCenterDetailPage(centerId: locatedCenter.id),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        await tester.tap(find.byIcon(Icons.fullscreen));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        // The pushed route's map is built from the detail page's ref, so its
+        // tile layer must rebuild on its own when the style changes there.
+        await tester.tap(find.byType(MapStyleButton));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.tap(find.text('Satellite'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final fullscreenTiles = tester.widget<TileLayer>(
+          find.byType(TileLayer).last,
+        );
+        expect(fullscreenTiles.urlTemplate, contains('arcgisonline'));
+      },
+    );
   });
 }

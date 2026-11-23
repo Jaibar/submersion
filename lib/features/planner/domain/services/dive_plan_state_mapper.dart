@@ -1,0 +1,250 @@
+import 'package:submersion/core/deco/entities/o2_exposure.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/services/plan_breathing_tanks.dart';
+
+/// Maps between the planner UI state ([DivePlanState]) and the persisted
+/// [domain.DivePlan] aggregate.
+///
+/// The UI state carries a subset of the aggregate; [existing] preserves
+/// fields the state does not know about across an edit-save cycle so a
+/// plan touched by the UI does not lose them. Mode, setpoints,
+/// contingency config, water type, dive links, air breaks, and the DPV
+/// mission travel WITH the state.
+domain.DivePlan divePlanFromState(
+  DivePlanState state, {
+  domain.DivePlan? existing,
+}) {
+  final base =
+      existing ??
+      domain.DivePlan(
+        id: state.id,
+        name: state.name,
+        gfLow: state.gfLow,
+        gfHigh: state.gfHigh,
+        createdAt: state.createdAt,
+        updatedAt: state.updatedAt,
+      );
+  return base.copyWith(
+    id: state.id,
+    name: state.name,
+    notes: state.notes,
+    siteId: state.siteId,
+    clearSiteId: state.siteId == null,
+    altitude: state.altitude,
+    clearAltitude: state.altitude == null,
+    waterType: state.waterType,
+    clearWaterType: state.waterType == null,
+    salinityPpt: state.salinityPpt,
+    clearSalinityPpt: state.salinityPpt == null,
+    startDateTime: state.startDateTime,
+    clearStartDateTime: state.startDateTime == null,
+    mode: state.mode,
+    setpointLow: state.setpointLow,
+    clearSetpointLow: state.setpointLow == null,
+    setpointHigh: state.setpointHigh,
+    clearSetpointHigh: state.setpointHigh == null,
+    setpointSwitchDepth: state.setpointSwitchDepth,
+    clearSetpointSwitchDepth: state.setpointSwitchDepth == null,
+    scrInjectionRate: state.scrInjectionRate,
+    clearScrInjectionRate: state.scrInjectionRate == null,
+    scrVo2: state.scrVo2,
+    clearScrVo2: state.scrVo2 == null,
+    pscrVo2: state.pscrVo2,
+    clearPscrVo2: state.pscrVo2 == null,
+    deviationDepthDelta: state.deviationDepthDelta,
+    clearDeviationDepthDelta: state.deviationDepthDelta == null,
+    deviationTimeMinutes: state.deviationTimeMinutes,
+    clearDeviationTimeMinutes: state.deviationTimeMinutes == null,
+    turnPressureRule: state.turnPressureRule,
+    clearTurnPressureRule: state.turnPressureRule == null,
+    turnPressureFraction: state.turnPressureFraction,
+    clearTurnPressureFraction: state.turnPressureFraction == null,
+    sourceDiveId: state.sourceDiveId,
+    clearSourceDiveId: state.sourceDiveId == null,
+    linkedDiveId: state.linkedDiveId,
+    clearLinkedDiveId: state.linkedDiveId == null,
+    gfLow: state.gfLow,
+    clearGfLow: state.gfLow == null,
+    gfHigh: state.gfHigh,
+    clearGfHigh: state.gfHigh == null,
+    sacBottom: state.sacRate,
+    clearSacBottom: state.sacRate == null,
+    sacDeco: state.sacDeco,
+    clearSacDeco: state.sacDeco == null,
+    sacStressed: state.sacStressed,
+    clearSacStressed: state.sacStressed == null,
+    ascentRate: state.ascentRate,
+    clearAscentRate: state.ascentRate == null,
+    intermediateAscentRate: state.intermediateAscentRate,
+    clearIntermediateAscentRate: state.intermediateAscentRate == null,
+    shallowAscentRate: state.shallowAscentRate,
+    clearShallowAscentRate: state.shallowAscentRate == null,
+    finalAscentRate: state.finalAscentRate,
+    clearFinalAscentRate: state.finalAscentRate == null,
+    lastStopDepth: state.lastStopDepth,
+    clearLastStopDepth: state.lastStopDepth == null,
+    descentRate: state.descentRate,
+    clearDescentRate: state.descentRate == null,
+    airBreaks: state.airBreaks,
+    clearAirBreaks: state.airBreaks == null,
+    airBreaksExplicitlyOff: state.airBreaksExplicitlyOff,
+    reservePressure: state.reservePressure,
+    clearReservePressure: state.reservePressure == null,
+    sacFactor: state.sacFactor,
+    clearSacFactor: state.sacFactor == null,
+    problemSolvingMinutes: state.problemSolvingMinutes,
+    clearProblemSolvingMinutes: state.problemSolvingMinutes == null,
+    gasSwitchStopSeconds: state.gasSwitchStopSeconds,
+    clearGasSwitchStopSeconds: state.gasSwitchStopSeconds == null,
+    ppO2Bottom: state.ppO2Bottom,
+    clearPpO2Bottom: state.ppO2Bottom == null,
+    ppO2Deco: state.ppO2Deco,
+    clearPpO2Deco: state.ppO2Deco == null,
+    ppO2DecoBand1: state.ppO2DecoBand1,
+    clearPpO2DecoBand1: state.ppO2DecoBand1 == null,
+    ppO2DecoBand2: state.ppO2DecoBand2,
+    clearPpO2DecoBand2: state.ppO2DecoBand2 == null,
+    ppO2DecoBand3: state.ppO2DecoBand3,
+    clearPpO2DecoBand3: state.ppO2DecoBand3 == null,
+    ppO2DecoBandsExplicitlyOff: state.ppO2DecoBandsExplicitlyOff,
+    maxO2DepthMeters: state.maxO2DepthMeters,
+    clearMaxO2DepthMeters: state.maxO2DepthMeters == null,
+    maxO2DepthExplicitlyOff: state.maxO2DepthExplicitlyOff,
+    hypercapniaAmv: state.hypercapniaAmv,
+    clearHypercapniaAmv: state.hypercapniaAmv == null,
+    hypercapniaMinutes: state.hypercapniaMinutes,
+    clearHypercapniaMinutes: state.hypercapniaMinutes == null,
+    hypercapniaExplicitlyOff: state.hypercapniaExplicitlyOff,
+    bestMixEndMeters: state.bestMixEndMeters,
+    clearBestMixEndMeters: state.bestMixEndMeters == null,
+    o2Narcotic: state.o2Narcotic,
+    clearO2Narcotic: state.o2Narcotic == null,
+    stopMinimums: state.stopMinimums,
+    surfaceInterval: state.surfaceInterval,
+    clearSurfaceInterval: state.surfaceInterval == null,
+    startCns: _startCns(state),
+    startOtu: state.initialOtu ?? 0,
+    segments: state.segments,
+    tanks: state.tanks,
+    equipmentIds: state.equipmentIds,
+    gearProvenance: state.gearProvenance,
+    plannedWeightKg: state.plannedWeightKg,
+    plannedWeightPlacement: state.plannedWeightPlacement,
+    clearPlannedWeight: state.plannedWeightKg == null,
+    mission: state.mission,
+    clearMission: state.mission == null,
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+  );
+}
+
+/// The CNS% a dive starts with: the previous dive's end CNS decayed over
+/// the surface interval, the same way the tissues are off-gassed for the
+/// seed (issue #3565).
+double _startCns(DivePlanState state) {
+  final carried = state.initialCns;
+  if (carried == null) return 0;
+  final interval = state.surfaceInterval;
+  if (interval == null) return carried;
+  return CnsTable.cnsAfterSurfaceInterval(carried, interval.inMinutes);
+}
+
+/// What the engine reads from [state]: the plan without its name, notes and
+/// timestamps, which change on a rename or a save and never change an
+/// outcome. Compare these to tell whether anything computed from the plan is
+/// out of date.
+domain.DivePlan planForEngine(DivePlanState state) => divePlanFromState(
+  state,
+).copyWith(name: '', notes: '', createdAt: _epoch, updatedAt: _epoch);
+
+final _epoch = DateTime.utc(2000);
+
+/// Restores the legacy planner state from a persisted plan.
+///
+/// Segments are sorted by `order` on the way in. The state's list order is
+/// the planner's working order - the segment list renders it, the reorder
+/// handler indexes into it, and `SegmentChain` chains it - so a plan whose
+/// list arrives out of sequence (a `.subplan` file carries its own `order`
+/// values alongside the array) would otherwise show and edit a different
+/// profile from the one the engine computes, which sorts.
+///
+/// The state holds breathing gas only (issue #4243; see
+/// [breathingPlanParts]): a stored plan can still carry a suit inflation
+/// bottle, and every reader of a stored plan (the planner, a series and its
+/// carried pressures, the plan vs actual overlay) hands the state straight
+/// to the engine.
+DivePlanState stateFromDivePlan(domain.DivePlan plan) {
+  final gas = breathingPlanParts(
+    plan.tanks,
+    List<PlanSegment>.from(plan.segments)
+      ..sort((a, b) => a.order.compareTo(b.order)),
+  );
+  return DivePlanState(
+    id: plan.id,
+    name: plan.name,
+    notes: plan.notes,
+    siteId: plan.siteId,
+    altitude: plan.altitude,
+    waterType: plan.waterType,
+    salinityPpt: plan.salinityPpt,
+    startDateTime: plan.startDateTime,
+    mode: plan.mode,
+    setpointLow: plan.setpointLow,
+    setpointHigh: plan.setpointHigh,
+    setpointSwitchDepth: plan.setpointSwitchDepth,
+    scrInjectionRate: plan.scrInjectionRate,
+    scrVo2: plan.scrVo2,
+    pscrVo2: plan.pscrVo2,
+    deviationDepthDelta: plan.deviationDepthDelta,
+    deviationTimeMinutes: plan.deviationTimeMinutes,
+    turnPressureRule: plan.turnPressureRule,
+    turnPressureFraction: plan.turnPressureFraction,
+    sourceDiveId: plan.sourceDiveId,
+    linkedDiveId: plan.linkedDiveId,
+    gfLow: plan.gfLow,
+    gfHigh: plan.gfHigh,
+    sacRate: plan.sacBottom,
+    sacDeco: plan.sacDeco,
+    sacStressed: plan.sacStressed,
+    ascentRate: plan.ascentRate,
+    intermediateAscentRate: plan.intermediateAscentRate,
+    shallowAscentRate: plan.shallowAscentRate,
+    finalAscentRate: plan.finalAscentRate,
+    lastStopDepth: plan.lastStopDepth,
+    descentRate: plan.descentRate,
+    airBreaks: plan.airBreaks,
+    airBreaksExplicitlyOff: plan.airBreaksExplicitlyOff,
+    reservePressure: plan.reservePressure,
+    sacFactor: plan.sacFactor,
+    problemSolvingMinutes: plan.problemSolvingMinutes,
+    gasSwitchStopSeconds: plan.gasSwitchStopSeconds,
+    ppO2Bottom: plan.ppO2Bottom,
+    ppO2Deco: plan.ppO2Deco,
+    ppO2DecoBand1: plan.ppO2DecoBand1,
+    ppO2DecoBand2: plan.ppO2DecoBand2,
+    ppO2DecoBand3: plan.ppO2DecoBand3,
+    ppO2DecoBandsExplicitlyOff: plan.ppO2DecoBandsExplicitlyOff,
+    maxO2DepthMeters: plan.maxO2DepthMeters,
+    maxO2DepthExplicitlyOff: plan.maxO2DepthExplicitlyOff,
+    hypercapniaAmv: plan.hypercapniaAmv,
+    hypercapniaMinutes: plan.hypercapniaMinutes,
+    hypercapniaExplicitlyOff: plan.hypercapniaExplicitlyOff,
+    bestMixEndMeters: plan.bestMixEndMeters,
+    o2Narcotic: plan.o2Narcotic,
+    stopMinimums: plan.stopMinimums,
+    surfaceInterval: plan.surfaceInterval,
+    segments: gas.segments,
+    tanks: gas.tanks,
+    equipmentIds: plan.equipmentIds,
+    gearProvenance: plan.gearProvenance,
+    plannedWeightKg: plan.plannedWeightKg,
+    plannedWeightPlacement: plan.plannedWeightPlacement,
+    mission: plan.mission,
+    isDirty: false,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  );
+}

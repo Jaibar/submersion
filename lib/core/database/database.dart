@@ -1,1259 +1,107 @@
-import 'dart:convert';
-
 import 'package:drift/drift.dart';
+
+import 'package:submersion/core/database/raw_dive_data_codec.dart';
+import 'package:submersion/core/database/tables/app_tables.dart';
+import 'package:submersion/core/database/tables/buddy_tables.dart';
+import 'package:submersion/core/database/tables/certification_currency_tables.dart';
+import 'package:submersion/core/database/tables/change_log_tables.dart';
+import 'package:submersion/core/database/tables/cylinder_tables.dart';
+import 'package:submersion/core/database/tables/dive_computer_connection_tables.dart';
+import 'package:submersion/core/database/tables/dive_lab_tables.dart';
+import 'package:submersion/core/database/tables/dive_plan_tables.dart';
+import 'package:submersion/core/database/tables/dive_deco_status_tables.dart';
+import 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
+import 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
+import 'package:submersion/core/database/tables/dive_profile_tables.dart';
+import 'package:submersion/core/database/tables/dive_health_tables.dart';
+import 'package:submersion/core/database/tables/dive_tables.dart';
+import 'package:submersion/core/database/tables/diver_tables.dart';
+import 'package:submersion/core/database/tables/equipment_condition_tables.dart';
+import 'package:submersion/core/database/tables/document_tables.dart';
+import 'package:submersion/core/database/tables/equipment_location_tables.dart';
+import 'package:submersion/core/database/tables/equipment_service_status_tables.dart';
+import 'package:submersion/core/database/tables/equipment_set_bundle_tables.dart';
+import 'package:submersion/core/database/tables/equipment_tables.dart';
+import 'package:submersion/core/database/tables/identification_tables.dart';
+import 'package:submersion/core/database/tables/marine_life_tables.dart';
+import 'package:submersion/core/database/tables/media_people_tables.dart';
+import 'package:submersion/core/database/tables/media_tables.dart';
+import 'package:submersion/core/database/tables/pre_dive_tables.dart';
+import 'package:submersion/core/database/tables/quality_tables.dart';
+import 'package:submersion/core/database/tables/insight_tables.dart';
+import 'package:submersion/core/database/tables/nearby_tables.dart';
+import 'package:submersion/core/database/tables/query_tables.dart';
+import 'package:submersion/core/database/tables/rule_tables.dart';
+import 'package:submersion/core/database/tables/safety_tables.dart';
+import 'package:submersion/core/database/tables/service_tables.dart';
+import 'package:submersion/core/database/tables/shared_library_tables.dart';
+import 'package:submersion/core/database/tables/site_tables.dart';
+import 'package:submersion/core/database/tables/sync_tables.dart';
+import 'package:submersion/core/database/tables/tag_tables.dart';
+import 'package:submersion/core/database/tables/track_tables.dart';
+import 'package:submersion/core/database/tables/trip_tables.dart';
+import 'package:submersion/core/database/tables/weight_tables.dart';
+import 'package:submersion/core/database/migrations/app_database_migrations.dart';
+
+export 'package:submersion/core/database/tables/app_tables.dart';
+export 'package:submersion/core/database/tables/buddy_tables.dart';
+export 'package:submersion/core/database/tables/certification_currency_tables.dart';
+export 'package:submersion/core/database/tables/cylinder_tables.dart';
+export 'package:submersion/core/database/tables/dive_health_tables.dart';
+export 'package:submersion/core/database/tables/dive_lab_tables.dart';
+export 'package:submersion/core/database/tables/dive_plan_tables.dart';
+export 'package:submersion/core/database/tables/dive_deco_status_tables.dart';
+export 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
+export 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
+export 'package:submersion/core/database/tables/dive_computer_connection_tables.dart';
+export 'package:submersion/core/database/tables/dive_profile_tables.dart';
+export 'package:submersion/core/database/tables/dive_tables.dart';
+export 'package:submersion/core/database/tables/diver_tables.dart';
+export 'package:submersion/core/database/tables/equipment_condition_tables.dart';
+export 'package:submersion/core/database/tables/document_tables.dart';
+export 'package:submersion/core/database/tables/equipment_location_tables.dart';
+export 'package:submersion/core/database/tables/equipment_service_status_tables.dart';
+export 'package:submersion/core/database/tables/equipment_set_bundle_tables.dart';
+export 'package:submersion/core/database/tables/equipment_tables.dart';
+export 'package:submersion/core/database/tables/identification_tables.dart';
+export 'package:submersion/core/database/tables/marine_life_tables.dart';
+export 'package:submersion/core/database/tables/media_people_tables.dart';
+export 'package:submersion/core/database/tables/media_tables.dart';
+export 'package:submersion/core/database/tables/pre_dive_tables.dart';
+export 'package:submersion/core/database/tables/quality_tables.dart';
+export 'package:submersion/core/database/tables/insight_tables.dart';
+export 'package:submersion/core/database/tables/nearby_tables.dart';
+export 'package:submersion/core/database/tables/query_tables.dart';
+export 'package:submersion/core/database/tables/rule_tables.dart';
+export 'package:submersion/core/database/tables/safety_tables.dart';
+export 'package:submersion/core/database/tables/service_tables.dart';
+export 'package:submersion/core/database/tables/shared_library_tables.dart';
+export 'package:submersion/core/database/tables/site_tables.dart';
+export 'package:submersion/core/database/tables/sync_tables.dart';
+export 'package:submersion/core/database/tables/tag_tables.dart';
+export 'package:submersion/core/database/tables/track_tables.dart';
+export 'package:submersion/core/database/tables/trip_tables.dart';
+export 'package:submersion/core/database/tables/weight_tables.dart';
+export 'package:submersion/core/database/migrations/app_database_migrations.dart';
 
 part 'database.g.dart';
 
 // ============================================================================
-// Table Definitions
-// ============================================================================
-
-/// Diver profiles (multi-account support)
-class Divers extends Table {
-  TextColumn get id => text()();
-  TextColumn get name => text()();
-  TextColumn get email => text().nullable()();
-  TextColumn get phone => text().nullable()();
-  TextColumn get photoPath => text().nullable()();
-  // Emergency contact
-  TextColumn get emergencyContactName => text().nullable()();
-  TextColumn get emergencyContactPhone => text().nullable()();
-  TextColumn get emergencyContactRelation => text().nullable()();
-  // Medical info
-  TextColumn get medicalNotes => text().withDefault(const Constant(''))();
-  TextColumn get bloodType => text().nullable()();
-  TextColumn get allergies => text().nullable()();
-  TextColumn get medications => text().nullable()();
-  IntColumn get medicalClearanceExpiryDate =>
-      integer().nullable()(); // Unix timestamp
-  // Secondary emergency contact
-  TextColumn get emergencyContact2Name => text().nullable()();
-  TextColumn get emergencyContact2Phone => text().nullable()();
-  TextColumn get emergencyContact2Relation => text().nullable()();
-  // Insurance
-  TextColumn get insuranceProvider => text().nullable()();
-  TextColumn get insurancePolicyNumber => text().nullable()();
-  IntColumn get insuranceExpiryDate => integer().nullable()(); // Unix timestamp
-  // General
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  BoolColumn get isDefault => boolean().withDefault(const Constant(false))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive trips (group of dives at a destination)
-class Trips extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  IntColumn get startDate => integer()(); // Unix timestamp
-  IntColumn get endDate => integer()(); // Unix timestamp
-  TextColumn get location => text().nullable()();
-  TextColumn get resortName => text().nullable()();
-  TextColumn get liveaboardName => text().nullable()();
-  TextColumn get tripType => text().withDefault(const Constant('shore'))();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Liveaboard-specific details, 1:1 with trips
-class LiveaboardDetailRecords extends Table {
-  TextColumn get id => text()();
-  TextColumn get tripId => text().references(Trips, #id)();
-  TextColumn get vesselName => text()();
-  TextColumn get operatorName => text().nullable()();
-  TextColumn get vesselType => text().nullable()();
-  TextColumn get cabinType => text().nullable()();
-  IntColumn get capacity => integer().nullable()();
-  TextColumn get embarkPort => text().nullable()();
-  RealColumn get embarkLatitude => real().nullable()();
-  RealColumn get embarkLongitude => real().nullable()();
-  TextColumn get disembarkPort => text().nullable()();
-  RealColumn get disembarkLatitude => real().nullable()();
-  RealColumn get disembarkLongitude => real().nullable()();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Itinerary days for trip planning
-class TripItineraryDays extends Table {
-  TextColumn get id => text()();
-  TextColumn get tripId => text().references(Trips, #id)();
-  IntColumn get dayNumber => integer()();
-  IntColumn get date => integer()(); // Unix timestamp
-  TextColumn get dayType => text().withDefault(const Constant('diveDay'))();
-  TextColumn get portName => text().nullable()();
-  RealColumn get latitude => real().nullable()();
-  RealColumn get longitude => real().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive log entries
-class Dives extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  IntColumn get diveNumber => integer().nullable()();
-  IntColumn get diveDateTime =>
-      integer()(); // Unix timestamp (legacy, kept for compatibility)
-  IntColumn get entryTime =>
-      integer().nullable()(); // Unix timestamp - when diver entered water
-  IntColumn get exitTime =>
-      integer().nullable()(); // Unix timestamp - when diver exited water
-  IntColumn get bottomTime => integer().nullable()(); // seconds (bottom time)
-  IntColumn get runtime => integer().nullable()(); // seconds (total runtime)
-  RealColumn get maxDepth => real().nullable()();
-  RealColumn get avgDepth => real().nullable()();
-  RealColumn get waterTemp => real().nullable()();
-  RealColumn get airTemp => real().nullable()();
-  TextColumn get visibility => text().nullable()();
-  TextColumn get diveType =>
-      text().withDefault(const Constant('recreational'))();
-  TextColumn get buddy => text().nullable()();
-  TextColumn get diveMaster => text().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  TextColumn get siteId => text().nullable().references(DiveSites, #id)();
-  IntColumn get rating => integer().nullable()();
-  // Dive center reference
-  TextColumn get diveCenterId =>
-      text().nullable().references(DiveCenters, #id)();
-  // Trip reference
-  TextColumn get tripId => text().nullable().references(Trips, #id)();
-  // Conditions fields
-  TextColumn get currentDirection => text().nullable()();
-  TextColumn get currentStrength => text().nullable()();
-  RealColumn get swellHeight => real().nullable()(); // meters
-  TextColumn get entryMethod => text().nullable()();
-  TextColumn get exitMethod => text().nullable()();
-  TextColumn get waterType => text().nullable()();
-  // Altitude for altitude diving
-  RealColumn get altitude => real().nullable()(); // meters above sea level
-  // Surface pressure for altitude/weather corrections
-  RealColumn get surfacePressure => real().nullable()(); // bar (default ~1.013)
-  // Surface interval before this dive
-  IntColumn get surfaceIntervalSeconds => integer().nullable()(); // seconds
-  // Decompression gradient factors
-  IntColumn get gradientFactorLow => integer().nullable()(); // 0-100
-  IntColumn get gradientFactorHigh => integer().nullable()(); // 0-100
-  // Deco model metadata
-  TextColumn get decoAlgorithm =>
-      text().nullable()(); // "buhlmann", "vpm", "rgbm", "dciem"
-  IntColumn get decoConservatism =>
-      integer().nullable()(); // Personal adjustment (0=neutral)
-  // Dive computer that logged this dive (for display/export, separate from computerId relation)
-  TextColumn get diveComputerModel => text().nullable()();
-  TextColumn get diveComputerSerial => text().nullable()();
-  TextColumn get diveComputerFirmware => text().nullable()();
-  // Weight system fields
-  RealColumn get weightAmount => real().nullable()(); // kg
-  TextColumn get weightType => text().nullable()();
-  // Favorite flag (v1.1)
-  BoolColumn get isFavorite => boolean().withDefault(const Constant(false))();
-  // Dive mode for CCR/SCR (v1.5)
-  TextColumn get diveMode =>
-      text().withDefault(const Constant('oc'))(); // oc, ccr, scr
-  // O2 toxicity tracking (v1.5)
-  RealColumn get cnsStart =>
-      real().withDefault(const Constant(0))(); // CNS% at dive start
-  RealColumn get cnsEnd => real().nullable()(); // CNS% at dive end
-  RealColumn get otu => real().nullable()(); // OTU accumulated this dive
-
-  // CCR Setpoints (v1.5) - in bar
-  RealColumn get setpointLow =>
-      real().nullable()(); // ~0.7 bar for descent/ascent
-  RealColumn get setpointHigh => real().nullable()(); // ~1.2-1.3 bar for bottom
-  RealColumn get setpointDeco => real().nullable()(); // ~1.3-1.6 bar for deco
-
-  // SCR Configuration (v1.5)
-  TextColumn get scrType => text().nullable()(); // 'cmf', 'pascr', 'escr'
-  RealColumn get scrInjectionRate =>
-      real().nullable()(); // L/min at surface (CMF)
-  RealColumn get scrAdditionRatio =>
-      real().nullable()(); // e.g., 0.33 for 1:3 (PASCR)
-  TextColumn get scrOrificeSize =>
-      text().nullable()(); // '40', '50', '60' (Dolphin)
-  RealColumn get assumedVo2 =>
-      real().nullable()(); // Assumed O2 consumption L/min
-
-  // Diluent/Supply Gas (v1.5) - quick reference for CCR/SCR
-  RealColumn get diluentO2 => real().nullable()(); // Diluent/supply O2%
-  RealColumn get diluentHe => real().nullable()(); // Diluent/supply He%
-
-  // Loop FO2 measurements (v1.5) - for SCR dives
-  RealColumn get loopO2Min => real().nullable()(); // Min loop O2%
-  RealColumn get loopO2Max => real().nullable()(); // Max loop O2%
-  RealColumn get loopO2Avg => real().nullable()(); // Avg loop O2%
-
-  // Shared rebreather fields (v1.5)
-  RealColumn get loopVolume => real().nullable()(); // Loop volume in liters
-  TextColumn get scrubberType => text().nullable()(); // e.g., 'Sofnolime 797'
-  IntColumn get scrubberDurationMinutes =>
-      integer().nullable()(); // Rated scrubber duration
-  IntColumn get scrubberRemainingMinutes =>
-      integer().nullable()(); // Remaining at dive start
-
-  // Dive planner flag (v1.5)
-  BoolColumn get isPlanned =>
-      boolean().withDefault(const Constant(false))(); // True for planned dives
-
-  // Primary computer used for this dive
-  TextColumn get computerId =>
-      text().nullable().references(DiveComputers, #id)();
-  // Training course this dive belongs to (v1.5)
-  TextColumn get courseId =>
-      text().nullable().references(Courses, #id, onDelete: KeyAction.setNull)();
-
-  // Import source tracking - tracks import source for Apple Watch, Garmin, etc.
-  TextColumn get importSource =>
-      text().nullable()(); // 'appleWatch', 'garmin', 'suunto'
-  TextColumn get importId =>
-      text().nullable()(); // Source-specific ID (e.g., HealthKit UUID)
-
-  // Weather conditions
-  RealColumn get windSpeed => real().nullable()(); // m/s
-  TextColumn get windDirection =>
-      text().nullable()(); // enum: CurrentDirection.name
-  TextColumn get cloudCover => text().nullable()();
-  TextColumn get precipitation => text().nullable()();
-  RealColumn get humidity => real().nullable()(); // 0-100
-  TextColumn get weatherDescription => text().nullable()();
-  TextColumn get weatherSource =>
-      text().nullable()(); // enum: WeatherSource.name
-  IntColumn get weatherFetchedAt => integer().nullable()(); // unix timestamp
-
-  // Import version: null = pre-fix, 1 = wall-clock-as-UTC convention
-  IntColumn get importVersion => integer().nullable()();
-
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Time-series dive profile data points
-class DiveProfiles extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get computerId =>
-      text().nullable().references(DiveComputers, #id)();
-  BoolColumn get isPrimary => boolean().withDefault(
-    const Constant(true),
-  )(); // Primary profile for stats
-  IntColumn get timestamp => integer()(); // seconds from dive start
-  RealColumn get depth => real()();
-  // Deprecated: use tank_pressure_profiles table. Column retained for schema compat.
-  RealColumn get pressure => real().nullable()();
-  RealColumn get temperature => real().nullable()();
-  IntColumn get heartRate => integer().nullable()();
-  // Computed decompression data (optional, can be calculated on-the-fly)
-  RealColumn get ascentRate => real().nullable()(); // m/min
-  RealColumn get ceiling => real().nullable()(); // deco ceiling in meters
-  IntColumn get ndl => integer().nullable()(); // no-deco limit in seconds
-
-  // CCR/SCR rebreather data (v1.5)
-  RealColumn get setpoint =>
-      real().nullable()(); // Current setpoint at sample (bar)
-  RealColumn get ppO2 => real().nullable()(); // Measured/calculated ppO2 (bar)
-
-  // Per-sample decompression data (v1.5)
-  RealColumn get cns => real().nullable()(); // CNS percentage 0-100
-  IntColumn get tts => integer().nullable()(); // Time to surface in seconds
-  IntColumn get rbt =>
-      integer().nullable()(); // Remaining bottom time in seconds
-  IntColumn get decoType =>
-      integer().nullable()(); // 0=NDL, 1=safety, 2=deco, 3=deep
-
-  // Wearable integration (v2.0) - tracks source of heart rate data
-  TextColumn get heartRateSource =>
-      text().nullable()(); // 'diveComputer', 'appleWatch', 'garmin', 'manual'
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive sites/locations
-class DiveSites extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get description => text().withDefault(const Constant(''))();
-  RealColumn get latitude => real().nullable()();
-  RealColumn get longitude => real().nullable()();
-  RealColumn get minDepth => real().nullable()(); // Shallowest point
-  RealColumn get maxDepth => real().nullable()(); // Deepest point
-  TextColumn get difficulty =>
-      text().nullable()(); // Beginner, Intermediate, Advanced, Technical
-  TextColumn get country => text().nullable()();
-  TextColumn get region => text().nullable()();
-  RealColumn get rating => real().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  TextColumn get hazards =>
-      text().nullable()(); // Currents, boats, marine life, etc.
-  TextColumn get accessNotes =>
-      text().nullable()(); // How to get there, entry points
-  TextColumn get mooringNumber =>
-      text().nullable()(); // Mooring buoy number for boats
-  TextColumn get parkingInfo =>
-      text().nullable()(); // Parking availability and tips
-  RealColumn get altitude => real()
-      .nullable()(); // Altitude above sea level in meters (for altitude diving)
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Tanks used during dives
-class DiveTanks extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get equipmentId => text().nullable().references(Equipment, #id)();
-  RealColumn get volume => real().nullable()(); // liters
-  RealColumn get workingPressure => real().nullable()(); // bar - rated pressure
-  RealColumn get startPressure => real().nullable()(); // bar
-  RealColumn get endPressure => real().nullable()(); // bar
-  RealColumn get o2Percent => real().withDefault(const Constant(21.0))();
-  RealColumn get hePercent => real().withDefault(const Constant(0.0))();
-  IntColumn get tankOrder => integer().withDefault(const Constant(0))();
-  TextColumn get tankRole => text().withDefault(
-    const Constant('backGas'),
-  )(); // backGas, stage, deco, bailout, etc.
-  TextColumn get tankMaterial =>
-      text().nullable()(); // aluminum, steel, carbonFiber
-  TextColumn get tankName =>
-      text().nullable()(); // user-friendly name like "Primary AL80"
-  TextColumn get presetName =>
-      text().nullable()(); // preset name (e.g., 'al80', 'hp100')
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Equipment catalog
-class Equipment extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get type => text()(); // regulator, bcd, wetsuit, etc.
-  TextColumn get brand => text().nullable()();
-  TextColumn get model => text().nullable()();
-  TextColumn get serialNumber => text().nullable()();
-  TextColumn get size => text().nullable()(); // S, M, L, XL, or specific size
-  TextColumn get status => text().withDefault(
-    const Constant('active'),
-  )(); // active, needsService, retired, etc.
-  IntColumn get purchaseDate => integer().nullable()();
-  RealColumn get purchasePrice => real().nullable()();
-  TextColumn get purchaseCurrency =>
-      text().withDefault(const Constant('USD'))();
-  IntColumn get lastServiceDate => integer().nullable()();
-  IntColumn get serviceIntervalDays => integer().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  BoolColumn get isActive => boolean().withDefault(const Constant(true))();
-  // Notification overrides (v27)
-  BoolColumn get customReminderEnabled => boolean()
-      .nullable()(); // NULL = use global, true = custom, false = disabled
-  TextColumn get customReminderDays =>
-      text().nullable()(); // JSON array override, e.g. "[7, 30]"
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Junction table for equipment used per dive
-class DiveEquipment extends Table {
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get equipmentId =>
-      text().references(Equipment, #id, onDelete: KeyAction.cascade)();
-
-  @override
-  Set<Column> get primaryKey => {diveId, equipmentId};
-}
-
-/// Multiple weight entries per dive (e.g., integrated + trim weights)
-class DiveWeights extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get weightType =>
-      text()(); // Integrated, Belt, Trim, Ankle, Backplate, Other
-  RealColumn get amountKg => real()(); // kg
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Equipment sets (named collections of equipment items)
-class EquipmentSets extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get description => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Junction table for equipment items in sets
-class EquipmentSetItems extends Table {
-  TextColumn get setId =>
-      text().references(EquipmentSets, #id, onDelete: KeyAction.cascade)();
-  TextColumn get equipmentId =>
-      text().references(Equipment, #id, onDelete: KeyAction.cascade)();
-
-  @override
-  Set<Column> get primaryKey => {setId, equipmentId};
-}
-
-/// Marine life species catalog
-class Species extends Table {
-  TextColumn get id => text()();
-  TextColumn get commonName => text()();
-  TextColumn get scientificName => text().nullable()();
-  TextColumn get category => text()(); // fish, coral, mammal, etc.
-  TextColumn get taxonomyClass => text().nullable()(); // e.g. Actinopterygii
-  TextColumn get description => text().nullable()();
-  TextColumn get photoPath => text().nullable()();
-  BoolColumn get isBuiltIn => boolean().withDefault(const Constant(false))();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Marine life sightings per dive
-class Sightings extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get speciesId => text().references(Species, #id)();
-  IntColumn get count => integer().withDefault(const Constant(1))();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Photos and media files (also used for signatures)
-class Media extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().nullable().references(Dives, #id, onDelete: KeyAction.setNull)();
-  TextColumn get siteId => text().nullable().references(
-    DiveSites,
-    #id,
-    onDelete: KeyAction.setNull,
-  )();
-  TextColumn get filePath => text()();
-  TextColumn get fileType => text().withDefault(
-    const Constant('photo'),
-  )(); // photo, video, instructor_signature
-  RealColumn get latitude => real().nullable()();
-  RealColumn get longitude => real().nullable()();
-  IntColumn get takenAt => integer().nullable()();
-  TextColumn get caption => text().nullable()();
-  // Signature fields (v1.5) - used when fileType='instructor_signature'
-  TextColumn get signerId =>
-      text().nullable().references(Buddies, #id, onDelete: KeyAction.setNull)();
-  TextColumn get signerName => text().nullable()();
-  // Signature type (v22) - distinguishes instructor vs buddy signatures
-  TextColumn get signatureType => text().nullable()(); // 'instructor' | 'buddy'
-  // Signature image data (v23) - stores signature as BLOB instead of file
-  BlobColumn get imageData => blob().nullable()();
-  // Gallery photo fields (v2.0) - for underwater photography feature
-  TextColumn get platformAssetId =>
-      text().nullable()(); // Platform-specific asset ID for gallery photos
-  TextColumn get originalFilename => text().nullable()();
-  IntColumn get width => integer().nullable()();
-  IntColumn get height => integer().nullable()();
-  IntColumn get durationSeconds => integer().nullable()(); // For videos
-  BoolColumn get isFavorite => boolean().withDefault(const Constant(false))();
-  IntColumn get thumbnailGeneratedAt => integer().nullable()();
-  IntColumn get lastVerifiedAt => integer().nullable()();
-  BoolColumn get isOrphaned => boolean().withDefault(const Constant(false))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Enrichment data calculated from dive profile at photo timestamp
-class MediaEnrichment extends Table {
-  TextColumn get id => text()();
-  TextColumn get mediaId =>
-      text().references(Media, #id, onDelete: KeyAction.cascade)();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  // Calculated from dive profile at photo timestamp
-  RealColumn get depthMeters => real().nullable()();
-  RealColumn get temperatureCelsius => real().nullable()();
-  IntColumn get elapsedSeconds => integer().nullable()();
-  // Confidence/quality
-  TextColumn get matchConfidence => text().withDefault(
-    const Constant('exact'),
-  )(); // exact, interpolated, estimated, no_profile
-  IntColumn get timestampOffsetSeconds => integer().nullable()();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Species tags on media (many-to-many with optional spatial annotation)
-class MediaSpecies extends Table {
-  TextColumn get id => text()();
-  TextColumn get mediaId =>
-      text().references(Media, #id, onDelete: KeyAction.cascade)();
-  TextColumn get speciesId =>
-      text().references(Species, #id, onDelete: KeyAction.cascade)();
-  TextColumn get sightingId => text().nullable().references(
-    Sightings,
-    #id,
-    onDelete: KeyAction.setNull,
-  )();
-  // Reserved for future spatial annotation (nullable for now)
-  RealColumn get bboxX => real().nullable()();
-  RealColumn get bboxY => real().nullable()();
-  RealColumn get bboxWidth => real().nullable()();
-  RealColumn get bboxHeight => real().nullable()();
-  TextColumn get notes => text().nullable()();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Pending photo suggestions for background scan feature
-class PendingPhotoSuggestions extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get platformAssetId => text()();
-  IntColumn get takenAt => integer()();
-  TextColumn get thumbnailPath => text().nullable()();
-  BoolColumn get dismissed => boolean().withDefault(const Constant(false))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Application settings key-value store (legacy - kept for backward compatibility)
-class Settings extends Table {
-  TextColumn get key => text()();
-  TextColumn get value => text().nullable()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {key};
-}
-
-/// Per-diver settings (v16)
-class DiverSettings extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().references(Divers, #id)();
-  // Unit settings
-  TextColumn get depthUnit => text().withDefault(const Constant('meters'))();
-  TextColumn get temperatureUnit =>
-      text().withDefault(const Constant('celsius'))();
-  TextColumn get pressureUnit => text().withDefault(const Constant('bar'))();
-  TextColumn get volumeUnit => text().withDefault(const Constant('liters'))();
-  TextColumn get weightUnit =>
-      text().withDefault(const Constant('kilograms'))();
-  TextColumn get altitudeUnit => text().withDefault(const Constant('meters'))();
-  TextColumn get sacUnit =>
-      text().withDefault(const Constant('litersPerMin'))();
-  // Time/Date format settings
-  TextColumn get timeFormat =>
-      text().withDefault(const Constant('twelveHour'))();
-  TextColumn get dateFormat => text().withDefault(const Constant('mmmDYYYY'))();
-  // Theme
-  TextColumn get themeMode => text().withDefault(const Constant('system'))();
-  TextColumn get themePreset =>
-      text().withDefault(const Constant('submersion'))();
-  // Locale (language preference: 'system', 'en', 'es', 'fr', etc.)
-  TextColumn get locale => text().withDefault(const Constant('system'))();
-  // Defaults
-  TextColumn get defaultDiveType =>
-      text().withDefault(const Constant('recreational'))();
-  RealColumn get defaultTankVolume =>
-      real().withDefault(const Constant(12.0))();
-  IntColumn get defaultStartPressure =>
-      integer().withDefault(const Constant(200))();
-  TextColumn get defaultTankPreset =>
-      text().nullable().withDefault(const Constant('al80'))();
-  BoolColumn get applyDefaultTankToImports =>
-      boolean().withDefault(const Constant(false))();
-  // Decompression settings
-  IntColumn get gfLow => integer().withDefault(const Constant(30))();
-  IntColumn get gfHigh => integer().withDefault(const Constant(70))();
-  RealColumn get ppO2MaxWorking => real().withDefault(const Constant(1.4))();
-  RealColumn get ppO2MaxDeco => real().withDefault(const Constant(1.6))();
-  IntColumn get cnsWarningThreshold =>
-      integer().withDefault(const Constant(80))();
-  RealColumn get ascentRateWarning => real().withDefault(const Constant(9.0))();
-  RealColumn get ascentRateCritical =>
-      real().withDefault(const Constant(12.0))();
-  BoolColumn get showCeilingOnProfile =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get showAscentRateColors =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get showNdlOnProfile =>
-      boolean().withDefault(const Constant(true))();
-  RealColumn get lastStopDepth => real().withDefault(const Constant(3.0))();
-  RealColumn get decoStopIncrement => real().withDefault(const Constant(3.0))();
-  BoolColumn get o2Narcotic => boolean().withDefault(const Constant(true))();
-  RealColumn get endLimit => real().withDefault(const Constant(30.0))();
-  BoolColumn get useDiveComputerCnsData =>
-      boolean().withDefault(const Constant(false))();
-  IntColumn get defaultNdlSource => integer().withDefault(const Constant(1))();
-  IntColumn get defaultCeilingSource =>
-      integer().withDefault(const Constant(1))();
-  IntColumn get defaultTtsSource => integer().withDefault(const Constant(1))();
-  IntColumn get defaultCnsSource => integer().withDefault(const Constant(1))();
-  // Appearance settings
-  BoolColumn get showDepthColoredDiveCards =>
-      boolean().withDefault(const Constant(false))();
-  // Card coloring settings (v35)
-  TextColumn get cardColorAttribute =>
-      text().withDefault(const Constant('none'))();
-  TextColumn get cardColorGradientPreset =>
-      text().withDefault(const Constant('ocean'))();
-  IntColumn get cardColorGradientStart => integer().nullable()();
-  IntColumn get cardColorGradientEnd => integer().nullable()();
-  // Tissue visualization settings
-  TextColumn get tissueColorScheme =>
-      text().withDefault(const Constant('classic'))();
-  TextColumn get tissueVizMode =>
-      text().withDefault(const Constant('heatMap'))();
-  BoolColumn get showMapBackgroundOnDiveCards =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showMapBackgroundOnSiteCards =>
-      boolean().withDefault(const Constant(false))();
-  // Dive profile markers
-  BoolColumn get showMaxDepthMarker =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get showPressureThresholdMarkers =>
-      boolean().withDefault(const Constant(false))();
-  // Dive list view mode (v51)
-  TextColumn get diveListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  // List view modes for other features (v52)
-  TextColumn get siteListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  TextColumn get tripListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  TextColumn get equipmentListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  TextColumn get buddyListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  TextColumn get diveCenterListViewMode =>
-      text().withDefault(const Constant('detailed'))();
-  // Map style (v67)
-  TextColumn get mapStyle =>
-      text().withDefault(const Constant('openStreetMap'))();
-  // Dive profile chart defaults
-  TextColumn get defaultRightAxisMetric =>
-      text().withDefault(const Constant('temperature'))();
-  BoolColumn get defaultShowTemperature =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get defaultShowPressure =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get defaultShowHeartRate =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowSac =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowEvents =>
-      boolean().withDefault(const Constant(true))();
-  BoolColumn get defaultShowPpO2 =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowPpN2 =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowPpHe =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowGasDensity =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowGf =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowSurfaceGf =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowMeanDepth =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowTts =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowCns =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowOtu =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get defaultShowGasSwitchMarkers =>
-      boolean().withDefault(const Constant(true))();
-  // Notification settings (v26)
-  BoolColumn get notificationsEnabled =>
-      boolean().withDefault(const Constant(true))();
-  TextColumn get serviceReminderDays =>
-      text().withDefault(const Constant('[7, 14, 30]'))(); // JSON array
-  TextColumn get reminderTime =>
-      text().withDefault(const Constant('09:00'))(); // HH:mm format
-  // Data source badge visibility (v55)
-  BoolColumn get showDataSourceBadges =>
-      boolean().withDefault(const Constant(true))();
-  // Dive detail section order and visibility (v56) — JSON array
-  TextColumn get diveDetailSections => text().nullable()();
-  // Table view profile panel default visibility (v61)
-  BoolColumn get showProfilePanelInTableView =>
-      boolean().withDefault(const Constant(true))();
-  // Per-section details pane visibility in table view (v63)
-  BoolColumn get showDetailsPaneDives =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneSites =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneBuddies =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneTrips =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneEquipment =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneDiveCenters =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneCertifications =>
-      boolean().withDefault(const Constant(false))();
-  BoolColumn get showDetailsPaneCourses =>
-      boolean().withDefault(const Constant(false))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive buddies contact list
-class Buddies extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get email => text().nullable()();
-  TextColumn get phone => text().nullable()();
-  TextColumn get certificationLevel => text().nullable()();
-  TextColumn get certificationAgency => text().nullable()();
-  TextColumn get photoPath => text().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Junction table for buddies on each dive (many-to-many with role)
-class DiveBuddies extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get buddyId =>
-      text().references(Buddies, #id, onDelete: KeyAction.cascade)();
-  TextColumn get role => text().withDefault(const Constant('buddy'))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Diver certifications
-class Certifications extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()(); // e.g., "Open Water Diver"
-  TextColumn get agency => text()(); // PADI, SSI, etc.
-  TextColumn get level => text().nullable()(); // For more specific level info
-  TextColumn get cardNumber => text().nullable()();
-  IntColumn get issueDate => integer().nullable()();
-  IntColumn get expiryDate => integer().nullable()(); // For certs that expire
-  TextColumn get instructorName => text().nullable()();
-  TextColumn get instructorNumber => text().nullable()();
-  TextColumn get photoFrontPath => text()
-      .nullable()(); // Front of cert card (deprecated, kept for migration)
-  TextColumn get photoBackPath =>
-      text().nullable()(); // Back of cert card (deprecated, kept for migration)
-  BlobColumn get photoFront => blob().nullable()(); // Front of cert card (BLOB)
-  BlobColumn get photoBack => blob().nullable()(); // Back of cert card (BLOB)
-  // Link to training course (bidirectional, v1.5)
-  TextColumn get courseId =>
-      text().nullable().references(Courses, #id, onDelete: KeyAction.setNull)();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Equipment service records
-class ServiceRecords extends Table {
-  TextColumn get id => text()();
-  TextColumn get equipmentId =>
-      text().references(Equipment, #id, onDelete: KeyAction.cascade)();
-  TextColumn get serviceType => text()(); // annual, repair, inspection, etc.
-  IntColumn get serviceDate => integer()();
-  TextColumn get provider => text().nullable()(); // Shop or technician name
-  RealColumn get cost => real().nullable()();
-  TextColumn get currency => text().withDefault(const Constant('USD'))();
-  IntColumn get nextServiceDue => integer().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive centers/operators
-class DiveCenters extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get street => text().nullable()(); // Street address
-  TextColumn get city => text().nullable()();
-  TextColumn get stateProvince =>
-      text().nullable()(); // State, province, or region
-  TextColumn get postalCode => text().nullable()();
-  RealColumn get latitude => real().nullable()();
-  RealColumn get longitude => real().nullable()();
-  TextColumn get country => text().nullable()();
-  TextColumn get phone => text().nullable()();
-  TextColumn get email => text().nullable()();
-  TextColumn get website => text().nullable()();
-  TextColumn get affiliations =>
-      text().nullable()(); // PADI, SSI, etc. comma-separated
-  RealColumn get rating => real().nullable()();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Tags for organizing dives (v1.5)
-class Tags extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()();
-  TextColumn get color => text().nullable()(); // Hex color code for UI
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Custom dive types (v1.0)
-class DiveTypes extends Table {
-  TextColumn get id => text()(); // Unique identifier (slug)
-  TextColumn get diverId =>
-      text().nullable().references(Divers, #id)(); // null for built-in types
-  TextColumn get name => text()(); // Display name
-  BoolColumn get isBuiltIn =>
-      boolean().withDefault(const Constant(false))(); // System vs user-defined
-  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Junction table for dive tags (many-to-many)
-class DiveTags extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get tagId =>
-      text().references(Tags, #id, onDelete: KeyAction.cascade)();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Custom tank presets (user-defined tank configurations)
-class TankPresets extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId =>
-      text().nullable().references(Divers, #id)(); // Owner of preset
-  TextColumn get name => text()(); // Internal name/identifier
-  TextColumn get displayName => text()(); // User-friendly display name
-  RealColumn get volumeLiters => real()(); // Water volume in liters
-  RealColumn get workingPressureBar => real()(); // Rated working pressure
-  TextColumn get material => text()(); // aluminum, steel, carbonFiber
-  TextColumn get description =>
-      text().withDefault(const Constant(''))(); // Optional description
-  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Dive computers (devices that record dive data)
-class DiveComputers extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId => text().nullable().references(Divers, #id)();
-  TextColumn get name => text()(); // User-friendly name e.g., "My Perdix"
-  TextColumn get manufacturer => text().nullable()(); // e.g., "Shearwater"
-  TextColumn get model => text().nullable()(); // e.g., "Perdix AI"
-  TextColumn get serialNumber => text().nullable()();
-  TextColumn get firmwareVersion => text().nullable()();
-  TextColumn get connectionType =>
-      text().nullable()(); // "bluetooth", "usb", "ble"
-  TextColumn get bluetoothAddress => text().nullable()(); // MAC address
-  TextColumn get lastDiveFingerprint => text().nullable()();
-  IntColumn get lastDownloadTimestamp =>
-      integer().nullable()(); // Unix timestamp
-  IntColumn get diveCount => integer().withDefault(const Constant(0))();
-  BoolColumn get isFavorite => boolean().withDefault(const Constant(false))();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Per-source metadata snapshots for multi-source dives.
-/// Only populated when a dive has data from multiple sources.
-@DataClassName('DiveDataSourcesData')
-class DiveDataSources extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get computerId => text().nullable().references(
-    DiveComputers,
-    #id,
-    onDelete: KeyAction.setNull,
-  )();
-  BoolColumn get isPrimary => boolean().withDefault(const Constant(false))();
-  TextColumn get computerModel => text().nullable()();
-  TextColumn get computerSerial => text().nullable()();
-  TextColumn get sourceFormat => text().nullable()();
-  TextColumn get sourceFileName => text().nullable()();
-  TextColumn get sourceFileFormat => text().nullable()();
-  RealColumn get maxDepth => real().nullable()();
-  RealColumn get avgDepth => real().nullable()();
-  IntColumn get duration => integer().nullable()();
-  RealColumn get waterTemp => real().nullable()();
-  DateTimeColumn get entryTime => dateTime().nullable()();
-  DateTimeColumn get exitTime => dateTime().nullable()();
-  RealColumn get maxAscentRate => real().nullable()();
-  RealColumn get maxDescentRate => real().nullable()();
-  IntColumn get surfaceInterval => integer().nullable()();
-  RealColumn get cns => real().nullable()();
-  RealColumn get otu => real().nullable()();
-  TextColumn get decoAlgorithm => text().nullable()();
-  IntColumn get gradientFactorLow => integer().nullable()();
-  IntColumn get gradientFactorHigh => integer().nullable()();
-  DateTimeColumn get importedAt => dateTime()();
-  DateTimeColumn get createdAt => dateTime()();
-  BlobColumn get rawData => blob().nullable()();
-  BlobColumn get rawFingerprint => blob().nullable()();
-  TextColumn get descriptorVendor => text().nullable()();
-  TextColumn get descriptorProduct => text().nullable()();
-  IntColumn get descriptorModel => integer().nullable()();
-  TextColumn get libdivecomputerVersion => text().nullable()();
-  DateTimeColumn get lastParsedAt => dateTime().nullable()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Profile events (markers on dive profile)
-class DiveProfileEvents extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  IntColumn get timestamp => integer()(); // seconds from dive start
-  TextColumn get eventType => text()(); // See ProfileEventType enum
-  TextColumn get severity =>
-      text().withDefault(const Constant('info'))(); // info, warning, alert
-  TextColumn get description => text().nullable()();
-  RealColumn get depth => real().nullable()(); // depth at event (meters)
-  RealColumn get value =>
-      real().nullable()(); // event-specific value (e.g., ascent rate)
-  TextColumn get tankId => text().nullable()(); // for gas switch events
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Gas switches during a dive
-class GasSwitches extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  IntColumn get timestamp => integer()(); // seconds from dive start
-  TextColumn get tankId =>
-      text().references(DiveTanks, #id, onDelete: KeyAction.cascade)();
-  RealColumn get depth => real().nullable()(); // depth at switch (meters)
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Per-tank time-series pressure data for multi-tank dives
-/// Enables visualization of pressure curves for each tank (AI transmitters)
-class TankPressureProfiles extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get tankId =>
-      text().references(DiveTanks, #id, onDelete: KeyAction.cascade)();
-  IntColumn get timestamp => integer()(); // seconds from dive start
-  RealColumn get pressure => real()(); // bar
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Tide data recorded with a dive for historical reference.
-///
-/// Stores the tide conditions at the time of a dive, including:
-/// - Current height and state (rising/falling)
-/// - Nearby high and low tide information
-///
-/// This enables post-dive analysis of conditions and correlation with dive quality.
-class TideRecords extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  // Current tide at dive time
-  RealColumn get heightMeters => real()(); // Tide height at dive start
-  TextColumn get tideState => text()(); // rising, falling, slackHigh, slackLow
-  RealColumn get rateOfChange =>
-      real().nullable()(); // meters per hour (positive = rising)
-  // Nearby high tide
-  RealColumn get highTideHeight => real().nullable()(); // Height at high tide
-  IntColumn get highTideTime =>
-      integer().nullable()(); // Unix timestamp of high tide
-  // Nearby low tide
-  RealColumn get lowTideHeight => real().nullable()(); // Height at low tide
-  IntColumn get lowTideTime =>
-      integer().nullable()(); // Unix timestamp of low tide
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// User-defined key:value fields per dive
-class DiveCustomFields extends Table {
-  TextColumn get id => text()();
-  TextColumn get diveId =>
-      text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get fieldKey => text()();
-  TextColumn get fieldValue => text().withDefault(const Constant(''))();
-  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-// ============================================================================
-// Sync Tables
-// ============================================================================
-
-/// Global sync metadata - tracks sync state for this device
-class SyncMetadata extends Table {
-  TextColumn get id => text()(); // Always 'global' for single record
-  IntColumn get lastSyncTimestamp =>
-      integer().nullable()(); // Unix timestamp ms of last successful sync
-  TextColumn get deviceId => text()(); // This device's unique UUID
-  TextColumn get syncProvider =>
-      text().nullable()(); // 'icloud' or 'googledrive'
-  TextColumn get remoteFileId =>
-      text().nullable()(); // Provider-specific file reference
-  IntColumn get syncVersion =>
-      integer().withDefault(const Constant(1))(); // Sync format version
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Per-record sync tracking for conflict detection
-class SyncRecords extends Table {
-  TextColumn get id => text()();
-  TextColumn get entityType => text()(); // e.g., 'dives', 'dive_sites'
-  TextColumn get recordId => text()(); // Primary key of the synced record
-  IntColumn get localUpdatedAt => integer()(); // Local modification timestamp
-  IntColumn get syncedAt => integer().nullable()(); // When last synced to cloud
-  TextColumn get syncStatus => text().withDefault(
-    const Constant('synced'),
-  )(); // synced, pending, conflict
-  TextColumn get conflictData =>
-      text().nullable()(); // JSON of conflicting remote data
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Deletion log for tracking deleted records during sync
-class DeletionLog extends Table {
-  TextColumn get id => text()();
-  TextColumn get entityType => text()(); // Which table the record was in
-  TextColumn get recordId => text()(); // Primary key of deleted record
-  IntColumn get deletedAt => integer()(); // Unix timestamp of deletion
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Cached map regions for offline use
-class CachedRegions extends Table {
-  TextColumn get id => text()();
-  TextColumn get name => text()();
-  RealColumn get minLat => real()();
-  RealColumn get maxLat => real()();
-  RealColumn get minLng => real()();
-  RealColumn get maxLng => real()();
-  IntColumn get minZoom => integer()();
-  IntColumn get maxZoom => integer()();
-  IntColumn get tileCount => integer()();
-  IntColumn get sizeBytes => integer()();
-  IntColumn get createdAt => integer()();
-  IntColumn get lastAccessedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Training courses (e.g., "Advanced Open Water", "Rescue Diver")
-class Courses extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId =>
-      text().references(Divers, #id, onDelete: KeyAction.cascade)();
-  TextColumn get name => text()(); // e.g., "Advanced Open Water Diver"
-  TextColumn get agency => text()(); // CertificationAgency enum
-  IntColumn get startDate => integer()(); // Unix timestamp
-  IntColumn get completionDate => integer().nullable()(); // null = in progress
-  // Instructor can be a buddy reference OR just text fields
-  TextColumn get instructorId =>
-      text().nullable().references(Buddies, #id, onDelete: KeyAction.setNull)();
-  TextColumn get instructorName => text().nullable()(); // Text fallback
-  TextColumn get instructorNumber =>
-      text().nullable()(); // Instructor cert number
-  // Link to earned certification (bidirectional, no FK to avoid circular ref)
-  TextColumn get certificationId => text().nullable()();
-  TextColumn get location => text().nullable()(); // Dive center/shop
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Junction table for expected species at dive sites (manual curation)
-class SiteSpecies extends Table {
-  TextColumn get id => text()();
-  TextColumn get siteId =>
-      text().references(DiveSites, #id, onDelete: KeyAction.cascade)();
-  TextColumn get speciesId =>
-      text().references(Species, #id, onDelete: KeyAction.cascade)();
-  TextColumn get notes => text().withDefault(const Constant(''))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Tracks scheduled notifications to enable smart rescheduling
-class ScheduledNotifications extends Table {
-  TextColumn get id => text()();
-  TextColumn get equipmentId =>
-      text().references(Equipment, #id, onDelete: KeyAction.cascade)();
-  IntColumn get scheduledDate => integer()(); // Unix timestamp
-  IntColumn get reminderDaysBefore => integer()(); // 7, 14, or 30
-  IntColumn get notificationId => integer()(); // Platform notification ID
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// User-saved CSV import presets (local-only, not synced)
-class CsvPresets extends Table {
-  TextColumn get id => text()();
-  TextColumn get name => text()();
-  TextColumn get presetJson => text()();
-  IntColumn get createdAt => integer()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Stores the active view configuration per (diver, view_mode).
-class ViewConfigs extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId =>
-      text().references(Divers, #id, onDelete: KeyAction.cascade)();
-  TextColumn get viewMode => text()();
-  TextColumn get configJson => text()();
-  IntColumn get updatedAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-/// Named presets per (diver, view_mode).
-class FieldPresets extends Table {
-  TextColumn get id => text()();
-  TextColumn get diverId =>
-      text().references(Divers, #id, onDelete: KeyAction.cascade)();
-  TextColumn get viewMode => text()();
-  TextColumn get name => text()();
-  TextColumn get configJson => text()();
-  BoolColumn get isBuiltIn => boolean().withDefault(const Constant(false))();
-  IntColumn get createdAt => integer()();
-
-  @override
-  Set<Column> get primaryKey => {id};
-}
-
-// ============================================================================
 // Database Class
 // ============================================================================
+
+/// Prefix of the deterministic id for a synthesized/backfilled primary data
+/// source -- the row a dive gets when it has profile samples but no
+/// dive_data_sources row (older file imports). Shared by the beforeOpen
+/// backfill (`_backfillMissingDataSources`) and the read-time
+/// synthesis ([DiveRepository.getProfilesByDataSource]) so the id a consumer
+/// sees before the heal equals the id persisted afterward. Never change it:
+/// existing databases already carry rows with this exact prefix.
+const String kLegacyDataSourceIdPrefix = 'legacy-src-';
+
+/// Full deterministic data-source id for [diveId]. See
+/// [kLegacyDataSourceIdPrefix].
+String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
 
 @DriftDatabase(
   tables: [
@@ -1261,20 +109,39 @@ class FieldPresets extends Table {
     DiverSettings,
     Trips,
     Dives,
-    DiveProfiles,
+    DiveProfileSeries,
     DiveSites,
     DiveTanks,
     Equipment,
     DiveEquipment,
     DiveWeights,
+    DiverWeightEntries,
+    DivePlanEquipment,
     EquipmentSets,
     EquipmentSetItems,
+    EquipmentSetGeofences,
+    // What a set carries besides gear (v364, issue #4525)
+    EquipmentSetIncludes,
+    EquipmentSetWeightPresets,
+    EquipmentSetCylinderConfigs,
+    QualityFindings,
+    EquipmentAttributes,
+    EquipmentComponents,
     Species,
     Sightings,
     Media,
     MediaEnrichment,
     MediaSpecies,
+    // Media tags (v309, issue #1970)
+    MediaTags,
+    // People tagged on photos and videos (v326, issue #1745)
+    MediaPeople,
     PendingPhotoSuggestions,
+    MediaRepairLog,
+    MediaIdentificationRuns,
+    MediaIdentifications,
+    MediaIdentificationCrops,
+    MediaSmartAlbums,
     Settings,
     Buddies,
     DiveBuddies,
@@ -1283,22 +150,79 @@ class FieldPresets extends Table {
     DiveCenters,
     Tags,
     DiveTags,
+    DiveDiveTypes,
     DiveTypes,
+    DiveRoles,
+    // Several roles per person on a dive (v272, issue #1221)
+    DiveDiverRoles,
+    DiveBuddyRoles,
+    // Custom certification agencies and levels (v261, issue #690)
+    CustomCertificationAgencies,
+    CustomCertificationLevels,
     TankPresets,
+    WeightPresets,
+    WeightPresetEntries,
+    Transmitters,
     DiveComputers,
     DiveDataSources,
+    ImportedFiles,
     DiveProfileEvents,
+    DiveSafetyReviews,
+    DiveSafetyFindings,
+    EmergencyChambers,
+    Incidents,
+    DiveSensorSummaries,
+    // Explore derived metrics (v247, issue #2195), local only
+    DiveDerivedMetricsRows,
+    DiveDecoStatus,
+    EquipmentObservations,
+    EquipmentFindings,
+    EquipmentConditionReviews,
     GasSwitches,
-    TankPressureProfiles,
+    TankPressureSeries,
     TideRecords,
+    // Apple Health readings per dive (v354, issue #637)
+    DiveHealthRecords,
     // Site-species junction
     SiteSpecies,
+    SiteFeatures,
+    // Site classification (v217, issue #1765)
+    SiteTypes,
+    SiteSiteTypes,
+    SiteTags,
+    // Equipment tags (v219, issue #1942)
+    EquipmentTags,
+    // Equipment sharing and its event log (v234, issue #2046)
+    EquipmentShares,
+    EquipmentOwnershipEvents,
+    // Equipment locations and their move log (v268)
+    EquipmentLocations,
+    EquipmentLocationMoves,
+    // Equipment service cache for the query language (v242, issue
+    // #2365), local only
+    EquipmentServiceStatus,
+    // Saved queries (v238, issue #2365)
+    SavedQueries,
+    // Dive Lab saved scenarios (v236)
+    DiveScenarios,
+    // Logbook rules and their run history (v301, issue #3513)
+    Rules,
+    RuleRuns,
+    RuleRunChanges,
     // Training courses (v1.5)
     Courses,
+    // Course requirement tracker (v121)
+    CourseRequirements,
+    CourseRequirementDives,
+    // A dive's courses (v288, issue #2515)
+    DiveCourses,
     // Sync tables
     SyncMetadata,
     SyncRecords,
     DeletionLog,
+    SyncPeerCursors,
+    LocalPublishStates,
+    NearbyPeers,
     // Maps & Visualization
     CachedRegions,
     // Notifications
@@ -1308,11 +232,98 @@ class FieldPresets extends Table {
     // Liveaboard tracking (v2.0)
     LiveaboardDetailRecords,
     TripItineraryDays,
+    TripDayWeather,
+    ChecklistTemplates,
+    // Multiple checklists per trip (v336, issue #3356)
+    TripChecklists,
+    // Checklist sections (v297-298, issue #3360)
+    TripChecklistSections,
+    TripChecklistItems,
+    ChecklistTemplateSections,
+    ChecklistTemplateItems,
+    // Pre-dive checklists (spec 2026-07-16-pre-dive-checklist)
+    PreDiveChecklistTemplates,
+    // Checklist sections (v299, issue #3360)
+    PreDiveChecklistTemplateSections,
+    PreDiveChecklistTemplateItems,
+    PreDiveSessions,
+    PreDiveSessionSections,
+    PreDiveSessionItems,
+    // GPS surface track logging (discussion #289)
+    GpsTracks,
+    GpsTrackPointsLocal,
+    // Measured underwater routes (spec 2026-09-10-underwater-nav-track-design.md,
+    // issues #1195 and #1445)
+    NavTracks,
+    // Saved dive plans (planner redesign Phase 2)
+    DivePlans,
+    DivePlanTanks,
+    DivePlanSegments,
+    // Saved repetitive dive series (v341, issue #3565)
+    DivePlanSeries,
+    // DPV mission planner (v244, issue #2086)
+    DivePlanMissions,
+    DivePlanMissionLegs,
+    DivePlanMissionMembers,
     // CSV import presets (local-only)
     CsvPresets,
     // Column view configuration
     ViewConfigs,
     FieldPresets,
+    MediaSubscriptions,
+    MediaSubscriptionState,
+    NetworkCredentialHosts,
+    MediaFetchDiagnostics,
+    MediaStores,
+    ConnectedAccounts,
+    ServiceKinds,
+    ServiceSchedules,
+    CylinderConfigs,
+    CylinderConfigItems,
+    // Rental gear memory (v221, issue #2075)
+    DiveCenterGearNotes,
+    // Cylinder fill history (v228, issue #2334)
+    CylinderFills,
+    // Twin set pairings (v345, issue #4242)
+    CylinderPairings,
+    // Trip cylinder slots and their ledger (v232, issue #2325)
+    TripCylinders,
+    TripCylinderEvents,
+    // Saved Connections maps (v235, issue #2322)
+    ConnectionMaps,
+    // Gear packed for a trip (v248, issue #2338)
+    TripEquipment,
+    // Download connections per dive computer (v279, issue #3106)
+    DiveComputerConnections,
+    // A profile's hidden shared trips and sites (v250, issue #2594)
+    TripHides,
+    SiteHides,
+    TripShares,
+    SiteShares,
+    // Insight observation dismissals (v265)
+    InsightObservationDismissals,
+    // Certification currency (v271, issue #2267)
+    CertificationCurrencyRules,
+    CertificationCurrencyPrefs,
+    CertificationCurrencyEvents,
+    // Documents store (v277, issue #2613)
+    Documents,
+    DocumentPages,
+    // Document tags (v309, issue #1970)
+    DocumentTags,
+    // Shared dive-site library (v289, issue #2567)
+    SharedLibraries,
+    SharedLibraryMembers,
+    SharedLibraryMemberships,
+    SharedSiteStates,
+    SharedSiteSuggestions,
+    SharedLibraryBackups,
+    LibrarySiteNotes,
+    // Per-device change log (v332, issue #3922)
+    ChangeLogContext,
+    ChangeLogOperations,
+    ChangeLogEvents,
+    ChangeLogFields,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -1322,7 +333,192 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 67;
+  static const int currentSchemaVersion = 382;
+
+  /// The oldest schema whose reader can apply this build's sync payloads
+  /// without loss or misinterpretation (the compatibility floor).
+  ///
+  /// Stamped into every published manifest's `schemaVersion` field, which
+  /// shipped readers compare against their own schema to decide whether to
+  /// hold a peer (changeset_reader.dart). Keeping the floor low lets older
+  /// builds keep syncing across additive schema changes; the receiving-side
+  /// overlay merge (issue #474) preserves columns an older peer omits, and
+  /// test/core/services/sync/cross_version_roundtrip_test.dart locks that in.
+  ///
+  /// Raise this to the NEW schema version ONLY when a migration:
+  ///  - drops, renames, or retypes an existing synced column,
+  ///  - changes the meaning or units of an existing column's values,
+  ///  - removes or folds a synced entity (the v147 buddyRoles case),
+  ///  - tightens a constraint an old writer's payloads would violate.
+  /// Do NOT raise it for new tables or synced entities, new nullable or
+  /// defaulted columns, new indexes, dedupe passes, or data repairs that
+  /// preserve meaning. When raising it, extend the round-trip test's
+  /// projection so the new boundary stays covered.
+  ///
+  /// Raised 137 -> 160 by the service type unification: v160 renames the
+  /// synced column service_records.service_type to service_category, which
+  /// the first rule above classifies as breaking. Peers below 160 are held
+  /// until they update. Note the gate is one-directional, so this does NOT
+  /// protect us from THEIR payloads; SyncDataSerializer._withRenamedKeys
+  /// carries the receiving-side tolerance.
+  ///
+  /// Raised 160 -> 170 by the SAC/RMV split: v170 renames the synced column
+  /// diver_settings.sac_unit to gas_consumption_display and replaces its
+  /// unit spellings with lane names, which the first two rules classify as
+  /// breaking. Peers below 170 are held until they update. Their payloads
+  /// still arrive here; _renamedWireKeys plus the value map in
+  /// _applyDiverSettingDefaults carry the receiving-side tolerance.
+  ///
+  /// Raised 170 -> 183 by the packed profile series: v182 replaces the synced
+  /// entities diveProfiles and tankPressureProfiles with diveProfileSeries and
+  /// tankPressureSeries, which the first rule above classifies as breaking.
+  /// Peers below 183 are held until they update. Their payloads still arrive
+  /// here; SyncData keeps the two legacy keys inbound-only and
+  /// SyncDataSerializer.packLegacySamples packs them into series on apply.
+  ///
+  /// 183 rather than 182, even though 182 is the rung that made the change:
+  /// no released build was ever stamped 182. Shipped devices are at 180, the
+  /// 181 rung shipped in PR #1390, and 182 and 183 land in the same release,
+  /// so nothing in the fleet is held by 183 that 182 did not already hold.
+  /// The extra step records that v183, not v182, is the rung that drops the
+  /// legacy tables and purges their `deletion_log` rows. The floor is stamped
+  /// on this device's own payloads and only holds readers below it; the gate
+  /// is one-directional and does nothing to inbound payloads from an older
+  /// peer. See `_purgeLegacySampleBookkeeping` in the migration library for
+  /// why those inbound legacy rows stay safe without the purged tombstones.
+  ///
+  /// Raised 183 -> 210 by the cylinder gear link: v210 lets a gear item a
+  /// cylinder is linked to be deleted (dive_tanks.equipment_id now sets null
+  /// on delete), so this build publishes equipment tombstones an older
+  /// reader cannot apply. Its code deletes the equipment row directly under
+  /// the old NO ACTION link, the delete fails, the sync moves past it, and
+  /// the item lingers there for good. That is an old reader misapplying our
+  /// payload, which is what this floor exists to prevent. Peers below 210
+  /// are held until they update. Their own payloads still arrive here, and
+  /// a live tank row still pointing at an item deleted here has its link
+  /// cleared by [SyncService.parentRefs].
+  ///
+  /// Raised 210 -> 224 by the media fact clocks: v224 splits a media row's
+  /// device-stamped facts (the upload stamps and the verification pair) onto
+  /// their own clocks, so this build publishes a media row whose ROW clock
+  /// did not move when only its facts changed. An older reader knows nothing
+  /// of the fact clocks and applies media as a blind upsert, so it would take
+  /// the whole row and overwrite a caption it holds that is newer than ours.
+  /// That is an old reader misapplying our payload, which is what this floor
+  /// exists to prevent. Peers below 224 are held until they update; their own
+  /// payloads still arrive here, and this build's merge reads a missing fact
+  /// clock as the row clock, so an old peer's writes still order correctly
+  /// (media sync program spec 5.1).
+  ///
+  /// Raised 224 -> 240 by scoped event tombstones (#1926): this build
+  /// replaces the per-row tombstones a split, re-import or re-parse wrote for
+  /// a dive's events with one tombstone for the whole set. An older reader
+  /// knows nothing of the scope type and stores it as an inert unknown
+  /// entity, so the events it names stay on that device for good. That is an
+  /// old reader misapplying our payload, which is what this floor exists to
+  /// prevent. Peers below 240 are held until they update; their own payloads
+  /// still arrive here, and the merge's scope guard keeps their copies of
+  /// deleted events from coming back.
+  ///
+  /// Raised 240 -> 275 by the decimal start pressure (#3091): v275 retypes
+  /// the synced column diver_settings.default_start_pressure from INTEGER
+  /// to REAL, which the first rule above classifies as breaking. An older
+  /// reader decodes the field with a hard int cast in DiverSetting.fromJson,
+  /// so a start pressure entered in psi (206.84 bar for 3000 psi) would
+  /// throw there. Peers below 275 are held until they update. Their own
+  /// payloads still arrive here and decode cleanly: drift's fromJson widens
+  /// an int to a double.
+  ///
+  /// Raised 275 -> 280 by the WebDAV backend (#2361): AccountKind.webdav is
+  /// a new value in the synced column connected_accounts.kind, and every
+  /// build before 280 decodes that column with AccountKind.values.byName,
+  /// which throws on a name it does not know. Schema 280 changes no data; it
+  /// exists so the floor can rise past the 275 to 279 betas. From 280 on
+  /// the accounts repository skips unknown kinds, so later kinds need no
+  /// floor bump of their own.
+  ///
+  /// Raised 280 -> 297 by checklist sections (#3360): v297 drops the synced
+  /// column trip_checklist_items.category, replacing it with a reference to
+  /// a new trip_checklist_sections row, which the first rule above
+  /// classifies as breaking (a dropped column, not a rename an older reader
+  /// could still decode). Peers below 297 are held until they update. Their
+  /// own payloads still arrive here, carrying `category` and no
+  /// `sectionId`; the existing #474 overlay (see above) refills the omitted
+  /// `sectionId` key from the local row before merging, so an old peer's
+  /// edit cannot null out a section this device already backfilled. See
+  /// cross_version_roundtrip_test.dart for the matching projection.
+  /// (v292 is shared_libraries.removals_json from #3481, v294 clears
+  /// duplicated certification photos, v295 is connected_accounts.nickname
+  /// from #3522, and v296 is the media color-correction columns from #3520;
+  /// all additive or non-synced, so none of them raise the floor on their
+  /// own. v293 is claimed by the accounts work, #3482.)
+  ///
+  /// Raised 297 -> 298 by the same change applied to
+  /// checklist_template_items.category (issue #3360), one rung later for
+  /// the template side of the same concept. Same reasoning, same overlay
+  /// protection, one rung per table group rather than one combined bump.
+  ///
+  /// Raised 298 -> 299 by the same change applied to
+  /// pre_dive_checklist_template_items.section (issue #3360), one rung
+  /// later for the pre-dive template side.
+  ///
+  /// Raised 299 -> 300 by the same change applied to
+  /// pre_dive_session_items.section (issue #3360), the last of the four
+  /// checklist-sections table groups.
+  ///
+  /// Raised 300 -> 308 by the planner Setup defaults (#3552): v305, v306
+  /// and v308 drop NOT NULL from synced dive_plans and dive_plan_missions
+  /// columns (rates, SAC, gradient factors, reserve, battery reserve, walk
+  /// speed), and this build writes NULL there to mean "follow the diver's
+  /// Settings". Every build before 305 decodes those columns with a
+  /// non-nullable DivePlan.fromJson / DivePlanMission.fromJson, which
+  /// throws on null, so the second rule above classifies the change as
+  /// breaking. Peers below 308 are held until they update. Their own
+  /// payloads still arrive here and decode cleanly: a concrete value is a
+  /// valid override in the nullable columns.
+  ///
+  /// Raised 308 -> 336 by multiple checklists per trip (#3356): v336
+  /// renames the synced columns trip_checklist_sections.trip_id and
+  /// trip_checklist_items.trip_id to checklist_id (now a reference to the
+  /// new trip_checklists row rather than the trip directly), which the
+  /// first rule above classifies as breaking the same way the v160 and
+  /// v170 column renames did. Peers below 336 are held until they update.
+  /// Their own payloads still arrive here, along with every base published
+  /// before the update: withCurrentWireKeys points a tripId-shaped row at
+  /// its trip's default checklist, and the serializer creates that
+  /// checklist when this device does not hold it yet.
+  ///
+  /// Raised 336 -> 350 by sighting abundance (#4337): v350 adds the synced
+  /// column sightings.abundance, where null means the count is exact and
+  /// `seen` or a REEF group means it is not. A peer below 350 stores a Seen
+  /// or group sighting as its count alone (1). Once that peer upgrades, the
+  /// new column is null there, and its next edit of the sighting publishes
+  /// an explicit null, which the merge applies as a real value (only an
+  /// omitted key is refilled from the local row), turning the sighting into
+  /// an exact 1 on every device. Peers below 350 are held until they
+  /// update. Their own payloads still arrive here and decode cleanly: a
+  /// missing abundance is null, an exact count.
+  ///
+  /// Raised 350 -> 378 by the marks on a species tag the app applied
+  /// (#4727): v378 adds the synced columns media_species.unconfirmed,
+  /// created_sighting and created_species, where null is the diver's own
+  /// tag. A peer below 378 stores an app-applied tag as a plain tag. Once
+  /// that peer upgrades, the columns are null there, and its next full
+  /// publish sends them as explicit nulls, which the merge applies as real
+  /// values (only an omitted key is refilled from the local row), silently
+  /// confirming the app's tags on every device. Peers below 378 are held
+  /// until they update. Their own payloads still arrive here and decode
+  /// cleanly: a missing column is null, the diver's own tag.
+  ///
+  /// Raised 378 -> 381 by syncing marine life results (#4876): v381 gives
+  /// media_identification_runs and media_identifications their clocks and
+  /// adds media_identification_crops. A peer below 381 drops those keys and
+  /// moves its cursor past the changesets that carry them, so once it
+  /// upgraded it would never receive the results published before (nothing
+  /// triggers a full resync in normal use): the device that analysed
+  /// usually updates first. Held below the floor, it reads them all once it
+  /// updates. Its own payloads still arrive here and decode cleanly.
+  static const int minimumCompatibleSchemaVersion = 381;
 
   /// Every schema version that has a migration block in onUpgrade.
   /// Used to calculate progress step counts. When adding a new migration,
@@ -1393,6 +589,1211 @@ class AppDatabase extends _$AppDatabase {
     65,
     66,
     67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    // v120 claimed in-worktree for the planner Subsurface-parity columns;
+    // 115-119 belong to other branches and interleave at merge time.
+    120,
+    // v121: course requirement tracker tables (renumbered from v114 at merge
+    // time; v114 became the tombstone-GC migration on main).
+    121,
+    // v122: gear service ledger (renumbered from v115 as main advanced past
+    // it; see schema-version ladder).
+    122,
+    // v123: post-dive safety review tables + diver safety settings columns
+    // (renumbered from v115 as main advanced past it at merge time).
+    123,
+    // v124: equipment type-specific attributes (renumbered from v115/v123 as
+    // main advanced past it at merge time; see schema-version ladder).
+    124,
+    // v125: diver_settings.no_fly_preset column (safety phase 2, no-fly
+    // countdown). Renumbered from v117/v124 as main advanced past it at merge
+    // time.
+    125,
+    // v126: emergency_chambers table + emergency card settings columns
+    // (renumbered from v118 as main advanced past it at merge time).
+    126,
+    // v127: incidents table (near-miss log, safety phase 4). Renumbered from
+    // v119 as main advanced past it at merge time.
+    127,
+    // v128: pre-dive checklist tables + built-in template seeds (renumbered
+    // from v117/v127 as main advanced past it at merge time).
+    128,
+    // v129: quality_findings table for the Data Quality Assistant (renumbered
+    // from v118 as main advanced past it at merge time).
+    129,
+    // v130: media_enrichment.hlc so a photo's depth/time association syncs.
+    130,
+    // v131: reconcile legacy service intervals edited after the v122 backfill
+    // into General service clocks (deletion-log guarded).
+    131,
+    // v132: backfill dives whose bottom_time was wrongly stored equal to
+    // runtime by older imports, recomputing it from the primary profile.
+    132,
+    // v133: deco stop band columns on diver_settings (renumbered from v130 as
+    // main advanced past it at merge time).
+    133,
+    // v134: media compressed-rendition columns (adjustable upload quality
+    // Phase A). Renumbered from v130 as main advanced past it at merge time.
+    134,
+    // v135: color accent toggle columns on diver_settings.
+    135,
+    136,
+    // v137: dives.weather_code, plus a one-time clear of the English weather
+    // prose this app generated itself so it can be re-rendered localized.
+    137,
+    // v138 is reserved by the divelogs.de branch (connected_accounts.diver_id).
+    // v139: cylinder_configs + cylinder_config_items (reusable diluent and
+    // bailout setups).
+    139,
+    // v140: media.retain_in_library (Media section Phase 1).
+    140,
+    // v141: diver_settings.default_currency (default currency for priced
+    // items). Renumbered from v138 and then v139 as those went to the
+    // divelogs.de branch and the cylinder configs respectively.
+    141,
+    // v142: trips.return_flight_at (return-flight dive-window countdown).
+    142,
+    // v143: media_repair_log (per-device) + media_smart_albums (synced),
+    // Media section Phase 5. Main reserved this number for PR #894 and
+    // continued at v144, so it lands here without renumbering.
+    143,
+    // v144: dives.visibility_meters plus the diver_settings visibility scale
+    // calibration columns (measured visibility replaces the tropical-biased
+    // bucket enum).
+    144,
+    // v145: gps_tracks provenance, label, and non-destructive trim bounds.
+    // Renumbered from v144 as main took that step for the visibility scale
+    // work at merge time.
+    145,
+    // v146: recompute machine-derived bottom times that the retired
+    // square-profile heuristic collapsed on multilevel dives.
+    146,
+    // v147: fold buddy_roles (professional credentials, issue #395) into
+    // buddy-owned certifications rows and drop the table (spec
+    // 2026-08-08-buddy-professional-roles-fold). Originally authored as v145;
+    // renumbered when PR #908 reserved 145 and v146 landed first.
+    147,
+    // v148: site media attachments (issues #211/#627): media(site_id) query
+    // index plus the site-side dedupe cleanup and partial unique index
+    // mirroring the dive-side v38 pair.
+    148,
+    // v149: duplicate tags (issue #1032): collapse `tags` rows sharing a
+    // (diver scope, case-folded name) and `dive_tags` rows sharing a
+    // (dive, tag), then add the two unique indexes that stop them recurring.
+    149,
+    // v150: diver_settings.coordinate_format (issue #1041): the diver's GPS
+    // coordinate notation. Presentational only -- coordinates stay decimal
+    // degrees in storage.
+    150,
+    // v151: diver_settings.seascape_appearance (PR #1073): the seascape
+    // terrain appearance knobs as one JSON blob, per-diver so they sync.
+    // Nullable so pre-v151 rows can adopt the legacy device-local pref.
+    151,
+    // v152: site_features (seascape program slice 2): diver-placed
+    // annotations on a site, synced LWW.
+    152,
+    // v153 (issue #810): raw O2 cell output in millivolts on dive_profiles.
+    153,
+    // v154 (issue #1104): dive_sites.entry_method / exit_method, the site's
+    // typical way in and out of the water.
+    154,
+    // v155 (issue #828): gas model preference on diver_settings, selecting
+    // ideal or real gas for every pressure-to-volume conversion. Renumbered
+    // from 154, which #1104 claimed first on main.
+    155,
+    // v156: dive_plan_tanks.is_travel_gas: flags a cylinder as also
+    // breathed on the descent, independent of its role, so the lost-gas
+    // contingency can cover stage/deco/diluent/pony/etc. cylinders used
+    // that way. Renumbered from 155, which #828 claimed first on main.
+    156,
+    // v157 (issue #829): default service price on service_kinds and
+    // service_schedules, prefilled when a maintenance record is logged.
+    // Renumbered from 154 and then 156, which #1104, #828 and #1127 claimed
+    // first on main.
+    157,
+    // v158 (issue #1149): owning-source FK on dive_profiles. Renumbered
+    // from 154 and then 156, which #1104, #1127 and #829 claimed first
+    // on main.
+    158,
+    // v159 (issue #1177): dive_data_sources.time_offset_seconds, the shift
+    // multi-computer consolidation applied to a folded-in source's timeline.
+    // Without it a re-parse re-inserts the secondary strand on the raw
+    // download's clock and it slides away from the primary's. Renumbered
+    // from 158, which #1149 claimed first on main.
+    159,
+    // v160 (service type unification): service_kinds.default_category, the
+    // category prefilled when a maintenance record is logged, plus the
+    // service_records.service_type -> service_category rename. Renumbered
+    // from 158 and then 159, which #1149 and #1177 claimed first on main.
+    160,
+    // v161: diver_settings.default_show_o2_cell_mv, a persisted default for
+    // the per-cell O2 mV toggle on the profile chart (issue #1235).
+    161,
+    // v163: diver_settings.default_show_estimated_tank_pressure, the switch
+    // that suppresses synthesized "(est.)" tank pressure lines on the profile
+    // chart (issue #731). v162 is skipped rather than missing: main was at
+    // v161 when that branch was cut, and this branch had already written 162.
+    // Two branches writing the same scalar auto-merge with no conflict
+    // marker, so #731 took 163 instead and 162 stays permanently unused.
+    163,
+    // v164: media.manual_elapsed_seconds, the diver's own placement of a
+    // media item in the dive when its capture time is wrong (issue #1090).
+    // Renumbered from 162, which #731 landed past while this branch was open.
+    164,
+    // v165: diver_settings.trim_tank_pressure_at_surfacing, which decides
+    // whether an import reads cylinder end pressure at the moment of
+    // surfacing rather than at the end of the recording (issue #1092).
+    // Renumbered from 163, which #731 landed on main while this branch
+    // was open. Main reserved this number while the branch was open, so it
+    // lands here without renumbering.
+    165,
+    // v166: diver_settings.place_name_language, the synced language used for
+    // reverse-geocoded country/region/town/body of water (issue #1187).
+    // Renumbered from 162, which #731 landed past while this branch was open.
+    166,
+    // v167 is likewise absent: it is claimed by issue #1269 (PR #1276) on a
+    // branch that is still open.
+    // v168 (issue #638): buddies.is_favorite, so frequently-dived buddies can
+    // be pinned to the top of the "Add buddy" picker regardless of sort.
+    // Renumbered from 161, which #1235 landed on main while this branch was
+    // open.
+    168,
+    // v170: diver_settings.sac_unit -> gas_consumption_display (a lane
+    // choice: sac, rmv, both) plus the rewrite of saved dive-table layouts
+    // that named the old sacRate column (discussions #354, #803). 167 and 169
+    // are deliberately absent, not missing: 167 is permanently skipped (main
+    // landed 168 past it, so PR #1276 moved its rung up), and 169 belongs to
+    // PR #1320 (dive-computer gear twins).
+    170,
+    // v171: trip_day_weather, fetched historical weather for trip days whose
+    // dives supply none. Renumbered from 168, which PR #1237 (issue #638,
+    // buddies.is_favorite) had already claimed and pushed; that claim was
+    // local and unpushed when this branch picked its number, so an open-PR
+    // scan could not see it.
+    // 165, 167 and 169 are deliberately absent, not missing: 165 is claimed by
+    // PR #1290, while 167 and 169 are permanently skipped. main landed past
+    // both while their branches were open, so PR #1276 moved to 173 and
+    // PR #1320 to 175. This ladder is non-contiguous by design; the audit
+    // asserts monotonic, unique, and scalar == max, never contiguous.
+    171,
+    // v173: dive_types.short_name, an optional diver-set abbreviation for
+    // custom dive types (mirrors the fixed built-in abbreviations). Issue
+    // #1269 (this PR). Renumbered up from 167, then 171, as main kept
+    // landing past this branch's claim while it was open; main's own v171
+    // comment above already reserves 173 for this PR, so that's the number
+    // landed here directly.
+    173,
+    // v174: dive_types.show_in_detail_header and dive_types.show_in_list_view,
+    // per-type toggles for which badge rows a diver's types appear in.
+    // Issue #1269 follow-up.
+    174,
+    // v175 (gear twins): dive_computers.equipment_id, the equipment row that
+    // represents a registered computer as gear, so a downloaded dive lists the
+    // computer that logged it alongside the rest of the diver's kit. Issue
+    // #1320. Renumbered from 169: main reserved 169 for this branch but landed
+    // 170 past it, and a rung below the shipped version never runs its
+    // onUpgrade step, so the gear-twin backfill would silently never execute.
+    // 171, 173 and 174 then landed as well (trip_day_weather and the two
+    // dive_types columns above), so this takes 175, which main's own v171
+    // comment already reserves for it. 169 is now permanently skipped, as are
+    // 162 and 167.
+    175,
+    // v177: GTR settings on diver_settings and the dive_profiles.rbt
+    // minutes-to-seconds repair.
+    177,
+    // v178: one dive_dive_types row per (dive, type), collapsing the
+    // duplicates the unguarded v92 seed minted on every device and the sync
+    // merge then unioned by row id. Issue #1360. (That comment originally
+    // recorded PR #1328 as holding 176; #1328 has since moved to 179, the
+    // rung below.)
+    178,
+    // v179: dives.site_suggestion_dismissed_at, the synced per-dive dismissal
+    // of the photo / dive-computer site suggestion. Renumbered twice while
+    // this branch was open -- from 172 when main landed 173-175, then from
+    // 176 when main landed 177 (GTR) -- because a rung below the shipped
+    // version never runs its onUpgrade step: a database already at the
+    // shipped version gains the column only through the beforeOpen backstop.
+    // 178 shipped with the dive-type uniqueness work while this branch was
+    // open, so this sits above it. 162, 167, 169 and 176 are skipped; the
+    // ladder is non-contiguous by design.
+    179,
+    // v180 (statistics exclusion): dives.excluded_from_stats and
+    // dives.excluded_from_gas_stats, letting a diver keep a dive in the
+    // logbook while removing it from statistics. Issues #526 and #1272.
+    // Renumbered from 178: main landed 178 (dive-type uniqueness) and 179
+    // (site-suggestion dismissal) while this branch was open, and a rung
+    // at or below the shipped version never runs its onUpgrade step.
+    // Column-only rung with no backfill, so the beforeOpen backstop is
+    // safe to re-run.
+    180,
+    // v181: divers.photo and buddies.photo, the profile photo blobs. Claimed
+    // against origin/main at 180, having been renumbered from 180 when PR
+    // #1374 (statistics exclusion) landed and took that rung while this
+    // branch held only its design docs. A rung at or below the shipped
+    // version merges with no conflict marker and its onUpgrade step then
+    // never runs, so re-verify this number if this branch sits open while
+    // main advances again.
+    181,
+    // v182 (packed profile series, spec 2026-08-28-profile-sample-storage):
+    // dive_profile_series and tank_pressure_series, one zlib columnar blob
+    // per (dive, computer, source, is_primary) group and per (dive, tank,
+    // computer) group, packed from the row-per-sample tables by
+    // packLegacyProfileRows with ids derived from the identity tuple so every
+    // device converges (the #1360 lesson). The legacy tables stay until the
+    // consumers move; the same PR retires them in a later plan. 176 remains
+    // skipped; the ladder is non-contiguous by design. Numbered 182 because
+    // PR #1390 (profile photos) took 181.
+    182,
+    // v183 (packed profile series, plan 2e): drop the row-per-sample
+    // dive_profiles and tank_pressure_profiles tables and purge the sync
+    // bookkeeping that named them. Every reader moved to the series tables
+    // in plans 2b to 2d, so the rows have no consumer left. The rung packs
+    // once more before it drops, because a device that reached 182 through
+    // a parallel branch's rung never ran ours and the beforeOpen backstop
+    // only runs AFTER onUpgrade: by then the rows would be gone.
+    183,
+    // v184 (issue #1451): dive_data_sources.merge_source_slot, the marker a
+    // sequential Combine stamps on the provenance rows it carries so the
+    // display can collapse the halves of one dive back into one source.
+    // Backfilled for dives combined before this rung shipped.
+    184,
+    // v185 (issue #1476): diver_settings.dive_detail_layout, the dive detail
+    // page's layout choice. Column-only rung, no backfill: a null reads back
+    // as the detailed layout, which is what every existing diver was already
+    // getting. Numbered 185 because PR #1451 took 184 while this branch was
+    // open; the column is nullable and additive either way, so the
+    // compatibility floor stays at 183.
+    185,
+    // v186: pre_dive_checklist_template_items.equipment_id, the remembered
+    // single-equipment link for an 'equipment'-typed template item. Chosen
+    // at session start (not in the template editor), mirroring the
+    // equipmentSet flow. Issue #814. Column-only rung, no backfill, so the
+    // beforeOpen backstop is safe to re-run. Renumbered from 181: main
+    // landed 181 through 185 while this branch was open, and a rung at or
+    // below the shipped version never runs its onUpgrade step.
+    186,
+    // v187: pre_dive_session_items.overdue_services, the frozen snapshot of
+    // overdue-service entries for a resolved checklist item (issue #814
+    // phase 2). Column-only rung, no backfill: every pre-existing row
+    // correctly reads back as null (no frozen snapshot), which the UI
+    // already treats as "nothing known" for a resolved legacy row.
+    // Renumbered from 182 for the same reason as 186 above.
+    187,
+    // v188: divers.insurance_emergency_phone and divers.insurance_phone, the
+    // insurer's 24h assistance line and office line (issue #1522). Column-only
+    // rung, no backfill: nothing in an existing database can tell us an
+    // insurer's hotline, so every pre-existing row correctly reads back as
+    // "not recorded" and the card keeps leading with the regional hotline.
+    188,
+    // v189: media.equipment_id plus idx_media_equipment_id (issue #1517).
+    // The link that files an invoice, receipt or warranty document against a
+    // piece of gear. Column-and-index rung, no backfill, so the beforeOpen
+    // backstop is safe to re-run. Renumbered from 188: main took that step
+    // for the insurance phone columns while this branch was open, and a rung
+    // at or below the shipped version never runs its onUpgrade step.
+    189,
+    // v190: recompress dive_data_sources.raw_data in place (issue #227).
+    // No DDL; the column's SQL type is unchanged and only the stored bytes
+    // move. Guarded per row: the self-describing header means a row this
+    // rung skips keeps reading correctly forever, so a blob left
+    // uncompressed costs space and nothing else. Numbered 190 because main
+    // took 188 and 189 while this branch was open.
+    190,
+    // v191: per-band planner ascent rates (9/6/3/1 m/min TDI phases).
+    // Renumbered from 188, which was itself renumbered from 185 and 184:
+    // main landed the insurance-phone, media-equipment-link and raw-data
+    // recompression rungs (188-190) while this branch was open, and a rung
+    // at or below the shipped version never runs its onUpgrade step.
+    191,
+    194,
+    // v195: media_species.hlc, so a species tag on a photo publishes in an
+    // incremental changeset instead of waiting for a full base publish
+    // (issue #1638). Additive nullable column; the one-time stamp of the
+    // rows already on disk is SyncRepository.backfillMissingHlc, which runs
+    // at the start of every sync. Renumbered from 192: main landed the
+    // transmitter-serial rung at 194 while this branch was open, 192 and 193
+    // are held by other open branches, and a rung at or below the shipped
+    // version never runs its onUpgrade step.
+    195,
+    // v196: weight_presets + weight_preset_entries (issue #1609). Renumbered
+    // from 192 then 195 -- main also landed the media-species-clock rung (195)
+    // while this branch was open (192 and 193 are held by other branches).
+    196,
+    // v197: dive_plans.salinity_ppt, custom planner water salinity for deco.
+    // Renumbered from 192: main landed the transmitter-serial, media-species
+    // clock and weight-preset rungs (194 through 196) while this branch was
+    // open, and a rung at or below the shipped version never runs its
+    // onUpgrade step.
+    197,
+    // v198: diver_settings.default_planner_water_type (salt/fresh/custom).
+    // Renumbered from 193 for the same reason as 197.
+    198,
+    // v199: certifications.additional_credentials -- extra (agency, level)
+    // pairs the same physical card grants (e.g. an FFESSM N1 that is also a
+    // CMAS 1-star). Additive nullable TEXT (a JSON array); no backfill, a
+    // null reads back as "just the primary agency/level". Renumbered from
+    // 197: main landed the planner salinity and water-type rungs (197, 198)
+    // while this branch was open.
+    199,
+    // v200: transmitters registry table (issue #1365) and
+    // dive_tanks.source_tank_index (issue #1314).
+    200,
+    // v201: the O2 cell linearity link (issue #986). Took 201 rather than
+    // 200 because #1365 held 200 on its own branch while this one was open;
+    // #1365 has since landed, so the two sit in order.
+    201,
+    202,
+    // 203: equipment assemblies (issue #1487). Renumbered from 202, which
+    // condition intelligence took while this branch was open.
+    203,
+    // v204: diver_settings.group_trips_in_dive_list -- inline collapsible
+    // trip groups in the dive list (issue #1193). Additive defaulted boolean,
+    // no backfill. Renumbered from 202 and then 201: the linearity link,
+    // condition intelligence and assemblies all landed while this branch was
+    // open, and a rung at or below the shipped version never runs its
+    // onUpgrade step.
+    204,
+    // 206: condition engine toggles on diver_settings (condition phase 3b).
+    // 205 is unused. v207 shipped in 1.7.8 while this branch was open, so
+    // a device already at 207 skips this step; the beforeOpen backstop
+    // adds the columns there instead.
+    206,
+    // v207: an updated_at on the three composite-natural-key gear junctions
+    // (issue #1728). 204 landed on main while this branch was open and 205
+    // and 206 are claimed by the condition-intelligence branches, so this
+    // rung takes 207; the list only counts remaining steps for progress
+    // reporting and is non-contiguous by design.
+    207,
+    // v208 (issue #478): the imported_files table plus
+    // dive_data_sources.imported_file_id, the original logbook file a
+    // file-imported dive can be re-parsed from. Table-and-column rung, no
+    // backfill, so the beforeOpen backstop is safe to re-run. Renumbered from
+    // 185: main landed 185 through 207 while this branch was open, and a rung
+    // at or below the shipped version never runs its onUpgrade step.
+    208,
+    // v210: dive_tanks.equipment_id ON DELETE SET NULL. The link was NO
+    // ACTION from the initial schema, so deleting a gear item a cylinder
+    // was linked to failed. Rebuilds the table from its stored definition.
+    // Also an hlc column on the 19 child tables exported through their
+    // parent, so a stale copy from a peer cannot overwrite a newer edit.
+    210,
+    // v211: diver_settings.auto_tag_imports (issue #998). Additive defaulted
+    // boolean, no backfill. Renumbered from 208: main's own v208 (issue
+    // #478) and v210 (#1769) landed while this branch was open, and a rung
+    // at or below the shipped version never runs its onUpgrade step.
+    211,
+    // v213: service_schedules.anchor_set_at, so a baseline date the diver
+    // sets outranks the service records logged before it. Column-only, no
+    // backfill.
+    213,
+    // v214: dive_plans.stop_minimums_json (replan-this-dive minimum stop
+    // durations). Additive nullable column, no backfill. Renumbered from 201,
+    // then 209, then 211: main shipped 211 and 213 while this branch was open,
+    // and a rung at or below the shipped version never runs its onUpgrade
+    // step. The 212 main reserved for this branch is below 213 and so is dead
+    // for the same reason.
+    214,
+    // v215: dive_plans gas-options columns (sac_factor, problem_solving_
+    // minutes, pp_o2_bottom, pp_o2_deco, best_mix_end_meters, o2_narcotic).
+    // Renumbered from 202, then 212, for the same collisions; stop-minimums
+    // took 214.
+    215,
+    // v217: dive site types and tags (issue #1765). Three new tables
+    // (site_types, site_site_types, site_tags), the built-in site type seed,
+    // both junction unique indexes, and tags.applies_to_dives /
+    // applies_to_sites. Additive only, so the compatibility floor stays.
+    // Renumbered from 212, then 214: main shipped 213, 214 and 215 while
+    // this branch was open, and 216 is claimed by the site detail sections
+    // work.
+    217,
+    // v218: diver_settings.site_detail_sections and site_detail_layout, the
+    // Site Details page's card order, visibility, fold state and layout
+    // (issue #1884). Additive nullable columns, no backfill. Takes 218, not
+    // 216: open PR #1860 holds 216 (metric-source defaults) and 217 (site
+    // types and tags) shipped first, and a rung at or below the shipped
+    // version never runs its onUpgrade step, so this one sits above both.
+    218,
+    // v219: equipment tags (issue #1942). tags.applies_to_equipment (off for
+    // every existing tag) and the equipment_tags junction with its
+    // (equipment_id, tag_id) unique index. Additive only, so the
+    // compatibility floor stays.
+    219,
+    // v220: equipment_sets.auto_apply_on_computer_import (issue #1020).
+    // Additive column, default off. Renumbered from 219: #1964 (equipment
+    // tags) shipped first and claimed it.
+    220,
+    // v221: rental gear memory (issue #2075). dive_center_gear_notes, a
+    // child of dive_centers. Table-only rung, no backfill, so the
+    // compatibility floor stays. Sits above v220 (#1980), which shipped
+    // while this was in review.
+    221,
+    // v222: diver_settings.seascape_vertical_exaggeration_overrides (issue
+    // #2141 follow-up). Additive column, default null. Compatibility floor
+    // stays: an older reader simply never sees the per-site overrides.
+    222,
+    // v223: buddies.linked_diver_id (a buddy that IS a local profile) and
+    // dives.outing_id (sibling dives mirrored from one save), issue #2002.
+    // Additive nullable columns, no backfill, so the floor stays at 210.
+    // Renumbered four times: equipment tags took 219, the computer-set
+    // auto-apply column took 220, rental gear memory took 221 and the
+    // per-site vertical exaggeration overrides took 222 while this branch
+    // was open, and a rung at or below the shipped version never runs.
+    223,
+    // v224: media.upload_facts_hlc and verify_facts_hlc, the two fact
+    // clocks (media sync program spec 5.1). Columns plus a backfill from
+    // the row clock, and the one rung on this ladder that DOES move the
+    // compatibility floor: a reader without them cannot order fact writes.
+    // Renumbered from 223, which buddy profile links took while this was
+    // in review.
+    224,
+    // v226: media.cloud_asset_id, the PhotoKit cloud identifier (media sync
+    // program spec 6.2). Column only; the one-time backfill runs after a
+    // sync, not here. Additive and nullable, so the floor stays at 224.
+    // 225 is held by PR #1978 (tissue loading import).
+    226,
+    // v227: diver_settings.hidden_tank_preset_ids (issue #2305). Additive
+    // nullable column, no backfill. The floor stays: an older reader simply
+    // shows every built-in preset. Renumbered from 225, which is held by PR
+    // #1978, after v226 landed while this was in review.
+    227,
+    // v228: cylinder_fills, the fill history keyed by passport id (issue
+    // #2334). Table-only rung, no backfill, floor stays at 224. Renumbered
+    // from 227, which hidden tank presets (#2305) took while this was in
+    // review.
+    228,
+    // v229: equipment_sets.show_figure, the per-set diver figure switch
+    // (issue #2326). Additive, no backfill, so the floor stays.
+    // Kept below v230, which main shipped first with 229 reserved for this
+    // rung: a database already at 230 skips this step, and the beforeOpen
+    // backstop adds the column there.
+    229,
+    // v230: nav_tracks -- measured underwater routes from Seacraft ENC
+    // navigation consoles and similar IMU-equipped computers (issues #1195,
+    // #1445). Table-only rung, additive, so the floor stays at 224.
+    // Renumbered from 209, then 228: main shipped cylinder fills (#2364) as
+    // 228 while this branch was open, and 229 is claimed by the diver
+    // figure branch (#2372). A rung at or below the shipped version never
+    // runs its onUpgrade step.
+    230,
+    // v231: diver_settings CCR ppO2 limits (issue #2342): setpoint low,
+    // setpoint high and the diluent's flush ppO2. Additive defaulted
+    // columns, no backfill, so the floor stays at 224. Renumbered from 228,
+    // then 230: main shipped cylinder fills (#2364) as 228 and nav tracks
+    // (#1772) as 230 while this was open, and 229 is claimed by #2372,
+    // #2331 and #2407.
+    231,
+    // v232: trip-scale gas logistics, phase 1 (issue #2325). trip_cylinders
+    // and trip_cylinder_events, two children of trips, and the nullable
+    // dive_tanks.trip_cylinder_id link. Tables and one column, no backfill,
+    // so the floor stays at 224. Renumbered from 228 while in review: main
+    // shipped cylinder fills (#2364) as 228, nav tracks (#1772) as 230 and
+    // CCR ppO2 limits (#2387) as 231, and 229 is held by #2372.
+    232,
+    // v233: dive_data_sources.source_diver_key (issue #1921), so a resync
+    // replays the importing diver's copy of a shared MacDive dive. Additive
+    // nullable column, no backfill (only a re-parse of each stored file
+    // could recover it), so the floor stays at 224. Taken while 232 was
+    // claimed by several open branches; trip cylinders (#2331) shipped it.
+    233,
+    // v234: equipment sharing (issue #2046). Two tables, equipment_shares
+    // with its (equipment_id, diver_id) unique index and
+    // equipment_ownership_events, plus two lookup indexes. Additive only, so
+    // the compatibility floor stays. Renumbered from 228, 229, 232 and 233:
+    // cylinder fills (#2364) took 228, 229 is claimed by the diver figure
+    // branch (#2372), nav tracks (#1772) took 230, CCR ppO2 limits (#2342)
+    // took 231, trip cylinders (#2325) took 232 and the dive source diver
+    // key (#1921) took 233 while this was open.
+    234,
+    // v235: connection_maps, saved Connections maps per diver, plus the
+    // idx_sightings_dive_id index the species maps join on (issue #2322).
+    // Table-and-index rung, no backfill, so it does not move the floor.
+    // Renumbered from 232 and 234: trip cylinders (#2331) shipped 232, the
+    // MacDive source diver key (#1921) 233 and equipment sharing (#2046) 234.
+    235,
+    // v236 (Dive Lab): dive_scenarios, saved what-if scenarios on a logged
+    // dive (branch point, mode, interventions), synced with an hlc column.
+    // Renumbered from 161, 228, 229, 231 and 232 as main shipped rungs while
+    // this branch was open; 236 was held for it when main took 237 to 240,
+    // so a database already past it gets the table from the beforeOpen
+    // backstop.
+    236,
+    // v237: diver_settings.show_dive_figure, the diver-wide switch for the
+    // figure in the dive detail equipment card (issue #2326). Additive, no
+    // backfill, so the floor it needs stays at 224. Taken
+    // above 235 and 236, which open branches claimed when this was cut,
+    // and kept below v239, which main shipped first: a database already
+    // past it skips this step, and the beforeOpen backstop adds the column.
+    237,
+    // v238: saved_queries, a diver's named query trees (issue #2365, spec
+    // Unit 7). Table-only rung, additive, floor stays at 224. Renumbered
+    // from 234 when equipment sharing (#2411) shipped it. Kept below
+    // v239, which main shipped with 238 left for this rung: a database
+    // already at 239 skips this step, and the beforeOpen backstop creates
+    // the table there.
+    238,
+    // v239: the built-in regulator service and O2 clean kinds also apply to
+    // first and second stages (issue #2275). A one-time UPDATE of two
+    // built-in rows, which sync never exports, so the floor stays. 235 to
+    // 238 were claimed by open branches when this was taken.
+    239,
+    // v240: idx_dive_profile_events_dive_id for scoped event tombstones
+    // (#1926), which delete and match events by dive; also raises the floor
+    // to 240. Renumbered from 233 and then 235: main shipped 233 (#1921),
+    // 234 (#2046) and 239 (#2275) while this was open.
+    240,
+    // v241: tank_pressure_series.source_id (issue #2440), backfilled where
+    // the source is unambiguous. Additive nullable column, so the floor
+    // stays at 240. Renumbered from 232 and then 240 while in review: main
+    // shipped 232 to 234, 239 (#2275) and 240 (#1926) while this was open.
+    // Kept below v242, which main shipped with 241 left for this rung: a
+    // database already at 242 skips this step, the beforeOpen backstop
+    // adds the column there, and its series stay unattributed, which every
+    // reader already handles.
+    241,
+    // v242: equipment_service_status, the local service-due cache the
+    // query language's serviceDue field reads (issue #2365, PR 3). A table
+    // with no hlc, never synced, so the floor does not move. 241 was held
+    // by #2493 when this was taken.
+    242,
+    // v244: DPV mission planner (issue #2086). dive_plan_missions,
+    // dive_plan_mission_legs and dive_plan_mission_members, children of
+    // dive_plans. Table-only rung, no backfill; an older reader keeps the
+    // new entity types as inert unknowns, so the floor stays at 240.
+    // Renumbered from 241: #2493 took it, main shipped 242 (#2541) and
+    // an open branch claims 243 (#2409).
+    244,
+    // v245: idx_certifications_buddy_id (issue #2365, PR 4). Index-only;
+    // the floor does not move. 243 was held by #2409 and 244 went to
+    // #2086 when this was taken.
+    245,
+    // v247: dive_derived_metrics, the Explore derived metrics the dive query
+    // fields read (issue #2195, phase 2). A table with no hlc, never synced,
+    // so the floor does not move. 246 is held by #2409 (open).
+    247,
+    // v248: trip_equipment, gear packed for a trip (issue #2338).
+    // Table-only rung, no backfill; the floor does not move. 246 is held by
+    // #2409 and 247 went to #2195 (Explore derived metrics).
+    248,
+    // v249: the trip fill forecast's inputs (issue #2325, PR 4): trips
+    // divers sharing and dives per day, itinerary planned dives, dive
+    // center fill hours. Additive columns, so the floor does not move. 248
+    // is trip_equipment (#2338).
+    249,
+    // v250: trip_hides and site_hides, the shared trips and sites a profile
+    // has hidden from itself (issue #2594). Table-only rung, no backfill;
+    // an older peer keeps the new entity types as inert unknowns, so the
+    // floor does not move. #2562 and #2409 held stale claims below 249
+    // when this was taken.
+    250,
+    // v251: dive_tanks.source_id (issue #2716), the data source a tank row
+    // came from, so two computer-less sources' copies of one cylinder come
+    // apart; backfilled where unambiguous. Additive nullable column, so the
+    // floor stays at 240. 250 is trip_hides and site_hides (#2594).
+    251,
+    // v252: nav_tracks.diver_id, the route's owner, backfilled from each
+    // linked route's dive (issue #2691 follow-up). Additive nullable column,
+    // so the floor does not move. 251 is dive_tanks.source_id (#2716).
+    252,
+    // v253: dive_safety_reviews.inputs_hash, the settings a review was
+    // computed from (issue #2592). An additive nullable column, so the floor
+    // does not move: the receiving overlay keeps it when an older peer's
+    // payload omits it. Merged after v254 (#2595): a database already at 254
+    // never runs this rung, and the beforeOpen backstop adds the column.
+    253,
+    // v254: dive_tanks.role_source, where a cylinder's role came from
+    // (issue #2595). An additive nullable column, so the floor does not
+    // move. 251 is dive_tanks.source_id (#2716) and 252
+    // nav_tracks.diver_id (#2703); 253 is
+    // dive_safety_reviews.inputs_hash (#2592).
+    254,
+    // v255: drops the ceilings safety stop samples carried from every
+    // stored profile series (issue #2550): a safety stop is no deco
+    // obligation, and its depth drew a deco stop band. Rewrites blobs in
+    // place without moving their sync stamp; an older peer's copy still
+    // reads as a safety stop, so the floor does not move. 254 is
+    // dive_tanks.role_source (#2595), 253 safety review inputs (#2592).
+    255,
+    // v256: dives.computer_tissue_json, the tissue state a dive computer
+    // reports for the dive (import of Garmin, Shearwater, Suunto, Ratio and
+    // UDDF tissue data, issue #1977). Additive nullable column, no
+    // backfill, so the floor stays. Renumbered from 220 and then 241: main
+    // shipped 220 to 255 while this was open.
+    256,
+    // v257: metadata-only profile revision history over existing
+    // dive_profile_series rows (#1197). No profile samples are copied:
+    // history rows point at existing series ids and track parent/branch
+    // relations. Local-only table, so the floor stays. Renumbered from 246
+    // and then 256: main shipped 247 through 256 while this branch was open.
+    257,
+    // v258: gas_switches.computer_id, the computer whose reading a switch
+    // came from (issue #2582), backfilled from the switch's cylinder.
+    // Additive nullable column, so the floor stays. Sits below 259, which
+    // main shipped first; a database already at 259 gains the column and
+    // its backfill through the beforeOpen backstop.
+    258,
+    // v259: dive_tanks.usage_duration, how long a cylinder was breathed as
+    // the source log recorded it (issue #1496). An additive nullable
+    // column, so the floor does not move: an older peer's payload omits it
+    // and the row keeps null. 258 is held by an open branch (#2828).
+    259,
+    // v260: dive_tanks.shared_computer_ids, the other computers on a
+    // consolidated dive that logged the same cylinder, so each computer is
+    // analysed on its own gas plan (issue #2560). Additive nullable column
+    // plus a local, deterministic backfill, so the floor stays. Renumbered
+    // from 241, 248, 250 and 251 while this was open; gas_switches.computer_id,
+    // which the analysis also reads, is v258 (#2582).
+    260,
+    // v261: drops diver_settings.default_ceiling_source (issue #767), unread
+    // since the ceiling line lost its source toggle at v137 (#755). Dropping
+    // a synced column normally raises the floor, but every reader the floor
+    // admits (240 and up) ignores the value and fills a missing key from its
+    // column default, so nothing it applies is lost or misread and the floor
+    // stays. Inbound, the generated fromJson ignores the legacy key.
+    261,
+    // v262: diver_settings certification/course list view modes and the
+    // formerly device-local profile "metrics follow viewport" and pSCR
+    // ratio (issue #2948). Additive columns, so the floor stays.
+    262,
+    263,
+    // v264: diver_settings.default_show_late_gas_switches (issue #2939).
+    // Additive column with a default, so the floor stays.
+    264,
+    // v265: insight_observation_dismissals (synced) and
+    // diver_settings.insights_muted_observation_rules (#2381). Additive, so
+    // the floor stays. Renumbered several times while this was open (262 is
+    // held by #2991; 261, 263 and 264 landed first).
+    265,
+    // v266: media.site_category and media.display_size, a site attachment's
+    // category and size override (issue #1039). Additive nullable columns,
+    // so the floor stays. Renumbered from 263, which main shipped first
+    // (#2030); 262 is claimed by an open branch.
+    266,
+    // v267: custom certification agencies and levels (issue #690). Two new
+    // synced tables and an index, no data migration, so the floor stays.
+    // Renumbered from 265 and 266, which main shipped first.
+    267,
+    // v268: equipment locations and their move log (issue #3037). Two new
+    // tables, so the floor stays.
+    268,
+    // v269: diver_settings.hidden_built_in_ids, the built-in dive types,
+    // roles, site types, service types and pre-dive templates each diver hid
+    // from the pickers (issue #401). Additive nullable column, no backfill,
+    // so the floor stays. Renumbered several times while this was open.
+    269,
+    // v270: dive_weights.label and weight_preset_entries.label, a diver's own
+    // name for a weight (issue #956). Additive defaulted columns, so the
+    // floor stays: an older peer's payload omits the key and the row keeps
+    // its local value or the '' default. Renumbered as other rungs shipped
+    // first (261 through 269).
+    270,
+    // v271: certification currency (issue #2267): the rule catalog with its
+    // built-in seed, per certification overrides and the event ledger. New
+    // synced tables only, so the floor stays. Built-in rules are reference
+    // data, re-seeded by INSERT OR IGNORE from onCreate, the rung and
+    // beforeOpen. Renumbered from 261, 262, 266, 267 and 269 as main shipped
+    // those first (and then 270); 268 is held by an open branch.
+    271,
+    // v272: dive_diver_roles and dive_buddy_roles, several roles per person
+    // on a dive (issue #1221). New synced child tables, no backfill: an
+    // older peer ignores them and its scalar role writes still resolve, so
+    // the floor stays. Renumbered from 262, 264, 267, 270 and 271 as main
+    // shipped those; 268 is held by an open branch (#3043).
+    272,
+    273,
+    // v274: diver_settings.has_accepted_planning_disclaimer (issue #3120).
+    274,
+    // v275: diver_settings.default_start_pressure retyped INTEGER to REAL
+    // (issue #3091), so a start pressure entered in psi is kept exactly.
+    // Retyping a synced column raises the floor to 275; see
+    // minimumCompatibleSchemaVersion.
+    275,
+    // v276: diver_settings.icd_warnings_enabled (issue #3121).
+    276,
+    // v277: documents and document_pages; insurance, medical clearance and
+    // certification card photos copied in (issue #2613).
+    277,
+    // v278: dives.visibility_min_meters / visibility_max_meters (issue #3226).
+    278,
+    // v279: dive_computer_connections (issue #3106). Table-only rung, no
+    // backfill; the floor does not move.
+    279,
+    // v280: no data change (issue #2361). AccountKind.webdav is a new value
+    // in the synced connected_accounts.kind column, which builds before this
+    // one decode with a throwing AccountKind.values.byName. Raising the
+    // floor to 280 holds them until they update; see
+    // minimumCompatibleSchemaVersion. Renumbered from 277, 278 and 279 as
+    // main shipped those first.
+    280,
+    // v281: diver_settings.trend_gap_collapse_months (issue #3251). Additive
+    // defaulted column, so the floor stays at 280. Renumbered from 278, 279
+    // and 280, which #3226, #3106 and #2361 shipped first.
+    281,
+    // v283: dive_profile_series.activated_at (issue #3189), backfilled from
+    // the primary flags and the local revision history. Additive nullable
+    // column, so the floor stays at 280. 282 is held by PR #3133.
+    283,
+    // v284: diver_settings.profile_color_* (issue #3012). Additive nullable
+    // columns, so the floor stays at 280. Renumbered from 282, which PR #3133
+    // holds, after #3296 shipped 283.
+    284,
+    // v285: nav_tracks.source_metadata (issue #3047). Additive nullable
+    // column, so the floor stays at 280. Renumbered from 282, which PR
+    // #3133 holds; 283 and 284 shipped first.
+    285,
+    // v286: diver_settings.equipment_default_statuses (issue #2628).
+    // Additive nullable column, so the floor stays at 280.
+    286,
+    // v287: dive_tanks.passport_id (issue #2650). Additive nullable column,
+    // so the floor stays at 280. Renumbered from 285 and 286, which #3306
+    // and #3319 shipped first.
+    287,
+    // v288: the dive_courses junction and the certification-side course link
+    // (issue #2515). A new table plus meaning-preserving backfills, so the
+    // floor stays at 280. Renumbered from 286 and 287, which #2628 and #2650
+    // shipped first.
+    288,
+    // v289: shared dive-site library tables and dive_sites.shared_library_id
+    // (issue #2567). New tables and a nullable column, so the floor stays
+    // at 280. Renumbered from 288 after #2515 shipped 288.
+    289,
+    // v290: dive_plan_segments.split_at_configured_rate (issue #3264).
+    // Additive defaulted column, so the floor stays at 280. Renumbered from
+    // 277, 282 then 286, as #2613's documents store, #3189, #3012, #3047,
+    // #2628, #2650, #2515 and #3324 shipped or claimed earlier rungs.
+    290,
+    // v291: shared_libraries.description (issue #3389). Additive nullable
+    // column, so the floor stays at 280.
+    291,
+    // v292: shared_libraries.removals_json (issue #3481). Additive nullable
+    // column, so the floor stays at 280.
+    292,
+    // v293: connected_accounts.location (issue #3482). Additive nullable
+    // column, so the floor stays at 280.
+    293,
+    294,
+    // v295: connected_accounts.nickname (issue #3522). Additive nullable
+    // column, so the floor stays at 280.
+    295,
+    // v296: media.color_adjustment and diver_settings.auto_color_correction
+    // (issue #3520). Additive nullable/defaulted columns, so the floor stays
+    // at 280. Renumbered from 292, claimed first by #3481.
+    296,
+    // v297: trip_checklist_sections table + trip_checklist_items.section_id,
+    // backfilled from category, which is then dropped (issue #3360). Raises
+    // the floor to 297. (v293 is claimed by the accounts work, #3482.)
+    297,
+    // v298: checklist_template_sections table +
+    // checklist_template_items.section_id, backfilled from category, which
+    // is then dropped (issue #3360). Raises the floor to 298.
+    298,
+    // v299: pre_dive_checklist_template_sections table +
+    // pre_dive_checklist_template_items.section_id, backfilled from
+    // section, which is then dropped (issue #3360). Raises the floor to
+    // 299.
+    299,
+    // v300: pre_dive_session_sections table +
+    // pre_dive_session_items.section_id, backfilled from section, which
+    // is then dropped (issue #3360). Raises the floor to 300.
+    300,
+    // v301: logbook rules, rule_runs and rule_run_changes (issue #3513).
+    // Additive tables, so the floor stays at 300. Renumbered from 292 as
+    // #3481 and #3502 shipped 292 and 294, #3482 holds 293, #3522 shipped
+    // 295, #3520 shipped 296 and #3360 shipped 297 to 300.
+    301,
+    // v302: media_stores.account_id (issue #3482). Additive, nullable and
+    // never cleared by a peer's null, so the floor stays at 300.
+    302,
+    // v303: media.remote_store_id (issue #3482). Additive and nullable, and
+    // an older peer omits it, so the floor stays at 300.
+    303,
+    // v304: diver_settings planner Setup-accordion global defaults (issue
+    // #3552). Additive columns only; does not move the compatibility floor.
+    // Renumbered from 302 as #3482 shipped 302-303 first.
+    304,
+    // v305: dive_plans Setup-accordion columns made nullable (issue #3552).
+    // Table rebuild; NULL now means "follow Settings", which an older
+    // reader cannot decode, so the floor moves (to 308, with v306/v308).
+    // Renumbered from 303.
+    305,
+    // v306: dive_plan_missions battery_reserve_fraction/walk_speed_mps made
+    // nullable (issue #3552). Table rebuild, same as 305 and part of the
+    // same floor move. Renumbered from 304.
+    306,
+    // v307: diver_settings air-break/turn-pressure defaults and
+    // dive_plans.air_breaks_explicitly_off (issue #3552). Additive only;
+    // does not move the compatibility floor. Renumbered from 305.
+    307,
+    // v308: dive_plans.reserve_pressure/gf_low/gf_high made nullable,
+    // diver_settings.planner_reserve_pressure added (issue #3552). Table
+    // rebuild for dive_plans; raises the compatibility floor to 308 for
+    // the whole v305-v308 nullability change. Renumbered from 306.
+    308,
+    // v309: media and document tags (issue #1970). tags.applies_to_media and
+    // tags.applies_to_documents (off for every existing tag), and the
+    // media_tags and document_tags junctions with their unique indexes.
+    // Additive only, so the compatibility floor stays.
+    309,
+    // v310: diver_settings.downloads_follow_computer_owner (issue #2050).
+    // Additive, on by default; the floor does not move. Renumbered from 309
+    // as #3605 shipped 309 first.
+    310,
+    // v311: trip_shares and site_shares, the profiles a trip or site is
+    // shared with when it is not shared with everyone (issue #2151).
+    // Table-only rung, no backfill; an older peer keeps the new entity types
+    // as inert unknowns and sees such an item as private, so the floor does
+    // not move. Renumbered from 309 and 310, which #1970 and #2050 took.
+    311,
+    // v312: dive_tanks.extra_regulator_ids, the regulators on a cylinder
+    // after the first (issue #3375). An additive nullable column, so the
+    // floor stays: an older peer's payload omits it and the row keeps null.
+    // Renumbered from 310 and 311 as #3611 and #2151 shipped them first.
+    312,
+    // v313: dive_centers.is_permanently_closed (issue #3379). Additive synced
+    // column, no backfill: an older peer ignores the field, so the floor
+    // stays. Renumbered from 310 and 312, which #2050 and #3375 took.
+    313,
+    // v314: cylinder_config_items.deco_switch_depth (issue #3567). Additive
+    // and nullable, and an older peer omits it, so the floor stays.
+    // Renumbered from 304, which #3552 took.
+    314,
+    // v315: diver_settings.omit_unused_oc_gases (issue #3668). Additive, off
+    // by default; the floor does not move.
+    315,
+    // v316: transmitters.is_configured (issue #3676). Additive with a default
+    // of 1, and an older peer omits it, so the floor stays. The known cost: a
+    // peer still on v315 ignores the column, so it treats an entry this
+    // build created from a download as the diver's own configuration and
+    // names its tanks after it until it updates; and an edit it publishes on
+    // such an entry drops the column, which then arrives here as configured.
+    // Renumbered from 315, which #3668 took.
+    316,
+    // v317: the tank inspection dates become VIP and hydro clock baselines
+    // (issue #3662). Data only and unsynced, so the floor does not move. 316
+    // is held by PR #3685.
+    317,
+    // v318: moves the CNS, OTU and deco model stored computer tissue
+    // snapshots held into their own dive and source columns (issue #2555).
+    // Data only, so the floor does not move: an older peer reads the slimmer
+    // snapshot as one that reported less, and a dive it still sends in the
+    // old shape gets the same move once applied here (SyncService). 317 is
+    // #3662 (tank inspection baselines); 316 is held by PR #3685.
+    318,
+    // v319: per-O2-band deco ppO2 limits and the explicit MOD for 100% O2
+    // (issue #3580). Column only, both off by default, so the floor does
+    // not move. Sits below 320; the beforeOpen backstop covers a database
+    // already at 320.
+    319,
+    // v320: the device-local nearby_peers table and the publish state's
+    // relay floor for nearby Bluetooth sync (issue #3731). Never synced, so
+    // the floor does not move. 319 is held
+    // by PR #3726.
+    320,
+    // v321: per-plan "explicitly off" flags for the bands and the
+    // explicit-depth override (issue #3580). Column only, both off by
+    // default, so the floor does not move.
+    321,
+    // v322: hypercapnia-bailout phase for OC bailout during a CCR/SCR dive
+    // (issue #3743). Column only, both off by default, so the floor does
+    // not move.
+    322,
+    // v323: diver_settings list arrangement columns and their sync clock
+    // (issue #3748). Additive and nullable, and an older peer omits them,
+    // so the floor does not move. 321 and 322 are held by PR #3726.
+    323,
+    // v324: buddy card swap columns on buddies, certifications and divers
+    // (issue #3728). Additive and nullable: an older peer drops the keys it
+    // does not know, so the floor does not move.
+    324,
+    // v325: trips.parent_trip_id, the larger trip a side trip is part of
+    // (issue #3658). Additive and nullable with no backfill: an older peer
+    // omits it and sees a side trip as a trip of its own, so the floor
+    // stays. Renumbered from 323, which #3748 shipped first; #3728 then
+    // shipped 324.
+    325,
+    // v326: the synced media_people table, buddies and the diver tagged on
+    // photos and videos (issue #1745). Additive only, so the floor does not
+    // move: an older peer ignores the new payload key. Renumbered from 323
+    // and 324, which #3748 and #3728 took; 325 is #3786's; 319, 321 and 322
+    // are held by PR #3726.
+    326,
+    // v327: drops the deco band columns v319 and v321 first added spelled
+    // `ppo2_*`, beside which Drift's `pp_o2_*` columns were missing on an
+    // upgraded database (issue #3809). Drift never read or wrote them, and
+    // sync never carried them, so the floor does not move.
+    327,
+    // v329: turns the diver figure on for every stored set and diver, now it
+    // is on by default (issue #3889). A one-time UPDATE that stamps no row,
+    // so nothing new crosses sync and the floor does not move.
+    329,
+    // v330: buddies.excluded_from_rankings keeps a buddy out of the buddy
+    // rankings (issue #3624). A defaulted column an older peer omits, so the
+    // floor does not move.
+    330,
+    // v331: equipment_locations.dive_center_id, the saved center a Dive
+    // center place stands for (issue #3623).
+    331,
+    // v332: the per-device change log tables (issue #3922). Local only and
+    // never synced, so the floor does not move.
+    332,
+    // v333: dives.gas_switches_edited (issue #32). A defaulted column an
+    // older peer omits, so the compatibility floor does not move.
+    333,
+    // v334: equipment_locations.buddy_id, the buddy a Person place stands
+    // for (issue #3790).
+    334,
+    // v335: nav_tracks.scale_factor, a track's size against the map
+    // (issue #3823). A new defaulted column, so the floor does not move.
+    335,
+    // v336: trip_checklists, splitting one trip's single flat checklist
+    // into several named ones (issue #3356).
+    336,
+    // v337: dives.weather_fetched_at back to seconds where the bulk conditions
+    // fill wrote milliseconds (issue #4119). Data only, so the floor does not
+    // move.
+    337,
+    // v338: incidents.observation_id, the gear check-in behind a near-miss
+    // (issue #3062).
+    338,
+    // v339: dive_computers.auto_download_disabled, the per-device opt-out
+    // for passive auto-connect/auto-download (issue #3361). Renumbered from
+    // 333, which upstream claimed first for issue #32, then from 338, which
+    // upstream claimed first for issue #3062.
+    339,
+    // v340: a combined dive's water temperature, CNS at the end and OTU
+    // recomputed from its segments (issue #4136). Data only, so the floor does
+    // not move.
+    340,
+    // v341: dive_plan_series, a saved repetitive dive series, and the
+    // dive_plans / dive_plan_tanks columns that place a plan in one (issue
+    // #3565). A new synced table plus nullable or defaulted columns an older
+    // peer omits, with no backfill, so the floor does not move. Renumbered
+    // from 339 and then 340, which upstream claimed first for issues #3361
+    // and #4136.
+    341,
+    // v342: dive_plans.fixed_start, whether a planned dive's start was set
+    // by the diver, and dive_plans.setting_overrides, the setting groups a
+    // dive keeps its own (issue #3565, phase 2). Defaulted columns an older
+    // peer omits, so the floor does not move.
+    342,
+    // v343: diver_settings.first_day_of_week, the day a week starts on
+    // (issue #4232). A defaulted column an older peer omits, so the floor
+    // does not move.
+    343,
+    // v344: nav_tracks.source_file, the original file a route was imported
+    // from (issue #4231). A nullable column an older peer omits, so the floor
+    // does not move.
+    344,
+    // v345: cylinder_pairings, twin set pairings of two cylinders, plus
+    // cylinder_fills.filled_together_id and dive_tanks.twin_passport_id
+    // (issue #4242). A new synced table and nullable columns an older peer
+    // omits, with no backfill, so the floor does not move.
+    345,
+    // v346: equipment.last_service_date moves forward to the item's newest
+    // service record where logging an older record had moved it back (issue
+    // #4201). Data only, a value every reader already holds, so the floor
+    // does not move. Numbered 346 so an open PR can take 345.
+    346,
+    // v347: diver_settings.show_photo_background_on_dive_cards, whether a
+    // dive card shows one of the dive's photos behind its text, and the
+    // overlay opacity over it per theme. Additive and defaulted; the floor
+    // does not move.
+    347,
+    // v348: dive_derived_metrics.gas_use_s and gas_use_avg_depth_m, a dive's
+    // underwater time and depth for SAC and RMV, and where surface breathing
+    // stretched them (issue #2930): a device-local cache the sweep refills.
+    // Plus dive_tanks.surface_breathing_duration, a nullable synced column an
+    // older peer omits, with no backfill. The floor does not move.
+    348,
+    // v349: an empty dives.water_temp takes the temperature its source rows
+    // measured, which a download kept on the source row only (issue #4333).
+    // Data only, filling a column every reader already holds, so the floor
+    // does not move. Numbered 349 so open PR #4327, which claimed 347, can
+    // take 348.
+    349,
+    // v350: sightings.abundance, Seen, a REEF group, or (null) an exact
+    // count (issue #4337). Nullable, no backfill; raises the sync floor to
+    // 350. Numbered 350: main holds 349 and open PR #4327 is to take 348.
+    350,
+    // v351: diver_settings.equipment_collapsed_groups, the Equipment page's
+    // folded group keys (issue #4184). A nullable column an older peer
+    // omits, so the floor does not move.
+    351,
+    // v352: media.observation_id and equipment.cover_media_id, gear photos
+    // and an item's cover photo (issue #3355). Nullable columns an older
+    // peer omits, with no backfill, so the floor does not move.
+    352,
+    // v354: dives.is_draft, a dive marked at the site that waits for its
+    // dive computer readings, and dive_health_records, heart rate, recovery
+    // and sleep from Apple Health per dive (issue #637). Additive and
+    // defaulted; the floor does not move. Numbered 354 because main holds
+    // 351 and open work claims 352 and 353.
+    354,
+    // v356: a merge slot on the source rows of a dive with no primary row and
+    // none yet, so a combine the v184 rung could not classify keeps a
+    // re-parse off its rows once it gains a primary (issue #4367). Data
+    // only; the floor does not move. Numbered 356 because main holds 354 and
+    // open work claims 352, 353 and 355.
+    356,
+    // v357: dive_profile_series.is_edit, the synced mark that a series is
+    // the diver's manual edit (issue #4386). A nullable column an older peer
+    // omits, with no backfill, so the floor does not move. Numbered 357
+    // because main holds 356; renumbered from 353, then 355.
+    357,
+    // v358: a dive's rating back on the 1 to 5 star scale where a UDDF
+    // import stored the file's 1 to 10 value, or 0 for an unrated dive
+    // (issue #4415). Data only; the floor does not move.
+    358,
+    // v359: diver_settings.pin_profile_on_scroll, whether dive details pins
+    // a thin profile strip once the profile card scrolls away (issue #4423).
+    // Additive and defaulted; the floor does not move. Numbered 359 because
+    // main holds 358.
+    359,
+    // v360: diver_settings.show_country_flags, the switch for the flags
+    // beside site locations and trips (issue #4426). Defaulted on, so the
+    // floor does not move. Renumbered from 359, which main took for #4423.
+    360,
+    // v361: dive_sites.country_code, the site's ISO country code (issue
+    // #4426), backfilled offline from each site's country text. Nullable,
+    // so the floor does not move. Renumbered from 360.
+    361,
+    // v362: dive_deco_status, the computed deco verdicts the query
+    // language's deco field reads (issue #4461). A table with no hlc, never
+    // synced, so the floor does not move.
+    362,
+    // v363: dive_sites.catalogue_id, the built-in catalogue record a site
+    // was adopted from. Nullable, nothing to backfill, so the floor does
+    // not move. Renumbered from 362, which main took for #4461.
+    363,
+    // v364: the three equipment-set junction tables and the nullable body
+    // composition columns on divers and their weight entries (issue #4525).
+    // New tables and nullable columns, so the floor does not move.
+    // Renumbered from 363, which main took for the site catalogue id.
+    364,
+    // v365: diver_settings.recent_equipment_colors, the custom colours the
+    // diver picked for their gear (issue #4537). A nullable column an older
+    // peer omits, so the floor does not move. Renumbered from 364, which
+    // main took for #4525.
+    365,
+    // v366: diver_settings.default_show_counterdiffusion, the default
+    // visibility of the isobaric counterdiffusion overlay on the dive profile
+    // (issue #4530). Additive and defaulted off; the floor does not move.
+    // Renumbered from 365, which main took for #4537.
+    366,
+    // v367: dives.media_time_offset_seconds, the correction for a camera
+    // whose clock disagrees with the dive computer's (issue #4539). A
+    // defaulted column an older peer omits, so the floor does not move.
+    // Renumbered from 366, which main took for #4530.
+    367,
+    // v368: equipment_attributes.value_unit, the unit an item's own number
+    // reads in, and the repair of cylinder volumes saved as water cubic feet
+    // (issue #4534). Nullable column plus a data repair, so the floor does
+    // not move. Renumbered from 366 and 367, which main took.
+    368,
+    // v369: dive_sites.catalogue_answers and the catalogue link and answers
+    // a profile keeps for a shared library site. Nullable, nothing to
+    // backfill, so the floor does not move. Renumbered three times: main took
+    // 365 for #4537, 367 for #4539 and 368 for #4544.
+    369,
+    // v370: diver_settings.default_show_buoyancy, the default visibility of
+    // the net buoyancy line on the dive profile (issue #4593). Additive and
+    // defaulted off; the floor does not move.
+    370,
+    // v371: diver_settings.favourite_dive_type_ids, the dive types a diver
+    // starred to list first in the pickers (issue #4413). Nullable, no
+    // backfill; the floor does not move.
+    371,
+    // v372: buddies.country and buddies.country_code (issue #4457).
+    // Nullable, nothing to backfill; the floor does not move. Renumbered
+    // from 371, which main took for #4413.
+    372,
+    // v373: dive_centers.logo, a dive center's logo (issue #4460). Nullable,
+    // no backfill; the floor does not move. Renumbered twice: main took 371
+    // for #4413 and 372 for #4457.
+    373,
+    // v374: dive_plans.scr_injection_rate/scr_vo2/pscr_vo2 and the diver's
+    // planner_scr_injection_rate/planner_scr_vo2/planner_pscr_vo2 defaults
+    // (issue #4660). Columns only, no backfill; the floor does not move.
+    374,
+    // v375: media_identification_runs and media_identifications, what the
+    // on-device model found on each photo (issue #4668). Tables with no
+    // hlc then, not synced until v381, so the floor did not move.
+    // Renumbered from 374, which main took for #4660.
+    375,
+    // v376: video columns on media_identification_runs and
+    // media_identifications (issue #4675). Columns on tables not synced
+    // until v381, no backfill; the floor did not move.
+    376,
+    // v377: media_identification_runs.scanned_ranges, the stretches of a
+    // video scanned (issue #4709). A column on a table not synced until
+    // v381, no backfill; the floor did not move.
+    377,
+    // v378: media_species.unconfirmed, created_sighting and created_species,
+    // the marks on a tag the app applied (issue #4727). Synced columns, no
+    // backfill; the floor rises to 378.
+    378,
+    // v379: diver_settings visibility and colour of the three Avelo profile
+    // lines (issue #4664). Additive and defaulted; the floor does not move.
+    379,
+    // v380: a lone download stamped as combined gets its source back as
+    // primary, and a live series duplicating its source's own under another
+    // computer's label is demoted (issue #4847). Data only; the floor does
+    // not move.
+    380,
+    // v381: marine life results sync (issue #4876): clocks on both
+    // identification tables, a run's maker, run id and naming bars, the
+    // decision clock, and media_identification_crops. The floor rises to
+    // 381 (see minimumCompatibleSchemaVersion).
+    381,
+    // v382: dives.hand_set_fields, the computer-written values the diver set
+    // by hand, which a re-parse and a resync keep (issue #4909). Nullable,
+    // no backfill; the floor does not move.
+    382,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading
@@ -1404,1796 +1805,10 @@ class AppDatabase extends _$AppDatabase {
   @override
   int get schemaVersion => currentSchemaVersion;
 
+  /// The upgrade ladder, the helpers its rungs call and the backstops
+  /// that run on every open live in `migrations/`, outside this library.
+  /// drift_dev resolves all of this library while it generates code, so
+  /// what is declared here is paid for on every build (issue #2502).
   @override
-  MigrationStrategy get migration {
-    return MigrationStrategy(
-      onCreate: (Migrator m) async {
-        await m.createAll();
-
-        // Seed built-in dive types
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final builtInTypes = [
-          ('recreational', 'Recreational', 0),
-          ('technical', 'Technical', 1),
-          ('freedive', 'Freedive', 2),
-          ('training', 'Training', 3),
-          ('wreck', 'Wreck', 4),
-          ('cave', 'Cave', 5),
-          ('ice', 'Ice', 6),
-          ('night', 'Night', 7),
-          ('drift', 'Drift', 8),
-          ('deep', 'Deep', 9),
-          ('altitude', 'Altitude', 10),
-          ('shore', 'Shore', 11),
-          ('boat', 'Boat', 12),
-          ('liveaboard', 'Liveaboard', 13),
-        ];
-
-        for (final type in builtInTypes) {
-          await customStatement('''
-            INSERT OR IGNORE INTO dive_types (id, name, is_built_in, sort_order, created_at, updated_at)
-            VALUES ('${type.$1}', '${type.$2}', 1, ${type.$3}, $now, $now)
-          ''');
-        }
-      },
-      onUpgrade: (Migrator m, int from, int to) async {
-        int completedSteps = 0;
-        final totalSteps = migrationStepCount(from);
-
-        Future<void> reportProgress() async {
-          completedSteps++;
-          onMigrationProgress?.call(completedSteps, totalSteps);
-          // Yield to the event loop so the UI can repaint (update the progress
-          // bar). With synchronous NativeDatabase, DDL blocks the main thread
-          // during each step, but this yield between steps gives the framework
-          // a chance to schedule a frame after setState.
-          await Future<void>.delayed(Duration.zero);
-        }
-
-        if (from < 2) {
-          // Add sacUnit column to diver_settings
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN sac_unit TEXT NOT NULL DEFAULT 'litersPerMin'",
-          );
-        }
-        if (from < 2) await reportProgress();
-        if (from < 3) {
-          // Add presetName column to dive_tanks
-          await customStatement(
-            'ALTER TABLE dive_tanks ADD COLUMN preset_name TEXT',
-          );
-        }
-        if (from < 3) await reportProgress();
-        if (from < 4) {
-          // Add sync tables for cloud sync feature
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS sync_metadata (
-              id TEXT NOT NULL PRIMARY KEY,
-              last_sync_timestamp INTEGER,
-              device_id TEXT NOT NULL,
-              sync_provider TEXT,
-              remote_file_id TEXT,
-              sync_version INTEGER NOT NULL DEFAULT 1,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS sync_records (
-              id TEXT NOT NULL PRIMARY KEY,
-              entity_type TEXT NOT NULL,
-              record_id TEXT NOT NULL,
-              local_updated_at INTEGER NOT NULL,
-              synced_at INTEGER,
-              sync_status TEXT NOT NULL DEFAULT 'synced',
-              conflict_data TEXT,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS deletion_log (
-              id TEXT NOT NULL PRIMARY KEY,
-              entity_type TEXT NOT NULL,
-              record_id TEXT NOT NULL,
-              deleted_at INTEGER NOT NULL
-            )
-          ''');
-        }
-        if (from < 4) await reportProgress();
-        if (from < 5) {
-          // Add showMapBackgroundOnDiveCards column to diver_settings
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_map_background_on_dive_cards INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 5) await reportProgress();
-        if (from < 6) {
-          // Add showMapBackgroundOnSiteCards column to diver_settings
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_map_background_on_site_cards INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 6) await reportProgress();
-        if (from < 7) {
-          // Add showDepthColoredDiveCards column to diver_settings (was missing migration)
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_depth_colored_dive_cards INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 7) await reportProgress();
-        if (from < 8) {
-          // Add dive profile marker settings
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_max_depth_marker INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_pressure_threshold_markers INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 8) await reportProgress();
-        if (from < 9) {
-          // Add per-tank pressure profiles for multi-tank visualization
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS tank_pressure_profiles (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              tank_id TEXT NOT NULL REFERENCES dive_tanks(id) ON DELETE CASCADE,
-              timestamp INTEGER NOT NULL,
-              pressure REAL NOT NULL
-            )
-          ''');
-          // Index for efficient queries by dive and tank
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_tank_pressure_dive_tank
-            ON tank_pressure_profiles(dive_id, tank_id, timestamp)
-          ''');
-        }
-        if (from < 9) await reportProgress();
-        if (from < 10) {
-          // Add time/date format columns to diver_settings
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN time_format TEXT NOT NULL DEFAULT 'twelveHour'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN date_format TEXT NOT NULL DEFAULT 'mmmDYYYY'",
-          );
-        }
-        if (from < 10) await reportProgress();
-        if (from < 11) {
-          // CCR/SCR Rebreather Support (v1.5)
-
-          // CCR Setpoints (bar)
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN setpoint_low REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN setpoint_high REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN setpoint_deco REAL',
-          );
-
-          // SCR Configuration
-          await customStatement('ALTER TABLE dives ADD COLUMN scr_type TEXT');
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scr_injection_rate REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scr_addition_ratio REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scr_orifice_size TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN assumed_vo2 REAL',
-          );
-
-          // Diluent/Supply Gas
-          await customStatement('ALTER TABLE dives ADD COLUMN diluent_o2 REAL');
-          await customStatement('ALTER TABLE dives ADD COLUMN diluent_he REAL');
-
-          // Loop FO2 measurements (SCR)
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN loop_o2_min REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN loop_o2_max REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN loop_o2_avg REAL',
-          );
-
-          // Shared rebreather fields
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN loop_volume REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scrubber_type TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scrubber_duration_minutes INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN scrubber_remaining_minutes INTEGER',
-          );
-
-          // DiveProfiles CCR/SCR fields
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN setpoint REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN pp_o2 REAL',
-          );
-        }
-        if (from < 11) await reportProgress();
-        if (from < 12) {
-          // Add isPlanned column for dive planner feature
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN is_planned INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 12) await reportProgress();
-        if (from < 13) {
-          // Add custom tank presets table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS tank_presets (
-              id TEXT NOT NULL PRIMARY KEY,
-              diver_id TEXT REFERENCES divers(id),
-              name TEXT NOT NULL,
-              display_name TEXT NOT NULL,
-              volume_liters REAL NOT NULL,
-              working_pressure_bar INTEGER NOT NULL,
-              material TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-        }
-        if (from < 13) await reportProgress();
-        if (from < 14) {
-          // Add tide records table for storing tide data with dives
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS tide_records (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              height_meters REAL NOT NULL,
-              tide_state TEXT NOT NULL,
-              rate_of_change REAL,
-              high_tide_height REAL,
-              high_tide_time INTEGER,
-              low_tide_height REAL,
-              low_tide_time INTEGER,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Index for efficient lookup by dive
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_tide_records_dive
-            ON tide_records(dive_id)
-          ''');
-        }
-        if (from < 14) await reportProgress();
-        if (from < 15) {
-          // Add index on dive_profiles.dive_id for faster profile loading
-          // This table has 160K+ rows and is queried frequently by dive_id
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_profiles_dive_id
-            ON dive_profiles(dive_id)
-          ''');
-          // Add composite index on sync_records for efficient pending/conflict lookups
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_sync_records_entity_record
-            ON sync_records(entity_type, record_id)
-          ''');
-        }
-        if (from < 15) await reportProgress();
-        if (from < 16) {
-          // Add altitude column to dive_sites for altitude diving support
-          await customStatement(
-            'ALTER TABLE dive_sites ADD COLUMN altitude REAL',
-          );
-        }
-        if (from < 16) await reportProgress();
-        if (from < 17) {
-          // Add personal & medical data fields to divers table
-          await customStatement(
-            'ALTER TABLE divers ADD COLUMN medications TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE divers ADD COLUMN medical_clearance_expiry_date INTEGER',
-          );
-          // Secondary emergency contact
-          await customStatement(
-            'ALTER TABLE divers ADD COLUMN emergency_contact2_name TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE divers ADD COLUMN emergency_contact2_phone TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE divers ADD COLUMN emergency_contact2_relation TEXT',
-          );
-        }
-        if (from < 17) await reportProgress();
-        if (from < 18) {
-          // Add site_species junction table for expected marine life at sites
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS site_species (
-              id TEXT NOT NULL PRIMARY KEY,
-              site_id TEXT NOT NULL REFERENCES dive_sites(id) ON DELETE CASCADE,
-              species_id TEXT NOT NULL REFERENCES species(id) ON DELETE CASCADE,
-              notes TEXT NOT NULL DEFAULT '',
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Index for efficient lookup by site
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_site_species_site
-            ON site_species(site_id)
-          ''');
-        }
-        if (from < 18) await reportProgress();
-        if (from < 19) {
-          // Training courses feature (v1.5)
-          // Create courses table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS courses (
-              id TEXT NOT NULL PRIMARY KEY,
-              diver_id TEXT NOT NULL REFERENCES divers(id) ON DELETE CASCADE,
-              name TEXT NOT NULL,
-              agency TEXT NOT NULL,
-              start_date INTEGER NOT NULL,
-              completion_date INTEGER,
-              instructor_id TEXT REFERENCES buddies(id) ON DELETE SET NULL,
-              instructor_name TEXT,
-              instructor_number TEXT,
-              certification_id TEXT REFERENCES certifications(id) ON DELETE SET NULL,
-              location TEXT,
-              notes TEXT NOT NULL DEFAULT '',
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          // Index for efficient lookup by diver
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_courses_diver
-            ON courses(diver_id)
-          ''');
-
-          // Add courseId FK to dives table
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN course_id TEXT REFERENCES courses(id) ON DELETE SET NULL',
-          );
-
-          // Add courseId FK to certifications table (bidirectional link)
-          await customStatement(
-            'ALTER TABLE certifications ADD COLUMN course_id TEXT REFERENCES courses(id) ON DELETE SET NULL',
-          );
-
-          // Add signature fields to media table
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN signer_id TEXT REFERENCES buddies(id) ON DELETE SET NULL',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN signer_name TEXT',
-          );
-        }
-        if (from < 19) await reportProgress();
-        if (from < 20) {
-          // Underwater photography feature (v2.0)
-          final now = DateTime.now().millisecondsSinceEpoch;
-
-          // Add new columns to media table for gallery photos
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN platform_asset_id TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN original_filename TEXT',
-          );
-          await customStatement('ALTER TABLE media ADD COLUMN width INTEGER');
-          await customStatement('ALTER TABLE media ADD COLUMN height INTEGER');
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN duration_seconds INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN thumbnail_generated_at INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN last_verified_at INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN is_orphaned INTEGER NOT NULL DEFAULT 0',
-          );
-          // Add timestamps with default for existing rows
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN created_at INTEGER NOT NULL DEFAULT $now',
-          );
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN updated_at INTEGER NOT NULL DEFAULT $now',
-          );
-
-          // Index on platform_asset_id for gallery photo lookups
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_media_platform_asset_id
-            ON media(platform_asset_id)
-          ''');
-
-          // Create media_enrichment table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS media_enrichment (
-              id TEXT NOT NULL PRIMARY KEY,
-              media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              depth_meters REAL,
-              temperature_celsius REAL,
-              elapsed_seconds INTEGER,
-              match_confidence TEXT NOT NULL DEFAULT 'exact',
-              timestamp_offset_seconds INTEGER,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Indexes for media_enrichment
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_media_enrichment_media
-            ON media_enrichment(media_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_media_enrichment_dive
-            ON media_enrichment(dive_id)
-          ''');
-
-          // Create media_species table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS media_species (
-              id TEXT NOT NULL PRIMARY KEY,
-              media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
-              species_id TEXT NOT NULL REFERENCES species(id) ON DELETE CASCADE,
-              sighting_id TEXT REFERENCES sightings(id) ON DELETE SET NULL,
-              bbox_x REAL,
-              bbox_y REAL,
-              bbox_width REAL,
-              bbox_height REAL,
-              notes TEXT,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Indexes for media_species
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_media_species_media
-            ON media_species(media_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_media_species_species
-            ON media_species(species_id)
-          ''');
-
-          // Create pending_photo_suggestions table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS pending_photo_suggestions (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              platform_asset_id TEXT NOT NULL,
-              taken_at INTEGER NOT NULL,
-              thumbnail_path TEXT,
-              dismissed INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Index for pending_photo_suggestions
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_pending_photo_suggestions_dive
-            ON pending_photo_suggestions(dive_id)
-          ''');
-        }
-        if (from < 20) await reportProgress();
-        if (from < 21) {
-          // Cached map regions for offline maps feature
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS cached_regions (
-              id TEXT NOT NULL PRIMARY KEY,
-              name TEXT NOT NULL,
-              min_lat REAL NOT NULL,
-              max_lat REAL NOT NULL,
-              min_lng REAL NOT NULL,
-              max_lng REAL NOT NULL,
-              min_zoom INTEGER NOT NULL,
-              max_zoom INTEGER NOT NULL,
-              tile_count INTEGER NOT NULL,
-              size_bytes INTEGER NOT NULL,
-              created_at INTEGER NOT NULL,
-              last_accessed_at INTEGER NOT NULL
-            )
-          ''');
-        }
-        if (from < 21) await reportProgress();
-        if (from < 22) {
-          // Buddy signatures feature - add signature type column
-          await customStatement(
-            'ALTER TABLE media ADD COLUMN signature_type TEXT',
-          );
-        }
-        if (from < 22) await reportProgress();
-        if (from < 23) {
-          // Store photos as BLOBs instead of file paths for backup/export
-          // Add BLOB columns to certifications table
-          await customStatement(
-            'ALTER TABLE certifications ADD COLUMN photo_front BLOB',
-          );
-          await customStatement(
-            'ALTER TABLE certifications ADD COLUMN photo_back BLOB',
-          );
-          // Add BLOB column to media table for signatures
-          await customStatement('ALTER TABLE media ADD COLUMN image_data BLOB');
-        }
-        if (from < 23) await reportProgress();
-        if (from < 24) {
-          // Add structured address fields to dive_centers
-          // The original table had 'location' but not 'city', so we add all new columns
-          // Check which columns exist to handle partial migrations
-          final tableInfo = await customSelect(
-            "PRAGMA table_info('dive_centers')",
-          ).get();
-          final existingColumns = tableInfo
-              .map((row) => row.data['name'] as String)
-              .toSet();
-
-          if (!existingColumns.contains('street')) {
-            await customStatement(
-              'ALTER TABLE dive_centers ADD COLUMN street TEXT',
-            );
-          }
-          if (!existingColumns.contains('city')) {
-            await customStatement(
-              'ALTER TABLE dive_centers ADD COLUMN city TEXT',
-            );
-          }
-          if (!existingColumns.contains('state_province')) {
-            await customStatement(
-              'ALTER TABLE dive_centers ADD COLUMN state_province TEXT',
-            );
-          }
-          if (!existingColumns.contains('postal_code')) {
-            await customStatement(
-              'ALTER TABLE dive_centers ADD COLUMN postal_code TEXT',
-            );
-          }
-          // Migrate existing location data to the new city column (if location exists)
-          if (existingColumns.contains('location')) {
-            await customStatement('''
-              UPDATE dive_centers
-              SET city = location
-              WHERE location IS NOT NULL AND (city IS NULL OR city = '')
-            ''');
-          }
-        }
-        if (from < 24) await reportProgress();
-        if (from < 25) {
-          // Add altitudeUnit column to diver_settings
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN altitude_unit TEXT NOT NULL DEFAULT 'meters'",
-          );
-        }
-        if (from < 25) await reportProgress();
-        if (from < 26) {
-          // Notification settings for service reminders
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN notifications_enabled INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN service_reminder_days TEXT NOT NULL DEFAULT '[7, 14, 30]'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN reminder_time TEXT NOT NULL DEFAULT '09:00'",
-          );
-        }
-        if (from < 26) await reportProgress();
-        if (from < 27) {
-          // Per-equipment notification overrides
-          await customStatement(
-            'ALTER TABLE equipment ADD COLUMN custom_reminder_enabled INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE equipment ADD COLUMN custom_reminder_days TEXT',
-          );
-        }
-        if (from < 27) await reportProgress();
-        if (from < 28) {
-          // Scheduled notifications tracking table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS scheduled_notifications (
-              id TEXT NOT NULL PRIMARY KEY,
-              equipment_id TEXT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
-              scheduled_date INTEGER NOT NULL,
-              reminder_days_before INTEGER NOT NULL,
-              notification_id INTEGER NOT NULL,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          // Index for efficient lookup by equipment
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_scheduled_notifications_equipment
-            ON scheduled_notifications(equipment_id)
-          ''');
-        }
-        if (from < 28) await reportProgress();
-        if (from < 29) {
-          // Add dive profile chart default visibility settings to diver_settings
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN default_right_axis_metric TEXT NOT NULL DEFAULT 'temperature'",
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_temperature INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_pressure INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_heart_rate INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_sac INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_events INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_pp_o2 INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_pp_n2 INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_pp_he INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_gas_density INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_gf INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_surface_gf INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_mean_depth INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_tts INTEGER NOT NULL DEFAULT 0',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_show_gas_switch_markers INTEGER NOT NULL DEFAULT 1',
-          );
-        }
-        if (from < 29) await reportProgress();
-        if (from < 30) {
-          // Wearable integration (v2.0) - Apple Watch, Garmin, Suunto import
-          // Add wearable source tracking to dives table
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN wearable_source TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN wearable_id TEXT',
-          );
-          // Add heart rate source tracking to dive_profiles table
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN heart_rate_source TEXT',
-          );
-        }
-        if (from < 30) await reportProgress();
-        if (from < 31) {
-          // Performance indexes for 5000+ dives
-          // Primary query: dives by diver, ordered by date
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_diver_datetime
-            ON dives(diver_id, dive_date_time DESC)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_diver_entrytime
-            ON dives(diver_id, entry_time DESC)
-          ''');
-          // FK lookups for batch loading in getAllDives()
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_site_id
-            ON dives(site_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_trip_id
-            ON dives(trip_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_dive_center_id
-            ON dives(dive_center_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_course_id
-            ON dives(course_id)
-          ''');
-          // Favorite filter
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dives_favorite
-            ON dives(diver_id, is_favorite)
-          ''');
-          // Child table lookups for batch loading
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_tanks_dive_id
-            ON dive_tanks(dive_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_equipment_dive_id
-            ON dive_equipment(dive_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_weights_dive_id
-            ON dive_weights(dive_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_tags_dive_id
-            ON dive_tags(dive_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_tags_tag_id
-            ON dive_tags(tag_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_buddies_dive_id
-            ON dive_buddies(dive_id)
-          ''');
-        }
-        if (from < 31) await reportProgress();
-        if (from < 32) {
-          // Add taxonomy class and built-in flag to species table
-          await customStatement(
-            'ALTER TABLE species ADD COLUMN taxonomy_class TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE species ADD COLUMN is_built_in INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 32) await reportProgress();
-        if (from < 33) {
-          // Add locale column for i18n language preference
-          final cols = await customSelect(
-            'PRAGMA table_info(diver_settings)',
-          ).get();
-          final hasLocale = cols.any(
-            (row) => row.read<String>('name') == 'locale',
-          );
-          if (!hasLocale) {
-            await customStatement(
-              "ALTER TABLE diver_settings ADD COLUMN locale TEXT NOT NULL DEFAULT 'system'",
-            );
-          }
-        }
-        if (from < 33) await reportProgress();
-        if (from < 34) {
-          // User-defined key:value custom fields per dive
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS dive_custom_fields (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              field_key TEXT NOT NULL,
-              field_value TEXT NOT NULL DEFAULT '',
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_custom_fields_dive_id
-            ON dive_custom_fields(dive_id)
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_custom_fields_key
-            ON dive_custom_fields(field_key)
-          ''');
-        }
-        if (from < 34) await reportProgress();
-        if (from < 35) {
-          // Card coloring: attribute selector + gradient settings
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN card_color_attribute TEXT NOT NULL DEFAULT 'none'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN card_color_gradient_preset TEXT NOT NULL DEFAULT 'ocean'",
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN card_color_gradient_start INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN card_color_gradient_end INTEGER',
-          );
-          // Migrate existing depth coloring users
-          await customStatement(
-            "UPDATE diver_settings SET card_color_attribute = 'depth' WHERE show_depth_colored_dive_cards = 1",
-          );
-        }
-        if (from < 35) await reportProgress();
-        if (from < 36) {
-          // Backfill water_temp from profile temperature data for dives
-          // where water_temp is NULL but profile points have temperature.
-          // Uses MIN(temperature) to match the import fallback logic.
-          await customStatement('''
-            UPDATE dives SET water_temp = (
-              SELECT MIN(temperature) FROM dive_profiles
-              WHERE dive_profiles.dive_id = dives.id
-              AND dive_profiles.is_primary = 1
-              AND dive_profiles.temperature IS NOT NULL
-              AND dive_profiles.temperature >= -2
-              AND dive_profiles.temperature <= 40
-            ) WHERE water_temp IS NULL
-          ''');
-        }
-        if (from < 36) await reportProgress();
-        if (from < 37) {
-          await customStatement(
-            'ALTER TABLE dive_computers ADD COLUMN firmware_version TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN dive_computer_firmware TEXT',
-          );
-        }
-        if (from < 37) await reportProgress();
-
-        if (from < 38) {
-          // Remove any existing duplicate media (same gallery photo linked
-          // to same dive). Keep the oldest record (lowest created_at).
-          await customStatement('''
-            DELETE FROM media WHERE id IN (
-              SELECT m.id FROM media m
-              INNER JOIN (
-                SELECT platform_asset_id, dive_id, MIN(created_at) as min_created
-                FROM media
-                WHERE platform_asset_id IS NOT NULL AND dive_id IS NOT NULL
-                GROUP BY platform_asset_id, dive_id
-                HAVING COUNT(*) > 1
-              ) dupes ON m.platform_asset_id = dupes.platform_asset_id
-                AND m.dive_id = dupes.dive_id
-                AND m.created_at > dupes.min_created
-            )
-          ''');
-          // Partial unique index: same gallery photo cannot be linked to
-          // same dive twice. Only constrains rows where both columns are
-          // non-null (signatures/orphans unaffected).
-          await customStatement('''
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_media_asset_dive_unique
-            ON media(platform_asset_id, dive_id)
-            WHERE platform_asset_id IS NOT NULL AND dive_id IS NOT NULL
-          ''');
-        }
-        if (from < 38) await reportProgress();
-        if (from < 39) {
-          // Backfill avg_depth from profile data for dives that have
-          // profile points but no avg_depth recorded.
-          await customStatement('''
-            UPDATE dives SET avg_depth = (
-              SELECT AVG(depth) FROM dive_profiles
-              WHERE dive_profiles.dive_id = dives.id
-              AND dive_profiles.is_primary = 1
-              AND dive_profiles.depth IS NOT NULL
-            )
-            WHERE avg_depth IS NULL
-            AND EXISTS (
-              SELECT 1 FROM dive_profiles
-              WHERE dive_profiles.dive_id = dives.id
-              AND dive_profiles.is_primary = 1
-              AND dive_profiles.depth IS NOT NULL
-            )
-          ''');
-          // Add CNS/OTU default visibility columns to settings
-          final tableInfo = await customSelect(
-            "PRAGMA table_info('diver_settings')",
-          ).get();
-          final existingColumns = tableInfo
-              .map((row) => row.data['name'] as String)
-              .toSet();
-          if (!existingColumns.contains('default_show_cns')) {
-            await customStatement(
-              'ALTER TABLE diver_settings ADD COLUMN default_show_cns INTEGER NOT NULL DEFAULT 0',
-            );
-          }
-          if (!existingColumns.contains('default_show_otu')) {
-            await customStatement(
-              'ALTER TABLE diver_settings ADD COLUMN default_show_otu INTEGER NOT NULL DEFAULT 0',
-            );
-          }
-        }
-        if (from < 39) await reportProgress();
-        if (from < 40) {
-          // Add per-sample decompression data columns to dive_profiles
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN cns REAL',
-          );
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN tts INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN rbt INTEGER',
-          );
-          await customStatement(
-            'ALTER TABLE dive_profiles ADD COLUMN deco_type INTEGER',
-          );
-          // Add deco model fields to dives
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN deco_algorithm TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives ADD COLUMN deco_conservatism INTEGER',
-          );
-        }
-        if (from < 40) await reportProgress();
-        if (from < 41) {
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN use_dive_computer_cns_data INTEGER NOT NULL DEFAULT 0',
-          );
-        }
-        if (from < 41) await reportProgress();
-        if (from < 42) {
-          // Add per-metric data source columns
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_ndl_source INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_ceiling_source INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_tts_source INTEGER NOT NULL DEFAULT 1',
-          );
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN default_cns_source INTEGER NOT NULL DEFAULT 1',
-          );
-          // Migrate existing CNS toggle: if user had it enabled, set CNS source to computer (0)
-          await customStatement(
-            'UPDATE diver_settings SET default_cns_source = 0 WHERE use_dive_computer_cns_data = 1',
-          );
-        }
-        if (from < 42) await reportProgress();
-        if (from < 43) {
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN theme_preset TEXT NOT NULL DEFAULT 'submersion'",
-          );
-        }
-        if (from < 43) await reportProgress();
-        if (from < 45) {
-          // Migrations 44-45 add columns to diver_settings.
-          // Guard with PRAGMA table_info to handle partial migrations
-          // (ALTER TABLE ADD COLUMN cannot be rolled back in SQLite).
-          final settingsInfo = await customSelect(
-            'PRAGMA table_info(diver_settings)',
-          ).get();
-          final settingsCols = settingsInfo
-              .map((r) => r.read<String>('name'))
-              .toSet();
-          if (!settingsCols.contains('o2_narcotic')) {
-            await customStatement(
-              'ALTER TABLE diver_settings ADD COLUMN o2_narcotic INTEGER NOT NULL DEFAULT 1',
-            );
-          }
-          if (!settingsCols.contains('end_limit')) {
-            await customStatement(
-              'ALTER TABLE diver_settings ADD COLUMN end_limit REAL NOT NULL DEFAULT 30.0',
-            );
-          }
-          if (!settingsCols.contains('tissue_color_scheme')) {
-            await customStatement(
-              "ALTER TABLE diver_settings ADD COLUMN tissue_color_scheme TEXT NOT NULL DEFAULT 'classic'",
-            );
-          }
-          if (!settingsCols.contains('tissue_viz_mode')) {
-            await customStatement(
-              "ALTER TABLE diver_settings ADD COLUMN tissue_viz_mode TEXT NOT NULL DEFAULT 'heatMap'",
-            );
-          }
-        }
-        if (from < 45) await reportProgress();
-
-        if (from < 46) {
-          // Add trip type column to trips
-          final tripsInfo = await customSelect(
-            'PRAGMA table_info(trips)',
-          ).get();
-          final tripsCols = tripsInfo
-              .map((r) => r.read<String>('name'))
-              .toSet();
-          if (!tripsCols.contains('trip_type')) {
-            await customStatement(
-              "ALTER TABLE trips ADD COLUMN trip_type TEXT NOT NULL DEFAULT 'shore'",
-            );
-          }
-
-          // Create liveaboard_detail_records table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS liveaboard_detail_records (
-              id TEXT NOT NULL PRIMARY KEY,
-              trip_id TEXT NOT NULL REFERENCES trips(id),
-              vessel_name TEXT NOT NULL,
-              operator_name TEXT,
-              vessel_type TEXT,
-              cabin_type TEXT,
-              capacity INTEGER,
-              embark_port TEXT,
-              embark_latitude REAL,
-              embark_longitude REAL,
-              disembark_port TEXT,
-              disembark_latitude REAL,
-              disembark_longitude REAL,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-
-          // Create trip_itinerary_days table
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS trip_itinerary_days (
-              id TEXT NOT NULL PRIMARY KEY,
-              trip_id TEXT NOT NULL REFERENCES trips(id),
-              day_number INTEGER NOT NULL,
-              date INTEGER NOT NULL,
-              day_type TEXT NOT NULL DEFAULT 'diveDay',
-              port_name TEXT,
-              latitude REAL,
-              longitude REAL,
-              notes TEXT NOT NULL DEFAULT '',
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-
-          // Migrate existing liveaboard trips
-          await customStatement('''
-            UPDATE trips SET trip_type = 'liveaboard'
-            WHERE liveaboard_name IS NOT NULL AND liveaboard_name != ''
-          ''');
-
-          // Migrate existing resort trips (only non-liveaboard)
-          await customStatement('''
-            UPDATE trips SET trip_type = 'resort'
-            WHERE resort_name IS NOT NULL AND resort_name != ''
-              AND trip_type = 'shore'
-          ''');
-
-          // Create liveaboard_detail_records for existing liveaboard trips
-          await customStatement('''
-            INSERT INTO liveaboard_detail_records (
-              id, trip_id, vessel_name, created_at, updated_at
-            )
-            SELECT
-              lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
-                substr(hex(randomblob(2)),2) || '-' ||
-                substr('89ab', abs(random()) % 4 + 1, 1) ||
-                substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))),
-              id,
-              COALESCE(liveaboard_name, 'Unknown Vessel'),
-              created_at,
-              updated_at
-            FROM trips
-            WHERE trip_type = 'liveaboard'
-              AND id NOT IN (SELECT trip_id FROM liveaboard_detail_records)
-          ''');
-        }
-        if (from < 46) await reportProgress();
-        if (from < 47) {
-          // Add lastDiveFingerprint column for incremental dive download
-          final dcInfo = await customSelect(
-            'PRAGMA table_info(dive_computers)',
-          ).get();
-          final dcCols = dcInfo.map((r) => r.read<String>('name')).toSet();
-          if (!dcCols.contains('last_dive_fingerprint')) {
-            await customStatement(
-              'ALTER TABLE dive_computers ADD COLUMN last_dive_fingerprint TEXT',
-            );
-          }
-        }
-        if (from < 47) await reportProgress();
-        if (from < 48) {
-          // Add weather columns to dives table.
-          // Guard with PRAGMA table_info to handle partial migrations
-          // (ALTER TABLE ADD COLUMN cannot be rolled back in SQLite).
-          final divesInfo = await customSelect(
-            'PRAGMA table_info(dives)',
-          ).get();
-          final divesCols = divesInfo
-              .map((r) => r.read<String>('name'))
-              .toSet();
-          if (!divesCols.contains('wind_speed')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN wind_speed REAL',
-            );
-          }
-          if (!divesCols.contains('wind_direction')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN wind_direction TEXT',
-            );
-          }
-          if (!divesCols.contains('cloud_cover')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN cloud_cover TEXT',
-            );
-          }
-          if (!divesCols.contains('precipitation')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN precipitation TEXT',
-            );
-          }
-          if (!divesCols.contains('humidity')) {
-            await customStatement('ALTER TABLE dives ADD COLUMN humidity REAL');
-          }
-          if (!divesCols.contains('weather_description')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN weather_description TEXT',
-            );
-          }
-          if (!divesCols.contains('weather_source')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN weather_source TEXT',
-            );
-          }
-          if (!divesCols.contains('weather_fetched_at')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN weather_fetched_at INTEGER',
-            );
-          }
-        }
-        if (from < 48) await reportProgress();
-        if (from < 49) {
-          // Add importVersion column.
-          final divesInfo = await customSelect(
-            'PRAGMA table_info(dives)',
-          ).get();
-          final divesCols = divesInfo
-              .map((r) => r.read<String>('name'))
-              .toSet();
-
-          if (!divesCols.contains('import_version')) {
-            await customStatement(
-              'ALTER TABLE dives ADD COLUMN import_version INTEGER',
-            );
-          }
-
-          // Migrate dive timestamps to wall-clock-as-UTC convention.
-          // Computer-imported dives: already in correct format (the original
-          // bug stored local wall-clock components as UTC, which matches the
-          // target convention). Only mark them with importVersion = 1.
-          await customStatement('''
-            UPDATE dives SET import_version = 1
-            WHERE dive_computer_model IS NOT NULL
-               OR computer_id IS NOT NULL
-          ''');
-
-          // Wearable and manual dives: stored as true local epoch.
-          // Both categories get the same shift so they are collapsed into one
-          // UPDATE using `import_version IS NULL` (computer dives are already
-          // set to 1 above).
-          //
-          // Convert local epoch to wall-clock-as-UTC:
-          //   newEpoch = localEpoch + timeZoneOffsetMs
-          //
-          // UTC+8 example: local 8:42 = 0:42 UTC epoch.  +8 h = 8:42 UTC.
-          // UTC-4 example: local 8:42 = 12:42 UTC epoch. -4 h = 8:42 UTC.
-          final now = DateTime.now();
-          final offsetMs = now.timeZoneOffset.inMilliseconds;
-
-          await customStatement('''
-            UPDATE dives
-            SET dive_date_time = dive_date_time + $offsetMs,
-                entry_time = CASE WHEN entry_time IS NOT NULL
-                             THEN entry_time + $offsetMs ELSE NULL END,
-                exit_time = CASE WHEN exit_time IS NOT NULL
-                            THEN exit_time + $offsetMs ELSE NULL END,
-                import_version = 1
-            WHERE import_version IS NULL
-          ''');
-        }
-        if (from < 49) await reportProgress();
-        if (from < 50) {
-          final settingsInfo = await customSelect(
-            'PRAGMA table_info(diver_settings)',
-          ).get();
-          final settingsCols = settingsInfo
-              .map((r) => r.read<String>('name'))
-              .toSet();
-          if (!settingsCols.contains('default_tank_preset')) {
-            await customStatement(
-              "ALTER TABLE diver_settings ADD COLUMN default_tank_preset TEXT DEFAULT 'al80'",
-            );
-          }
-          if (!settingsCols.contains('apply_default_tank_to_imports')) {
-            await customStatement(
-              'ALTER TABLE diver_settings ADD COLUMN apply_default_tank_to_imports INTEGER NOT NULL DEFAULT 0',
-            );
-          }
-        }
-        if (from < 50) await reportProgress();
-        if (from < 51) {
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN dive_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-        }
-        if (from < 51) await reportProgress();
-        if (from < 52) {
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN site_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN trip_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN equipment_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN buddy_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-          await customStatement(
-            "ALTER TABLE diver_settings ADD COLUMN dive_center_list_view_mode TEXT NOT NULL DEFAULT 'detailed'",
-          );
-        }
-        if (from < 52) await reportProgress();
-        if (from < 53) {
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS dive_computer_data (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              computer_id TEXT REFERENCES dive_computers(id),
-              is_primary INTEGER NOT NULL DEFAULT 0,
-              computer_model TEXT,
-              computer_serial TEXT,
-              source_format TEXT,
-              max_depth REAL,
-              avg_depth REAL,
-              duration INTEGER,
-              water_temp REAL,
-              entry_time INTEGER,
-              exit_time INTEGER,
-              max_ascent_rate REAL,
-              max_descent_rate REAL,
-              surface_interval INTEGER,
-              cns REAL,
-              otu REAL,
-              deco_algorithm TEXT,
-              gradient_factor_low INTEGER,
-              gradient_factor_high INTEGER,
-              imported_at INTEGER NOT NULL,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_computer_data_dive_id
-            ON dive_computer_data(dive_id)
-          ''');
-        }
-        if (from < 53) await reportProgress();
-        if (from < 54) {
-          await customStatement(
-            'ALTER TABLE dive_computer_data RENAME TO dive_data_sources',
-          );
-          await customStatement(
-            'ALTER TABLE dive_data_sources ADD COLUMN source_file_name TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dive_data_sources ADD COLUMN source_file_format TEXT',
-          );
-          await customStatement(
-            'ALTER TABLE dives RENAME COLUMN wearable_source TO import_source',
-          );
-          await customStatement(
-            'ALTER TABLE dives RENAME COLUMN wearable_id TO import_id',
-          );
-          await customStatement(
-            'DROP INDEX IF EXISTS idx_dive_computer_data_dive_id',
-          );
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_dive_data_sources_dive_id
-            ON dive_data_sources(dive_id)
-          ''');
-        }
-        if (from < 54) await reportProgress();
-        if (from < 55) {
-          // Add data source badge visibility setting to diver_settings
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN show_data_source_badges INTEGER NOT NULL DEFAULT 1',
-          );
-        }
-        if (from < 55) await reportProgress();
-        if (from < 56) {
-          await m.database.customStatement(
-            'ALTER TABLE dives RENAME COLUMN duration TO bottom_time',
-          );
-        }
-        if (from < 56) await reportProgress();
-        if (from < 57) {
-          // Add dive detail section configuration column to diver_settings
-          await customStatement(
-            'ALTER TABLE diver_settings ADD COLUMN dive_detail_sections TEXT',
-          );
-        }
-        if (from < 57) await reportProgress();
-        if (from < 58) {
-          // Add csv_presets table for user-saved CSV import presets
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS csv_presets (
-              id TEXT NOT NULL PRIMARY KEY,
-              name TEXT NOT NULL,
-              preset_json TEXT NOT NULL,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          // Convert pressure columns from INTEGER to REAL in dive_tanks
-          // to avoid rounding errors in PSI/bar conversions.
-          // SQLite doesn't support ALTER COLUMN, so recreate the table.
-          await customStatement('''
-            CREATE TABLE dive_tanks_new (
-              id TEXT NOT NULL PRIMARY KEY,
-              dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-              equipment_id TEXT REFERENCES equipment(id),
-              volume REAL,
-              working_pressure REAL,
-              start_pressure REAL,
-              end_pressure REAL,
-              o2_percent REAL NOT NULL DEFAULT 21.0,
-              he_percent REAL NOT NULL DEFAULT 0.0,
-              tank_order INTEGER NOT NULL DEFAULT 0,
-              tank_role TEXT NOT NULL DEFAULT 'backGas',
-              tank_material TEXT,
-              tank_name TEXT,
-              preset_name TEXT
-            )
-          ''');
-          await customStatement('''
-            INSERT INTO dive_tanks_new
-              (id, dive_id, equipment_id, volume,
-               working_pressure, start_pressure, end_pressure,
-               o2_percent, he_percent, tank_order, tank_role,
-               tank_material, tank_name, preset_name)
-            SELECT id, dive_id, equipment_id, volume,
-                   CAST(working_pressure AS REAL),
-                   CAST(start_pressure AS REAL),
-                   CAST(end_pressure AS REAL),
-                   o2_percent, he_percent, tank_order, tank_role,
-                   tank_material, tank_name, preset_name
-            FROM dive_tanks
-          ''');
-          await customStatement('DROP TABLE dive_tanks');
-          await customStatement(
-            'ALTER TABLE dive_tanks_new RENAME TO dive_tanks',
-          );
-          await customStatement(
-            'CREATE INDEX IF NOT EXISTS idx_dive_tanks_dive_id ON dive_tanks(dive_id)',
-          );
-          // Convert workingPressureBar from INTEGER to REAL in tank_presets
-          await customStatement('''
-            CREATE TABLE tank_presets_new (
-              id TEXT NOT NULL PRIMARY KEY,
-              diver_id TEXT REFERENCES divers(id),
-              name TEXT NOT NULL,
-              display_name TEXT NOT NULL,
-              volume_liters REAL NOT NULL,
-              working_pressure_bar REAL NOT NULL,
-              material TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            INSERT INTO tank_presets_new
-              (id, diver_id, name, display_name, volume_liters,
-               working_pressure_bar, material, description,
-               sort_order, created_at, updated_at)
-            SELECT id, diver_id, name, display_name, volume_liters,
-                   CAST(working_pressure_bar AS REAL),
-                   material, description, sort_order, created_at, updated_at
-            FROM tank_presets
-          ''');
-          await customStatement('DROP TABLE tank_presets');
-          await customStatement(
-            'ALTER TABLE tank_presets_new RENAME TO tank_presets',
-          );
-        }
-        if (from < 58) await reportProgress();
-        if (from < 59) {
-          // Migrate legacy dive_profiles.pressure data into
-          // tank_pressure_profiles in a single bulk INSERT.
-          // For each dive that has pressure data in dive_profiles but NO
-          // existing rows in tank_pressure_profiles, copy the pressure
-          // points associated with the dive's first tank (by rowid).
-          //
-          // Performance: use EXCEPT on small dive_id sets instead of
-          // per-row NOT EXISTS (which triggers full table scans on
-          // large tables). Reuse dp.id instead of generating UUIDs.
-          // Temp tables with PKs give SQLite indexed join paths.
-
-          // Build an indexed lookup of first tank per dive (~500 rows).
-          await customStatement('''
-            CREATE TEMP TABLE _migration_first_tanks (
-              dive_id TEXT PRIMARY KEY,
-              tank_id TEXT NOT NULL
-            )
-          ''');
-          await customStatement('''
-            INSERT INTO _migration_first_tanks (dive_id, tank_id)
-            SELECT dive_id, id
-            FROM (
-              SELECT dive_id, id,
-                     ROW_NUMBER() OVER (PARTITION BY dive_id ORDER BY rowid) AS rn
-              FROM dive_tanks
-            )
-            WHERE rn = 1
-          ''');
-
-          // Ensure index exists so NOT EXISTS can use it
-          // (may be missing depending on migration history).
-          await customStatement('''
-            CREATE INDEX IF NOT EXISTS idx_tank_pressure_dive_tank
-            ON tank_pressure_profiles(dive_id, tank_id, timestamp)
-          ''');
-
-          // Find dive_ids needing migration: have legacy pressure data
-          // but no rows in tank_pressure_profiles yet. Uses set
-          // difference on small distinct-dive_id sets (~hundreds) rather
-          // than per-row NOT EXISTS on ~100k profile rows.
-          final divesToMigrate = await customSelect('''
-            SELECT DISTINCT dp.dive_id
-            FROM dive_profiles dp
-            WHERE dp.pressure IS NOT NULL AND dp.is_primary = 1
-            EXCEPT
-            SELECT DISTINCT dive_id FROM tank_pressure_profiles
-          ''').get();
-
-          if (divesToMigrate.isNotEmpty) {
-            // Stash the dive_ids that need migration.
-            await customStatement('''
-              CREATE TEMP TABLE _migration_dive_ids (
-                dive_id TEXT PRIMARY KEY
-              )
-            ''');
-            for (final row in divesToMigrate) {
-              await customStatement(
-                "INSERT INTO _migration_dive_ids VALUES (?)",
-                [row.read<String>('dive_id')],
-              );
-            }
-
-            // Drop secondary index for faster bulk insert.
-            await customStatement(
-              'DROP INDEX IF EXISTS idx_tank_pressure_dive_tank',
-            );
-            final cacheResult = await customSelect('PRAGMA cache_size').get();
-            final previousCacheSize = cacheResult.first.read<int>('cache_size');
-            await customStatement('PRAGMA cache_size = -65536');
-            await customStatement('''
-              INSERT INTO tank_pressure_profiles (id, dive_id, tank_id, timestamp, pressure)
-              SELECT
-                dp.id,
-                dp.dive_id,
-                ft.tank_id,
-                dp.timestamp,
-                dp.pressure
-              FROM dive_profiles dp
-              JOIN _migration_first_tanks ft ON ft.dive_id = dp.dive_id
-              JOIN _migration_dive_ids md ON md.dive_id = dp.dive_id
-              WHERE dp.pressure IS NOT NULL
-                AND dp.is_primary = 1
-            ''');
-            await customStatement('PRAGMA cache_size = $previousCacheSize');
-            await customStatement('''
-              CREATE INDEX IF NOT EXISTS idx_tank_pressure_dive_tank
-              ON tank_pressure_profiles(dive_id, tank_id, timestamp)
-            ''');
-            await customStatement('DROP TABLE IF EXISTS _migration_dive_ids');
-          }
-
-          await customStatement('DROP TABLE IF EXISTS _migration_first_tanks');
-        }
-        if (from < 59) await reportProgress();
-
-        if (from < 60) {
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS view_configs (
-              id TEXT NOT NULL PRIMARY KEY,
-              diver_id TEXT NOT NULL REFERENCES divers(id) ON DELETE CASCADE,
-              view_mode TEXT NOT NULL,
-              config_json TEXT NOT NULL,
-              updated_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement('''
-            CREATE TABLE IF NOT EXISTS field_presets (
-              id TEXT NOT NULL PRIMARY KEY,
-              diver_id TEXT NOT NULL REFERENCES divers(id) ON DELETE CASCADE,
-              view_mode TEXT NOT NULL,
-              name TEXT NOT NULL,
-              config_json TEXT NOT NULL,
-              is_built_in INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL
-            )
-          ''');
-          await customStatement(
-            'CREATE INDEX IF NOT EXISTS idx_view_configs_diver ON view_configs(diver_id, view_mode)',
-          );
-          await customStatement(
-            'CREATE INDEX IF NOT EXISTS idx_field_presets_diver ON field_presets(diver_id, view_mode)',
-          );
-        }
-        if (from < 60) await reportProgress();
-
-        if (from < 61) {
-          // Add showProfilePanelInTableView column to diver_settings.
-          // Guard against table not existing in older migration test contexts.
-          final columns = await customSelect(
-            "PRAGMA table_info('diver_settings')",
-          ).get();
-          if (columns.isNotEmpty &&
-              !columns.any(
-                (c) =>
-                    c.read<String>('name') ==
-                    'show_profile_panel_in_table_view',
-              )) {
-            await customStatement('''
-              ALTER TABLE diver_settings
-              ADD COLUMN show_profile_panel_in_table_view INTEGER NOT NULL DEFAULT 1
-            ''');
-          }
-        }
-        if (from < 61) await reportProgress();
-
-        if (from < 62) {
-          await customStatement('''
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_view_configs_unique
-            ON view_configs(diver_id, view_mode)
-          ''');
-        }
-        if (from < 62) await reportProgress();
-
-        if (from < 63) {
-          // Add per-section details pane toggle columns to diver_settings.
-          final columns = await customSelect(
-            "PRAGMA table_info('diver_settings')",
-          ).get();
-          if (columns.isNotEmpty) {
-            final existing = columns.map((c) => c.read<String>('name')).toSet();
-            const newColumns = {
-              'show_details_pane_dives': 0,
-              'show_details_pane_sites': 0,
-              'show_details_pane_buddies': 0,
-              'show_details_pane_trips': 0,
-              'show_details_pane_equipment': 0,
-              'show_details_pane_dive_centers': 0,
-              'show_details_pane_certifications': 0,
-              'show_details_pane_courses': 0,
-            };
-            for (final entry in newColumns.entries) {
-              if (!existing.contains(entry.key)) {
-                await customStatement('''
-                  ALTER TABLE diver_settings
-                  ADD COLUMN ${entry.key} INTEGER NOT NULL DEFAULT ${entry.value}
-                ''');
-              }
-            }
-          }
-        }
-        if (from < 63) await reportProgress();
-
-        if (from < 64) {
-          // Delete orphaned records (diver_id = NULL) left by prior diver
-          // deletions that nullified instead of cascade-deleting.
-          // Delete dives first so child tables CASCADE automatically.
-          // Guard: only run on tables that have a diver_id column (older
-          // migration-test databases may not have it).
-          for (final table in [
-            'dives',
-            'trips',
-            'dive_sites',
-            'equipment',
-            'equipment_sets',
-            'buddies',
-            'certifications',
-            'dive_centers',
-            'tags',
-            'dive_computers',
-            'tank_presets',
-          ]) {
-            final cols = await customSelect(
-              "PRAGMA table_info('$table')",
-            ).get();
-            if (cols.any((c) => c.read<String>('name') == 'diver_id')) {
-              await customStatement(
-                'DELETE FROM $table WHERE diver_id IS NULL',
-              );
-            }
-          }
-
-          // Custom dive types may be orphaned too, but built-in types
-          // (is_built_in = 1) intentionally have null diver_id. Only
-          // delete orphaned custom types.
-          final diveTypeCols = await customSelect(
-            "PRAGMA table_info('dive_types')",
-          ).get();
-          final hasDiverId = diveTypeCols.any(
-            (c) => c.read<String>('name') == 'diver_id',
-          );
-          final hasBuiltIn = diveTypeCols.any(
-            (c) => c.read<String>('name') == 'is_built_in',
-          );
-          if (hasDiverId && hasBuiltIn) {
-            await customStatement(
-              'DELETE FROM dive_types WHERE diver_id IS NULL AND is_built_in = 0',
-            );
-          }
-        }
-        if (from < 64) await reportProgress();
-
-        if (from < 65) {
-          // Flip legacy detailed-card stat2 default from bottomTime to runtime.
-          // Preserves deliberate customizations (e.g. waterTemp) by only
-          // rewriting rows that still carry the old default.
-          final rows = await customSelect(
-            "SELECT id, config_json FROM view_configs WHERE view_mode = 'detailed'",
-          ).get();
-          final now = DateTime.now().millisecondsSinceEpoch;
-          for (final row in rows) {
-            final configJson = row.read<String>('config_json');
-            Map<String, dynamic> parsed;
-            try {
-              parsed = jsonDecode(configJson) as Map<String, dynamic>;
-            } catch (_) {
-              continue;
-            }
-            final slots = parsed['slots'];
-            if (slots is! List) continue;
-            var modified = false;
-            for (final slot in slots) {
-              if (slot is Map<String, dynamic> &&
-                  slot['slotId'] == 'stat2' &&
-                  slot['field'] == 'bottomTime') {
-                slot['field'] = 'runtime';
-                modified = true;
-              }
-            }
-            if (!modified) continue;
-            await customStatement(
-              'UPDATE view_configs SET config_json = ?, updated_at = ? WHERE id = ?',
-              [jsonEncode(parsed), now, row.read<String>('id')],
-            );
-          }
-        }
-        if (from < 65) await reportProgress();
-        if (from < 66) {
-          // Guard: dive_data_sources may not exist in older migration tests.
-          final ddsColumns = await customSelect(
-            "PRAGMA table_info('dive_data_sources')",
-          ).get();
-          if (ddsColumns.isNotEmpty) {
-            final existing = ddsColumns
-                .map((c) => c.read<String>('name'))
-                .toSet();
-            if (!existing.contains('raw_data')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN raw_data BLOB',
-              );
-            }
-            if (!existing.contains('raw_fingerprint')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN raw_fingerprint BLOB',
-              );
-            }
-            if (!existing.contains('descriptor_vendor')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_vendor TEXT',
-              );
-            }
-            if (!existing.contains('descriptor_product')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_product TEXT',
-              );
-            }
-            if (!existing.contains('descriptor_model')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_model INTEGER',
-              );
-            }
-            if (!existing.contains('libdivecomputer_version')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN libdivecomputer_version TEXT',
-              );
-            }
-            if (!existing.contains('last_parsed_at')) {
-              await customStatement(
-                'ALTER TABLE dive_data_sources ADD COLUMN last_parsed_at INTEGER',
-              );
-            }
-
-            // Rebuild the table to update the computer_id FK from the
-            // original NO ACTION to ON DELETE SET NULL. SQLite cannot
-            // alter constraints in place, so we create → copy → swap.
-            await customStatement('PRAGMA foreign_keys = OFF');
-            await customStatement('''
-              CREATE TABLE dive_data_sources_new (
-                id TEXT NOT NULL PRIMARY KEY,
-                dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
-                computer_id TEXT REFERENCES dive_computers(id) ON DELETE SET NULL,
-                is_primary INTEGER NOT NULL DEFAULT 0,
-                computer_model TEXT,
-                computer_serial TEXT,
-                source_format TEXT,
-                source_file_name TEXT,
-                source_file_format TEXT,
-                max_depth REAL,
-                avg_depth REAL,
-                duration INTEGER,
-                water_temp REAL,
-                entry_time INTEGER,
-                exit_time INTEGER,
-                max_ascent_rate REAL,
-                max_descent_rate REAL,
-                surface_interval INTEGER,
-                cns REAL,
-                otu REAL,
-                deco_algorithm TEXT,
-                gradient_factor_low INTEGER,
-                gradient_factor_high INTEGER,
-                imported_at INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                raw_data BLOB,
-                raw_fingerprint BLOB,
-                descriptor_vendor TEXT,
-                descriptor_product TEXT,
-                descriptor_model INTEGER,
-                libdivecomputer_version TEXT,
-                last_parsed_at INTEGER
-              )
-            ''');
-            await customStatement('''
-              INSERT INTO dive_data_sources_new
-              SELECT id, dive_id, computer_id, is_primary,
-                     computer_model, computer_serial, source_format,
-                     source_file_name, source_file_format,
-                     max_depth, avg_depth, duration, water_temp,
-                     entry_time, exit_time, max_ascent_rate, max_descent_rate,
-                     surface_interval, cns, otu, deco_algorithm,
-                     gradient_factor_low, gradient_factor_high,
-                     imported_at, created_at,
-                     raw_data, raw_fingerprint,
-                     descriptor_vendor, descriptor_product, descriptor_model,
-                     libdivecomputer_version, last_parsed_at
-              FROM dive_data_sources
-            ''');
-            await customStatement('DROP TABLE dive_data_sources');
-            await customStatement(
-              'ALTER TABLE dive_data_sources_new RENAME TO dive_data_sources',
-            );
-            await customStatement('''
-              CREATE INDEX IF NOT EXISTS idx_dive_data_sources_dive_id
-              ON dive_data_sources(dive_id)
-            ''');
-            await customStatement('PRAGMA foreign_keys = ON');
-          }
-        }
-        if (from < 66) await reportProgress();
-
-        if (from < 67) {
-          final cols = await customSelect(
-            "PRAGMA table_info('diver_settings')",
-          ).get();
-          if (cols.isNotEmpty) {
-            final existing = cols.map((c) => c.read<String>('name')).toSet();
-            if (!existing.contains('map_style')) {
-              await customStatement(
-                "ALTER TABLE diver_settings ADD COLUMN map_style TEXT NOT NULL DEFAULT 'openStreetMap'",
-              );
-            }
-          }
-        }
-        if (from < 67) await reportProgress();
-      },
-      beforeOpen: (details) async {
-        // Enable foreign keys
-        await customStatement('PRAGMA foreign_keys = ON');
-      },
-    );
-  }
+  MigrationStrategy get migration => buildMigrationStrategy();
 }

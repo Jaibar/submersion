@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/tank_presets.dart';
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -16,6 +17,70 @@ import '../../../../helpers/mock_providers.dart';
 
 void main() {
   group('TankEditor', () {
+    testWidgets('a tank keeps showing a preset the diver has hidden (#2305)', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final builtInPresets = TankPresets.all
+          .map((p) => TankPresetEntity.fromBuiltIn(p))
+          .toList();
+      // What tankPresetsProvider serves once HP80 is hidden.
+      final visiblePresets = builtInPresets
+          .where((p) => p.name != 'hp80')
+          .toList();
+
+      const tank = DiveTank(
+        id: 'tank-hidden',
+        volume: 10.2,
+        workingPressure: 237.317,
+        gasMix: GasMix(o2: 21.0, he: 0.0),
+        presetName: 'hp80',
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            tankPresetListNotifierProvider.overrideWith(
+              (ref) => _MockTankPresetListNotifier(builtInPresets),
+            ),
+            tankPresetsProvider.overrideWith(
+              (ref) => Future.value(visiblePresets),
+            ),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: TankEditor(
+                  tank: tank,
+                  tankNumber: 1,
+                  onChanged: (_) {},
+                  onRemove: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('tank-preset-dropdown')),
+          matching: find.text('HP80'),
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('renders pressure values in metric (bar)', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -52,6 +117,10 @@ void main() {
             ),
           ].cast(),
           child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
@@ -115,6 +184,10 @@ void main() {
             ),
           ].cast(),
           child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
@@ -159,6 +232,8 @@ void main() {
         startPressure: 200.0,
         endPressure: 50.0,
         gasMix: GasMix(o2: 21.0, he: 0.0),
+        computerId: 'dc-1',
+        transmitterSerial: '180777',
       );
 
       DiveTank? updatedTank;
@@ -179,6 +254,10 @@ void main() {
             ),
           ].cast(),
           child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
@@ -214,7 +293,539 @@ void main() {
 
       // End pressure: 725 psi -> ~50 bar
       expect(updatedTank!.endPressure, closeTo(50.0, 0.5));
+
+      // Computer-owned identity survives an edit: the editor rebuilds the
+      // tank field by field, so anything it forgets is silently wiped.
+      expect(updatedTank!.computerId, 'dc-1');
+      expect(updatedTank!.transmitterSerial, '180777');
     });
+
+    testWidgets('an unparseable He% keeps the last known-good mix instead of '
+        'silently turning it into air (issue #1900)', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      final builtInPresets = TankPresets.all
+          .map((p) => TankPresetEntity.fromBuiltIn(p))
+          .toList();
+
+      const tank = DiveTank(
+        id: 'tank-5',
+        volume: 11.1,
+        workingPressure: 206.843,
+        gasMix: GasMix(o2: 21.0, he: 35.0),
+      );
+
+      DiveTank? updatedTank;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            tankPresetListNotifierProvider.overrideWith(
+              (ref) => _MockTankPresetListNotifier(builtInPresets),
+            ),
+            tankPresetsProvider.overrideWith(
+              (ref) => Future.value(builtInPresets),
+            ),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: TankEditor(
+                  tank: tank,
+                  tankNumber: 1,
+                  onChanged: (t) => updatedTank = t,
+                  onRemove: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final heField = find.widgetWithText(TextFormField, '35');
+      expect(heField, findsOneWidget);
+      await tester.enterText(heField, 'abc');
+      await tester.pump();
+
+      // The validator's inline error is shown...
+      expect(find.textContaining('Enter a valid number'), findsOneWidget);
+      // ...and the persisted mix keeps the tank's real He, not 0 (air).
+      expect(updatedTank, isNotNull);
+      expect(updatedTank!.gasMix.he, 35.0);
+      expect(updatedTank!.gasMix.o2, 21.0);
+    });
+
+    testWidgets(
+      'an unreadable MND says why instead of being ignored (#1900 review)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final builtInPresets = TankPresets.all
+            .map((p) => TankPresetEntity.fromBuiltIn(p))
+            .toList();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              tankPresetListNotifierProvider.overrideWith(
+                (ref) => _MockTankPresetListNotifier(builtInPresets),
+              ),
+              tankPresetsProvider.overrideWith(
+                (ref) => Future.value(builtInPresets),
+              ),
+            ].cast(),
+            child: const MaterialApp(
+              locale: Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: _RebuildingTankHost(
+                    initial: DiveTank(
+                      id: 'tank-mnd',
+                      volume: 11.1,
+                      workingPressure: 206.843,
+                      gasMix: GasMix(o2: 21, he: 35),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final mndField = find.ancestor(
+          of: find.text('MND'),
+          matching: find.byType(TextFormField),
+        );
+        await tester.ensureVisible(mndField);
+        await tester.enterText(mndField, '1..2');
+        await tester.pump();
+
+        expect(find.textContaining('Enter a valid number'), findsOneWidget);
+
+        // Leaving the box puts back the MND the mix really has.
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump();
+        expect(find.textContaining('Enter a valid number'), findsNothing);
+      },
+    );
+
+    testWidgets('a typed MND puts its He in the He field and reports the tank '
+        '(issue #3660)', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final builtInPresets = TankPresets.all
+          .map((p) => TankPresetEntity.fromBuiltIn(p))
+          .toList();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            tankPresetListNotifierProvider.overrideWith(
+              (ref) => _MockTankPresetListNotifier(builtInPresets),
+            ),
+            tankPresetsProvider.overrideWith(
+              (ref) => Future.value(builtInPresets),
+            ),
+          ].cast(),
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: _RebuildingTankHost(
+                  initial: DiveTank(
+                    id: 'tank-mnd-he',
+                    volume: 11.1,
+                    workingPressure: 206.843,
+                    gasMix: GasMix(o2: 21, he: 35),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final mndField = find.ancestor(
+        of: find.text('MND'),
+        matching: find.byType(TextFormField),
+      );
+      await tester.ensureVisible(mndField);
+      // 40 m is 5 bar; the default 30 m END is 4 bar, so 20% He.
+      await tester.enterText(mndField, '40');
+      await tester.pumpAndSettle();
+
+      final heField = find.ancestor(
+        of: find.text('He'),
+        matching: find.byType(TextFormField),
+      );
+      expect(tester.widget<TextFormField>(heField).controller!.text, '20');
+      final host = tester.state<_RebuildingTankHostState>(
+        find.byType(_RebuildingTankHost),
+      );
+      expect(host.lastTank?.gasMix, const GasMix(o2: 21, he: 20));
+    });
+
+    testWidgets(
+      'an unreadable start pressure keeps the last typed value and shows '
+      'the error (#1900)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final builtInPresets = TankPresets.all
+            .map((p) => TankPresetEntity.fromBuiltIn(p))
+            .toList();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              tankPresetListNotifierProvider.overrideWith(
+                (ref) => _MockTankPresetListNotifier(builtInPresets),
+              ),
+              tankPresetsProvider.overrideWith(
+                (ref) => Future.value(builtInPresets),
+              ),
+            ].cast(),
+            child: const MaterialApp(
+              locale: Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: _RebuildingTankHost(
+                    initial: DiveTank(
+                      id: 'tank-p',
+                      volume: 11.1,
+                      workingPressure: 206.843,
+                      startPressure: 200,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final startField = find.ancestor(
+          of: find.text('Start Pressure'),
+          matching: find.byType(TextFormField),
+        );
+        await tester.enterText(startField, '210');
+        await tester.pump();
+        await tester.enterText(startField, '');
+        await tester.pump();
+        await tester.enterText(startField, '2..10');
+        await tester.pump();
+
+        expect(find.textContaining('Enter a valid number'), findsOneWidget);
+        final hostState = tester.state<_RebuildingTankHostState>(
+          find.byType(_RebuildingTankHost),
+        );
+        expect(
+          hostState.lastTank!.startPressure,
+          closeTo(210, 0.001),
+          reason: 'an unreadable pressure used to be reported as null',
+        );
+      },
+    );
+
+    testWidgets(
+      'clearing a field then retyping garbage does not fall back to the '
+      'blank-intermediate 0.0 that round-tripped through the parent '
+      '(issue #1900 review)',
+      (tester) async {
+        // A real parent (TankRow) writes every onChanged result straight
+        // back into the tank it passes down, so clearing a field to retype
+        // it briefly rebuilds the editor with widget.tank.gasMix.he == 0
+        // (the blank default). Falling back to widget.tank.gasMix on a
+        // following invalid keystroke would still turn the mix into air
+        // despite the validator error; this host reproduces that rebuild.
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+
+        final builtInPresets = TankPresets.all
+            .map((p) => TankPresetEntity.fromBuiltIn(p))
+            .toList();
+
+        const initialTank = DiveTank(
+          id: 'tank-6',
+          volume: 11.1,
+          workingPressure: 206.843,
+          gasMix: GasMix(o2: 21.0, he: 35.0),
+        );
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              tankPresetListNotifierProvider.overrideWith(
+                (ref) => _MockTankPresetListNotifier(builtInPresets),
+              ),
+              tankPresetsProvider.overrideWith(
+                (ref) => Future.value(builtInPresets),
+              ),
+            ].cast(),
+            child: const MaterialApp(
+              locale: Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: _RebuildingTankHost(initial: initialTank),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // By label rather than current text: the field's text changes
+        // across this test's steps, but its label never does.
+        final heField = find.ancestor(
+          of: find.text('He'),
+          matching: find.byType(TextFormField),
+        );
+        expect(heField, findsOneWidget);
+        final o2Field = find.ancestor(
+          of: find.text('O2'),
+          matching: find.byType(TextFormField),
+        );
+        expect(o2Field, findsOneWidget);
+
+        // Type a real edit on both fields first: each new value must become
+        // that field's own "last valid" value, overriding the tank's
+        // original 21/35.
+        await tester.enterText(o2Field, '30');
+        await tester.pump();
+        await tester.enterText(heField, '40');
+        await tester.pump();
+
+        // Clear it: the blank default (air, He 0) round-trips through the
+        // parent and rebuilds the editor with tank.gasMix.he == 0.
+        await tester.enterText(heField, '');
+        await tester.pump();
+
+        // Now type something unparseable.
+        await tester.enterText(heField, 'xyz');
+        await tester.pump();
+
+        expect(find.textContaining('Enter a valid number'), findsOneWidget);
+        final hostState = tester.state<_RebuildingTankHostState>(
+          find.byType(_RebuildingTankHost),
+        );
+        expect(
+          hostState.lastTank!.gasMix.o2,
+          30.0,
+          reason: 'the untouched O2 field keeps its own last valid edit',
+        );
+        expect(
+          hostState.lastTank!.gasMix.he,
+          40.0,
+          reason:
+              'must fall back to the last value the diver actually typed '
+              '(40, from the edit above), not the tank\'s original 35 nor '
+              'the blank-default 0.0 that round-tripped through the parent '
+              'when the field was cleared',
+        );
+      },
+    );
+
+    testWidgets(
+      'selecting Oxygen Supply role auto-fills 100% O2 / 0% He (issue #726)',
+      (tester) async {
+        // Tall enough for the role menu to show every role: in the default
+        // 800x600 view twelve roles scroll and O2 Supply sits off-screen.
+        tester.view.physicalSize = const Size(800, 1600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+
+        final mockSettings = MockSettingsNotifier();
+
+        final builtInPresets = TankPresets.all
+            .map((p) => TankPresetEntity.fromBuiltIn(p))
+            .toList();
+
+        const tank = DiveTank(
+          id: 'tank-oxygen',
+          gasMix: GasMix(o2: 32.0, he: 0.0),
+        );
+
+        DiveTank? updatedTank;
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => mockSettings),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              tankPresetListNotifierProvider.overrideWith(
+                (ref) => _MockTankPresetListNotifier(builtInPresets),
+              ),
+              tankPresetsProvider.overrideWith(
+                (ref) => Future.value(builtInPresets),
+              ),
+            ].cast(),
+            child: MaterialApp(
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: TankEditor(
+                    tank: tank,
+                    tankNumber: 1,
+                    onChanged: (t) => updatedTank = t,
+                    onRemove: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final roleDropdown = find.byType(DropdownButtonFormField<TankRole>);
+        expect(roleDropdown, findsOneWidget);
+        await tester.tap(roleDropdown);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('O₂ Supply').last);
+        await tester.pumpAndSettle();
+
+        expect(find.widgetWithText(TextFormField, '100'), findsOneWidget);
+        expect(updatedTank, isNotNull);
+        expect(updatedTank!.role, TankRole.oxygenSupply);
+        expect(updatedTank!.gasMix.o2, 100.0);
+        expect(updatedTank!.gasMix.he, 0.0);
+      },
+    );
+
+    testWidgets(
+      'selecting Oxygen Supply role updates the last-known-good O2, not '
+      'just the displayed text (issue #726 follow-up, code review)',
+      (tester) async {
+        // Tall enough for the role menu to show every role: in the default
+        // 800x600 view twelve roles scroll and O2 Supply sits off-screen.
+        tester.view.physicalSize = const Size(800, 1600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        // The role switch must feed _lastValidO2/_lastValidHe, not only the
+        // text controllers: retyping the O2 field afterward falls back to
+        // _lastValidO2 on an unparseable (non-blank) value (#1900's
+        // fallback), and that must be the 100% the role switch just set,
+        // not the tank's original nitrox mix.
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+
+        final builtInPresets = TankPresets.all
+            .map((p) => TankPresetEntity.fromBuiltIn(p))
+            .toList();
+
+        const tank = DiveTank(
+          id: 'tank-oxygen-2',
+          gasMix: GasMix(o2: 32.0, he: 0.0),
+        );
+
+        DiveTank? updatedTank;
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              tankPresetListNotifierProvider.overrideWith(
+                (ref) => _MockTankPresetListNotifier(builtInPresets),
+              ),
+              tankPresetsProvider.overrideWith(
+                (ref) => Future.value(builtInPresets),
+              ),
+            ].cast(),
+            child: MaterialApp(
+              locale: const Locale('en'),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: TankEditor(
+                    tank: tank,
+                    tankNumber: 1,
+                    onChanged: (t) => updatedTank = t,
+                    onRemove: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(DropdownButtonFormField<TankRole>));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('O₂ Supply').last);
+        await tester.pumpAndSettle();
+
+        final o2Field = find.ancestor(
+          of: find.text('O2'),
+          matching: find.byType(TextFormField),
+        );
+        expect(o2Field, findsOneWidget);
+        await tester.enterText(o2Field, '');
+        await tester.pump();
+        await tester.enterText(o2Field, 'xyz');
+        await tester.pump();
+
+        expect(find.textContaining('Enter a valid number'), findsOneWidget);
+        expect(
+          updatedTank!.gasMix.o2,
+          100.0,
+          reason:
+              'must fall back to the 100% the role switch just set, not '
+              'the tank\'s original 32%',
+        );
+      },
+    );
 
     testWidgets('applyPreset shows volumeCuft in imperial mode', (
       tester,
@@ -251,6 +862,10 @@ void main() {
             ),
           ].cast(),
           child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
@@ -269,9 +884,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Open the preset dropdown and select AL80
-      final presetDropdown = find.byType(
-        DropdownButtonFormField<TankPresetEntity?>,
-      );
+      final presetDropdown = find.byKey(const Key('tank-preset-dropdown'));
       expect(presetDropdown, findsOneWidget);
       await tester.tap(presetDropdown);
       await tester.pumpAndSettle();
@@ -295,6 +908,143 @@ void main() {
       expect(updatedTank!.presetName, 'al80');
       expect(updatedTank!.volume, 11.1);
     });
+
+    testWidgets('Save as preset creates a custom preset from current specs', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final builtInPresets = TankPresets.all
+          .map((p) => TankPresetEntity.fromBuiltIn(p))
+          .toList();
+      final notifier = _MockTankPresetListNotifier(builtInPresets);
+
+      const tank = DiveTank(
+        id: 'tank-1',
+        volume: 11.1,
+        workingPressure: 232.0, // bar (metric default)
+        gasMix: GasMix(o2: 21.0, he: 0.0),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            tankPresetListNotifierProvider.overrideWith((ref) => notifier),
+            tankPresetsProvider.overrideWith(
+              (ref) => Future.value(builtInPresets),
+            ),
+          ].cast(),
+          child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: TankEditor(tank: tank, tankNumber: 1, onChanged: (_) {}),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Save as preset'));
+      await tester.pumpAndSettle();
+
+      // Name dialog: enter a name and confirm.
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.byType(TextField),
+        ),
+        'My AL80',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      final added = notifier.lastAddedPreset;
+      expect(added, isNotNull);
+      expect(added!.displayName, 'My AL80');
+      expect(added.volumeLiters, closeTo(11.1, 0.01));
+      expect(added.workingPressureBar, closeTo(232.0, 0.01));
+      expect(added.isBuiltIn, isFalse);
+      expect(find.textContaining('Saved preset'), findsOneWidget);
+    });
+
+    testWidgets('Save as preset reports a failed save instead of throwing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final builtInPresets = TankPresets.all
+          .map((p) => TankPresetEntity.fromBuiltIn(p))
+          .toList();
+      final notifier = _MockTankPresetListNotifier(builtInPresets)
+        ..addPresetError = Exception('db is down');
+
+      const tank = DiveTank(
+        id: 'tank-1',
+        volume: 11.1,
+        workingPressure: 232.0,
+        gasMix: GasMix(o2: 21.0, he: 0.0),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            tankPresetListNotifierProvider.overrideWith((ref) => notifier),
+            tankPresetsProvider.overrideWith(
+              (ref) => Future.value(builtInPresets),
+            ),
+          ].cast(),
+          child: MaterialApp(
+            // Pinned: an unpinned MaterialApp resolves against the host
+            // machine's locale list, so English label assertions below fail
+            // on a non-English dev machine.
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: TankEditor(tank: tank, tankNumber: 1, onChanged: (_) {}),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Save as preset'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.byType(TextField),
+        ),
+        'My AL80',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      // The failure is reported to the user, not raised as a framework error,
+      // and no preset is selected.
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('Error saving preset'), findsOneWidget);
+      expect(find.textContaining('Saved preset'), findsNothing);
+    });
   });
 }
 
@@ -308,12 +1058,53 @@ class _MockTankPresetListNotifier
   @override
   Future<void> refresh() async {}
 
+  TankPresetEntity? lastAddedPreset;
+
+  /// When set, [addPreset] throws this instead of succeeding, standing in for
+  /// a failed database write.
+  Object? addPresetError;
+
   @override
-  Future<TankPresetEntity> addPreset(TankPresetEntity preset) async => preset;
+  Future<TankPresetEntity> addPreset(TankPresetEntity preset) async {
+    if (addPresetError != null) throw addPresetError!;
+    lastAddedPreset = preset;
+    return preset;
+  }
 
   @override
   Future<void> updatePreset(TankPresetEntity preset) async {}
 
   @override
   Future<void> deletePreset(String id) async {}
+}
+
+/// Mirrors how a real parent (TankRow) drives TankEditor: every onChanged
+/// result is written straight back into the tank passed down, so the editor
+/// really does rebuild with widget.tank reflecting a blank-field's transient
+/// default -- not just the value the diver last confirmed.
+class _RebuildingTankHost extends StatefulWidget {
+  const _RebuildingTankHost({required this.initial});
+
+  final DiveTank initial;
+
+  @override
+  State<_RebuildingTankHost> createState() => _RebuildingTankHostState();
+}
+
+class _RebuildingTankHostState extends State<_RebuildingTankHost> {
+  late DiveTank _tank = widget.initial;
+  DiveTank? lastTank;
+
+  @override
+  Widget build(BuildContext context) {
+    return TankEditor(
+      tank: _tank,
+      tankNumber: 1,
+      onChanged: (t) => setState(() {
+        _tank = t;
+        lastTank = t;
+      }),
+      onRemove: () {},
+    );
+  }
 }

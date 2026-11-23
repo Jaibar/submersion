@@ -1,26 +1,45 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_country_flags.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Two-line compact card tile for the trip list.
 ///
-/// Line 1: Trip name (expanded) | Date range (secondary text) | Chevron
+/// Line 1: Trip name (expanded) | Date range (secondary text)
 /// Line 2: Dive count with scuba icon | Total bottom time with timer icon
-class CompactTripListTile extends StatelessWidget {
+/// A chevron centred on both lines follows them at the card's end.
+class CompactTripListTile extends ConsumerWidget {
   final TripWithStats tripWithStats;
   final bool isSelected;
   final VoidCallback? onTap;
+  final bool showSharedBadge;
+  final bool isSelectionMode;
+  final bool isChecked;
+  final ValueChanged<bool>? onCheckChanged;
+
+  /// How the trip nests (issue #3658): its side trip count, or the larger
+  /// trip it is part of when that trip is not listed.
+  final String? nestingNote;
 
   const CompactTripListTile({
     super.key,
     required this.tripWithStats,
+    this.nestingNote,
     this.isSelected = false,
     this.onTap,
+    this.showSharedBadge = false,
+    this.isSelectionMode = false,
+    this.isChecked = false,
+    this.onCheckChanged,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final trip = tripWithStats.trip;
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
@@ -28,9 +47,10 @@ class CompactTripListTile extends StatelessWidget {
         ? colorScheme.primaryContainer.withValues(alpha: 0.5)
         : null;
     final secondaryTextColor = colorScheme.onSurfaceVariant;
-    final dateFormat = DateFormat.yMMMd();
+    // Ordered by the diver's date format preference (#1512).
+    final units = ref.watch(unitFormatterProvider);
     final dateRangeStr =
-        '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}';
+        '${units.formatDate(trip.startDate)} - ${units.formatDate(trip.endDate)}';
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
@@ -42,68 +62,118 @@ class CompactTripListTile extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(12),
           child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Line 1: trip name, date range, chevron
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        trip.name,
-                        style: textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
+            padding: const EdgeInsets.all(kRecordCardCompactPadding),
+            child: RecordListChevronRow(
+              chevronSize: RecordListChevron.compactSize,
+              chevronColor: secondaryTextColor,
+              child: Row(
+                children: [
+                  // The checkbox sits beside the whole two-line block rather
+                  // than on line 1, so it stays vertically centred against it.
+                  SelectionCheckboxSlot(
+                    isSelectionMode: isSelectionMode,
+                    isChecked: isChecked,
+                    onChanged: onCheckChanged,
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Line 1: trip name, date range
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      trip.name,
+                                      style: textTheme.bodyMedium?.copyWith(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  TripCountryFlags(
+                                    tripId: trip.id,
+                                    maxFlags: 3,
+                                    gap: 6,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (showSharedBadge) ...[
+                              const SizedBox(width: 6),
+                              Tooltip(
+                                message: context
+                                    .l10n
+                                    .accessibility_label_sharedWithProfiles,
+                                child: Icon(
+                                  Icons.people_outline,
+                                  size: 16,
+                                  color: colorScheme.primary,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(width: 8),
+                            Text(
+                              dateRangeStr,
+                              style: textTheme.bodySmall?.copyWith(
+                                color: secondaryTextColor,
+                              ),
+                            ),
+                          ],
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      dateRangeStr,
-                      style: textTheme.bodySmall?.copyWith(
-                        color: secondaryTextColor,
-                      ),
-                    ),
-                    ExcludeSemantics(
-                      child: Icon(
-                        Icons.chevron_right,
-                        color: secondaryTextColor,
-                        size: 20,
-                      ),
-                    ),
-                  ],
-                ),
-                // Line 2: dive count and bottom time
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.scuba_diving,
-                      size: 13,
-                      color: colorScheme.primary,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${tripWithStats.diveCount}',
-                      style: textTheme.bodySmall?.copyWith(
-                        color: colorScheme.primary,
-                      ),
-                    ),
-                    if (tripWithStats.totalBottomTime > 0) ...[
-                      const SizedBox(width: 12),
-                      Icon(Icons.timer, size: 13, color: colorScheme.primary),
-                      const SizedBox(width: 4),
-                      Text(
-                        tripWithStats.formattedBottomTime,
-                        style: textTheme.bodySmall?.copyWith(
-                          color: colorScheme.primary,
+                        // Line 2: dive count and bottom time
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.scuba_diving,
+                              size: 13,
+                              color: colorScheme.primary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${tripWithStats.diveCount}',
+                              style: textTheme.bodySmall?.copyWith(
+                                color: colorScheme.primary,
+                              ),
+                            ),
+                            if (tripWithStats.totalRuntime > 0) ...[
+                              const SizedBox(width: 12),
+                              Icon(
+                                Icons.timer,
+                                size: 13,
+                                color: colorScheme.primary,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                tripWithStats.formattedRuntime,
+                                style: textTheme.bodySmall?.copyWith(
+                                  color: colorScheme.primary,
+                                ),
+                              ),
+                            ],
+                            if (nestingNote != null) ...[
+                              const SizedBox(width: 12),
+                              Flexible(
+                                child: Text(
+                                  nestingNote!,
+                                  style: textTheme.bodySmall?.copyWith(
+                                    color: secondaryTextColor,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

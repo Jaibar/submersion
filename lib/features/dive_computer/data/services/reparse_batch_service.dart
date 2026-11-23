@@ -1,0 +1,503 @@
+import 'package:drift/drift.dart';
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/dive_computer/data/services/reparse_empty_parse.dart';
+import 'package:submersion/features/dive_computer/data/services/reparse_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/dive_log/data/services/hand_set_fields.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+
+/// Parses one dive's raw dive computer bytes. The native Pigeon call in the
+/// app; a fake in tests.
+typedef RawDiveParseFn =
+    Future<pigeon.ParsedDive> Function(
+      String vendor,
+      String product,
+      int model,
+      Uint8List rawData,
+    );
+
+/// The error a dive fails with when a stored source lacks the vendor,
+/// product or model needed to parse it. The results dialog shows its own
+/// translation in place of this English text.
+const missingDescriptorsError = 'Missing dive computer details';
+
+/// One dive a batch re-parse could not refresh, with the first error.
+class ReparseDiveFailure {
+  const ReparseDiveFailure({required this.diveId, required this.error});
+
+  final String diveId;
+  final String error;
+}
+
+/// What a batch re-parse did, counted in dives.
+class ReparseBatchResult {
+  const ReparseBatchResult({
+    required this.total,
+    required this.succeeded,
+    required this.skipped,
+    required this.notProcessed,
+    required this.profilesPreserved,
+    required this.failures,
+    this.handSetKept = 0,
+  });
+
+  /// Every dive the run was asked to re-parse.
+  final int total;
+  final int succeeded;
+
+  /// Dives with no raw data to re-parse (in the filter, when one is given).
+  final int skipped;
+
+  /// Dives a cancel stopped the run before reaching.
+  final int notProcessed;
+
+  /// Succeeded dives whose combined profile was deliberately left alone.
+  final int profilesPreserved;
+  final List<ReparseDiveFailure> failures;
+
+  /// Succeeded dives that kept a value the diver set by hand, which the
+  /// parse would have changed (issue #4909).
+  final int handSetKept;
+
+  int get failed => failures.length;
+  bool get cancelled => notProcessed > 0;
+}
+
+/// How many dives one dive computer has raw data for.
+class ComputerRawDataCount {
+  const ComputerRawDataCount({
+    required this.computerId,
+    required this.computerName,
+    required this.dives,
+  });
+
+  final String? computerId;
+
+  /// Empty when the computer row is gone; the UI names it.
+  final String computerName;
+  final int dives;
+}
+
+/// Re-parses many dives from their stored raw bytes (issue #224).
+///
+/// Every batch re-parse runs through [run]: selected dives, the whole log
+/// and one computer's dives. Work is counted per dive: each of a dive's
+/// sources is parsed before any is written, so a parse failure leaves the
+/// whole dive untouched. The writes themselves stay
+/// [ReparseService.applyParsedUpdate], one transaction per source.
+class ReparseBatchService {
+  ReparseBatchService(
+    this._reparse, {
+    void Function(List<String> diveIds)? scheduleRefresh,
+  }) : _scheduleRefresh = scheduleRefresh ?? _scheduleDerivedRefresh;
+
+  static final _log = LoggerService.forClass(ReparseBatchService);
+
+  final ReparseService _reparse;
+
+  /// Queues the data computed from a dive's profile strands for the dives a
+  /// run rewrote. Injected in tests.
+  final void Function(List<String> diveIds) _scheduleRefresh;
+
+  static void _scheduleDerivedRefresh(List<String> diveIds) {
+    scheduleSensorSummaryRefresh(diveIds);
+    scheduleDerivedMetricsRefresh(diveIds);
+  }
+
+  AppDatabase get _db => _reparse.db;
+
+  /// Every dive with raw data, oldest first, for [diverId] (every diver when
+  /// null).
+  Future<List<String>> diveIdsWithRawData({required String? diverId}) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT d.id AS id FROM dives d '
+          'WHERE EXISTS (SELECT 1 FROM dive_data_sources s '
+          'WHERE s.dive_id = d.id AND s.raw_data IS NOT NULL) '
+          '${diverId == null ? '' : 'AND d.diver_id = ? '}'
+          'ORDER BY d.dive_date_time, d.id',
+          variables: [if (diverId != null) Variable(diverId)],
+          readsFrom: {_db.dives, _db.diveDataSources},
+        )
+        .get();
+    return [for (final r in rows) r.read<String>('id')];
+  }
+
+  /// The dives [computerId] holds raw data for, oldest first.
+  Future<List<String>> diveIdsForComputer(String computerId) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT d.id AS id FROM dives d '
+          'WHERE EXISTS (SELECT 1 FROM dive_data_sources s '
+          'WHERE s.dive_id = d.id AND s.computer_id = ? '
+          'AND s.raw_data IS NOT NULL) '
+          'ORDER BY d.dive_date_time, d.id',
+          variables: [Variable(computerId)],
+          readsFrom: {_db.dives, _db.diveDataSources},
+        )
+        .get();
+    return [for (final r in rows) r.read<String>('id')];
+  }
+
+  /// The dives of [diveIds] that have raw data, in the order given. Read in
+  /// chunks, so selecting a whole large log stays under SQLite's bound
+  /// variable limit.
+  Future<List<String>> withRawData(List<String> diveIds) async {
+    final found = <String>{};
+    for (final chunk in seriesIdChunks(diveIds)) {
+      final query = _db.selectOnly(_db.diveDataSources, distinct: true)
+        ..addColumns([_db.diveDataSources.diveId])
+        ..where(
+          _db.diveDataSources.diveId.isIn(chunk) &
+              _db.diveDataSources.rawData.isNotNull(),
+        );
+      for (final row in await query.get()) {
+        found.add(row.read(_db.diveDataSources.diveId)!);
+      }
+    }
+    return [
+      for (final id in diveIds)
+        if (found.contains(id)) id,
+    ];
+  }
+
+  /// Dives with raw data per computer, for [diverId] (every diver when null).
+  Future<List<ComputerRawDataCount>> rawDataCountsByComputer({
+    required String? diverId,
+  }) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT s.computer_id AS computer_id, '
+          "COALESCE(c.name, '') AS name, "
+          'COUNT(DISTINCT s.dive_id) AS dives '
+          'FROM dive_data_sources s '
+          'JOIN dives d ON d.id = s.dive_id '
+          'LEFT JOIN dive_computers c ON c.id = s.computer_id '
+          'WHERE s.raw_data IS NOT NULL '
+          '${diverId == null ? '' : 'AND d.diver_id = ? '}'
+          'GROUP BY s.computer_id, c.name '
+          'ORDER BY name',
+          variables: [if (diverId != null) Variable(diverId)],
+          readsFrom: {_db.dives, _db.diveDataSources, _db.diveComputers},
+        )
+        .get();
+    return [
+      for (final r in rows)
+        ComputerRawDataCount(
+          computerId: r.readNullable<String>('computer_id'),
+          computerName: r.read<String>('name'),
+          dives: r.read<int>('dives'),
+        ),
+    ];
+  }
+
+  /// Logged dives of [diverId] (every diver when null) with nothing to
+  /// re-parse.
+  Future<int> diveCountWithoutRawData({required String? diverId}) async {
+    final row = await _db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM dives d '
+          'WHERE d.is_planned = 0 '
+          'AND NOT EXISTS (SELECT 1 FROM dive_data_sources s '
+          'WHERE s.dive_id = d.id AND s.raw_data IS NOT NULL) '
+          '${diverId == null ? '' : 'AND d.diver_id = ? '}',
+          variables: [if (diverId != null) Variable(diverId)],
+          readsFrom: {_db.dives, _db.diveDataSources},
+        )
+        .getSingle();
+    return row.read<int>('n');
+  }
+
+  /// Re-parses [diveIds] in order, as one change-log operation.
+  ///
+  /// With [computerId], only that computer's sources on each dive are
+  /// re-parsed. [onProgress] runs after every dive; [isCancelled] is checked
+  /// before every dive, so a cancel never splits one.
+  Future<ReparseBatchResult> run(
+    List<String> diveIds, {
+    required RawDiveParseFn parseFn,
+    String? computerId,
+    void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) => ChangeLogScope.bulk(
+    _db,
+    label: ChangeLogLabels.reparse,
+    body: () => _run(
+      diveIds,
+      parseFn: parseFn,
+      computerId: computerId,
+      onProgress: onProgress,
+      isCancelled: isCancelled,
+    ),
+  );
+
+  Future<ReparseBatchResult> _run(
+    List<String> diveIds, {
+    required RawDiveParseFn parseFn,
+    String? computerId,
+    void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final total = diveIds.length;
+    final failures = <ReparseDiveFailure>[];
+    final changed = <String>[];
+    // Succeeded dives plus failed ones that a write fault left partly
+    // rewritten: both need their derived data recomputed.
+    final rewritten = <String>[];
+    var skipped = 0;
+    var notProcessed = 0;
+    var profilesPreserved = 0;
+    var handSetKept = 0;
+
+    for (var i = 0; i < total; i++) {
+      if (isCancelled?.call() ?? false) {
+        notProcessed = total - i;
+        break;
+      }
+      final diveId = diveIds[i];
+      final outcome = await _reparseOne(diveId, parseFn, computerId);
+      switch (outcome) {
+        case _Skipped():
+          skipped++;
+        case _Failed(:final error, :final partlyApplied):
+          failures.add(ReparseDiveFailure(diveId: diveId, error: error));
+          if (partlyApplied) rewritten.add(diveId);
+        case _Succeeded(:final sourcesPreserved, :final keptHandSet):
+          changed.add(diveId);
+          rewritten.add(diveId);
+          if (sourcesPreserved > 0) profilesPreserved++;
+          if (keptHandSet) handSetKept++;
+      }
+      onProgress?.call(i + 1, total);
+    }
+
+    // The re-parse rewrote the profile strands; the sensor summary and the
+    // derived metrics are computed from them.
+    if (rewritten.isNotEmpty) _scheduleRefresh(rewritten);
+
+    return ReparseBatchResult(
+      total: total,
+      succeeded: changed.length,
+      skipped: skipped,
+      notProcessed: notProcessed,
+      profilesPreserved: profilesPreserved,
+      failures: List.unmodifiable(failures),
+      handSetKept: handSetKept,
+    );
+  }
+
+  /// One dive's re-parse, as the dive page's "Re-parse raw data" runs it:
+  /// the same step [run] takes for each dive, filed under a re-parse entry
+  /// of its own, so its revert puts the replaced series back too (issue
+  /// #4848). Returns the error (none on success, or when the dive has no raw
+  /// data) and how many sources kept a combined dive's profile.
+  ///
+  /// Values the diver set by hand stay, unless named in [replaceHandSet]
+  /// (issue #4909): the fields the diver chose the parse for after
+  /// [previewSingleDive].
+  Future<({List<String> errors, int profilesPreserved})> reparseSingleDive(
+    String diveId, {
+    required RawDiveParseFn parseFn,
+    Iterable<HandSetChange> replaceHandSet = const [],
+  }) => ChangeLogScope.bulk(
+    _db,
+    label: ChangeLogLabels.reparse,
+    body: () => _reparseSingle(diveId, parseFn, replaceHandSet),
+  );
+
+  /// The values the diver set by hand that re-parsing [diveId] would
+  /// replace, each with the parse's value (issue #4909). Parses as
+  /// [reparseSingleDive] does and writes nothing. None when the dive has no
+  /// raw data or a source fails to parse: the re-parse itself then reports
+  /// it.
+  Future<List<HandSetChange>> previewSingleDive(
+    String diveId, {
+    required RawDiveParseFn parseFn,
+  }) async {
+    if (!await hasHandSetMarks(_db, diveId)) return const [];
+    final parsed = await _parseSources(diveId, parseFn, null);
+    if (parsed.stop != null) return const [];
+    return [
+      for (final (source, dive) in parsed.sources)
+        ...await _reparse.previewHandSetChanges(
+          diveId: diveId,
+          sourceRowId: source.id,
+          parsed: dive,
+          descriptorVendor: source.descriptorVendor,
+        ),
+    ];
+  }
+
+  Future<({List<String> errors, int profilesPreserved})> _reparseSingle(
+    String diveId,
+    RawDiveParseFn parseFn,
+    Iterable<HandSetChange> replaceHandSet,
+  ) async {
+    final outcome = await _reparseOne(
+      diveId,
+      parseFn,
+      null,
+      replaceHandSet: replaceHandSet,
+    );
+    switch (outcome) {
+      case _Skipped():
+        return (errors: const <String>[], profilesPreserved: 0);
+      case _Failed(:final error, :final partlyApplied):
+        if (partlyApplied) _scheduleRefresh([diveId]);
+        return (errors: [error], profilesPreserved: 0);
+      case _Succeeded(:final sourcesPreserved):
+        _scheduleRefresh([diveId]);
+        return (errors: const <String>[], profilesPreserved: sourcesPreserved);
+    }
+  }
+
+  /// Parses every source of [diveId] first, then applies them all, so a
+  /// parse failure writes nothing.
+  Future<_DiveOutcome> _reparseOne(
+    String diveId,
+    RawDiveParseFn parseFn,
+    String? computerId, {
+    Iterable<HandSetChange> replaceHandSet = const [],
+  }) async {
+    final (:stop, sources: parsed) = await _parseSources(
+      diveId,
+      parseFn,
+      computerId,
+    );
+    if (stop != null) return stop;
+
+    var sourcesPreserved = 0;
+    var keptHandSet = false;
+    var appliedAny = false;
+    for (final (source, dive) in parsed) {
+      try {
+        final outcome = await _reparse.applyParsedUpdate(
+          diveId: diveId,
+          sourceRowId: source.id,
+          parsed: dive,
+          descriptorVendor: source.descriptorVendor,
+          descriptorProduct: source.descriptorProduct,
+          descriptorModel: source.descriptorModel,
+          libdivecomputerVersion: source.libdivecomputerVersion,
+          replaceHandSet: replaceHandSet,
+        );
+        if (outcome.profilePreserved) sourcesPreserved++;
+        if (outcome.handSetKept.isNotEmpty) keptHandSet = true;
+        appliedAny = true;
+      } catch (e, stackTrace) {
+        // A database fault: sources already applied stay applied.
+        _log.error(
+          'Re-parse of dive $diveId failed while writing',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        return _Failed(reparseErrorText(e), partlyApplied: appliedAny);
+      }
+    }
+    return _Succeeded(
+      sourcesPreserved: sourcesPreserved,
+      keptHandSet: keptHandSet,
+    );
+  }
+
+  /// Every source of [diveId] (only [computerId]'s, when given) with its
+  /// parse, or the outcome that stops the dive before anything is written:
+  /// skipped when none has raw data, failed when any cannot be parsed.
+  Future<
+    ({
+      _DiveOutcome? stop,
+      List<(DiveDataSourcesData, pigeon.ParsedDive)> sources,
+    })
+  >
+  _parseSources(
+    String diveId,
+    RawDiveParseFn parseFn,
+    String? computerId,
+  ) async {
+    ({
+      _DiveOutcome? stop,
+      List<(DiveDataSourcesData, pigeon.ParsedDive)> sources,
+    })
+    stopWith(_DiveOutcome outcome) => (stop: outcome, sources: const []);
+
+    final List<DiveDataSourcesData> sources;
+    try {
+      sources = [
+        for (final s in await _reparse.getSourcesForDiveReparse(diveId))
+          if (computerId == null || s.computerId == computerId) s,
+      ];
+    } catch (e, stackTrace) {
+      // One unreadable dive (a corrupt stored blob, say) fails that dive,
+      // not the run.
+      _log.error(
+        'Could not read the sources of dive $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return stopWith(_Failed(reparseErrorText(e)));
+    }
+    if (sources.isEmpty) return stopWith(const _Skipped());
+
+    final parsed = <(DiveDataSourcesData, pigeon.ParsedDive)>[];
+    for (final source in sources) {
+      final vendor = source.descriptorVendor;
+      final product = source.descriptorProduct;
+      final model = source.descriptorModel;
+      if (vendor == null || product == null || model == null) {
+        return stopWith(const _Failed(missingDescriptorsError));
+      }
+      try {
+        final dive = await parseFn(vendor, product, model, source.rawData!);
+        if (isEmptyParse(dive)) {
+          return stopWith(_Failed(const EmptyParseException().toString()));
+        }
+        parsed.add((source, dive));
+      } catch (e) {
+        return stopWith(_Failed(reparseErrorText(e)));
+      }
+    }
+    return (stop: null, sources: parsed);
+  }
+}
+
+sealed class _DiveOutcome {
+  const _DiveOutcome();
+}
+
+class _Skipped extends _DiveOutcome {
+  const _Skipped();
+}
+
+class _Failed extends _DiveOutcome {
+  const _Failed(this.error, {this.partlyApplied = false});
+  final String error;
+
+  /// An earlier source of the dive was written before this one failed.
+  final bool partlyApplied;
+}
+
+class _Succeeded extends _DiveOutcome {
+  const _Succeeded({required this.sourcesPreserved, this.keptHandSet = false});
+
+  /// A value the diver set by hand stayed where the parse differed.
+  final bool keptHandSet;
+
+  /// Sources whose profile strand was left alone because the dive is
+  /// combined (see `sourceOwnsProfileStrand`).
+  final int sourcesPreserved;
+}
+
+/// What a results list shows for [error]. The native parser reports its
+/// failures as a [PlatformException], whose own text wraps the message in
+/// the code and two nulls.
+String reparseErrorText(Object error) => switch (error) {
+  PlatformException(:final message?) when message.isNotEmpty => message,
+  PlatformException(:final code) => code,
+  _ => error.toString(),
+};

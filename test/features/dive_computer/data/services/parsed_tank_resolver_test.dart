@@ -1,0 +1,874 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_computer/data/services/parsed_tank_resolver.dart';
+import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+
+void main() {
+  group('resolveParsedTanks', () {
+    // DC_GASMIX_UNKNOWN: Shearwater never links a tank to a gas mix, so its
+    // tank records carry this sentinel.
+    const unknownGasMixIndex = 4294967295;
+
+    pigeon.ParsedDive makeParsedDive({
+      List<pigeon.ProfileSample> samples = const [],
+      List<pigeon.TankInfo> tanks = const [],
+      List<pigeon.GasMix> gasMixes = const [],
+      String? diveMode,
+    }) {
+      return pigeon.ParsedDive(
+        fingerprint: 'test',
+        dateTimeYear: 2026,
+        dateTimeMonth: 6,
+        dateTimeDay: 20,
+        dateTimeHour: 9,
+        dateTimeMinute: 43,
+        dateTimeSecond: 2,
+        maxDepthMeters: 23.4,
+        avgDepthMeters: 16.6,
+        durationSeconds: 6409,
+        samples: samples,
+        tanks: tanks,
+        gasMixes: gasMixes,
+        diveMode: diveMode,
+        events: const [],
+      );
+    }
+
+    pigeon.ProfileSample sample(int t, int tankIndex, int gasMixIndex) =>
+        pigeon.ProfileSample(
+          timeSeconds: t,
+          depthMeters: 10.0,
+          pressureBar: 150.0,
+          tankIndex: tankIndex,
+          gasMixIndex: gasMixIndex,
+        );
+
+    test('carries the transmitter serial the computer reported', () {
+      // Two computers paired to one transmitter log the same cylinder; the
+      // serial is what lets consolidation tell that apart from two tanks.
+      final parsed = makeParsedDive(
+        gasMixes: [pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0)],
+        tanks: [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 200.0,
+            endPressureBar: 60.0,
+            transmitterSerial: 180777,
+          ),
+        ],
+      );
+      final tanks = resolveParsedTanks(parsed);
+      expect(tanks, hasLength(1));
+      expect(tanks.single.transmitterSerial, '180777');
+    });
+
+    test('a tank without a transmitter serial resolves to null, not "0"', () {
+      final parsed = makeParsedDive(
+        gasMixes: [pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0)],
+        tanks: [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 200.0,
+            endPressureBar: 60.0,
+          ),
+        ],
+      );
+      expect(resolveParsedTanks(parsed).single.transmitterSerial, isNull);
+    });
+
+    test('gauge-mode parsed dive yields no synthesized tanks or switches', () {
+      // Gauge dives log depth+time only. Even when the computer reports a gas
+      // mix (which would otherwise synthesize a pressureless air cylinder),
+      // a gauge dive must import with no tanks and no gas switches.
+      final parsed = makeParsedDive(
+        diveMode: 'gauge',
+        gasMixes: [pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0)],
+        samples: [sample(0, 0, 0), sample(60, 0, 0)],
+        tanks: const [],
+      );
+      expect(resolveParsedTanks(parsed), isEmpty);
+      expect(resolveGasSwitches(parsed), isEmpty);
+    });
+
+    test('gauge-mode parsed dive keeps real reported tank records', () {
+      // Some computers still emit tank/pressure records in gauge mode. Those are
+      // kept (hidden and excluded from gas stats by mode) so switching a
+      // downloaded gauge dive back to OC is lossless -- only fabricated
+      // cylinders are skipped for gauge.
+      final parsed = makeParsedDive(
+        diveMode: 'gauge',
+        gasMixes: [pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0)],
+        tanks: [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 200.0,
+            endPressureBar: 60.0,
+          ),
+        ],
+      );
+      final tanks = resolveParsedTanks(parsed);
+      expect(tanks, hasLength(1));
+      expect(tanks.single.startPressure, 200.0);
+      expect(tanks.single.endPressure, 60.0);
+    });
+
+    test('multi-gas dive with one transmitter keeps both gases and labels the '
+        'transmitter tank with the gas actually breathed on it', () {
+      // Real Teric dive: gas[0]=99% deco (no transmitter), gas[1]=32% back gas
+      // (transmitter). Tank 0's gas is 32% (what it was breathed on), not
+      // gasMixes.first (99%), and the 99% must survive as a separate cylinder.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+        ],
+        tanks: [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 246.8,
+            endPressureBar: 86.6,
+          ),
+        ],
+        // Bottom phase on gas 1 (32%), deco phase on gas 0 (99%); the
+        // transmitter (tank 0) is sampled throughout.
+        samples: [
+          sample(2, 0, 1),
+          sample(1000, 0, 1),
+          sample(3000, 0, 1),
+          sample(5000, 0, 1),
+          sample(5958, 0, 0),
+          sample(6400, 0, 0),
+        ],
+      );
+
+      final tanks = resolveParsedTanks(parsed);
+
+      expect(tanks, hasLength(2), reason: 'both gases must be kept');
+
+      final backGas = tanks.firstWhere((t) => t.o2Percent == 32.0);
+      expect(backGas.index, 0, reason: 'transmitter tank keeps its index');
+      expect(backGas.startPressure, 246.8);
+      expect(backGas.endPressure, 86.6);
+
+      final decoGas = tanks.firstWhere((t) => t.o2Percent == 99.0);
+      expect(
+        decoGas.startPressure,
+        isNull,
+        reason: 'deco gas had no transmitter',
+      );
+      expect(decoGas.endPressure, isNull);
+      expect(
+        decoGas.index,
+        isNot(0),
+        reason: 'synthesized cylinder must not collide with the tank index',
+      );
+    });
+
+    test(
+      'single-gas dive with transmitter yields one correctly-labeled tank',
+      () {
+        final parsed = makeParsedDive(
+          gasMixes: [pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0)],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: unknownGasMixIndex,
+              startPressureBar: 242.8,
+              endPressureBar: 123.1,
+            ),
+          ],
+          samples: [sample(2, 0, 0), sample(3000, 0, 0)],
+        );
+
+        final tanks = resolveParsedTanks(parsed);
+
+        expect(tanks, hasLength(1));
+        expect(tanks[0].o2Percent, 32.0);
+        expect(tanks[0].startPressure, 242.8);
+      },
+    );
+
+    test(
+      'uses the most-breathed gas when a transmitter spans a gas switch',
+      () {
+        // Tank 0 sampled mostly on gas 1 (32%), briefly on gas 0 (99%): the
+        // tank's gas is the dominant one.
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+          ],
+          tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+          samples: [
+            sample(2, 0, 1),
+            sample(100, 0, 1),
+            sample(200, 0, 1),
+            sample(300, 0, 0),
+          ],
+        );
+
+        final backGas = resolveParsedTanks(
+          parsed,
+        ).firstWhere((t) => t.index == 0);
+        expect(backGas.o2Percent, 32.0);
+      },
+    );
+
+    test('labels each transmitter with the gas breathed on its own tank', () {
+      // Two transmitters (e.g. sidemount/twinset): tank 0 on gas 0 (32%),
+      // tank 1 on gas 1 (50%). Each tank is labeled from its own samples.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+        ],
+        tanks: [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 210.0,
+          ),
+          pigeon.TankInfo(
+            index: 1,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 205.0,
+          ),
+        ],
+        samples: [
+          sample(2, 0, 0),
+          sample(100, 0, 0),
+          sample(200, 1, 1),
+          sample(300, 1, 1),
+        ],
+      );
+
+      final tanks = resolveParsedTanks(parsed);
+
+      expect(tanks, hasLength(2));
+      expect(tanks.firstWhere((t) => t.index == 0).o2Percent, 32.0);
+      expect(tanks.firstWhere((t) => t.index == 1).o2Percent, 50.0);
+    });
+
+    test('breaks a sample-count tie toward the first-breathed gas', () {
+      // Equal samples on gas 1 then gas 0 for the same tank: the earliest gas
+      // (gas 1, breathed first) wins.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+        ],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [sample(2, 0, 1), sample(100, 0, 0)],
+      );
+
+      final backGas = resolveParsedTanks(
+        parsed,
+      ).firstWhere((t) => t.index == 0);
+      expect(backGas.o2Percent, 32.0);
+    });
+
+    test('honors a valid tank gasMixIndex when the computer sets it', () {
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+        ],
+        tanks: [
+          pigeon.TankInfo(index: 0, gasMixIndex: 1, startPressureBar: 200.0),
+        ],
+      );
+
+      final tanks = resolveParsedTanks(parsed);
+      final t0 = tanks.firstWhere((t) => t.index == 0);
+      expect(t0.o2Percent, 50.0);
+    });
+
+    test('picks the most-breathed gas when a later gas overtakes the first', () {
+      // Tank 0 is breathed briefly on gas 0 (air) then mostly on gas 1 (32%).
+      // The dominant-gas tally must advance past the first-seen gas, so the tank
+      // is labeled 32%, not 21%.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+        ],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [
+          sample(2, 0, 0),
+          sample(100, 0, 1),
+          sample(200, 0, 1),
+          sample(300, 0, 1),
+        ],
+      );
+
+      final t0 = resolveParsedTanks(parsed).firstWhere((t) => t.index == 0);
+      expect(t0.o2Percent, 32.0);
+    });
+
+    test(
+      'synthesizes one cylinder per gas mix when there are no tank records',
+      () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+          ],
+        );
+
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks, hasLength(2));
+        expect(tanks[0].index, 0);
+        expect(tanks[0].o2Percent, 32.0);
+        expect(tanks[1].o2Percent, 50.0);
+        expect(tanks[0].startPressure, isNull);
+      },
+    );
+
+    test('falls back to air when a tank has no gas information at all', () {
+      final parsed = makeParsedDive(
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+      );
+
+      final tanks = resolveParsedTanks(parsed);
+      expect(tanks, hasLength(1));
+      expect(tanks[0].o2Percent, 21.0);
+      expect(tanks[0].isAir, isTrue);
+    });
+
+    group('role inference', () {
+      String? roleOf(pigeon.ParsedDive parsed, double o2) =>
+          resolveParsedTanks(parsed).firstWhere((t) => t.o2Percent == o2).role;
+
+      test('open circuit: O2 >= 41% is deco, below is back gas', () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 41.0, hePercent: 0.0),
+            pigeon.GasMix(index: 2, o2Percent: 100.0, hePercent: 0.0),
+          ],
+        );
+        expect(roleOf(parsed, 32.0), 'backGas');
+        expect(roleOf(parsed, 41.0), 'deco');
+        expect(roleOf(parsed, 100.0), 'deco');
+      });
+
+      test('open circuit: trimix bottom gas (He>0, O2<41) is back gas', () {
+        final parsed = makeParsedDive(
+          gasMixes: [pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0)],
+        );
+        expect(roleOf(parsed, 18.0), 'backGas');
+      });
+
+      // A helium-bearing accelerated-deco gas (50/20 rather than EAN50) is
+      // blended to soften the helium swing at the switch; it is still deco gas
+      // (#1905).
+      test('open circuit: helium-bearing gas at O2 >= 41% is deco', () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 35.0, hePercent: 25.0),
+            pigeon.GasMix(index: 1, o2Percent: 41.0, hePercent: 10.0),
+            pigeon.GasMix(index: 2, o2Percent: 50.0, hePercent: 20.0),
+          ],
+        );
+        expect(roleOf(parsed, 35.0), 'backGas');
+        expect(roleOf(parsed, 41.0), 'deco');
+        expect(roleOf(parsed, 50.0), 'deco');
+      });
+
+      test('a transmitter tank breathing a helium-bearing deco gas is deco '
+          '(#1905)', () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 20.0),
+          ],
+          tanks: [
+            pigeon.TankInfo(index: 0, gasMixIndex: 0, startPressureBar: 230.0),
+            pigeon.TankInfo(index: 1, gasMixIndex: 1, startPressureBar: 200.0),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.firstWhere((t) => t.index == 0).role, 'backGas');
+        final deco = tanks.firstWhere((t) => t.index == 1);
+        expect(deco.o2Percent, 50.0);
+        expect(deco.hePercent, 20.0);
+        expect(deco.role, 'deco');
+      });
+
+      test('native usage maps oxygen -> oxygenSupply, diluent -> diluent', () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 100.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 21.0, hePercent: 0.0),
+          ],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: 0,
+              startPressureBar: 200.0,
+              usage: 1, // DC_USAGE_OXYGEN
+            ),
+            pigeon.TankInfo(
+              index: 1,
+              gasMixIndex: 1,
+              startPressureBar: 200.0,
+              usage: 2, // DC_USAGE_DILUENT
+            ),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.firstWhere((t) => t.index == 0).role, 'oxygenSupply');
+        expect(tanks.firstWhere((t) => t.index == 1).role, 'diluent');
+      });
+
+      test('native usage wins over the O2 heuristic', () {
+        // usage = oxygen on a 32% gas still resolves to oxygenSupply.
+        final parsed = makeParsedDive(
+          gasMixes: [pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0)],
+          tanks: [pigeon.TankInfo(index: 0, gasMixIndex: 0, usage: 1)],
+        );
+        expect(resolveParsedTanks(parsed).single.role, 'oxygenSupply');
+      });
+
+      test('HP CCR oxygen tank with no matched gas mix defaults to 100% O2, '
+          'not the diluent it would otherwise fall back to (issue #726)', () {
+        // Real Shearwater HP CCR dive: two pressure-telemetry tanks
+        // (diluent + O2), neither linked to a gas mix (DC_GASMIX_UNKNOWN)
+        // and neither breathed in the OC sense samples track, so both
+        // would otherwise fall through to the "primary mix" guess and the
+        // O2 tank would be mislabeled with the diluent's 18% trimix.
+        final parsed = makeParsedDive(
+          gasMixes: [pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0)],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: unknownGasMixIndex,
+              startPressureBar: 200.0,
+              usage: 2, // DC_USAGE_DILUENT
+            ),
+            pigeon.TankInfo(
+              index: 1,
+              gasMixIndex: unknownGasMixIndex,
+              startPressureBar: 200.0,
+              usage: 1, // DC_USAGE_OXYGEN
+            ),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        final oxygenTank = tanks.firstWhere((t) => t.index == 1);
+        expect(oxygenTank.role, 'oxygenSupply');
+        expect(oxygenTank.o2Percent, 100.0);
+        expect(oxygenTank.hePercent, 0.0);
+
+        // The diluent tank is unaffected: it still falls back to the
+        // primary mix, since that guess is meaningful for it.
+        final diluentTank = tanks.firstWhere((t) => t.index == 0);
+        expect(diluentTank.role, 'diluent');
+        expect(diluentTank.o2Percent, 18.0);
+        expect(diluentTank.hePercent, 45.0);
+      });
+
+      test('an unlinked oxygen tank matches an explicit oxygen-tagged gas mix '
+          'instead of being duplicated as a phantom deco cylinder (Copilot '
+          'review on #1972)', () {
+        // Unlike Shearwater, some computers DO report an explicit
+        // usage-tagged gas mix for the O2 supply, but the tank record still
+        // isn't index-linked to it (gasMixIndex unknown) and it's never the
+        // dominant gas on any sample (it's injected into the loop, not
+        // breathed OC). The real gas mix must be matched by its usage tag
+        // rather than left for the "no match" default, or it gets
+        // synthesized a second time below as an unclaimed gas.
+        final gasMixes = [
+          pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+          pigeon.GasMix(
+            index: 1,
+            o2Percent: 100.0,
+            hePercent: 0.0,
+            usage: 1, // DC_USAGE_OXYGEN
+          ),
+        ];
+        final tankInfos = [
+          pigeon.TankInfo(
+            index: 0,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 200.0,
+            usage: 2, // DC_USAGE_DILUENT
+          ),
+          pigeon.TankInfo(
+            index: 1,
+            gasMixIndex: unknownGasMixIndex,
+            startPressureBar: 200.0,
+            usage: 1, // DC_USAGE_OXYGEN
+          ),
+        ];
+
+        final tanks = resolveParsedTanks(
+          makeParsedDive(gasMixes: gasMixes, tanks: tankInfos),
+        );
+
+        // Exactly two cylinders: no phantom duplicate for the matched gas.
+        expect(tanks, hasLength(2));
+
+        final oxygenTank = tanks.firstWhere((t) => t.index == 1);
+        expect(oxygenTank.role, 'oxygenSupply');
+        expect(oxygenTank.o2Percent, 100.0);
+        expect(oxygenTank.hePercent, 0.0);
+        expect(
+          oxygenTank.startPressure,
+          200.0,
+          reason: 'stays the real, pressure-tracked transmitter tank',
+        );
+
+        // Gas switches must resolve to the real tank, not a phantom one.
+        final switches = resolveGasSwitches(
+          makeParsedDive(
+            gasMixes: gasMixes,
+            tanks: tankInfos,
+            samples: [sample(0, 0, 0), sample(60, 1, 1)],
+          ),
+        );
+        expect(switches.single.toTankIndex, 1);
+      });
+
+      test('synthesized deco cylinder (no transmitter) gets the deco role', () {
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+          ],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: unknownGasMixIndex,
+              startPressureBar: 240.0,
+            ),
+          ],
+          samples: [sample(2, 0, 1), sample(100, 0, 1), sample(5958, 0, 0)],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.firstWhere((t) => t.o2Percent == 32.0).role, 'backGas');
+        expect(tanks.firstWhere((t) => t.o2Percent == 99.0).role, 'deco');
+      });
+
+      test('sensorless CCR: reported gas usage maps oxygen/diluent directly '
+          'and sidemount to back gas, regardless of O2%', () {
+        final parsed = makeParsedDive(
+          diveMode: 'ccr',
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 100.0, hePercent: 0.0, usage: 1),
+            pigeon.GasMix(index: 1, o2Percent: 18.0, hePercent: 45.0, usage: 2),
+            pigeon.GasMix(index: 2, o2Percent: 21.0, hePercent: 0.0, usage: 3),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(
+          tanks.firstWhere((t) => t.o2Percent == 100.0).role,
+          'oxygenSupply',
+        );
+        expect(tanks.firstWhere((t) => t.o2Percent == 18.0).role, 'diluent');
+        expect(tanks.firstWhere((t) => t.o2Percent == 21.0).role, 'backGas');
+      });
+
+      test(
+        'sensorless CCR: bailout gases with no reported usage are ranked '
+        'against each other (lowest O2 -> bailout, >=41% -> deco, rest -> stage)',
+        () {
+          final parsed = makeParsedDive(
+            diveMode: 'ccr',
+            gasMixes: [
+              pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+              pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+              pigeon.GasMix(index: 2, o2Percent: 32.0, hePercent: 0.0),
+            ],
+          );
+          final tanks = resolveParsedTanks(parsed);
+          expect(tanks.firstWhere((t) => t.o2Percent == 18.0).role, 'bailout');
+          expect(tanks.firstWhere((t) => t.o2Percent == 50.0).role, 'deco');
+          expect(tanks.firstWhere((t) => t.o2Percent == 32.0).role, 'stage');
+        },
+      );
+
+      test('sensorless CCR bailout tie: same lowest O2, higher helium wins '
+          'bailout; the loser falls through to deco/stage instead', () {
+        final parsed = makeParsedDive(
+          diveMode: 'ccr',
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(index: 1, o2Percent: 18.0, hePercent: 50.0),
+            pigeon.GasMix(index: 2, o2Percent: 32.0, hePercent: 0.0),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.firstWhere((t) => t.hePercent == 45.0).role, 'stage');
+        expect(tanks.firstWhere((t) => t.hePercent == 50.0).role, 'bailout');
+        expect(tanks.firstWhere((t) => t.o2Percent == 32.0).role, 'stage');
+      });
+
+      test('sensorless CCR bailout tie: same lowest O2 and helium -> both '
+          'gases get the bailout role', () {
+        final parsed = makeParsedDive(
+          diveMode: 'ccr',
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(index: 1, o2Percent: 18.0, hePercent: 45.0),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.every((t) => t.role == 'bailout'), isTrue);
+      });
+
+      test('sensorless CCR bailout tie: floating-point noise from the native '
+          'fraction * 100.0 conversion does not defeat the tie detection', () {
+        // Each platform converter computes o2/he percent independently from
+        // the native fraction, so two mixes the diver set to the same
+        // nominal percentage can differ by a few ULPs rather than being
+        // bit-identical.
+        final parsed = makeParsedDive(
+          diveMode: 'ccr',
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(
+              index: 1,
+              o2Percent: 18.0 + 4e-14,
+              hePercent: 45.0 - 4e-14,
+            ),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.every((t) => t.role == 'bailout'), isTrue);
+      });
+
+      test('sensorless SCR keeps the original single-threshold heuristic, '
+          'unaffected by the CCR bailout ranking', () {
+        final parsed = makeParsedDive(
+          diveMode: 'scr',
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+          ],
+        );
+        final tanks = resolveParsedTanks(parsed);
+        expect(tanks.firstWhere((t) => t.o2Percent == 18.0).role, 'backGas');
+        expect(tanks.firstWhere((t) => t.o2Percent == 50.0).role, 'deco');
+      });
+    });
+  });
+
+  group('resolveGasSwitches', () {
+    const unknownGasMixIndex = 4294967295;
+
+    pigeon.ParsedDive makeParsedDive({
+      List<pigeon.ProfileSample> samples = const [],
+      List<pigeon.TankInfo> tanks = const [],
+      List<pigeon.GasMix> gasMixes = const [],
+      String? diveMode,
+    }) {
+      return pigeon.ParsedDive(
+        fingerprint: 'test',
+        dateTimeYear: 2026,
+        dateTimeMonth: 6,
+        dateTimeDay: 20,
+        dateTimeHour: 9,
+        dateTimeMinute: 43,
+        dateTimeSecond: 2,
+        maxDepthMeters: 23.4,
+        avgDepthMeters: 16.6,
+        durationSeconds: 6409,
+        samples: samples,
+        tanks: tanks,
+        gasMixes: gasMixes,
+        diveMode: diveMode,
+        events: const [],
+      );
+    }
+
+    pigeon.ProfileSample sample(
+      int t,
+      int tankIndex,
+      int? gasMixIndex, {
+      double depth = 10.0,
+    }) => pigeon.ProfileSample(
+      timeSeconds: t,
+      depthMeters: depth,
+      pressureBar: 150.0,
+      tankIndex: tankIndex,
+      gasMixIndex: gasMixIndex,
+    );
+
+    test(
+      'emits a switch at the transition to the synthesized deco cylinder',
+      () {
+        // gas[1]=32% back gas on transmitter tank 0; gas[0]=99% deco (no
+        // transmitter -> synthesized cylinder at index 1). Diver breathes 32%
+        // then switches to 99% during deco at t=5958.
+        final parsed = makeParsedDive(
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+            pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+          ],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: unknownGasMixIndex,
+              startPressureBar: 246.8,
+              endPressureBar: 86.6,
+            ),
+          ],
+          samples: [
+            sample(2, 0, 1),
+            sample(1000, 0, 1),
+            sample(5000, 0, 1),
+            sample(5958, 0, 0, depth: 6.0),
+            sample(6400, 0, 0, depth: 5.0),
+          ],
+        );
+
+        final switches = resolveGasSwitches(parsed);
+
+        expect(switches, hasLength(1));
+        expect(switches.single.timeSeconds, 5958);
+        expect(switches.single.depth, 6.0);
+        expect(
+          switches.single.toTankIndex,
+          1,
+          reason: 'the 99% deco gas resolves to the synthesized cylinder index',
+        );
+      },
+    );
+
+    test('emits a switch for each distinct gas change', () {
+      // 32% -> 99% -> back to 32%: two switches.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 99.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 32.0, hePercent: 0.0),
+        ],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [sample(2, 0, 1), sample(1000, 0, 0), sample(2000, 0, 1)],
+      );
+
+      final switches = resolveGasSwitches(parsed);
+
+      expect(switches.map((s) => s.timeSeconds), [1000, 2000]);
+      expect(switches[0].toTankIndex, 1); // 99% synthesized cylinder
+      expect(switches[1].toTankIndex, 0); // back to the 32% transmitter tank
+    });
+
+    test('returns no switches when the gas never changes', () {
+      final parsed = makeParsedDive(
+        gasMixes: [pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0)],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [sample(2, 0, 0), sample(1000, 0, 0), sample(3000, 0, 0)],
+      );
+
+      expect(resolveGasSwitches(parsed), isEmpty);
+    });
+
+    test('returns no switches when samples carry no gas-mix index', () {
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 99.0, hePercent: 0.0),
+        ],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [sample(2, 0, null), sample(1000, 0, null)],
+      );
+
+      expect(resolveGasSwitches(parsed), isEmpty);
+    });
+
+    test('ignores out-of-range gas indices without fabricating switches', () {
+      // A stray/out-of-range gasMixIndex (here 7, with only 2 gas mixes) must
+      // not become the baseline or trigger a spurious switch when the real gas
+      // resumes. Expect a single switch for the genuine 0 -> 1 change.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 32.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 99.0, hePercent: 0.0),
+        ],
+        tanks: [pigeon.TankInfo(index: 0, gasMixIndex: unknownGasMixIndex)],
+        samples: [
+          sample(2, 0, 0),
+          sample(100, 0, 7), // garbage index -> skipped, baseline stays 0
+          sample(200, 0, 0), // back to 0 -> no switch (baseline never moved)
+          sample(300, 0, 1), // genuine switch to 99%
+        ],
+      );
+
+      final switches = resolveGasSwitches(parsed);
+      expect(switches, hasLength(1));
+      expect(switches.single.timeSeconds, 300);
+      expect(switches.single.toTankIndex, 1);
+    });
+
+    test('maps switches through a valid native tank->gas link', () {
+      // Two transmitters with the computer's own gas links: tank 0 = gas 0
+      // (21%), tank 1 = gas 1 (50%). A switch to gas 1 points at tank 1.
+      final parsed = makeParsedDive(
+        gasMixes: [
+          pigeon.GasMix(index: 0, o2Percent: 21.0, hePercent: 0.0),
+          pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+        ],
+        tanks: [
+          pigeon.TankInfo(index: 0, gasMixIndex: 0, startPressureBar: 200.0),
+          pigeon.TankInfo(index: 1, gasMixIndex: 1, startPressureBar: 200.0),
+        ],
+        samples: [sample(2, 0, 0), sample(1000, 1, 1)],
+      );
+
+      final switches = resolveGasSwitches(parsed);
+      expect(switches, hasLength(1));
+      expect(switches.single.toTankIndex, 1);
+    });
+  });
+
+  group('resolveDiluentGas', () {
+    test('returns null for an empty tank list', () {
+      expect(resolveDiluentGas(const []), isNull);
+    });
+
+    test('returns null when no tank carries the diluent role', () {
+      final tanks = [
+        const DownloadedTank(index: 0, o2Percent: 21.0, role: 'backGas'),
+        const DownloadedTank(index: 1, o2Percent: 100.0, role: 'oxygenSupply'),
+      ];
+      expect(resolveDiluentGas(tanks), isNull);
+    });
+
+    test('returns the diluent tank\'s gas mix when present', () {
+      final tanks = [
+        const DownloadedTank(index: 0, o2Percent: 100.0, role: 'oxygenSupply'),
+        DownloadedTank(
+          index: 1,
+          o2Percent: 18.0,
+          hePercent: 45.0,
+          role: TankRole.diluent.name,
+        ),
+      ];
+      final diluent = resolveDiluentGas(tanks);
+      expect(diluent, isNotNull);
+      expect(diluent!.o2, 18.0);
+      expect(diluent.he, 45.0);
+    });
+
+    test('returns the first diluent tank when more than one is tagged', () {
+      final tanks = [
+        DownloadedTank(index: 0, o2Percent: 21.0, role: TankRole.diluent.name),
+        DownloadedTank(
+          index: 1,
+          o2Percent: 18.0,
+          hePercent: 45.0,
+          role: TankRole.diluent.name,
+        ),
+      ];
+      final diluent = resolveDiluentGas(tanks);
+      expect(diluent!.o2, 21.0);
+      expect(diluent.he, 0.0);
+    });
+  });
+}

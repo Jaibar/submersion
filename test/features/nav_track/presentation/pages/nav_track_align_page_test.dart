@@ -1,0 +1,2230 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:go_router/go_router.dart';
+import 'package:latlong2/latlong.dart';
+
+import 'package:submersion/features/maps/presentation/widgets/map_compass_button.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/features/bathymetry/application/bathymetry_providers.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/nav_track/data/services/parsers/seacraft_enc_csv_parser.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track_point.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_corrector.dart';
+import 'package:submersion/features/nav_track/domain/nav_track_georef.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_align_page.dart';
+import 'package:submersion/features/nav_track/presentation/providers/nav_track_providers.dart';
+import 'package:submersion/features/nav_track/presentation/widgets/nav_track_polyline_layer.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/nav_track/presentation/editing/nav_track_edit_fields.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/world_map_expectations.dart';
+
+/// The track page's sitting the align page is handed (issue #4527): what
+/// Done handed it reads back as the correction the page "saved".
+class _Held {
+  _Held(this.sitting, this.routeId);
+
+  final RecordEditController<NavTrack> sitting;
+  final String routeId;
+
+  /// The correction Done handed the sitting; null while it holds none.
+  NavTrackCorrection? get lastCorrection {
+    final session = sitting.session;
+    if (session == null) return null;
+    if (!session.changedCardIds.contains('correction')) return null;
+    return navTrackCorrectionIn(session);
+  }
+
+  /// The correction the sitting holds, changed or not: a correction put
+  /// back as it was stored is no change.
+  NavTrackCorrection? get correction {
+    final session = sitting.session;
+    return session == null ? null : navTrackCorrectionIn(session);
+  }
+
+  /// The track the held correction is for, once there is one.
+  String? get lastRouteId => lastCorrection == null ? null : routeId;
+}
+
+List<NavTrackPoint> _points() => [
+  for (var i = 0; i < 10; i++)
+    NavTrackPoint(
+      timestamp: 1755856800 + i * 10,
+      north: i * 10.0,
+      east: i * 5.0,
+      depth: 5.0 + i,
+      distance: i * 11.0,
+    ),
+];
+
+NavTrack _route({String? diveId, String? siteId}) => NavTrack(
+  id: 'r1',
+  diveId: diveId,
+  siteId: siteId,
+  linkMode: diveId == null ? null : NavTrackLinkMode.auto,
+  source: NavTrackSource.seacraftEnc,
+  sourceRef: 'r1.csv',
+  startTime: 1755856800000,
+  endTime: 1755860400000,
+  pointCount: 10,
+  points: _points(),
+  createdAt: DateTime(2026, 8, 22),
+  updatedAt: DateTime(2026, 8, 22),
+);
+
+Future<_Held> _pump(
+  WidgetTester tester, {
+  required NavTrack route,
+  Dive? linkedDive,
+  DiveSite? site,
+  Override? bathymetryOverride,
+  MockSettingsNotifier? settingsNotifier,
+}) async {
+  final overrides = await getBaseOverrides(settingsNotifier: settingsNotifier);
+  // The align page edits only in the track page's sitting (issue #4527).
+  final sitting = RecordEditController<NavTrack>(onSave: (_) async {});
+  addTearDown(sitting.dispose);
+  sitting.unlock(route);
+  final router = GoRouter(
+    initialLocation: '/tracks/underwater/${route.id}',
+    routes: [
+      GoRoute(
+        path: '/tracks/underwater/:id',
+        builder: (context, state) =>
+            const Scaffold(body: Text('ROUTE_DETAIL_PAGE')),
+      ),
+      GoRoute(
+        path: '/tracks/underwater/:id/align',
+        builder: (context, state) => NavTrackAlignPage(
+          routeId: state.pathParameters['id']!,
+          joinedSitting: sitting,
+        ),
+      ),
+      GoRoute(
+        path: '/tracks/underwater/:id/3d',
+        builder: (context, state) =>
+            const Scaffold(body: Text('ROUTE_3D_PAGE')),
+      ),
+    ],
+  );
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        ...overrides,
+        navTrackByIdProvider(route.id).overrideWith((ref) async => route),
+        if (linkedDive != null)
+          diveProvider(linkedDive.id).overrideWith((ref) async => linkedDive),
+        if (site != null)
+          siteProvider(site.id).overrideWith((ref) async => site),
+        // Never hit the real bathymetry cache/network from a widget test.
+        bathymetryOverride ??
+            bathymetryGridProvider.overrideWith((ref, cell) async => null),
+      ],
+      child: MaterialApp.router(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        routerConfig: router,
+      ),
+    ),
+  );
+  router.push('/tracks/underwater/${route.id}/align');
+  await tester.pumpAndSettle();
+  return _Held(sitting, route.id);
+}
+
+void main() {
+  testWidgets(
+    'the map can rotate, so it carries a compass steering it (#3386)',
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      final map = tester.widget<FlutterMap>(find.byType(FlutterMap));
+      expect(
+        tester
+            .widget<MapCompassButton>(find.byType(MapCompassButton))
+            .controller,
+        same(map.mapController),
+      );
+    },
+  );
+
+  testWidgets(
+    'setting a start point on the map and saving persists the anchor',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastRouteId, 'r1');
+      expect(repository.lastCorrection?.anchor, isNotNull);
+    },
+  );
+
+  testWidgets(
+    'picking a suggestion chip while "Start auf der Karte setzen" is still '
+    'awaiting a map tap cancels that crosshair flow, so a later accidental '
+    'tap of the still-visible "Set start here" button cannot silently '
+    'overwrite the chip\'s choice (code review)',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      await _pump(
+        tester,
+        route: _route(siteId: 'site-1'),
+        site: site,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('nav-track-align-set-here')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-from-site')));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-set-here')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'picking an end-mode chip while "Ende auf der Karte setzen" is still '
+    'awaiting a map tap cancels that crosshair flow the same way',
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-place-end')));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('nav-track-align-set-here')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-end-same-as-start')),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-set-here')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'the "From dive entry" chip sets the anchor from the linked dive',
+    (tester) async {
+      final dive = Dive(
+        id: 'dive-1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 8, 22, 10, 8),
+        entryLocation: const GeoPoint(46.9, 7.2),
+      );
+      final repository = await _pump(
+        tester,
+        route: _route(diveId: 'dive-1'),
+        linkedDive: dive,
+      );
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.anchor, const GeoPoint(46.9, 7.2));
+    },
+  );
+
+  testWidgets('the "From site" chip sets the anchor from the route\'s site', (
+    tester,
+  ) async {
+    const site = DiveSite(
+      id: 'site-1',
+      name: 'Test Site',
+      location: GeoPoint(47.1, 8.3),
+    );
+    final repository = await _pump(
+      tester,
+      route: _route(siteId: 'site-1'),
+      site: site,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-from-site')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    expect(repository.lastCorrection?.anchor, const GeoPoint(47.1, 8.3));
+  });
+
+  testWidgets(
+    'the start row mirrors the end row: picking a suggestion chip marks '
+    'that chip selected, not the "place on map" button, and no other chip',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      final dive = Dive(
+        id: 'dive-1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 8, 22, 10, 8),
+        entryLocation: const GeoPoint(46.9, 7.2),
+      );
+      await _pump(
+        tester,
+        route: _route(diveId: 'dive-1', siteId: 'site-1'),
+        linkedDive: dive,
+        site: site,
+      );
+
+      FilterChip chipByKey(String key) =>
+          tester.widget<FilterChip>(find.byKey(ValueKey(key)));
+      bool placeButtonChecked() => find
+          .descendant(
+            of: find.byKey(const ValueKey('nav-track-align-place-start')),
+            matching: find.byIcon(Icons.check),
+          )
+          .evaluate()
+          .isNotEmpty;
+
+      expect(chipByKey('nav-track-align-from-site').selected, isFalse);
+      expect(placeButtonChecked(), isFalse);
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-from-site')));
+      await tester.pump();
+
+      expect(chipByKey('nav-track-align-from-site').selected, isTrue);
+      expect(chipByKey('nav-track-align-from-dive-entry').selected, isFalse);
+      expect(placeButtonChecked(), isFalse);
+    },
+  );
+
+  testWidgets(
+    'manually placing the start point (not from a suggestion) checks the '
+    '"Start auf der Karte setzen" button instead of any chip',
+    (tester) async {
+      final dive = Dive(
+        id: 'dive-1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 8, 22, 10, 8),
+        entryLocation: const GeoPoint(46.9, 7.2),
+      );
+      await _pump(
+        tester,
+        route: _route(diveId: 'dive-1'),
+        linkedDive: dive,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('nav-track-align-place-start')),
+          matching: find.byIcon(Icons.check),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+            )
+            .selected,
+        isFalse,
+      );
+    },
+  );
+
+  testWidgets(
+    'the "From site" chip still works after other controls triggered a '
+    'rebuild (regression: the chip used to sit behind a FutureBuilder '
+    'whose Future was recreated on every setState, one Flutter anti-'
+    'pattern independent of whether it ever visibly broke the chip)',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      final repository = await _pump(
+        tester,
+        route: _route(siteId: 'site-1'),
+        site: site,
+      );
+
+      // Trigger a handful of rebuilds via setState before using the chip.
+      final sliderFinder = find.byKey(
+        const ValueKey('nav-track-align-trust-slider'),
+      );
+      await tester.drag(sliderFinder, const Offset(20, 0));
+      await tester.pump();
+      await tester.drag(sliderFinder, const Offset(-10, 0));
+      await tester.pump();
+
+      final chipFinder = find.byKey(
+        const ValueKey('nav-track-align-from-site'),
+      );
+      expect(chipFinder, findsOneWidget);
+      await tester.tap(chipFinder);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.anchor, const GeoPoint(47.1, 8.3));
+    },
+  );
+
+  testWidgets(
+    'the "From GPS" chip appears for a route with a pre-dive fix and sets '
+    'the anchor from the site pin, back-solved through the fix (item 3)',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      final preDiveFixPoints = [
+        const NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 0),
+        // A pre-dive GPS re-calibration jump, before any underwater sample.
+        const NavTrackPoint(
+          timestamp: 1755856802,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856804,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        // Now descending: ends the fixed run.
+        const NavTrackPoint(
+          timestamp: 1755856806,
+          north: 100,
+          east: 0,
+          depth: 5,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856808,
+          north: 105,
+          east: 2,
+          depth: 8,
+        ),
+      ];
+      final route = NavTrack(
+        id: 'r1',
+        siteId: 'site-1',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'r1.csv',
+        startTime: 1755856800000,
+        endTime: 1755856808000,
+        pointCount: preDiveFixPoints.length,
+        points: preDiveFixPoints,
+        createdAt: DateTime(2026, 8, 22),
+        updatedAt: DateTime(2026, 8, 22),
+      );
+
+      final repository = await _pump(tester, route: route, site: site);
+
+      final chipFinder = find.byKey(const ValueKey('nav-track-align-from-gps'));
+      expect(chipFinder, findsOneWidget);
+      await tester.tap(chipFinder);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      final anchor = repository.lastCorrection?.anchor;
+      expect(anchor, isNotNull);
+      // The stabilized fix position is (north: 100, east: 0), so the
+      // suggested anchor is the site pin shifted 100 m back (south) --
+      // definitely not the site pin itself.
+      expect(anchor, isNot(site.location));
+      final backToFix = offsetToGeoPoint(anchor!, east: 0, north: 100);
+      expect(backToFix.latitude, closeTo(site.location!.latitude, 1e-6));
+      expect(backToFix.longitude, closeTo(site.location!.longitude, 1e-6));
+    },
+  );
+
+  testWidgets(
+    'the "From GPS" chip stays selected across an unrelated rebuild (code '
+    'review: its suggestion is a GeoPoint re-derived by floating-point '
+    'arithmetic on every build, not a cached value, so the chip must not '
+    'rely on exact == equality against the anchor stored at selection time)',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      final preDiveFixPoints = [
+        const NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 0),
+        const NavTrackPoint(
+          timestamp: 1755856802,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856804,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856806,
+          north: 100,
+          east: 0,
+          depth: 5,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856808,
+          north: 105,
+          east: 2,
+          depth: 8,
+        ),
+      ];
+      final route = NavTrack(
+        id: 'r1',
+        siteId: 'site-1',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'r1.csv',
+        startTime: 1755856800000,
+        endTime: 1755856808000,
+        pointCount: preDiveFixPoints.length,
+        points: preDiveFixPoints,
+        createdAt: DateTime(2026, 8, 22),
+        updatedAt: DateTime(2026, 8, 22),
+      );
+
+      await _pump(tester, route: route, site: site);
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-from-gps')));
+      await tester.pump();
+      expect(
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('nav-track-align-from-gps')),
+            )
+            .selected,
+        isTrue,
+      );
+
+      // An unrelated control rebuilds _ControlsPanel, which re-derives the
+      // "From GPS" suggestion from scratch again.
+      await tester.drag(
+        find.byKey(const ValueKey('nav-track-align-trust-slider')),
+        const Offset(20, 0),
+      );
+      await tester.pump();
+
+      expect(
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('nav-track-align-from-gps')),
+            )
+            .selected,
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'the "From GPS" chip does not appear for a route with no pre-dive fix',
+    (tester) async {
+      const site = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      await _pump(
+        tester,
+        route: _route(siteId: 'site-1'),
+        site: site,
+      );
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-from-gps')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets('the "From GPS" chip does not appear when the only fix follows a '
+      'surface-only route (the corrector treats that fix as the end, not a '
+      'pre-dive calibration)', (tester) async {
+    const site = DiveSite(
+      id: 'site-1',
+      name: 'Test Site',
+      location: GeoPoint(47.1, 8.3),
+    );
+    // Never deeper than the surface threshold, so there is no underwater
+    // sample at all, then a GPS re-acquisition jump at the end.
+    final surfaceOnlyPoints = [
+      for (var i = 0; i < 6; i++)
+        NavTrackPoint(
+          timestamp: 1755856800 + i * 2,
+          north: i * 3.0,
+          east: 0,
+          depth: 0,
+        ),
+      const NavTrackPoint(timestamp: 1755856814, north: 200, east: 0, depth: 0),
+      const NavTrackPoint(timestamp: 1755856816, north: 201, east: 0, depth: 0),
+    ];
+    final route = NavTrack(
+      id: 'r1',
+      siteId: 'site-1',
+      source: NavTrackSource.seacraftEnc,
+      sourceRef: 'r1.csv',
+      startTime: 1755856800000,
+      endTime: 1755856816000,
+      pointCount: surfaceOnlyPoints.length,
+      points: surfaceOnlyPoints,
+      createdAt: DateTime(2026, 8, 22),
+      updatedAt: DateTime(2026, 8, 22),
+    );
+
+    await _pump(tester, route: route, site: site);
+
+    expect(
+      find.byKey(const ValueKey('nav-track-align-from-gps')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('the "Same as start" end chip switches the end mode', (
+    tester,
+  ) async {
+    final repository = await _pump(tester, route: _route());
+
+    await tester.tap(
+      find.byKey(const ValueKey('nav-track-align-end-same-as-start')),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    expect(repository.lastCorrection?.endMode, NavTrackEndMode.sameAsStart);
+  });
+
+  testWidgets(
+    'the end chips mirror the start chips\' button+chips look, and only '
+    'one end mode is selected at a time',
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      FilterChip chipByKey(String key) =>
+          tester.widget<FilterChip>(find.byKey(ValueKey(key)));
+
+      // "None" is the default end mode, so its chip starts selected.
+      expect(chipByKey('nav-track-align-end-none').selected, isTrue);
+      expect(chipByKey('nav-track-align-end-same-as-start').selected, isFalse);
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-end-same-as-start')),
+      );
+      await tester.pump();
+
+      expect(chipByKey('nav-track-align-end-none').selected, isFalse);
+      expect(chipByKey('nav-track-align-end-same-as-start').selected, isTrue);
+    },
+  );
+
+  testWidgets(
+    'the "GPS position at surfacing" end chip only appears for a route '
+    'with a post-dive fix, and selecting it sets the end mode',
+    (tester) async {
+      final track = parseSeacraftEncCsv(
+        File(
+          'test/fixtures/nav_tracks/seacraft_enc3_gps_fix.csv',
+        ).readAsBytesSync(),
+      );
+      final fixRoute = NavTrack(
+        id: 'r-fix',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'fix.csv',
+        startTime: track.points.first.timestamp * 1000,
+        endTime: track.points.last.timestamp * 1000,
+        pointCount: track.points.length,
+        points: track.points,
+        anchorLatitude: 47.1,
+        anchorLongitude: 8.3,
+        createdAt: DateTime(2026, 9, 6),
+        updatedAt: DateTime(2026, 9, 6),
+      );
+
+      final repository = await _pump(tester, route: fixRoute);
+
+      final chipFinder = find.byKey(
+        const ValueKey('nav-track-align-end-gps-fix'),
+      );
+      expect(chipFinder, findsOneWidget);
+      await tester.tap(chipFinder);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.endMode, NavTrackEndMode.gpsFix);
+    },
+  );
+
+  testWidgets(
+    'the "GPS position at surfacing" end chip does not appear for a route '
+    'with no fix event',
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-end-gps-fix')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'the "GPS position at surfacing" end chip does not appear for a route '
+    'with only a pre-dive fix (review finding: hasFix alone is true for '
+    'ANY fix event, but NavTrackEndMode.gpsFix only ever resolves against '
+    'a post-dive one, so gating on hasFix would show a chip that silently '
+    'did nothing)',
+    (tester) async {
+      final preDiveFixOnlyPoints = [
+        const NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 0),
+        // A pre-dive GPS re-calibration jump, before any underwater sample.
+        const NavTrackPoint(
+          timestamp: 1755856802,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856804,
+          north: 100,
+          east: 0,
+          depth: 0,
+        ),
+        // Now descending and staying underwater until the recording ends:
+        // no post-dive fix at all.
+        const NavTrackPoint(
+          timestamp: 1755856806,
+          north: 100,
+          east: 0,
+          depth: 5,
+        ),
+        const NavTrackPoint(
+          timestamp: 1755856808,
+          north: 105,
+          east: 2,
+          depth: 8,
+        ),
+      ];
+      final route = NavTrack(
+        id: 'r1',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'r1.csv',
+        startTime: 1755856800000,
+        endTime: 1755856808000,
+        pointCount: preDiveFixOnlyPoints.length,
+        points: preDiveFixOnlyPoints,
+        createdAt: DateTime(2026, 8, 22),
+        updatedAt: DateTime(2026, 8, 22),
+      );
+
+      await _pump(tester, route: route);
+
+      expect(
+        find.byKey(const ValueKey('nav-track-align-end-gps-fix')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'the "Place end on map" button starts the crosshair flow and sets the '
+    'point end mode once placed',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-place-end')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump();
+
+      // The dropdown this replaces always showed the current mode; the
+      // button mirrors that by switching to a checked, filled look once the
+      // point mode is active, instead of silently losing the indicator.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('nav-track-align-place-end')),
+          matching: find.byIcon(Icons.check),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.endMode, NavTrackEndMode.point);
+      expect(repository.lastCorrection?.endPoint, isNotNull);
+    },
+  );
+
+  testWidgets(
+    'dragging the trust slider updates the trust fraction and readout',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      final sliderFinder = find.byKey(
+        const ValueKey('nav-track-align-trust-slider'),
+      );
+      expect(sliderFinder, findsOneWidget);
+
+      await tester.drag(sliderFinder, const Offset(80, 0));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.trustFraction, greaterThan(0));
+    },
+  );
+
+  testWidgets('moving the trust slider moves the trust marker on the route', (
+    tester,
+  ) async {
+    await _pump(tester, route: _route());
+
+    // Place the start marker so the route (and the trust marker) renders.
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-place-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+    await tester.pump();
+
+    final trustMarkerFinder = find.byKey(
+      const ValueKey('nav-track-align-trust-marker'),
+    );
+    expect(trustMarkerFinder, findsOneWidget);
+    final before = tester.getCenter(trustMarkerFinder);
+
+    final sliderFinder = find.byKey(
+      const ValueKey('nav-track-align-trust-slider'),
+    );
+    await tester.drag(sliderFinder, const Offset(150, 0));
+    await tester.pump();
+
+    final after = tester.getCenter(trustMarkerFinder);
+    expect(after, isNot(before));
+  });
+
+  testWidgets('reset correction clears the anchor and end mode', (
+    tester,
+  ) async {
+    final repository = await _pump(tester, route: _route());
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-place-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-reset')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    expect(repository.correction?.anchor, isNull);
+    expect(repository.correction?.endMode, NavTrackEndMode.none);
+    expect(repository.correction?.trustFraction, 0);
+  });
+
+  testWidgets(
+    'dragging the start marker right on screen moves it east, and down '
+    'moves it south',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      // Place the start marker at the map's initial centre first.
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump();
+
+      final markerFinder = find.byKey(
+        const ValueKey('nav-track-align-start-marker'),
+      );
+      expect(markerFinder, findsOneWidget);
+
+      // Drag right and down on screen.
+      await tester.drag(markerFinder, const Offset(40, 30));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      const before = GeoPoint(0, 0);
+      final after = repository.lastCorrection?.anchor;
+      expect(after, isNotNull);
+      // Right on screen must increase longitude (east); down must decrease
+      // latitude (south). A north/east or sign mix-up would flip one or
+      // both of these compass directions.
+      expect(after!.longitude, greaterThan(before.longitude));
+      expect(after.latitude, lessThan(before.latitude));
+    },
+  );
+
+  testWidgets('dragging the end marker moves the end point on its own', (
+    tester,
+  ) async {
+    final repository = await _pump(tester, route: _route());
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-place-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-place-end')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+    await tester.pump();
+
+    await tester.drag(
+      find.byKey(const ValueKey('nav-track-align-end-marker')),
+      const Offset(40, 30),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    final correction = repository.lastCorrection;
+    expect(correction?.endPoint?.longitude, greaterThan(0));
+    expect(correction?.endPoint?.latitude, lessThan(0));
+    expect(correction?.anchor, const GeoPoint(0, 0));
+  });
+
+  testWidgets('the "None" end chip clears a chosen end mode', (tester) async {
+    final repository = await _pump(tester, route: _route());
+
+    await tester.tap(
+      find.byKey(const ValueKey('nav-track-align-end-same-as-start')),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-end-none')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    expect(repository.correction?.endMode, NavTrackEndMode.none);
+  });
+
+  testWidgets(
+    'shows a "Start:" heading above the start-point actions, mirroring '
+    'the "End:" heading above the end-mode dropdown (item 2)',
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      expect(find.text('Start: '), findsOneWidget);
+      expect(find.text('End: '), findsOneWidget);
+    },
+  );
+
+  testWidgets('cancel pops without saving', (tester) async {
+    final repository = await _pump(tester, route: _route());
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-cancel')));
+    await tester.pumpAndSettle();
+
+    expect(repository.lastCorrection, isNull);
+  });
+
+  testWidgets(
+    'the "Open 3D" button uses the same icon as "3D-Unterwasserwelt" on the '
+    'dive detail page (Icons.terrain), not the unrelated AR-cube icon the '
+    "dive profile's own 3D preview uses",
+    (tester) async {
+      await _pump(tester, route: _route());
+
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('nav-track-align-3d')),
+          matching: find.byIcon(Icons.terrain),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'typing a rotation value into the field updates headingOffsetDeg',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      final fieldFinder = find.byKey(
+        const ValueKey('nav-track-align-rotation-field'),
+      );
+      await tester.enterText(fieldFinder, '12.5');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.headingOffsetDeg, 12.5);
+    },
+  );
+
+  testWidgets('a comma decimal is read under a comma locale (#1900)', (
+    tester,
+  ) async {
+    final previousLocale = Intl.defaultLocale;
+    addTearDown(() => Intl.defaultLocale = previousLocale);
+    Intl.defaultLocale = 'de';
+    final repository = await _pump(tester, route: _route());
+
+    final fieldFinder = find.byKey(
+      const ValueKey('nav-track-align-rotation-field'),
+    );
+    await tester.enterText(fieldFinder, '12,5');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+    await tester.pumpAndSettle();
+
+    expect(
+      repository.lastCorrection?.headingOffsetDeg,
+      12.5,
+      reason: 'double.tryParse rejected "12,5" and silently reverted it',
+    );
+  });
+
+  testWidgets('unreadable rotation text says why before it is reverted '
+      '(#1900)', (tester) async {
+    final previousLocale = Intl.defaultLocale;
+    addTearDown(() => Intl.defaultLocale = previousLocale);
+    Intl.defaultLocale = 'en_US';
+    await _pump(tester, route: _route());
+
+    await tester.enterText(
+      find.byKey(const ValueKey('nav-track-align-rotation-field')),
+      '1..5',
+    );
+    await tester.pump();
+
+    expect(find.textContaining('Enter a valid number'), findsOneWidget);
+  });
+
+  testWidgets(
+    'entering garbage text into the rotation field leaves the prior value '
+    'intact',
+    (tester) async {
+      final repository = await _pump(tester, route: _route());
+
+      // Establish a known non-zero value first via the stepper.
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-rotate-up')));
+      await tester.pump();
+
+      final fieldFinder = find.byKey(
+        const ValueKey('nav-track-align-rotation-field'),
+      );
+      await tester.enterText(fieldFinder, 'not a number');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.headingOffsetDeg, 0.5);
+    },
+  );
+
+  testWidgets(
+    'discards a stale terrain-check result that resolves after a newer one '
+    '(item 6): moving the start point twice must not let the FIRST, '
+    'slower bathymetry fetch overwrite the SECOND, faster one that already '
+    'landed',
+    (tester) async {
+      final completers =
+          <({double lat, double lon}), Completer<BathymetryGrid?>>{};
+      final grid = BathymetryGrid(
+        originLat: 0,
+        originLon: 0,
+        cellSizeLatDeg: 0.01,
+        cellSizeLonDeg: 0.01,
+        rows: 1,
+        cols: 1,
+        depthsMeters: const [50.0],
+        sourceId: 'test',
+        resolutionMeters: 5, // fine: no "coarse bathymetry" caveat
+        fetchedAt: DateTime(2026, 1, 1),
+      );
+      final coarseGrid = BathymetryGrid(
+        originLat: 0,
+        originLon: 0,
+        cellSizeLatDeg: 0.01,
+        cellSizeLonDeg: 0.01,
+        rows: 1,
+        cols: 1,
+        depthsMeters: const [50.0],
+        sourceId: 'test-coarse',
+        resolutionMeters: 500, // coarse: adds the caveat
+        fetchedAt: DateTime(2026, 1, 1),
+      );
+
+      final dive = Dive(
+        id: 'dive-1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 8, 22, 10, 8),
+        entryLocation: const GeoPoint(46.9, 7.2),
+      );
+      await _pump(
+        tester,
+        route: _route(diveId: 'dive-1'),
+        linkedDive: dive,
+        bathymetryOverride: bathymetryGridProvider.overrideWith((ref, cell) {
+          final completer = completers.putIfAbsent(cell, () => Completer());
+          return completer.future;
+        }),
+      );
+
+      // First terrain check: the start point at the map's initial centre
+      // (0, 0) -- a different quantized cell from the dive entry below.
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump(const Duration(milliseconds: 300)); // debounce fires
+      final firstCell = completers.keys.single;
+
+      // Before the first fetch resolves, move the start point again (a
+      // different cell): the second, later terrain check must supersede it.
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+      );
+      await tester.pump(const Duration(milliseconds: 300)); // debounce fires
+      expect(completers.length, 2);
+      final secondCell = completers.keys.firstWhere((c) => c != firstCell);
+
+      // The second (newer) request resolves first, with the fine grid.
+      completers[secondCell]!.complete(grid);
+      await tester.pump();
+      expect(find.textContaining('coarse bathymetry'), findsNothing);
+
+      // The first (older, slower) request resolves last, with a coarse
+      // grid. It must be discarded, not overwrite the newer result.
+      completers[firstCell]!.complete(coarseGrid);
+      await tester.pump();
+
+      expect(find.textContaining('coarse bathymetry'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'discards an older terrain result that lands while a newer check is '
+    'still waiting out its debounce',
+    (tester) async {
+      final completers =
+          <({double lat, double lon}), Completer<BathymetryGrid?>>{};
+      final coarseGrid = BathymetryGrid(
+        originLat: 0,
+        originLon: 0,
+        cellSizeLatDeg: 0.01,
+        cellSizeLonDeg: 0.01,
+        rows: 1,
+        cols: 1,
+        depthsMeters: const [50.0],
+        sourceId: 'test-coarse',
+        resolutionMeters: 500, // coarse: adds the caveat
+        fetchedAt: DateTime(2026, 1, 1),
+      );
+      final dive = Dive(
+        id: 'dive-1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 8, 22, 10, 8),
+        entryLocation: const GeoPoint(46.9, 7.2),
+      );
+      await _pump(
+        tester,
+        route: _route(diveId: 'dive-1'),
+        linkedDive: dive,
+        bathymetryOverride: bathymetryGridProvider.overrideWith((ref, cell) {
+          final completer = completers.putIfAbsent(cell, () => Completer());
+          return completer.future;
+        }),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-place-start')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pump(const Duration(milliseconds: 300)); // first check runs
+      final firstCell = completers.keys.single;
+
+      // Move the start point; the next check is still inside its debounce.
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // The first check's fetch lands now, for a start point the diver has
+      // already moved away from.
+      completers[firstCell]!.complete(coarseGrid);
+      await tester.pump();
+
+      expect(find.textContaining('coarse bathymetry'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 300));
+    },
+  );
+
+  testWidgets(
+    'proposes "same as start" for a looped dive whose recording ends with a '
+    'far-away GPS fix (the proposal measures the dive, not the surface tail)',
+    (tester) async {
+      final route = NavTrack(
+        id: 'r-loop',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'r-loop.csv',
+        startTime: 1755856800000,
+        endTime: 1755856854000,
+        pointCount: 7,
+        points: const [
+          NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 5),
+          NavTrackPoint(timestamp: 1755856810, north: 40, east: 0, depth: 8),
+          NavTrackPoint(timestamp: 1755856820, north: 40, east: 40, depth: 8),
+          NavTrackPoint(timestamp: 1755856830, north: 0, east: 40, depth: 6),
+          // Back where it started, then surfacing.
+          NavTrackPoint(timestamp: 1755856850, north: 2, east: 1, depth: 0),
+          // GPS re-acquired: the console jumps far away within seconds.
+          NavTrackPoint(timestamp: 1755856852, north: 400, east: 0, depth: 0),
+          NavTrackPoint(timestamp: 1755856854, north: 401, east: 0, depth: 0),
+        ],
+        createdAt: DateTime(2026, 8, 22),
+        updatedAt: DateTime(2026, 8, 22),
+      );
+
+      final repository = await _pump(tester, route: route);
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastCorrection?.endMode, NavTrackEndMode.sameAsStart);
+    },
+  );
+
+  testWidgets(
+    'the terrain check only runs over the active dead-reckoned range, not '
+    'the raw recording (proactive finding: a GPS-fixed/out-of-water tail '
+    'must not be checked against the seafloor at all)',
+    (tester) async {
+      final grid = BathymetryGrid(
+        originLat: 0,
+        originLon: 0,
+        cellSizeLatDeg: 0.05,
+        cellSizeLonDeg: 0.05,
+        rows: 1,
+        cols: 1,
+        depthsMeters: const [50.0],
+        sourceId: 'test',
+        resolutionMeters: 5,
+        fetchedAt: DateTime(2026, 1, 1),
+      );
+
+      final route = NavTrack(
+        id: 'r-fix',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'r-fix.csv',
+        startTime: 0,
+        endTime: 20000,
+        pointCount: 4,
+        anchorLatitude: 0,
+        anchorLongitude: 0,
+        points: const [
+          NavTrackPoint(timestamp: 0, north: 0, east: 0, depth: 5),
+          NavTrackPoint(
+            timestamp: 10,
+            north: 5,
+            east: 0,
+            depth: 0.1,
+            distance: 5,
+          ),
+          // Fix event: >50 m step in <=5 s at the surface -- excluded from
+          // the active range from here on.
+          NavTrackPoint(
+            timestamp: 12,
+            north: 400,
+            east: 0,
+            depth: 0.1,
+            distance: 5,
+          ),
+          NavTrackPoint(
+            timestamp: 20,
+            north: 405,
+            east: 0,
+            depth: 0.1,
+            distance: 5,
+          ),
+        ],
+        createdAt: DateTime(2026, 9, 6),
+        updatedAt: DateTime(2026, 9, 6),
+      );
+
+      await _pump(
+        tester,
+        route: route,
+        bathymetryOverride: bathymetryGridProvider.overrideWith(
+          (ref, cell) async => grid,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300)); // debounce fires
+      await tester.pump();
+
+      // Only the 2 pre-fix samples may be checked, never all 4 raw ones.
+      expect(find.textContaining('of 2 below the seafloor'), findsOneWidget);
+      expect(find.textContaining('of 4 below the seafloor'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'the trust slider shares the corrector\'s device-distance-channel '
+    'preference instead of always recomputing geometric path length '
+    '(item 2)',
+    (tester) async {
+      final points = [
+        const NavTrackPoint(
+          timestamp: 0,
+          north: 0,
+          east: 0,
+          depth: 5,
+          distance: 0,
+        ),
+        const NavTrackPoint(
+          timestamp: 10,
+          north: 10,
+          east: 0,
+          depth: 5,
+          distance: 10,
+        ),
+        // Loops back to the previous position -- geometric path length adds
+        // almost nothing here -- while the device's own distance channel
+        // (integrated from the speed log, not from position) keeps
+        // climbing, exactly the ENC console shape the design spec
+        // describes.
+        const NavTrackPoint(
+          timestamp: 20,
+          north: 10,
+          east: 0,
+          depth: 5,
+          distance: 1000,
+        ),
+      ];
+      final route = NavTrack(
+        id: 'r-loop',
+        source: NavTrackSource.seacraftEnc,
+        sourceRef: 'loop.csv',
+        startTime: 0,
+        endTime: 20000,
+        pointCount: points.length,
+        points: points,
+        createdAt: DateTime(2026, 9, 6),
+        updatedAt: DateTime(2026, 9, 6),
+      );
+
+      await _pump(tester, route: route);
+
+      final sliderFinder = find.byKey(
+        const ValueKey('nav-track-align-trust-slider'),
+      );
+      // Drag far enough right to saturate the trust fraction near 1.0.
+      await tester.drag(sliderFinder, const Offset(2000, 0));
+      await tester.pump();
+
+      // Geometric path length over these 3 samples is only 10 m (the loop
+      // back to the same position contributes nothing); the device
+      // distance channel reaches 1000 m. A slider that recomputed
+      // geometric path length instead of sharing the corrector's own
+      // distance-source rule could never show more than ~10 m here.
+      expect(find.textContaining('trusted up to 10m'), findsNothing);
+      expect(
+        find.textContaining(RegExp(r'trusted up to (9\d\d|1000)m')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('the trust summary respects the diver\'s imperial unit setting '
+      '(spec: "Anything displaying units should respect the active diver\'s '
+      'unit settings")', (tester) async {
+    await _pump(
+      tester,
+      route: _route(),
+      settingsNotifier: MockSettingsNotifier(
+        const AppSettings(depthUnit: DepthUnit.feet),
+      ),
+    );
+
+    // With no correction yet, trustFraction defaults to 0, so the trust
+    // summary reads "0ft" -- still enough to prove the imperial unit and
+    // its symbol are used, not a hardcoded "m".
+    expect(find.textContaining(RegExp(r'trusted up to \d+ft')), findsOneWidget);
+    expect(find.textContaining(RegExp(r'trusted up to \d+m\b')), findsNothing);
+  });
+
+  testWidgets('a route whose points blob could not be decoded shows a load '
+      'error instead of crashing (the repository returns an empty points '
+      'list for an unreadable synced blob)', (tester) async {
+    final degraded = NavTrack(
+      id: 'r1',
+      source: NavTrackSource.seacraftEnc,
+      sourceRef: 'r1.csv',
+      startTime: 1755856800000,
+      endTime: 1755860400000,
+      pointCount: 10,
+      points: const [],
+      createdAt: DateTime(2026, 8, 22),
+      updatedAt: DateTime(2026, 8, 22),
+    );
+
+    await _pump(tester, route: degraded);
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Could not load this track.'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('nav-track-align-trust-slider')),
+      findsNothing,
+    );
+  });
+
+  group('GPS-fix dots stay put under rotation and trust (item 1)', () {
+    // The real fixture with a genuine surface GPS fix event (011.DAT.csv,
+    // spec "A surface GPS fix inside the same file"): the yellow dots must
+    // render from the raw recording, never from NavTrackCorrector.apply,
+    // so neither headingOffsetDeg nor trustFraction may move them.
+    final track = parseSeacraftEncCsv(
+      File(
+        'test/fixtures/nav_tracks/seacraft_enc3_gps_fix.csv',
+      ).readAsBytesSync(),
+    );
+
+    NavTrack fixRoute() => NavTrack(
+      id: 'r-fix',
+      source: NavTrackSource.seacraftEnc,
+      sourceRef: 'fix.csv',
+      startTime: track.points.first.timestamp * 1000,
+      endTime: track.points.last.timestamp * 1000,
+      pointCount: track.points.length,
+      points: track.points,
+      anchorLatitude: 47.1,
+      anchorLongitude: 8.3,
+      createdAt: DateTime(2026, 9, 6),
+      updatedAt: DateTime(2026, 9, 6),
+    );
+
+    LatLng firstGpsFixDotPosition(WidgetTester tester) {
+      final markerLayers = tester
+          .widgetList<MarkerLayer>(find.byType(MarkerLayer))
+          .where(
+            (layer) => layer.markers.any((m) => m.width == 6 && m.height == 6),
+          )
+          .toList();
+      expect(
+        markerLayers,
+        isNotEmpty,
+        reason: 'expected a GPS-fix dots layer to be rendered',
+      );
+      return markerLayers.first.markers.first.point;
+    }
+
+    testWidgets('changing headingOffsetDeg does not move a GPS-fix dot', (
+      tester,
+    ) async {
+      await _pump(tester, route: fixRoute());
+
+      final before = firstGpsFixDotPosition(tester);
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-rotate-up')));
+      await tester.pump();
+      // A single 0.5 degree step barely moves anything; use a large,
+      // unambiguous rotation instead.
+      final fieldFinder = find.byKey(
+        const ValueKey('nav-track-align-rotation-field'),
+      );
+      await tester.enterText(fieldFinder, '90');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      final after = firstGpsFixDotPosition(tester);
+
+      expect(after.latitude, closeTo(before.latitude, 1e-9));
+      expect(after.longitude, closeTo(before.longitude, 1e-9));
+    });
+
+    testWidgets('changing trustFraction does not move a GPS-fix dot', (
+      tester,
+    ) async {
+      await _pump(tester, route: fixRoute());
+
+      final before = firstGpsFixDotPosition(tester);
+
+      await tester.drag(
+        find.byKey(const ValueKey('nav-track-align-trust-slider')),
+        const Offset(120, 0),
+      );
+      await tester.pump();
+
+      final after = firstGpsFixDotPosition(tester);
+
+      expect(after.latitude, closeTo(before.latitude, 1e-9));
+      expect(after.longitude, closeTo(before.longitude, 1e-9));
+    });
+  });
+
+  group('when the track cannot be shown', () {
+    Future<void> pumpAlign(
+      WidgetTester tester,
+      Future<NavTrack?> Function() load,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            navTrackByIdProvider('r1').overrideWith((ref) => load()),
+          ],
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: NavTrackAlignPage(routeId: 'r1'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a failed load says the track could not be loaded', (
+      tester,
+    ) async {
+      await pumpAlign(tester, () async => throw StateError('database locked'));
+      expect(find.text('Could not load this track.'), findsOneWidget);
+    });
+
+    testWidgets('a missing track says the track was not found', (tester) async {
+      await pumpAlign(tester, () async => null);
+      expect(find.text('Track not found.'), findsOneWidget);
+    });
+  });
+
+  group('opening framing (#3823)', () {
+    MapController controllerOf(WidgetTester tester) =>
+        tester.widget<FlutterMap>(find.byType(FlutterMap)).mapController!;
+
+    // Due north, [metres] long.
+    List<NavTrackPoint> run(double metres) => [
+      for (var i = 0; i < 20; i++)
+        NavTrackPoint(
+          timestamp: 1755856800 + i * 10,
+          north: i * metres / 19,
+          east: 0,
+          depth: 5,
+        ),
+    ];
+
+    NavTrack anchoredRun(double metres, {double scale = 1}) =>
+        _route().copyWith(
+          anchorLatitude: 10,
+          anchorLongitude: 20,
+          points: run(metres),
+          scaleFactor: scale,
+        );
+
+    bool shows(WidgetTester tester, double north) =>
+        controllerOf(tester).camera.visibleBounds.contains(
+          LatLng(
+            offsetToGeoPoint(
+              const GeoPoint(10, 20),
+              east: 0,
+              north: north,
+            ).latitude,
+            20,
+          ),
+        );
+
+    testWidgets('opens with the whole of a long track in view', (tester) async {
+      await _pump(tester, route: anchoredRun(5000));
+      expect(shows(tester, 0), isTrue);
+      expect(shows(tester, 5000), isTrue);
+    });
+
+    testWidgets('opens fitted to the track as scaled', (tester) async {
+      await _pump(tester, route: anchoredRun(1000, scale: 4));
+      expect(shows(tester, 4000), isTrue);
+    });
+
+    testWidgets('opens close enough that a small track keeps its handle clear '
+        'of the start marker', (tester) async {
+      await _pump(tester, route: anchoredRun(100));
+      final handle = tester.getCenter(
+        find.byKey(const ValueKey('nav-track-align-scale-handle')),
+      );
+      final start = tester.getCenter(
+        find.byKey(const ValueKey('nav-track-align-start-marker')),
+      );
+      expect((handle - start).distance, greaterThan(36));
+    });
+
+    testWidgets('a track with no start point opens on the world view', (
+      tester,
+    ) async {
+      await _pump(tester, route: _route());
+      expect(controllerOf(tester).camera.zoom, 3);
+    });
+
+    testWidgets('resizing the map does not undo the diver\'s own framing', (
+      tester,
+    ) async {
+      await _pump(tester, route: anchoredRun(1000));
+      final controller = controllerOf(tester);
+      controller.move(const LatLng(10.5, 20.5), 12);
+      await tester.pump();
+      // Pinning the end adds the hint, which takes height from the map.
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-place-end')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-set-here')));
+      await tester.pumpAndSettle();
+      expect(controller.camera.center.latitude, closeTo(10.5, 0.01));
+      expect(controller.camera.zoom, 12);
+    });
+  });
+
+  group('dragging a start or end marker', () {
+    const startMarker = ValueKey('nav-track-align-start-marker');
+    const endMarker = ValueKey('nav-track-align-end-marker');
+
+    NavTrack anchored() => _route().copyWith(
+      anchorLatitude: 10,
+      anchorLongitude: 20,
+      endMode: NavTrackEndMode.point,
+      endLatitude: 10.002,
+      endLongitude: 20.002,
+    );
+
+    MapController controllerOf(WidgetTester tester) =>
+        tester.widget<FlutterMap>(find.byType(FlutterMap)).mapController!;
+
+    Future<void> drag(WidgetTester tester, Key key, Offset by) async {
+      final from = tester.getCenter(find.byKey(key));
+      final gesture = await tester.startGesture(from);
+      await tester.pump();
+      for (var i = 1; i <= 8; i++) {
+        await gesture.moveTo(from + by * (i / 8));
+        await tester.pump();
+      }
+      await gesture.up();
+      await tester.pump();
+    }
+
+    testWidgets('does not pan the map', (tester) async {
+      await _pump(tester, route: anchored());
+      final before = controllerOf(tester).camera.center;
+      await drag(tester, startMarker, const Offset(50, 30));
+      expect(controllerOf(tester).camera.center, before);
+    });
+
+    testWidgets('keeps the start marker under the pointer', (tester) async {
+      await _pump(tester, route: anchored());
+      final from = tester.getCenter(find.byKey(startMarker));
+      const by = Offset(50, 30);
+      await drag(tester, startMarker, by);
+      expect(
+        (tester.getCenter(find.byKey(startMarker)) - (from + by)).distance,
+        lessThan(1),
+      );
+    });
+
+    testWidgets('keeps the end marker under the pointer', (tester) async {
+      await _pump(tester, route: anchored());
+      final from = tester.getCenter(find.byKey(endMarker));
+      const by = Offset(-40, 25);
+      await drag(tester, endMarker, by);
+      expect(
+        (tester.getCenter(find.byKey(endMarker)) - (from + by)).distance,
+        lessThan(1),
+      );
+    });
+
+    testWidgets('tracks the pointer on a rotated map', (tester) async {
+      await _pump(tester, route: anchored());
+      controllerOf(tester).rotate(90);
+      await tester.pumpAndSettle();
+      final from = tester.getCenter(find.byKey(startMarker));
+      const by = Offset(50, 30);
+      await drag(tester, startMarker, by);
+      expect(
+        (tester.getCenter(find.byKey(startMarker)) - (from + by)).distance,
+        lessThan(1),
+      );
+    });
+  });
+
+  group('track scale (#3823)', () {
+    const scaleUp = ValueKey('nav-track-align-scale-up');
+    const hint = ValueKey('nav-track-align-scale-pinned-hint');
+
+    NavTrack anchored({
+      NavTrackEndMode endMode = NavTrackEndMode.none,
+      double? endLatitude,
+      double? endLongitude,
+    }) => _route().copyWith(
+      anchorLatitude: 10,
+      anchorLongitude: 20,
+      endMode: endMode,
+      endLatitude: endLatitude,
+      endLongitude: endLongitude,
+    );
+
+    double fieldPercent(WidgetTester tester) => double.parse(
+      tester
+          .widget<TextField>(
+            find.byKey(const ValueKey('nav-track-align-scale-field')),
+          )
+          .controller!
+          .text,
+    );
+
+    testWidgets('Save persists the scale', (tester) async {
+      final repository = await _pump(tester, route: _route());
+      await tester.tap(find.byKey(scaleUp));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+      expect(repository.lastCorrection?.scaleFactor, closeTo(1.01, 1e-9));
+    });
+
+    testWidgets('Cancel does not persist the scale', (tester) async {
+      final repository = await _pump(tester, route: _route());
+      await tester.tap(find.byKey(scaleUp));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-cancel')));
+      await tester.pumpAndSettle();
+      expect(repository.lastCorrection, isNull);
+    });
+
+    testWidgets('Reset returns the scale to 100%', (tester) async {
+      await _pump(tester, route: _route());
+      await tester.tap(find.byKey(scaleUp));
+      await tester.pump();
+      expect(fieldPercent(tester), 101);
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-reset')));
+      await tester.pump();
+      expect(fieldPercent(tester), 100);
+    });
+
+    testWidgets('a saved scale opens in the field', (tester) async {
+      await _pump(tester, route: _route().copyWith(scaleFactor: 1.38));
+      expect(fieldPercent(tester), 138);
+    });
+
+    testWidgets('a scale change moves the drawn track', (tester) async {
+      await _pump(tester, route: anchored());
+      NavTrack drawn() => tester
+          .widget<NavTrackPolylineLayer>(find.byType(NavTrackPolylineLayer))
+          .route;
+      expect(drawn().scaleFactor, 1);
+      await tester.tap(find.byKey(scaleUp));
+      await tester.pump();
+      expect(drawn().scaleFactor, closeTo(1.01, 1e-9));
+    });
+
+    testWidgets('the hint shows while an end point pins the end', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        route: anchored(
+          endMode: NavTrackEndMode.point,
+          endLatitude: 10.001,
+          endLongitude: 20.001,
+        ),
+      );
+      expect(find.byKey(hint), findsOneWidget);
+    });
+
+    testWidgets('no hint for Same as start', (tester) async {
+      await _pump(
+        tester,
+        route: anchored(endMode: NavTrackEndMode.sameAsStart),
+      );
+      expect(find.byKey(hint), findsNothing);
+    });
+
+    testWidgets('no hint with no end', (tester) async {
+      await _pump(tester, route: anchored());
+      expect(find.byKey(hint), findsNothing);
+    });
+
+    testWidgets('fits a phone with the widest value and the hint showing', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+
+      await _pump(
+        tester,
+        route: anchored(
+          endMode: NavTrackEndMode.point,
+          endLatitude: 10.001,
+          endLongitude: 20.001,
+        ).copyWith(scaleFactor: 4, headingOffsetDeg: -180),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(fieldPercent(tester), 400);
+      expect(find.byKey(hint), findsOneWidget);
+      // Too wide for one row at this width, so Scale drops below Rotation.
+      expect(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('nav-track-align-scale-field')),
+            )
+            .dy,
+        greaterThan(
+          tester
+              .getTopLeft(
+                find.byKey(const ValueKey('nav-track-align-rotation-field')),
+              )
+              .dy,
+        ),
+      );
+      for (final key in [
+        'nav-track-align-scale-down',
+        'nav-track-align-scale-up',
+        'nav-track-align-rotate-up',
+      ]) {
+        expect(
+          tester.getBottomRight(find.byKey(ValueKey(key))).dx,
+          lessThanOrEqualTo(390),
+        );
+      }
+    });
+
+    group('the handle', () {
+      const handle = ValueKey('nav-track-align-scale-handle');
+
+      // An out-and-back about 230 m long, so at the page's opening zoom the
+      // handle clears the start marker and stays inside the test's small map.
+      NavTrack longTrack({
+        NavTrackEndMode endMode = NavTrackEndMode.none,
+        double trustFraction = 0,
+      }) => _route().copyWith(
+        anchorLatitude: 10,
+        anchorLongitude: 20,
+        endMode: endMode,
+        trustFraction: trustFraction,
+        points: [
+          for (var i = 0; i < 20; i++)
+            NavTrackPoint(
+              timestamp: 1755856800 + i * 10,
+              north: i < 10 ? i * 25.0 : (19 - i) * 25.0,
+              east: i < 10 ? i * 5.0 : 100.0 - i * 5.0,
+              depth: 5,
+            ),
+        ],
+      );
+
+      Future<void> dragHandle(WidgetTester tester, Offset by) async {
+        final from = tester.getCenter(find.byKey(handle));
+        final gesture = await tester.startGesture(from);
+        await tester.pump();
+        for (var i = 1; i <= 8; i++) {
+          await gesture.moveTo(from + by * (i / 8));
+          await tester.pump();
+        }
+        await gesture.up();
+        await tester.pump();
+      }
+
+      testWidgets('shows once the track is on the map', (tester) async {
+        await _pump(tester, route: longTrack());
+        expect(find.byKey(handle), findsOneWidget);
+      });
+
+      testWidgets('is hidden with no start point', (tester) async {
+        await _pump(tester, route: _route());
+        expect(find.byKey(handle), findsNothing);
+      });
+
+      testWidgets('is hidden on a track under 10 m', (tester) async {
+        await _pump(
+          tester,
+          route: anchored().copyWith(
+            points: const [
+              NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 5),
+              NavTrackPoint(timestamp: 1755856810, north: 4, east: 3, depth: 5),
+            ],
+          ),
+        );
+        expect(find.byKey(handle), findsNothing);
+      });
+
+      testWidgets('is hidden while placing a point', (tester) async {
+        await _pump(tester, route: longTrack());
+        await tester.tap(
+          find.byKey(const ValueKey('nav-track-align-place-start')),
+        );
+        await tester.pump();
+        expect(find.byKey(handle), findsNothing);
+      });
+
+      testWidgets('is hidden while the end is pinned', (tester) async {
+        await _pump(
+          tester,
+          route: longTrack(
+            endMode: NavTrackEndMode.point,
+          ).copyWith(endLatitude: 10.001, endLongitude: 20.001),
+        );
+        expect(find.byKey(handle), findsNothing);
+      });
+
+      testWidgets('a drag updates the scale field live', (tester) async {
+        await _pump(tester, route: longTrack());
+        await dragHandle(tester, const Offset(10, -60));
+        expect(fieldPercent(tester), greaterThan(100));
+      });
+
+      testWidgets('Save persists a dragged scale', (tester) async {
+        final repository = await _pump(tester, route: longTrack());
+        await dragHandle(tester, const Offset(10, -60));
+        await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+        await tester.pumpAndSettle();
+        expect(repository.lastCorrection!.scaleFactor, greaterThan(1));
+      });
+
+      testWidgets('stays under the pointer with Same as start and trust set', (
+        tester,
+      ) async {
+        await _pump(
+          tester,
+          route: longTrack(
+            endMode: NavTrackEndMode.sameAsStart,
+            trustFraction: 0.3,
+          ),
+        );
+        final from = tester.getCenter(find.byKey(handle));
+        final start = tester.getCenter(
+          find.byKey(const ValueKey('nav-track-align-start-marker')),
+        );
+        // Out along the line from the start: the handle reads distance only.
+        final by = (from - start) * 0.4;
+        final gesture = await tester.startGesture(from);
+        await tester.pump();
+        for (var i = 1; i <= 8; i++) {
+          await gesture.moveTo(from + by * (i / 8));
+          await tester.pump();
+        }
+        expect(
+          (tester.getCenter(find.byKey(handle)) - (from + by)).distance,
+          lessThan(2),
+        );
+        await gesture.up();
+      });
+    });
+
+    testWidgets('picking Same as start clears the hint', (tester) async {
+      await _pump(
+        tester,
+        route: anchored(
+          endMode: NavTrackEndMode.point,
+          endLatitude: 10.001,
+          endLongitude: 20.001,
+        ),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('nav-track-align-end-same-as-start')),
+      );
+      await tester.pump();
+      expect(find.byKey(hint), findsNothing);
+    });
+  });
+
+  testWidgets('the map zooms and scrolls like the other maps (#3664)', (
+    tester,
+  ) async {
+    await _pump(tester, route: _route());
+    expectZoomsAndScrollsLikeOtherMaps(tester);
+  });
+
+  group('controls panel height cap (#3994)', () {
+    // The widest the Start row gets: a linked dive (From dive entry), a
+    // site (From site) and a pre-dive GPS fix (From GPS), all at once:
+    // the shape from the "From GPS" chip test above, with a dive added.
+    const site = DiveSite(
+      id: 'site-1',
+      name: 'Test Site',
+      location: GeoPoint(47.1, 8.3),
+    );
+    final wideRowPoints = [
+      const NavTrackPoint(timestamp: 1755856800, north: 0, east: 0, depth: 0),
+      const NavTrackPoint(timestamp: 1755856802, north: 100, east: 0, depth: 0),
+      const NavTrackPoint(timestamp: 1755856804, north: 100, east: 0, depth: 0),
+      const NavTrackPoint(timestamp: 1755856806, north: 100, east: 0, depth: 5),
+      const NavTrackPoint(timestamp: 1755856808, north: 105, east: 2, depth: 8),
+    ];
+    final wideRowRoute = NavTrack(
+      id: 'r1',
+      diveId: 'dive-1',
+      siteId: 'site-1',
+      linkMode: NavTrackLinkMode.auto,
+      source: NavTrackSource.seacraftEnc,
+      sourceRef: 'r1.csv',
+      startTime: 1755856800000,
+      endTime: 1755856808000,
+      pointCount: wideRowPoints.length,
+      points: wideRowPoints,
+      createdAt: DateTime(2026, 8, 22),
+      updatedAt: DateTime(2026, 8, 22),
+    );
+    final wideRowDive = Dive(
+      id: 'dive-1',
+      diveNumber: 1,
+      dateTime: DateTime(2026, 8, 22, 10, 8),
+      entryLocation: const GeoPoint(46.9, 7.2),
+    );
+
+    Future<void> pumpWideRowOnPhone(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await _pump(
+        tester,
+        route: wideRowRoute,
+        linkedDive: wideRowDive,
+        site: site,
+      );
+      // The widest Start row, confirmed present before measuring layout.
+      expect(
+        find.byKey(const ValueKey('nav-track-align-from-dive-entry')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('nav-track-align-from-site')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('nav-track-align-from-gps')),
+        findsOneWidget,
+      );
+    }
+
+    double bodyHeight(WidgetTester tester) => tester
+        .getSize(find.byKey(const ValueKey('nav-track-align-body')))
+        .height;
+
+    testWidgets(
+      'the map keeps at least 55% of the body height on a phone-sized '
+      'screen',
+      (tester) async {
+        await pumpWideRowOnPhone(tester);
+
+        final height = bodyHeight(tester);
+        expect(
+          tester.getSize(find.byType(FlutterMap)).height,
+          greaterThanOrEqualTo(height * 0.55 - 1),
+        );
+      },
+    );
+
+    testWidgets(
+      'the controls panel does not exceed 45% of the body height on a '
+      'phone-sized screen',
+      (tester) async {
+        await pumpWideRowOnPhone(tester);
+
+        final height = bodyHeight(tester);
+        expect(
+          tester
+              .getSize(
+                find.byKey(const ValueKey('nav-track-align-controls-panel')),
+              )
+              .height,
+          lessThanOrEqualTo(height * 0.45 + 1),
+        );
+      },
+    );
+
+    testWidgets('no RenderFlex overflow is reported on the phone-sized '
+        'screen', (tester) async {
+      await pumpWideRowOnPhone(tester);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets(
+      'the panel is not capped at desktop width, even with a tall panel',
+      (tester) async {
+        tester.view.physicalSize = const Size(1200, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        // The widest Start row (dive + site + pre-dive fix, see the wide
+        // row fixture above): tall enough to need the cap on a phone, but
+        // a desktop window docks nothing and must show it uncapped.
+        final repository = await _pump(
+          tester,
+          route: wideRowRoute,
+          linkedDive: wideRowDive,
+          site: site,
+        );
+
+        // The constraint itself, not a height threshold: how much the
+        // content wraps (and so how tall it naturally is) already varies
+        // with window width on its own, which would make any fixed
+        // threshold here fragile. double.infinity is the direct proof
+        // that nothing caps this panel at desktop width.
+        expect(
+          tester
+              .widget<ConstrainedBox>(
+                find.byKey(const ValueKey('nav-track-align-controls-panel')),
+              )
+              .constraints
+              .maxHeight,
+          double.infinity,
+        );
+        // And functionally: Save must be directly tappable with no
+        // scrolling, proving the cap truly does not apply here.
+        await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+        await tester.pumpAndSettle();
+        expect(repository.lastRouteId, 'r1');
+      },
+    );
+
+    for (final (name, size) in const [
+      ('a phone in landscape', Size(844, 390)),
+      ('a short desktop window', Size(1000, 500)),
+    ]) {
+      testWidgets('the cap also holds on $name, whatever its width', (
+        tester,
+      ) async {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final repository = await _pump(
+          tester,
+          route: wideRowRoute,
+          linkedDive: wideRowDive,
+          site: site,
+        );
+
+        expect(tester.takeException(), isNull);
+        final height = bodyHeight(tester);
+        expect(
+          tester.getSize(find.byType(FlutterMap)).height,
+          greaterThanOrEqualTo(height * 0.55 - 1),
+        );
+
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('nav-track-align-done')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+        await tester.pumpAndSettle();
+        expect(repository.lastRouteId, 'r1');
+      });
+    }
+
+    // A scroll view inherits the PrimaryScrollController on mobile only, so
+    // a Scrollbar without its own controller fails on every desktop platform.
+    // Widget tests default to Android and would never see it.
+    testWidgets(
+      'the panel\'s visible scrollbar works on a desktop platform',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        await pumpWideRowOnPhone(tester);
+
+        expect(tester.takeException(), isNull);
+        final scrollbar = tester.widget<Scrollbar>(
+          find
+              .ancestor(
+                of: find.byKey(const ValueKey('nav-track-align-done')),
+                matching: find.byType(Scrollbar),
+              )
+              .last,
+        );
+        expect(scrollbar.controller!.position.maxScrollExtent, greaterThan(0));
+      },
+    );
+
+    testWidgets('Save is reachable by scrolling when the panel is capped', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final repository = await _pump(
+        tester,
+        route: wideRowRoute,
+        linkedDive: wideRowDive,
+        site: site,
+      );
+
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('nav-track-align-done')),
+      );
+      await tester.tap(find.byKey(const ValueKey('nav-track-align-done')));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastRouteId, 'r1');
+    });
+  });
+}

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
@@ -24,6 +25,7 @@ void main() {
       DatabaseService.instance.resetForTesting();
 
       await expectLater(repository.getAllDives(), throwsA(anything));
+      await expectLater(repository.getDiveListSnapshot(), throwsA(anything));
       await expectLater(repository.getDiveById('test-id'), throwsA(anything));
       await expectLater(
         repository.saveEditedProfile('test-id', []),
@@ -35,7 +37,15 @@ void main() {
       );
       await expectLater(repository.getDiveCount(), throwsA(anything));
       await expectLater(
+        repository.getResidualHistoryRevision('test-id'),
+        throwsA(anything),
+      );
+      await expectLater(
         repository.getDivesForSite('test-id'),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.getDiverIdsAtSite('test-id'),
         throwsA(anything),
       );
       await expectLater(
@@ -47,9 +57,42 @@ void main() {
         throwsA(anything),
       );
       await expectLater(repository.getNextDiveNumber(), throwsA(anything));
-      await expectLater(repository.searchDives('test'), throwsA(anything));
+      await expectLater(
+        repository.countDivesSharingDiveNumber(['test-id']),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.searchDiveSummaries('test'),
+        throwsA(anything),
+      );
+      await expectLater(repository.getDivePickerRows(), throwsA(anything));
       await expectLater(repository.getStatistics(), throwsA(anything));
       await expectLater(repository.getRecords(), throwsA(anything));
+      await expectLater(
+        repository.getDivesNeedingConditions(),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.countDivesNeedingConditions(),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.countDivesMissingConditionsWithoutLocation(),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.countLoggedDives({'test-id'}),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.fillDiveConditions(
+          'test-id',
+          humidity: 70,
+          source: WeatherSource.openMeteo,
+          fetchedAt: DateTime.now(),
+        ),
+        throwsA(anything),
+      );
       final dummyDive = Dive(id: 'test-id', dateTime: DateTime.now());
       await expectLater(repository.createDive(dummyDive), throwsA(anything));
       await expectLater(repository.updateDive(dummyDive), throwsA(anything));
@@ -64,6 +107,10 @@ void main() {
       );
       await expectLater(
         repository.getDivesByIds(['test-id']),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.getDivesByIdsWithoutSamples(['test-id']),
         throwsA(anything),
       );
       await expectLater(repository.getDiveSummaries(), throwsA(anything));
@@ -129,6 +176,36 @@ void main() {
     });
 
     test(
+      'should throw ArgumentError when updating dive with a tank that has an empty id',
+      () async {
+        final createdDive = await repository.createDive(
+          Dive(
+            id: 'test-dive',
+            dateTime: DateTime.now(),
+            tanks: const [
+              DiveTank(
+                id: '',
+                volume: 12.0,
+                startPressure: 200,
+                endPressure: 50,
+              ),
+            ],
+          ),
+        );
+
+        final updatedDive = createdDive.copyWith(
+          tanks: [createdDive.tanks[0].copyWith(id: '')],
+          notes: 'Attempt update with empty tank id',
+        );
+
+        await expectLater(
+          repository.updateDive(updatedDive),
+          throwsA(isA<ArgumentError>()),
+        );
+      },
+    );
+
+    test(
       'methods that return defaults return correct values on error',
       () async {
         await DatabaseService.instance.database.close();
@@ -137,13 +214,13 @@ void main() {
         // Methods that return empty list
         expect(await repository.getDiveProfile('test-id'), isEmpty);
         expect(await repository.getGasSwitchesForDive('test-id'), isEmpty);
+        expect(await repository.getGasSwitchesForDives(['test-id']), isEmpty);
 
         // Methods that return empty map
-        expect(await repository.getProfilesBySource('test-id'), isEmpty);
+        expect(await repository.getProfilesByDataSource('test-id'), isEmpty);
         expect(await repository.getBatchProfileSummaries(['test-id']), isEmpty);
 
         // Methods that return null
-        expect(await repository.getPreviousDive('test-id'), isNull);
         expect(await repository.getSurfaceInterval('test-id'), isNull);
       },
     );

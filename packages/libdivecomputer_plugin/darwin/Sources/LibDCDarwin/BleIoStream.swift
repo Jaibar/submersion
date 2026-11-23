@@ -8,28 +8,24 @@ import Foundation
 /// This class translates those calls to async CoreBluetooth operations,
 /// blocking with semaphores until the BLE operation completes.
 class BleIoStream: NSObject, CBPeripheralDelegate {
-    private struct CharacteristicCandidate {
-        let score: Int
-        let write: CBCharacteristic
-        let notify: CBCharacteristic
-    }
-
-    private static let preferredServiceUUIDs: Set<CBUUID> = [
-        CBUUID(string: "CB3C4555-D670-4670-BC20-B61DBC851E9A"),
-    ]
-
-    private static let preferredWriteUUIDs: Set<CBUUID> = [
-        CBUUID(string: "6606AB42-89D5-4A00-A8CE-4EB5E1414EE0"),
-    ]
-
-    private static let preferredNotifyUUIDs: Set<CBUUID> = [
-        CBUUID(string: "A60B8E5C-B267-44D7-9764-837CAF96489E"),
-    ]
+    // Characteristic scoring and the device-specific Tx/Rx preferences live in
+    // BleCharacteristicSelector so they can be unit-tested standalone.
 
     private static let pelagicGen1TxCharacteristic = CBUUID(
         string: "6606AB42-89D5-4A00-A8CE-4EB5E1414EE0"
     )
     private static let notifySettleDelaySeconds: TimeInterval = 0.3
+    /// Bound on the opening credit grant.
+    ///
+    /// Deliberately fixed rather than derived from `timeoutMs`. This runs
+    /// inside connectAndDiscover, before libdivecomputer has been handed the
+    /// iostream callbacks, so `set_timeout` cannot have been called yet and
+    /// `timeoutMs` is still its 10000 ms initialiser -- the two are the same
+    /// number. Following the caller's timeout would also let libdivecomputer's
+    /// negative "no timeout" (mapped to `.distantFuture` on the I/O path) hang
+    /// connection setup indefinitely. The neighbouring setup waits are bounded
+    /// the same way: 15 s to connect, 10 s to discover.
+    private static let creditGrantTimeoutSeconds: DispatchTimeInterval = .seconds(10)
     private static let bleIoctlType: UInt32 = UInt32(Character("b").asciiValue!)
     private static let bleIoctlGetNameNumber: UInt32 = 0
     private static let bleIoctlGetPinCodeNumber: UInt32 = 1
@@ -37,31 +33,61 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
     private static let ioctlDirRead: UInt32 = 1
     private static let ioctlDirWrite: UInt32 = 2
     private static let pinTimeoutSeconds: TimeInterval = 60
+    private static let characteristicReadTimeout: DispatchTimeInterval = .seconds(10)
     private static let directionInput: UInt32 = 1
     private static let maxLogBytes = 24
 
     let peripheral: CBPeripheral
     private let centralManager: CBCentralManager
 
+    /// Which subscription the discovery state machine is waiting on. Telit
+    /// Terminal I/O devices subscribe to UART Credits TX before UART Data TX;
+    /// everything else goes straight to `.dataNotify`.
+    private enum NotifySetupStep {
+        case idle
+        case creditsNotify
+        case dataNotify
+    }
+
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
-    private var bestCandidate: CharacteristicCandidate?
+    /// The read-poll data characteristic (issue #1454), non-nil only when the
+    /// selected service cannot notify. Replies are fetched with readValue(for:)
+    /// and land in `packetBuffer` exactly as notifications do.
+    private var readCharacteristic: CBCharacteristic?
+    /// Guards `readPoll`, which the download thread and the CoreBluetooth
+    /// delegate queue both touch.
+    private let readPollLock = NSLock()
+    private var readPoll = ReadPollPolicy()
+    /// UART Credits RX/TX, non-nil only for Telit Terminal I/O devices.
+    private var creditsWriteCharacteristic: CBCharacteristic?
+    private var creditsNotifyCharacteristic: CBCharacteristic?
+    private var creditsRequired = false
+    /// Grant awaiting its write confirmation, for mid-transfer top-ups only.
+    private var pendingTopUpGrant: UInt8?
+    private var creditPolicy = TerminalIoCreditPolicy()
+    private var discoveredServices: [(service: CBService, characteristics: [CBCharacteristic])] = []
     private var remainingServiceDiscoveries = 0
     private var discoverySignaled = false
 
-    private let readLock = NSLock()
-    private var readBuffer = Data()
-    private let readSemaphore = DispatchSemaphore(value: 0)
+    private let packetBuffer = PacketReadBuffer()
+    /// Characteristic read in flight (issue #422).
+    private let pendingRead = PendingCharacteristicRead()
     private let writeSemaphore = DispatchSemaphore(value: 0)
     private let writeReadySemaphore = DispatchSemaphore(value: 0)
+    private let creditSemaphore = DispatchSemaphore(value: 0)
     private let connectSemaphore = DispatchSemaphore(value: 0)
     private let discoverSemaphore = DispatchSemaphore(value: 0)
 
     private var timeoutMs: Int = 10000
     private var connectError: Error?
     private var isReady = false
-    private var waitingForNotifyEnable = false
+    /// True from the moment this attempt's link is up until it drops, so a
+    /// disconnect before the connect succeeded never closes the buffer.
+    private var linkUp = false
+    private var notifySetupStep: NotifySetupStep = .idle
     private var lastWriteError: Error?
+    private var lastCreditWriteError: Error?
     private var hasSeenNotify = false
     private var writeWithoutResponsePreferred = false
     private var consecutiveReadTimeouts = 0
@@ -113,31 +139,41 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
     // MARK: - Connection
 
     /// Connect to the peripheral and discover services/characteristics.
-    /// Blocks until ready or timeout. Returns true on success.
-    func connectAndDiscover() -> Bool {
+    /// Blocks until ready or timeout. Returns nil once the stream is usable,
+    /// or the reason the attempt was abandoned.
+    func connectAndDiscover() -> BleConnectFailure? {
         NativeLogger.d(
             "BleIoStream", category: "BLE",
-            "connectAndDiscover start for \(peripheral.identifier.uuidString)"
-                + " (peripheralState=\(peripheral.state.rawValue)"
-                + " centralState=\(centralManager.state.rawValue))"
+            "connectAndDiscover start for \(self.peripheral.identifier.uuidString)"
+                + " (peripheralState=\(self.peripheral.state.rawValue)"
+                + " centralState=\(self.centralManager.state.rawValue))"
         )
 
         guard centralManager.state == .poweredOn else {
             NativeLogger.w(
                 "BleIoStream", category: "BLE",
-                "Central not powered on (state=\(centralManager.state.rawValue))"
+                "Central not powered on (state=\(self.centralManager.state.rawValue))"
             )
-            return false
+            return .other
         }
 
         connectError = nil
         isReady = false
-        waitingForNotifyEnable = false
+        linkUp = false
+        notifySetupStep = .idle
         discoverySignaled = false
         remainingServiceDiscoveries = 0
-        bestCandidate = nil
+        discoveredServices.removeAll()
         writeCharacteristic = nil
         notifyCharacteristic = nil
+        readCharacteristic = nil
+        withReadPoll { $0 = ReadPollPolicy() }
+        creditsWriteCharacteristic = nil
+        creditsNotifyCharacteristic = nil
+        creditsRequired = false
+        pendingTopUpGrant = nil
+        creditPolicy = TerminalIoCreditPolicy()
+        lastCreditWriteError = nil
         hasSeenNotify = false
         writeWithoutResponsePreferred = false
         consecutiveReadTimeouts = 0
@@ -154,13 +190,13 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
                 NativeLogger.w("BleIoStream", category: "BLE",
                     "Timed out waiting for in-flight connect callback")
                 centralManager.cancelPeripheralConnection(peripheral)
-                return false
+                return .other
             }
             if let error = connectError {
                 NativeLogger.e("BleIoStream", category: "BLE",
                     "In-flight connect failed: \(error.localizedDescription)")
                 centralManager.cancelPeripheralConnection(peripheral)
-                return false
+                return BleConnectFailure.fromConnectError(error)
             }
         default:
             centralManager.connect(peripheral, options: nil)
@@ -169,38 +205,149 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
                 NativeLogger.w("BleIoStream", category: "BLE",
                     "Timed out waiting for connect callback")
                 centralManager.cancelPeripheralConnection(peripheral)
-                return false
+                return .other
             }
             if let error = connectError {
                 NativeLogger.e("BleIoStream", category: "BLE",
                     "Connect failed: \(error.localizedDescription)")
                 centralManager.cancelPeripheralConnection(peripheral)
-                return false
+                return BleConnectFailure.fromConnectError(error)
             }
         }
 
+        // CoreBluetooth exposes no connection-interval/priority API (unlike
+        // Android's requestConnectionPriority or Windows' preferred connection
+        // parameters): iOS negotiates the interval from the peripheral's
+        // preferred values. High-rate dumps (e.g. the OSTC nano logbook, #280)
+        // therefore rely on the device pacing itself; the hw_ostc3 read fix
+        // handles correctly-delivered data and a retry covers transient loss.
+        // From here a disconnect closes the buffer, including one during the
+        // discovery, credit grant or settle delay below.
+        linkUp = true
         NativeLogger.d("BleIoStream", category: "BLE", "Connected; discovering services")
         peripheral.discoverServices(nil)
         let discoverResult = discoverSemaphore.wait(timeout: .now() + .seconds(10))
         if discoverResult == .timedOut {
+            // The link is up but the peer never answered, so this is not the
+            // "no usable characteristics" case below: nothing was enumerated at
+            // all. On macOS that is what a stale bond looks like -- iOS names
+            // the condition, macOS just waits (issue #865).
             NativeLogger.w("BleIoStream", category: "BLE",
                 "Timed out waiting for service/characteristic discovery")
             centralManager.cancelPeripheralConnection(peripheral)
-            return false
+            return .discoveryStalled
         }
         if !isReady {
             NativeLogger.w("BleIoStream", category: "BLE",
                 "Discovery completed without usable write/notify characteristics")
             centralManager.cancelPeripheralConnection(peripheral)
-            return false
+            return .other
+        }
+        // A Telit Terminal I/O module keeps its UART bridge closed until the
+        // client grants initial credits, so the first command write would fail
+        // outright without this (issue #923).
+        if !grantInitialCredits() {
+            centralManager.cancelPeripheralConnection(peripheral)
+            return .other
         }
         Thread.sleep(forTimeInterval: Self.notifySettleDelaySeconds)
         NativeLogger.d("BleIoStream", category: "BLE",
             "Post-notify settle delay complete (\(Int(Self.notifySettleDelaySeconds * 1000)) ms)")
         NativeLogger.d("BleIoStream", category: "BLE",
-            "Discovery ready (write=\(writeCharacteristic?.uuid.uuidString ?? "nil")"
-                + " notify=\(notifyCharacteristic?.uuid.uuidString ?? "nil"))")
+            "Discovery ready (write=\(self.writeCharacteristic?.uuid.uuidString ?? "nil")"
+                + " notify=\(self.notifyCharacteristic?.uuid.uuidString ?? "nil")"
+                + " read=\(self.readCharacteristic?.uuid.uuidString ?? "nil"))")
+        // The link may have dropped during setup; a download must not start
+        // on a dead stream and fail later as a timeout (issue #2902).
+        if packetBuffer.isClosed {
+            NativeLogger.w("BleIoStream", category: "BLE",
+                "Link dropped during setup; abandoning this attempt")
+            return .other
+        }
+        return nil
+    }
+
+    // MARK: - Terminal I/O credits
+
+    /// Write the opening credit grant to Credits RX and wait for the
+    /// confirmation. A no-op (success) on devices with no credit
+    /// characteristics.
+    private func grantInitialCredits() -> Bool {
+        guard let creditsChar = creditsWriteCharacteristic else { return true }
+
+        let amount = TerminalIoCreditPolicy.initialGrant
+        drainSemaphore(creditSemaphore)
+        lastCreditWriteError = nil
+        NativeLogger.d("BleIoStream", category: "BLE",
+            "Terminal I/O: granting \(amount) initial credits on"
+                + " \(creditsChar.uuid.uuidString)")
+        peripheral.writeValue(Data([amount]), for: creditsChar, type: .withResponse)
+
+        if creditSemaphore.wait(
+            timeout: .now() + Self.creditGrantTimeoutSeconds) == .timedOut {
+            return creditGrantFailed("timed out granting initial credits")
+        }
+        if let error = lastCreditWriteError {
+            return creditGrantFailed(
+                "initial credit grant failed: \(error.localizedDescription)")
+        }
+        creditPolicy.opened(with: amount)
+        NativeLogger.d("BleIoStream", category: "BLE",
+            "Terminal I/O: bridge open (credits=\(self.creditPolicy.credits))")
         return true
+    }
+
+    /// Decide what a failed opening grant means for this module family.
+    ///
+    /// A Telit bridge carries nothing without credits, so the connection is
+    /// dead. The u-blox serial service treats flow control as optional and
+    /// already works with no handshake at all, so drop back to that rather
+    /// than fail a device that would otherwise download fine.
+    private func creditGrantFailed(_ reason: String) -> Bool {
+        if creditsRequired {
+            NativeLogger.e("BleIoStream", category: "BLE", "Terminal I/O: \(reason)")
+            return false
+        }
+        NativeLogger.w("BleIoStream", category: "BLE",
+            "Terminal I/O: \(reason); continuing without credit flow control")
+        creditsWriteCharacteristic = nil
+
+        // Unsubscribe rather than merely ignoring the credit indications. The
+        // point is not the discarded delegate callbacks but that the module
+        // stops transmitting them at all: this fallback exists for the OSTC
+        // nano, whose downloads are already lost to a saturated delegate queue
+        // and BLE link (#394), so spending neither airtime nor queue time on a
+        // channel we have given up on matters.
+        if let creditsNotify = creditsNotifyCharacteristic {
+            if creditsNotify.isNotifying {
+                peripheral.setNotifyValue(false, for: creditsNotify)
+            }
+            creditsNotifyCharacteristic = nil
+        }
+        return true
+    }
+
+    /// Account for one received packet and top the module back up when its
+    /// balance runs low, so a multi-thousand-notification logbook dump does
+    /// not stall once the opening grant is spent.
+    ///
+    /// Called on the CoreBluetooth delegate queue, so the write is issued
+    /// without waiting for its confirmation: blocking this queue starves
+    /// notification delivery and loses bytes (issue #394). The balance is
+    /// therefore credited later, in didWriteValueFor, once the module has
+    /// actually acknowledged the grant -- counting it here would overstate the
+    /// balance whenever a write failed, and an overstated balance stalls the
+    /// transfer permanently (see TerminalIoCreditPolicy).
+    private func replenishCredits() {
+        guard let creditsChar = creditsWriteCharacteristic,
+            let grant = creditPolicy.packetReceived()
+        else { return }
+
+        pendingTopUpGrant = grant
+        peripheral.writeValue(Data([grant]), for: creditsChar, type: .withResponse)
+        NativeLogger.d("BleIoStream", category: "BLE",
+            "Terminal I/O: requesting \(grant) more credits"
+                + " (balance=\(self.creditPolicy.credits))")
     }
 
     // MARK: - C Callback Implementations
@@ -224,11 +371,7 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         let stream = Unmanaged<BleIoStream>.fromOpaque(userdata!).takeUnretainedValue()
         guard let actual else {
             var transferred: size_t = 0
-            let status = stream.performRead(data: data!, size: size, actual: &transferred)
-            if status != Int32(LIBDC_STATUS_SUCCESS) {
-                return status
-            }
-            return transferred == size ? Int32(LIBDC_STATUS_SUCCESS) : Int32(LIBDC_STATUS_TIMEOUT)
+            return stream.performRead(data: data!, size: size, actual: &transferred)
         }
         return stream.performRead(data: data!, size: size, actual: actual)
     }
@@ -249,6 +392,10 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
 
     private static let cClose: libdc_io_close_fn = { userdata in
         let stream = Unmanaged<BleIoStream>.fromOpaque(userdata!).takeUnretainedValue()
+        // Fail a read-poll reader waiting with no timeout, and wake it now
+        // rather than at the end of its wait slice.
+        stream.withReadPoll { $0.close() }
+        if stream.readCharacteristic != nil { stream.packetBuffer.interrupt() }
         stream.centralManager.cancelPeripheralConnection(stream.peripheral)
         return Int32(LIBDC_STATUS_SUCCESS)
     }
@@ -260,21 +407,22 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
 
     private static let cPoll: libdc_io_poll_fn = { userdata, timeout in
         let stream = Unmanaged<BleIoStream>.fromOpaque(userdata!).takeUnretainedValue()
-        stream.readLock.lock()
-        let available = stream.readBuffer.count
-        stream.readLock.unlock()
-        if available > 0 { return Int32(LIBDC_STATUS_SUCCESS) }
+        if stream.packetBuffer.hasData { return Int32(LIBDC_STATUS_SUCCESS) }
 
         if timeout == 0 { return Int32(LIBDC_STATUS_TIMEOUT) }
 
         let deadline: DispatchTime = timeout < 0 ? .distantFuture :
             .now() + .milliseconds(Int(timeout))
-        let result = stream.readSemaphore.wait(timeout: deadline)
-        if result == .timedOut { return Int32(LIBDC_STATUS_TIMEOUT) }
-
-        // Re-signal since we consumed the signal but didn't consume data.
-        stream.readSemaphore.signal()
-        return Int32(LIBDC_STATUS_SUCCESS)
+        // A read-poll characteristic pushes nothing, so waiting alone would
+        // never see data; ask for it the way read() does.
+        if let readChar = stream.readCharacteristic {
+            return stream.awaitPolledPacket(readChar, deadline: deadline)
+        }
+        if stream.packetBuffer.poll(deadline: deadline) {
+            return Int32(LIBDC_STATUS_SUCCESS)
+        }
+        return stream.packetBuffer.isClosed
+            ? Int32(LIBDC_STATUS_IO) : Int32(LIBDC_STATUS_TIMEOUT)
     }
 
     // MARK: - I/O Operations
@@ -284,28 +432,34 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         let deadline: DispatchTime = timeoutMs == Int.max ? .distantFuture :
             .now() + .milliseconds(timeoutMs)
 
-        while true {
-            readLock.lock()
-            let available = readBuffer.count
-            if available > 0 {
-                let bytesToRead = min(size, readBuffer.count)
-                _ = readBuffer.withUnsafeBytes { ptr in
-                    memcpy(data, ptr.baseAddress!, bytesToRead)
-                }
-                readBuffer.removeFirst(bytesToRead)
-                readLock.unlock()
-                actual.pointee = bytesToRead
-                return Int32(LIBDC_STATUS_SUCCESS)
+        if let readChar = readCharacteristic {
+            let status = awaitPolledPacket(readChar, deadline: deadline)
+            if status == Int32(LIBDC_STATUS_SUCCESS),
+                let count = packetBuffer.read(into: data, maxBytes: size, deadline: .now()) {
+                actual.pointee = count
+                return status
             }
-            readLock.unlock()
-
-            if readSemaphore.wait(timeout: deadline) == .timedOut {
-                actual.pointee = 0
-                consecutiveReadTimeouts += 1
-                maybeFlipWriteModeAfterReadTimeout()
-                return Int32(LIBDC_STATUS_TIMEOUT)
-            }
+            actual.pointee = 0
+            if status == Int32(LIBDC_STATUS_TIMEOUT) { consecutiveReadTimeouts += 1 }
+            return status == Int32(LIBDC_STATUS_SUCCESS) ? Int32(LIBDC_STATUS_TIMEOUT) : status
         }
+
+        // The buffer returns bytes from at most one BLE notification per
+        // call: libdivecomputer's packet parsers size each read from the
+        // packet header and would silently drop a second packet coalesced
+        // into the same read (lost FLAG_LAST ack -> spurious timeout).
+        guard let bytesToRead = packetBuffer.read(
+            into: data, maxBytes: size, deadline: deadline) else {
+            actual.pointee = 0
+            // The link dropped (issue #2902): no reply is coming, so report
+            // the I/O error now rather than as a timeout after the full wait.
+            if packetBuffer.isClosed { return Int32(LIBDC_STATUS_IO) }
+            consecutiveReadTimeouts += 1
+            maybeFlipWriteModeAfterReadTimeout()
+            return Int32(LIBDC_STATUS_TIMEOUT)
+        }
+        actual.pointee = bytesToRead
+        return Int32(LIBDC_STATUS_SUCCESS)
     }
 
     private func performWrite(data: UnsafeRawPointer, size: size_t,
@@ -369,6 +523,22 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
                 }
                 return Int32(LIBDC_STATUS_TIMEOUT)
             }
+            // A read-poll computer's reply is fetched by a read whatever the
+            // write completion said, so a rejection on a live link is reported
+            // as sent and the read decides (issue #1454,
+            // ReadPollPolicy.writeOutcome).
+            if let error = lastWriteError, readCharacteristic != nil,
+               ReadPollPolicy.writeOutcome(accepted: false,
+                                           linkUp: peripheral.state == .connected)
+                == .sentDespiteRejection {
+                NativeLogger.w("BleIoStream", category: "BLE",
+                    "write: the computer rejected a \(size)-byte command on"
+                        + " \(characteristic.uuid.uuidString)"
+                        + " (\(error.localizedDescription));"
+                        + " treating it as sent and reading the reply")
+                actual.pointee = size
+                return Int32(LIBDC_STATUS_SUCCESS)
+            }
             if let error = lastWriteError {
                 NativeLogger.e("BleIoStream", category: "BLE",
                     "write withResponse failed for \(characteristic.uuid.uuidString):"
@@ -391,16 +561,88 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
             return Int32(LIBDC_STATUS_SUCCESS)
         }
 
-        readLock.lock()
-        readBuffer.removeAll(keepingCapacity: true)
-        readLock.unlock()
-        drainSemaphore(readSemaphore)
+        // One lock with handleReadResponse: a read completing concurrently is
+        // either queued before the clear or discarded by the policy, never
+        // appended after it (issue #1454).
+        withReadPoll { policy in
+            policy.purge()
+            packetBuffer.purge()
+        }
         return Int32(LIBDC_STATUS_SUCCESS)
     }
 
     private func drainSemaphore(_ semaphore: DispatchSemaphore) {
         while semaphore.wait(timeout: .now()) == .success {
             // Drain all pending signals to avoid stale wakeups.
+        }
+    }
+
+    private func withReadPoll<T>(_ body: (inout ReadPollPolicy) -> T) -> T {
+        readPollLock.lock()
+        defer { readPollLock.unlock() }
+        return body(&readPoll)
+    }
+
+    private static func milliseconds(_ time: DispatchTime) -> UInt64 {
+        time.uptimeNanoseconds / 1_000_000
+    }
+
+    /// Block until the read-poll characteristic has produced a packet, issuing
+    /// GATT reads as ReadPollPolicy directs. Returns SUCCESS once a packet is
+    /// buffered, TIMEOUT at the deadline, or IO once the stream is closed. The
+    /// wait is sliced so an empty value or a refused read is noticed without a
+    /// wakeup from the delegate queue.
+    private func awaitPolledPacket(_ characteristic: CBCharacteristic,
+                                   deadline: DispatchTime) -> Int32 {
+        while !packetBuffer.hasData {
+            let now = DispatchTime.now()
+            if now >= deadline { return Int32(LIBDC_STATUS_TIMEOUT) }
+            // Re-check under the lock handleReadResponse appends under: a reply
+            // that landed since the loop test must not trigger a second read
+            // while it sits in the buffer.
+            let action = withReadPoll { policy -> ReadPollPolicy.Action in
+                packetBuffer.hasData ? .wait : policy.next(nowMs: Self.milliseconds(now))
+            }
+            switch action {
+            case .closed:
+                return Int32(LIBDC_STATUS_IO)
+            case .issueRead:
+                peripheral.readValue(for: characteristic)
+                NativeLogger.d("BleIoStream", category: "BLE",
+                    "read-poll: read issued on \(characteristic.uuid.uuidString)")
+            case .wait:
+                break
+            }
+            let slice = now + .milliseconds(Int(ReadPollPolicy.waitSliceMs))
+            _ = packetBuffer.poll(deadline: min(deadline, slice))
+        }
+        return Int32(LIBDC_STATUS_SUCCESS)
+    }
+
+    /// Settle one read-poll response (issue #1454). CoreBluetooth reports read
+    /// responses through the same delegate method as notifications; the read
+    /// characteristic has no notify property, so every value arriving for it
+    /// answers a readValue(for:) call.
+    private func handleReadResponse(_ characteristic: CBCharacteristic, error: Error?) {
+        let value = error == nil ? (characteristic.value ?? Data()) : Data()
+        let now = Self.milliseconds(.now())
+        // Queued under the read-poll lock, as performPurge clears under it, so
+        // a value the policy accepts can never land after a purge.
+        let deliver = withReadPoll { policy -> Bool in
+            let deliver = policy.completed(hasData: !value.isEmpty, nowMs: now)
+            if deliver { packetBuffer.append(value) }
+            return deliver
+        }
+        if deliver { consecutiveReadTimeouts = 0 }
+        if let error {
+            NativeLogger.w("BleIoStream", category: "BLE",
+                "read-poll read failed for \(characteristic.uuid.uuidString):"
+                    + " \(error.localizedDescription); retrying")
+        } else {
+            NativeLogger.d("BleIoStream", category: "BLE",
+                "read-poll \(characteristic.uuid.uuidString) bytes=\(value.count)"
+                    + " delivered=\(deliver)"
+                    + " data=\(Self.hexString(value, maxBytes: Self.maxLogBytes))")
         }
     }
 
@@ -443,9 +685,13 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         let properties = characteristic.properties
         guard properties.contains(.write) && properties.contains(.writeWithoutResponse) else { return }
         writeWithoutResponsePreferred.toggle()
+        // Snapshot before logging: the message is built later on the logger
+        // queue, and reading this mutable flag there would race with the I/O
+        // queue that toggles it.
+        let preferWithoutResponse = writeWithoutResponsePreferred
         NativeLogger.d("BleIoStream", category: "BLE",
             "Read timed out before response; flipping preferred write mode to"
-                + " \(writeWithoutResponsePreferred ? "withoutResponse" : "withResponse")"
+                + " \(preferWithoutResponse ? "withoutResponse" : "withResponse")"
         )
     }
 
@@ -565,6 +811,52 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
             }
         }
 
+        var uuidBuffer = [CChar](repeating: 0,
+                                 count: Int(LIBDC_BLE_UUID_STRING_SIZE))
+        var valueSize: Int = 0
+        let decoded = libdc_ble_characteristic_read_decode(
+            request, data, size, &uuidBuffer, &valueSize)
+        if decoded == LIBDC_BLE_CHAR_READ_INVALID {
+            return Int32(LIBDC_STATUS_INVALIDARGS)
+        }
+        if decoded == LIBDC_BLE_CHAR_READ_OK, let data {
+            let uuidString = String(cString: uuidBuffer)
+            let target = CBUUID(string: uuidString)
+            // libdivecomputer names only the characteristic; search every
+            // discovered service.
+            guard let characteristic = discoveredServices
+                .flatMap({ $0.characteristics })
+                .first(where: { $0.uuid == target }),
+                  characteristic.properties.contains(.read) else {
+                NativeLogger.w("BleIoStream", category: "BLE",
+                    "ioctl BLE_CHARACTERISTIC_READ \(uuidString) not readable")
+                return Int32(LIBDC_STATUS_NOACCESS)
+            }
+            guard pendingRead.begin(uuid: characteristic.uuid.uuidString) else {
+                NativeLogger.e("BleIoStream", category: "BLE",
+                    "ioctl BLE_CHARACTERISTIC_READ \(uuidString) refused:"
+                        + " an earlier read of it timed out")
+                return Int32(LIBDC_STATUS_IO)
+            }
+            peripheral.readValue(for: characteristic)
+            guard let value = pendingRead.wait(
+                timeout: .now() + Self.characteristicReadTimeout) else {
+                NativeLogger.e("BleIoStream", category: "BLE",
+                    "ioctl BLE_CHARACTERISTIC_READ \(uuidString) failed")
+                return Int32(LIBDC_STATUS_IO)
+            }
+            let status = value.withUnsafeBytes { bytes in
+                libdc_ble_characteristic_read_fill(
+                    data, size,
+                    bytes.bindMemory(to: UInt8.self).baseAddress,
+                    value.count)
+            }
+            NativeLogger.d("BleIoStream", category: "BLE",
+                "ioctl BLE_CHARACTERISTIC_READ \(uuidString)"
+                    + " bytes=\(value.count) -> \(status)")
+            return status
+        }
+
         return Int32(LIBDC_STATUS_UNSUPPORTED)
     }
 
@@ -606,7 +898,12 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         } else if let characteristics = service.characteristics {
             NativeLogger.d("BleIoStream", category: "BLE",
                 "Discovered \(characteristics.count) characteristics for \(service.uuid.uuidString)")
-            updateBestCandidate(service: service, characteristics: characteristics)
+            for characteristic in characteristics {
+                NativeLogger.d("BleIoStream", category: "BLE",
+                    "  characteristic \(characteristic.uuid.uuidString)"
+                        + " (\(Self.propertySummary(characteristic.properties)))")
+            }
+            discoveredServices.append((service: service, characteristics: characteristics))
         }
 
         if remainingServiceDiscoveries > 0 {
@@ -620,6 +917,32 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral,
                      didUpdateValueFor characteristic: CBCharacteristic,
                      error: Error?) {
+        // A characteristic read reply (issue #422) arrives here too. Claim it
+        // before the notification path can buffer it as download data.
+        // CoreBluetooth gives a read reply and a notification the same shape,
+        // so if the characteristic being read were also the data-notify line,
+        // a notification landing mid-read would be taken as the reply. That
+        // cannot happen at the one point libdivecomputer reads (the Cressi
+        // version handshake, before any command is sent), and 6E400003 is a
+        // read-only field on Cressi, so no further disambiguation is attempted.
+        if pendingRead.complete(uuid: characteristic.uuid.uuidString,
+                                value: error == nil ? characteristic.value : nil) {
+            // The waiter only learns that no value came, so the reason is
+            // logged here or not at all.
+            if let error {
+                NativeLogger.w("BleIoStream", category: "BLE",
+                    "ioctl BLE_CHARACTERISTIC_READ"
+                        + " \(characteristic.uuid.uuidString) failed:"
+                        + " \(error.localizedDescription)"
+                        + " (code \((error as NSError).code))")
+            }
+            return
+        }
+        if let readChar = readCharacteristic {
+            guard characteristic.uuid == readChar.uuid else { return }
+            handleReadResponse(characteristic, error: error)
+            return
+        }
         if let error {
             NativeLogger.e("BleIoStream", category: "BLE",
                 "didUpdateValue error for \(characteristic.uuid.uuidString):"
@@ -632,20 +955,23 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         guard let value = characteristic.value else { return }
         hasSeenNotify = true
         consecutiveReadTimeouts = 0
+        // Hand the payload to the consumer before logging. Under the OSTC
+        // download fire-hose (hundreds of notifications/second) any work left on
+        // this CoreBluetooth delegate queue delays draining the next
+        // notification; if the queue falls behind, iOS drops notifications and
+        // the download loses bytes (issue #394). append() is O(1) and the log
+        // is dispatched off this queue by NativeLogger.
+        packetBuffer.append(value)
+        replenishCredits()
         NativeLogger.d("BleIoStream", category: "BLE",
             "notify \(characteristic.uuid.uuidString)"
                 + " bytes=\(value.count)"
                 + " data=\(Self.hexString(value, maxBytes: Self.maxLogBytes))")
-        readLock.lock()
-        readBuffer.append(value)
-        readLock.unlock()
-        readSemaphore.signal()
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                      didWriteValueFor characteristic: CBCharacteristic,
                      error: Error?) {
-        lastWriteError = error
         if let error {
             NativeLogger.e("BleIoStream", category: "BLE",
                 "didWriteValue error for \(characteristic.uuid.uuidString):"
@@ -654,33 +980,97 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
             NativeLogger.d("BleIoStream", category: "BLE",
                 "didWriteValue ok for \(characteristic.uuid.uuidString)")
         }
+
+        // Credit grants share this callback with command writes but not their
+        // semaphore: signalling writeSemaphore here would release a command
+        // write that is still in flight and desynchronise the protocol.
+        if let credits = creditsWriteCharacteristic,
+            characteristic.uuid == credits.uuid {
+            // A mid-transfer top-up has no waiter; settle it against the
+            // policy here. Only now is the module known to hold the grant.
+            if let grant = pendingTopUpGrant {
+                pendingTopUpGrant = nil
+                if error == nil {
+                    creditPolicy.grantAccepted(grant)
+                    NativeLogger.d("BleIoStream", category: "BLE",
+                        "Terminal I/O: \(grant) credits acknowledged"
+                            + " (balance=\(self.creditPolicy.credits))")
+                } else {
+                    // Leave the balance uncredited so the next packet retries.
+                    creditPolicy.grantFailed()
+                    NativeLogger.w("BleIoStream", category: "BLE",
+                        "Terminal I/O: credit grant not acknowledged; will retry")
+                }
+                return
+            }
+            lastCreditWriteError = error
+            creditSemaphore.signal()
+            return
+        }
+
+        // Only the selected command characteristic drives writeSemaphore.
+        // Matching positively rather than "anything that is not credits"
+        // matters once the u-blox fallback has cleared the credit
+        // characteristics: a late completion for a timed-out credit grant
+        // would otherwise fall through here and wake a command write that is
+        // still in flight, desynchronising the protocol.
+        guard let dataCharacteristic = writeCharacteristic,
+            characteristic.uuid == dataCharacteristic.uuid
+        else {
+            return
+        }
+
+        lastWriteError = error
         writeSemaphore.signal()
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateNotificationStateFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard let notify = notifyCharacteristic, characteristic.uuid == notify.uuid else {
-            return
+        let expected: CBCharacteristic?
+        switch notifySetupStep {
+        case .idle: return
+        case .creditsNotify: expected = creditsNotifyCharacteristic
+        case .dataNotify: expected = notifyCharacteristic
         }
-        guard waitingForNotifyEnable else { return }
-        waitingForNotifyEnable = false
+        guard let expected, characteristic.uuid == expected.uuid else { return }
 
+        let step = notifySetupStep
+        notifySetupStep = .idle
+
+        let failure: String?
         if let error {
+            failure = "failed enabling notify: \(error.localizedDescription)"
+        } else if !characteristic.isNotifying {
+            failure = "notify not active"
+        } else {
+            failure = nil
+        }
+
+        if let failure {
+            // A failed credits subscription is survivable on u-blox, whose
+            // flow control is optional; on Telit it is the end of the road.
+            if step == .creditsNotify, !creditsRequired {
+                // creditGrantFailed clears the credit characteristics; the
+                // subscription never came up here, so it has nothing to undo.
+                _ = creditGrantFailed(failure)
+                subscribeToDataNotifications()
+                return
+            }
             NativeLogger.e("BleIoStream", category: "BLE",
-                "Failed enabling notify for \(characteristic.uuid.uuidString):"
-                    + " \(error.localizedDescription)")
+                "\(failure) for \(characteristic.uuid.uuidString)")
             signalDiscoveryReady()
             return
         }
-        if !characteristic.isNotifying {
-            NativeLogger.w("BleIoStream", category: "BLE",
-                "Notify not active for \(characteristic.uuid.uuidString)")
-            signalDiscoveryReady()
-            return
-        }
+
         NativeLogger.d("BleIoStream", category: "BLE",
             "Notify enabled for \(characteristic.uuid.uuidString)")
+
+        if step == .creditsNotify {
+            // Credits TX is live; Data TX comes next.
+            subscribeToDataNotifications()
+            return
+        }
         isReady = true
         signalDiscoveryReady()
     }
@@ -691,81 +1081,94 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
         discoverSemaphore.signal()
     }
 
-    private func updateBestCandidate(service: CBService, characteristics: [CBCharacteristic]) {
-        var bestWrite: (characteristic: CBCharacteristic, score: Int)?
-        var bestNotify: (characteristic: CBCharacteristic, score: Int)?
-
-        for characteristic in characteristics {
-            let props = characteristic.properties
-
-            if props.contains(.write) || props.contains(.writeWithoutResponse) {
-                var writeScore = 0
-                if props.contains(.writeWithoutResponse) { writeScore += 4 }
-                if props.contains(.write) { writeScore += 2 }
-                if Self.preferredWriteUUIDs.contains(characteristic.uuid) { writeScore += 1000 }
-                if bestWrite == nil || writeScore > bestWrite!.score {
-                    bestWrite = (characteristic, writeScore)
-                }
-            }
-
-            if props.contains(.notify) || props.contains(.indicate) {
-                var notifyScore = 0
-                if props.contains(.notify) { notifyScore += 4 }
-                if props.contains(.indicate) { notifyScore += 2 }
-                if Self.preferredNotifyUUIDs.contains(characteristic.uuid) { notifyScore += 1000 }
-                if bestNotify == nil || notifyScore > bestNotify!.score {
-                    bestNotify = (characteristic, notifyScore)
-                }
-            }
-        }
-
-        guard let write = bestWrite, let notify = bestNotify else {
-            return
-        }
-
-        var serviceScore = write.score + notify.score
-        if Self.preferredServiceUUIDs.contains(service.uuid) {
-            serviceScore += 1000
-        }
-
-        if let existing = bestCandidate, existing.score >= serviceScore {
-            return
-        }
-
-        bestCandidate = CharacteristicCandidate(
-            score: serviceScore,
-            write: write.characteristic,
-            notify: notify.characteristic
-        )
-    }
-
     private func finalizeCharacteristicSelection() {
-        guard let candidate = bestCandidate else {
+        let services = discoveredServices.map { entry in
+            BleCharacteristicSelector.Service(
+                uuid: entry.service.uuid,
+                characteristics: entry.characteristics.map {
+                    BleCharacteristicSelector.Characteristic(
+                        uuid: $0.uuid, properties: $0.properties)
+                }
+            )
+        }
+
+        guard let selection = BleCharacteristicSelector.select(services: services) else {
             NativeLogger.w("BleIoStream", category: "BLE",
-                "No suitable write/notify characteristic pair found")
+                "No suitable write/notify characteristic pair or read-poll service found")
             signalDiscoveryReady()
             return
         }
 
-        writeCharacteristic = candidate.write
-        notifyCharacteristic = candidate.notify
-        writeWithoutResponsePreferred = initialWriteWithoutResponsePreference(for: candidate.write)
-        NativeLogger.d("BleIoStream", category: "BLE",
-            "Selected write=\(candidate.write.uuid.uuidString)"
-                + " (\(Self.propertySummary(candidate.write.properties)))"
-                + " notify=\(candidate.notify.uuid.uuidString)"
-                + " (\(Self.propertySummary(candidate.notify.properties)))"
-                + " (score=\(candidate.score))")
-        NativeLogger.d("BleIoStream", category: "BLE",
-            "Initial write mode preference:"
-                + " \(writeWithoutResponsePreferred ? "withoutResponse" : "withResponse")")
-        if candidate.notify.isNotifying {
+        // `services` is built from `discoveredServices` in the same order, so
+        // the selection's indices address the exact live characteristics --
+        // unambiguous even if the peripheral exposes duplicate service UUIDs.
+        let entry = discoveredServices[selection.serviceIndex]
+        let writeChar = entry.characteristics[selection.writeIndex]
+        let responseChar = entry.characteristics[selection.responseIndex]
+
+        if selection.responseMode == .read {
+            // Read-poll tier (issue #1454): the computer cannot push its
+            // replies, so there is nothing to subscribe to and the response
+            // path is ready as soon as the characteristic is chosen.
+            writeCharacteristic = writeChar
+            readCharacteristic = responseChar
+            writeWithoutResponsePreferred = initialWriteWithoutResponsePreference(for: writeChar)
+            NativeLogger.d("BleIoStream", category: "BLE",
+                "read-poll tier selected: service=\(entry.service.uuid.uuidString)"
+                    + " characteristic=\(responseChar.uuid.uuidString)"
+                    + " (\(Self.propertySummary(responseChar.properties)))")
             isReady = true
             signalDiscoveryReady()
             return
         }
-        waitingForNotifyEnable = true
-        peripheral.setNotifyValue(true, for: candidate.notify)
+        let notifyChar = responseChar
+
+        writeCharacteristic = writeChar
+        notifyCharacteristic = notifyChar
+        if let credits = selection.terminalIoCredits {
+            creditsWriteCharacteristic = entry.characteristics[credits.writeIndex]
+            creditsNotifyCharacteristic = entry.characteristics[credits.notifyIndex]
+            creditsRequired = credits.required
+            NativeLogger.d("BleIoStream", category: "BLE",
+                "Credit flow control detected"
+                    + " (\(credits.required ? "Telit, required" : "u-blox, optional")):"
+                    + " creditsRx=\(entry.characteristics[credits.writeIndex].uuid.uuidString)"
+                    + " creditsTx=\(entry.characteristics[credits.notifyIndex].uuid.uuidString)")
+        }
+        writeWithoutResponsePreferred = initialWriteWithoutResponsePreference(for: writeChar)
+        NativeLogger.d("BleIoStream", category: "BLE",
+            "Selected write=\(writeChar.uuid.uuidString)"
+                + " (\(Self.propertySummary(writeChar.properties)))"
+                + " notify=\(notifyChar.uuid.uuidString)"
+                + " (\(Self.propertySummary(notifyChar.properties)))"
+                + " (score=\(selection.score))")
+        let preferWithoutResponse = writeWithoutResponsePreferred
+        NativeLogger.d("BleIoStream", category: "BLE",
+            "Initial write mode preference:"
+                + " \(preferWithoutResponse ? "withoutResponse" : "withResponse")")
+        // Terminal I/O requires UART Credits TX to be subscribed before UART
+        // Data TX (Telit TIO Implementation Guide r04 sections 6.4 and 6.2,
+        // and the same order in Subsurface's qt-ble.cpp).
+        if let creditsNotify = creditsNotifyCharacteristic, !creditsNotify.isNotifying {
+            notifySetupStep = .creditsNotify
+            peripheral.setNotifyValue(true, for: creditsNotify)
+            return
+        }
+        subscribeToDataNotifications()
+    }
+
+    private func subscribeToDataNotifications() {
+        guard let notifyChar = notifyCharacteristic else {
+            signalDiscoveryReady()
+            return
+        }
+        if notifyChar.isNotifying {
+            isReady = true
+            signalDiscoveryReady()
+            return
+        }
+        notifySetupStep = .dataNotify
+        peripheral.setNotifyValue(true, for: notifyChar)
     }
 }
 
@@ -798,6 +1201,34 @@ extension BleIoStream: CBCentralManagerDelegate {
         }
         connectError = error
         connectSemaphore.signal()
+    }
+
+    func centralManager(_ central: CBCentralManager,
+                         didDisconnectPeripheral peripheral: CBPeripheral,
+                         error: Error?) {
+        guard peripheral.identifier == self.peripheral.identifier else { return }
+        // CoreBluetooth passes an error only when the app did not ask for the
+        // disconnect, so a nil error is this stream's own close.
+        if let error {
+            NativeLogger.w("BleIoStream", category: "BLE",
+                "Link to \(peripheral.identifier.uuidString) lost:"
+                    + " \(error.localizedDescription)"
+                    + " (code \((error as NSError).code))")
+        } else {
+            NativeLogger.d("BleIoStream", category: "BLE",
+                "Disconnected from \(peripheral.identifier.uuidString)")
+        }
+        // A characteristic read in flight gets no reply once the link is
+        // down; wake its waiter rather than leave it to the timeout (#422).
+        pendingRead.cancel()
+        // Nor does a notification or a read-poll reply (issue #2902). Without
+        // this a dropped link only surfaced as a read timeout, which reads
+        // the same in the log as a device that stopped answering.
+        if linkUp {
+            linkUp = false
+            withReadPoll { $0.close() }
+            packetBuffer.close()
+        }
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {

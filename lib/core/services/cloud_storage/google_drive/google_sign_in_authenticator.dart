@@ -1,0 +1,427 @@
+import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
+import 'package:googleapis_auth/googleapis_auth.dart';
+import 'package:http/http.dart' as http;
+
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_access.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_authenticator.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_client_config.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_errors.dart';
+import 'package:submersion/core/services/cloud_storage/http_timeouts.dart';
+import 'package:submersion/core/services/logger_service.dart';
+
+/// google_sign_in-backed authenticator for iOS, macOS, and Android.
+///
+/// Token persistence across launches is handled by google_sign_in's own
+/// cache via attemptLightweightAuthentication(); nothing is stored by the
+/// app. That cache is the entire reason cold-launch sync works, so silent
+/// sign-in must NOT be gated behind an in-process opt-in flag: such a flag is
+/// false in every fresh process, which would report sync as unauthenticated
+/// after every restart. See [GoogleDriveAuthenticator.attemptSilentAuth] for
+/// where the pre-opt-in guarantee actually lives.
+class GoogleSignInAuthenticator implements GoogleDriveAuthenticator {
+  /// [isWeb], [webClientId] and [baseClient] are seams for tests;
+  /// production reads the host platform, the stored client id and a plain
+  /// HTTP client (issue #4121). [baseClient] carries the browser's
+  /// authorized requests, so a test can serve Drive itself.
+  GoogleSignInAuthenticator({
+    bool? isWeb,
+    Future<String?> Function()? webClientId,
+    http.Client Function()? baseClient,
+  }) : _isWeb = isWeb ?? HostPlatform.isWeb,
+       _webClientId = webClientId ?? GoogleDriveClientConfig.webClientId,
+       _baseClient = baseClient ?? http.Client.new;
+
+  static final _log = LoggerService.forClass(GoogleSignInAuthenticator);
+
+  static const _scopes = [drive.DriveApi.driveAppdataScope];
+
+  final bool _isWeb;
+  final Future<String?> Function() _webClientId;
+  final http.Client Function() _baseClient;
+
+  // Use the shared instance; configuration is provided per-call via scope
+  // hints.
+  final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
+  bool _initialized = false;
+
+  /// The authorized client, wrapped in [TimeoutHttpClient]. Held as a plain
+  /// [http.Client] because that wrapper is what everything downstream uses:
+  /// the provider builds its DriveApi from it and the media store sends raw
+  /// REST over it, and neither needs the AuthClient surface.
+  http.Client? _authClient;
+  GoogleSignInAccount? _currentUser;
+
+  /// The signed-in account's address: the SDK's account natively, the Drive
+  /// About resource in a browser, where the SDK hands out no account.
+  String? _email;
+
+  @override
+  http.Client? get authClient => _authClient;
+
+  @override
+  Future<String?> get userEmail async => _email;
+
+  Future<void> _ensureInitialized() async {
+    if (_initialized) return;
+    if (_isWeb) {
+      // A page signs in with the user's own web client; the compiled-in
+      // desktop and Android clients do not apply (issue #4121).
+      final clientId = await _webClientId();
+      if (clientId == null) {
+        throw const CloudStorageException(googleDriveWebClientIdMissing);
+      }
+      await _googleSignIn.initialize(clientId: clientId);
+      _initialized = true;
+      return;
+    }
+    final serverClientId =
+        HostPlatform.isAndroid &&
+            GoogleDriveClientConfig.androidServerClientId.isNotEmpty
+        ? GoogleDriveClientConfig.androidServerClientId
+        : null;
+    await _googleSignIn.initialize(serverClientId: serverClientId);
+    _initialized = true;
+  }
+
+  /// Single-flights [attemptSilentAuth]: the `_authClient != null` guard is
+  /// read before the SDK round trip, so two concurrent callers would both get
+  /// past it and both install. The second install closes the client the first
+  /// already published to the provider and the media store, and nothing
+  /// rebuilds from a still-non-null authClient -- so every later Drive call
+  /// failed with "HTTP request failed. Client is already closed." until the
+  /// process restarted.
+  ///
+  /// Two callers is the ordinary case: the Cloud Sync page fires an unawaited
+  /// refreshState() -> isAuthenticated() while a launch sync sits inside its
+  /// own isAuthenticated().
+  Future<bool>? _silentAuthInFlight;
+
+  @override
+  Future<bool> attemptSilentAuth() {
+    if (_authClient != null) return Future.value(true);
+    return _silentAuthInFlight ??= _runSilentAuth().whenComplete(
+      () => _silentAuthInFlight = null,
+    );
+  }
+
+  @override
+  bool lastSilentAuthThrew = false;
+
+  Future<bool> _runSilentAuth() async {
+    lastSilentAuthThrew = false;
+    try {
+      if (_authClient != null) return true;
+
+      await _ensureInitialized();
+      await _eviction;
+      if (_isWeb) return await _renewInBrowser();
+      // A known account only needs a fresh token, which the SDK mints from
+      // its authorization without any UI. Lightweight sign-in is for the
+      // cold launch alone: on Android it goes through Credential Manager,
+      // which needs a foreground activity, so routing the hourly token
+      // refresh through it failed every background sync and left the diver
+      // signing in by hand each time the token expired (#3602).
+      final account =
+          _currentUser ??
+          await _googleSignIn.attemptLightweightAuthentication();
+      if (account == null) return false;
+
+      final authorization = await account.authorizationClient
+          .authorizationForScopes(_scopes);
+      if (authorization == null) return false;
+
+      _installClient(account, authorization);
+      return true;
+    } catch (e) {
+      _log.warning('Silent sign-in failed: $e');
+      lastSilentAuthThrew = true;
+      return false;
+    }
+  }
+
+  @override
+  Future<void> authenticate({String? expectedAccount}) async {
+    try {
+      await _ensureInitialized();
+      if (_isWeb) {
+        await _authenticateInBrowser(expectedAccount);
+        return;
+      }
+      final account = await _googleSignIn.authenticate(scopeHint: _scopes);
+      if (!isSameAccount(expectedAccount, account.email)) {
+        await _forgetRefusedAccount();
+        throw CloudAccountMismatchException(account.email);
+      }
+      await account.authorizationClient.authorizeScopes(_scopes);
+
+      // authorizeScopes hands back whatever token the consent produced, and
+      // Google's consent page gives Drive a checkbox of its own, so that token
+      // can lack Drive. Only the no-prompt path compares the grant with the
+      // request. It is the check every cold launch already makes, so a grant
+      // that passes here is one that keeps working after a restart.
+      final authorization = await account.authorizationClient
+          .authorizationForScopes(_scopes);
+      if (authorization == null) {
+        _log.warning('Google consent granted sign-in without Drive access');
+        throw const CloudStorageException(googleDriveAccessNotAllowed);
+      }
+
+      _installClient(account, authorization);
+      _log.info('Authenticated with Google Drive as ${account.email}');
+    } on CloudStorageException {
+      rethrow;
+    } on GoogleSignInException catch (e, stackTrace) {
+      if (e.code == GoogleSignInExceptionCode.canceled) {
+        if (_isPlatformRefusal(e.description)) {
+          _log.error(
+            'Google Play services refused to authorize the account',
+            error: e,
+            stackTrace: stackTrace,
+          );
+          throw CloudStorageException(
+            // Deliberately platform-neutral about where to look: this
+            // authenticator also serves iOS and macOS, so naming Android's
+            // settings would misdirect users there.
+            'Google Sign-In was refused by the device. Check that the Google '
+            'account on this device is signed in and up to date in the system '
+            'settings, then try again.',
+            // The plain status, never the exception. displayMessage appends
+            // the cause and the Cloud Sync snackbar renders displayMessage,
+            // so passing `e` here would print its toString on screen: the
+            // word "canceled" back in front of a user who cancelled nothing,
+            // plus a second copy of the status. The exception itself is
+            // already in the log line above, which is where it belongs.
+            e.description,
+            stackTrace,
+          );
+        }
+        _log.info('Google Sign-In was cancelled by the user');
+        throw CloudStorageException(
+          'Google Sign-In was cancelled',
+          // No cause: a dismissal has no detail worth showing, and the
+          // exception's toString would only leak plugin internals.
+          null,
+          stackTrace,
+        );
+      }
+      _log.error('Google Sign-In failed', error: e, stackTrace: stackTrace);
+      throw CloudStorageException(
+        'Google Sign-In failed',
+        e.description ?? e.code.name,
+        stackTrace,
+      );
+    } catch (e, stackTrace) {
+      _log.error('Google Sign-In failed', error: e, stackTrace: stackTrace);
+      throw CloudStorageException('Google Sign-In failed', e, stackTrace);
+    }
+  }
+
+  /// The SDK switched its current user as soon as the account was picked, so
+  /// the next cold launch's lightweight sign-in could return it. That cannot
+  /// be undone: the SDK has no way back to the previous user. Signing out
+  /// costs the expected account a sign-in after a restart, which is the safe
+  /// side of syncing into the wrong Drive, and the client held in this process
+  /// is not affected.
+  Future<void> _forgetRefusedAccount() async {
+    try {
+      await _googleSignIn.signOut();
+    } catch (e, stackTrace) {
+      _log.warning(
+        'Could not sign the refused Google account out of the SDK',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Whether a `canceled` code actually describes a refusal by Google Play
+  /// services rather than a dialog the user dismissed.
+  ///
+  /// Android routes both through `GetCredentialCancellationException`, so the
+  /// SDK reports them under one code. Play services prefixes its own
+  /// refusals with the numeric status it failed on, as in
+  /// `[16] Account reauth failed.`; a dismissal carries prose with no such
+  /// prefix. Matching the bracketed status rather than the wording keeps this
+  /// working when Google rewords a message, and it is the only structure the
+  /// two cases do not share.
+  ///
+  /// The distinction matters because the two need opposite responses: a
+  /// dismissal is a decision to leave alone, while a refusal is a fault the
+  /// user cannot act on without being told what it was. Reporting a refusal
+  /// as "cancelled" is what left Google Drive users on an unregistered build
+  /// retrying a dialog they had never dismissed.
+  static bool _isPlatformRefusal(String? description) =>
+      description != null && _platformStatusPrefix.hasMatch(description);
+
+  static final _platformStatusPrefix = RegExp(r'^\s*\[\d+\]');
+
+  /// A page cannot sign in the native way: google_sign_in_web has no
+  /// authenticate() (it throws, pointing at its sign-in button), and its
+  /// lightweight sign-in only starts One Tap and answers null. The
+  /// client-level authorization opens Google's account and consent popup
+  /// instead, and the Drive About resource names the account that granted
+  /// it (issue #4121).
+  Future<void> _authenticateInBrowser(String? expectedAccount) async {
+    final authorization = await _googleSignIn.authorizationClient
+        .authorizeScopes(_scopes);
+    final client = _browserClient(authorization);
+    final String? email;
+    try {
+      email = await _readAccountEmail(client);
+    } catch (_) {
+      client.close();
+      rethrow;
+    }
+    if (!isSameAccount(expectedAccount, email)) {
+      client.close();
+      await _forgetRefusedAccount();
+      throw CloudAccountMismatchException(email ?? '');
+    }
+    _install(client, accessToken: authorization.accessToken, email: email);
+    _log.info('Authenticated with Google Drive as $email');
+  }
+
+  /// The browser's silent path: the authorization Google still holds for
+  /// this site, asked for without a prompt. Nothing cached means the user
+  /// signs in again, which the sync status shows as a row to tap.
+  Future<bool> _renewInBrowser() async {
+    final authorization = await _googleSignIn.authorizationClient
+        .authorizationForScopes(_scopes);
+    if (authorization == null) return false;
+    final client = _browserClient(authorization);
+    final String? email;
+    try {
+      email = _email ?? await _readAccountEmail(client);
+    } catch (_) {
+      // Nothing installed it yet, so nothing else would ever close it.
+      client.close();
+      rethrow;
+    }
+    _install(client, accessToken: authorization.accessToken, email: email);
+    return true;
+  }
+
+  /// The extension's authClient builds over a transport this app cannot
+  /// choose; the browser path needs its own so a test can serve Drive. The
+  /// SDK gives no expiry, so a distant one is set and a rejected token goes
+  /// through [handleAuthFailure], as it does natively.
+  http.Client _browserClient(GoogleSignInClientAuthorization authorization) {
+    final credentials = AccessCredentials(
+      AccessToken(
+        'Bearer',
+        authorization.accessToken,
+        DateTime.now().toUtc().add(const Duration(days: 365)),
+      ),
+      null,
+      _scopes,
+    );
+    // The wrapper's close must reach the transport, which the OAuth client
+    // leaves open unless told otherwise.
+    return TimeoutHttpClient(
+      authenticatedClient(
+        _baseClient(),
+        credentials,
+        closeUnderlyingClient: true,
+      ),
+    );
+  }
+
+  Future<String?> _readAccountEmail(http.Client client) async {
+    final about = await drive.DriveApi(client).about.get($fields: 'user');
+    return about.user?.emailAddress;
+  }
+
+  void _installClient(
+    GoogleSignInAccount account,
+    GoogleSignInClientAuthorization authorization,
+  ) {
+    // google_sign_in builds the authorized client over a transport this app
+    // never gets to configure, so the deadlines go on the outside. Closing
+    // the wrapper closes the client underneath it (#1279).
+    _install(
+      TimeoutHttpClient(authorization.authClient(scopes: _scopes)),
+      accessToken: authorization.accessToken,
+      account: account,
+      email: account.email,
+    );
+  }
+
+  void _install(
+    http.Client client, {
+    required String accessToken,
+    GoogleSignInAccount? account,
+    required String? email,
+  }) {
+    _authClient?.close();
+    _authClient = client;
+    _accessToken = accessToken;
+    _currentUser = account;
+    _email = email;
+  }
+
+  /// The access token inside [_authClient], kept so a rejection can evict it
+  /// from the SDK's token cache.
+  String? _accessToken;
+
+  @override
+  Future<void> signOut() async {
+    await _googleSignIn.signOut();
+    // Close the auth client if it exists; close is synchronous.
+    _authClient?.close();
+    _authClient = null;
+    _accessToken = null;
+    _currentUser = null;
+    _email = null;
+    _log.info('Signed out from Google Drive');
+  }
+
+  @override
+  Future<void> handleAuthFailure() async {
+    // Drop the stale client so the next attemptSilentAuth() rebuilds
+    // authorization without UI.
+    //
+    // Deliberately leaves _currentUser set (unlike DesktopOAuthAuthenticator,
+    // which clears _email): silent re-auth here normally restores the same
+    // account and _installClient overwrites it, while a failed re-auth leaves
+    // isAuthenticated() false so the stale email is never surfaced. Do not
+    // "fix" this to clear _currentUser -- it would blank a still-valid account
+    // during a transient token refresh.
+    _authClient?.close();
+    _authClient = null;
+
+    // The SDK caches access tokens and can return one the API has already
+    // rejected, so the rejected token is evicted before the next
+    // authorization asks for one. Best effort: a failure here must not stop
+    // the re-auth that follows, which may still get a fresh token.
+    final rejected = _accessToken;
+    _accessToken = null;
+    if (rejected == null) return;
+    final eviction = _evict(rejected);
+    _eviction = eviction;
+    try {
+      await eviction;
+    } finally {
+      if (identical(_eviction, eviction)) _eviction = null;
+    }
+  }
+
+  /// The eviction of a rejected token while it runs. Silent auth waits for
+  /// it: a caller authorizing in that window (the Cloud Sync page's unawaited
+  /// refresh, the media store's supplier) got the dead token back from the
+  /// SDK cache and installed it, so the retry failed on it again.
+  Future<void>? _eviction;
+
+  Future<void> _evict(String token) async {
+    try {
+      await _googleSignIn.authorizationClient.clearAuthorizationToken(
+        accessToken: token,
+      );
+    } catch (e) {
+      _log.warning('Could not clear the rejected Google token: $e');
+    }
+  }
+}

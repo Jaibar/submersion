@@ -3,6 +3,8 @@ import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/weather/data/repositories/weather_repository.dart';
+import 'package:submersion/features/weather/data/services/bulk_conditions_service.dart';
+import 'package:submersion/features/weather/data/services/elevation_service.dart';
 import 'package:submersion/features/weather/data/services/weather_service.dart';
 import 'package:submersion/features/weather/domain/entities/weather_data.dart';
 
@@ -17,6 +19,12 @@ final weatherServiceProvider = Provider<WeatherService>((ref) {
   return WeatherService(client: client);
 });
 
+/// ElevationService provider
+final elevationServiceProvider = Provider<ElevationService>((ref) {
+  final client = ref.watch(weatherHttpClientProvider);
+  return ElevationService(client: client);
+});
+
 /// WeatherRepository provider
 final weatherRepositoryProvider = Provider<WeatherRepository>((ref) {
   final weatherService = ref.watch(weatherServiceProvider);
@@ -24,6 +32,14 @@ final weatherRepositoryProvider = Provider<WeatherRepository>((ref) {
   return WeatherRepository(
     weatherService: weatherService,
     diveRepository: diveRepository,
+  );
+});
+
+/// Bulk conditions backfill across the whole logbook.
+final bulkConditionsServiceProvider = Provider<BulkConditionsService>((ref) {
+  return BulkConditionsService(
+    diveRepository: ref.watch(diveRepositoryProvider),
+    weatherService: ref.watch(weatherServiceProvider),
   );
 });
 

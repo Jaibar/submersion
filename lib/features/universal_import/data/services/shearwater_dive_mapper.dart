@@ -4,11 +4,18 @@ import 'package:flutter/services.dart';
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/surface_pressure_limits.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
+import 'package:submersion/features/universal_import/data/services/import_site_location.dart';
+import 'package:submersion/features/universal_import/data/services/parsed_dive_profile_mapper.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_db_reader.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_filename_parser.dart';
+import 'package:submersion/features/universal_import/data/services/shearwater_gf99_aligner.dart';
+import 'package:submersion/features/universal_import/data/services/shearwater_transmitter_serials.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_value_mapper.dart';
 
 /// Converts [ShearwaterRawDive] objects into `Map<String, dynamic>` entity maps
@@ -30,6 +37,10 @@ class ShearwaterDiveMapper {
 
     final tanks = mapTanks(rawDive);
     final surfacePressure = _extractSurfacePressure(rawDive);
+    final siteKey = siteKeyFor(rawDive);
+    final entryFix = _gnssFix(rawDive.gnssEntryLocation);
+    final exitFix = _gnssFix(rawDive.gnssExitLocation);
+    final computerTissue = _computerTissue(rawDive);
 
     return {
       'importSource': 'shearwater_cloud',
@@ -47,11 +58,23 @@ class ShearwaterDiveMapper {
       'diveNumber': _parseInt(rawDive.diveNumber),
       if (rawDive.buddy != null) 'buddyRefs': [rawDive.buddy!],
       'notes': _buildNotes(rawDive),
-      'siteName': rawDive.site,
-      if (rawDive.site != null)
-        'site': <String, dynamic>{'uddfId': rawDive.site, 'name': rawDive.site},
+      'siteName': ?siteKey,
+      if (siteKey != null)
+        'site': <String, dynamic>{'uddfId': siteKey, 'name': siteKey},
+      // The Swift's own fixes, kept on the dive whether or not they also
+      // named a site, so a logbook never loses where the dive happened
+      // (#2232). `UddfEntityImporter` reads these into `Dive.entryLocation`.
+      if (entryFix != null) 'latitude': entryFix.latitude,
+      if (entryFix != null) 'longitude': entryFix.longitude,
+      if (exitFix != null) 'exitLatitude': exitFix.latitude,
+      if (exitFix != null) 'exitLongitude': exitFix.longitude,
       'diveComputerModel': filenameInfo.model,
-      'diveComputerSerial': filenameInfo.serial,
+      // The manufacturer and an uppercase serial let the registry match this
+      // computer to the one a BLE download registered (issue #3106).
+      'diveComputerManufacturer': filenameInfo.model == null
+          ? null
+          : ShearwaterFilenameParser.vendorProduct(filenameInfo.model!)?.$1,
+      'diveComputerSerial': filenameInfo.serial?.toUpperCase(),
       'waterType': ShearwaterValueMapper.mapWaterType(rawDive.environment),
       'visibility': ShearwaterValueMapper.mapVisibility(
         rawDive.visibility,
@@ -67,6 +90,16 @@ class ShearwaterDiveMapper {
       'diveMode': _mapDiveMode(rawDive.apparatus),
       'tanks': tanks,
       'profile': const <Map<String, dynamic>>[],
+      // From dive_logs; libdivecomputer's values replace these when the
+      // profile parses (mergeWithParsedDive).
+      'gradientFactorLow': ?rawDive.gfMin,
+      'gradientFactorHigh': ?rawDive.gfMax,
+      // Also from dive_logs. The deco model gives way to libdivecomputer's
+      // the same way; the CNS has no other source.
+      'decoAlgorithm': ?rawDive.decoModel,
+      'cnsStart': ?rawDive.startCNS,
+      'cnsEnd': ?rawDive.endCNS,
+      'computerTissue': ?computerTissue,
     };
   }
 
@@ -102,6 +135,7 @@ class ShearwaterDiveMapper {
       warnings?.add(
         const ImportWarning(
           severity: ImportWarningSeverity.warning,
+          code: ImportWarningCode.profileUnreadable,
           message:
               'Could not determine dive computer model for profile parsing',
           entityType: ImportEntityType.dives,
@@ -116,7 +150,11 @@ class ShearwaterDiveMapper {
         product: vendorProduct.$2,
         data: logData,
       );
-      return mergeWithParsedDive(baseMap, parsed);
+      return mergeWithParsedDive(
+        baseMap,
+        parsed,
+        gf99Samples: rawDive.gf99Samples,
+      );
     } on MissingPluginException {
       rethrow;
     } on PlatformException catch (e) {
@@ -124,6 +162,7 @@ class ShearwaterDiveMapper {
       warnings?.add(
         ImportWarning(
           severity: ImportWarningSeverity.warning,
+          code: ImportWarningCode.profileUnreadable,
           message: 'Profile parsing failed for dive ${rawDive.diveId}: $e',
           entityType: ImportEntityType.dives,
         ),
@@ -133,6 +172,7 @@ class ShearwaterDiveMapper {
       warnings?.add(
         ImportWarning(
           severity: ImportWarningSeverity.warning,
+          code: ImportWarningCode.profileUnreadable,
           message: 'Profile parsing failed for dive ${rawDive.diveId}: $e',
           entityType: ImportEntityType.dives,
         ),
@@ -173,16 +213,66 @@ class ShearwaterDiveMapper {
     return results;
   }
 
+  /// The identity a dive's site is filed under, or null when the dive says
+  /// nothing about where it happened.
+  ///
+  /// Shearwater Cloud keys a site on its name, so a dive the diver never
+  /// named had no identity and used to be dropped along with its GNSS entry
+  /// fix (#2210). The fix now supplies the identity, through the shared
+  /// coordinate name every importer uses.
+  static String? siteKeyFor(ShearwaterRawDive dive) {
+    final name = dive.site?.trim();
+    if (name != null && name.isNotEmpty) return name;
+
+    final point = _gnssFix(dive.gnssEntryLocation);
+    if (point == null) return null;
+    return ImportSiteLocation.nameFromCoordinates(
+      point.latitude,
+      point.longitude,
+    );
+  }
+
+  /// A GNSS string as a position the contract accepts, or null.
+  ///
+  /// The string parse alone is not enough: `_parseGnssLocation` returns any
+  /// two readable doubles, including `0,0` and an off-globe pair, and the
+  /// entity importer stores whatever it is handed.
+  static GeoPoint? _gnssFix(String? gnss) {
+    final coords = _parseGnssLocation(gnss);
+    if (coords == null) return null;
+    return ImportSiteLocation.fix(coords.$1, coords.$2);
+  }
+
   /// Deduplicates dive sites by name across a list of raw dives.
   ///
   /// Each unique site name produces one site entity map with `name`,
-  /// `uddfId`, and optional location fields.
+  /// `uddfId`, and optional location fields. A dive the diver never named
+  /// is keyed on its GNSS fix instead of being skipped, so its coordinates
+  /// reach the log (#2210).
   static List<Map<String, dynamic>> mapSites(List<ShearwaterRawDive> dives) {
     final siteMap = <String, Map<String, dynamic>>{};
 
     for (final dive in dives) {
-      final name = dive.site;
+      final name = siteKeyFor(dive);
       if (name == null) continue;
+
+      // Judged by the same contract as the dive's own fix, so a named site
+      // never carries the 0,0 sentinel or an off-globe pair the dive drops.
+      final fix = _gnssFix(dive.gnssEntryLocation);
+
+      // The first dive at a site may have had no usable fix; a later one
+      // that has one fills it in rather than leaving the site unplaced.
+      final existing = siteMap[name];
+      if (existing != null) {
+        if (fix != null && !existing.containsKey('latitude')) {
+          siteMap[name] = {
+            ...existing,
+            'latitude': fix.latitude,
+            'longitude': fix.longitude,
+          };
+        }
+        continue;
+      }
 
       siteMap.putIfAbsent(name, () {
         final site = <String, dynamic>{'name': name, 'uddfId': name};
@@ -191,11 +281,15 @@ class ShearwaterDiveMapper {
           site['notes'] = dive.location;
         }
 
-        final coords = _parseGnssLocation(dive.gnssEntryLocation);
-        if (coords != null) {
-          site['latitude'] = coords.$1;
-          site['longitude'] = coords.$2;
+        if (fix != null) {
+          site['latitude'] = fix.latitude;
+          site['longitude'] = fix.longitude;
         }
+
+        // A suggestion only (issue #1765): the importer applies it while the
+        // site has no types, so it never overrides the diver's own choice.
+        final siteType = ShearwaterValueMapper.mapSiteType(dive.environment);
+        if (siteType != null) site['suggestedSiteTypeRefs'] = [siteType];
 
         return site;
       });
@@ -311,7 +405,42 @@ class ShearwaterDiveMapper {
     final firstTank = tankData[0] as Map<String, dynamic>;
     final mbar = _toDouble(firstTank['SurfacePressureMBar']);
     if (mbar == null) return null;
-    return ShearwaterValueMapper.mbarToBar(mbar);
+    // Zero, or anything no surface could read, is no reading.
+    return plausibleSurfacePressureBar(ShearwaterValueMapper.mbarToBar(mbar));
+  }
+
+  /// The tissue state the computer reported, or null when the export carries
+  /// none of it: surface GF at the start, GF99 at the end. The CNS and the
+  /// deco model beside them are dive keys of their own (issue #2555).
+  static ComputerTissueSnapshot? _computerTissue(ShearwaterRawDive rawDive) {
+    final surfaceGf = rawDive.startGFS;
+    final gf99 = _endGf99(rawDive);
+    if (surfaceGf == null && gf99 == null) return null;
+    return ComputerTissueSnapshot(
+      start: surfaceGf == null
+          ? null
+          : ComputerTissueState(surfaceGfPercent: surfaceGf),
+      end: gf99 == null ? null : ComputerTissueState(gf99Percent: gf99),
+    );
+  }
+
+  /// GF99 at the end of the dive. Shearwater Cloud writes it in three
+  /// places; the one derived from the samples
+  /// (`calculated_values_from_samples.EndGF99`) is the most reliable, and
+  /// `dive_details.EndGF99` is a 0.0 placeholder in exports that never
+  /// computed it, so zero is read as absent throughout.
+  static double? _endGf99(ShearwaterRawDive rawDive) {
+    final candidates = <double?>[
+      _toDouble(rawDive.calculatedValues?['EndGF99']),
+      rawDive.endGF99,
+      rawDive.gf99Samples.isEmpty
+          ? null
+          : rawDive.gf99Samples.last.gf99.toDouble(),
+    ];
+    for (final value in candidates) {
+      if (value != null && value > 0) return value;
+    }
+    return null;
   }
 
   /// Parses a GNSS location string "lat,lon" into a coordinate pair.
@@ -337,11 +466,15 @@ class ShearwaterDiveMapper {
   }
 
   /// Merges parsed profile and deco data into the base metadata map.
+  ///
+  /// [gf99Samples] (from `dive_log_records`) are aligned onto the parsed
+  /// samples by nearest time and set as each sample's `'gf99'`.
   @visibleForTesting
   static Map<String, dynamic> mergeWithParsedDive(
     Map<String, dynamic> baseMap,
-    pigeon.ParsedDive parsed,
-  ) {
+    pigeon.ParsedDive parsed, {
+    List<ShearwaterGf99Sample> gf99Samples = const [],
+  }) {
     final merged = Map<String, dynamic>.from(baseMap);
 
     // Override depth/duration with parsed values (more accurate)
@@ -360,6 +493,11 @@ class ShearwaterDiveMapper {
       merged['gradientFactorHigh'] = parsed.gfHigh;
     }
 
+    // The export's own reading wins; the raw log only fills a gap.
+    merged['surfacePressure'] ??= plausibleSurfacePressureBar(
+      parsed.surfacePressureBar,
+    );
+
     // Override dive mode from parsed data (more accurate than apparatus guess).
     if (parsed.diveMode != null) {
       merged['diveMode'] = switch (parsed.diveMode) {
@@ -369,59 +507,37 @@ class ShearwaterDiveMapper {
       };
     }
 
-    // Build profile samples with all available sensor data.
-    merged['profile'] = parsed.samples.map((s) {
-      final sampleMap = <String, dynamic>{
-        'timestamp': s.timeSeconds,
-        'depth': s.depthMeters,
-      };
-      if (s.temperatureCelsius != null) {
-        sampleMap['temperature'] = s.temperatureCelsius;
-      }
-      if (s.pressureBar != null) {
-        sampleMap['allTankPressures'] = <Map<String, dynamic>>[
-          {'pressure': s.pressureBar, 'tankIndex': s.tankIndex ?? 0},
-        ];
-      }
-      if (s.setpoint != null) {
-        sampleMap['setpoint'] = s.setpoint;
-      }
-      if (s.ppo2 != null) {
-        sampleMap['ppO2'] = s.ppo2;
-      }
-      if (s.heartRate != null) {
-        sampleMap['heartRate'] = s.heartRate;
-      }
-      if (s.cns != null) {
-        sampleMap['cns'] = s.cns;
-      }
-      if (s.rbt != null) {
-        sampleMap['rbt'] = s.rbt;
-      }
-      if (s.tts != null) {
-        sampleMap['tts'] = s.tts;
-      }
-      if (s.decoType != null) {
-        sampleMap['decoType'] = s.decoType;
-      }
-      if (s.decoDepth != null && s.decoType != null && s.decoType != 0) {
-        sampleMap['ceiling'] = s.decoDepth;
-      }
-      if (s.decoType == 0 && s.decoTime != null) {
-        sampleMap['ndl'] = s.decoTime;
-      }
-      return sampleMap;
-    }).toList();
+    // The export names the tanks but not their transmitters; the raw log
+    // knows each transmitter's serial (#4388).
+    final metaTanks = merged['tanks'] as List<Map<String, dynamic>>?;
+    if (metaTanks != null && metaTanks.isNotEmpty) {
+      merged['tanks'] = withTransmitterSerials(metaTanks, parsed.tanks);
+    }
+
+    // Build profile samples with all available sensor data, then add the
+    // GF99 the export logs alongside (libdivecomputer does not report it).
+    merged['profile'] = ShearwaterGf99Aligner.apply(
+      ParsedDiveProfileMapper.samples(parsed),
+      gf99Samples,
+    );
+
+    // Gas switches live only in the parsed samples, and a deco bottle without
+    // a transmitter is missing from the metadata's tank list (#2608).
+    final gas = ParsedDiveProfileMapper.gasSwitches(
+      parsed,
+      (merged['tanks'] as List<Map<String, dynamic>>?) ?? const [],
+      profile: merged['profile'] as List<Map<String, dynamic>>,
+    );
+    if (gas.gasSwitches.isNotEmpty) {
+      merged['tanks'] = gas.tanks;
+      merged['gasSwitches'] = gas.gasSwitches;
+      merged['profile'] = gas.profile;
+    }
 
     // Extract water temperature from profile samples if not already set
     if (merged['waterTemp'] == null) {
-      final temps = parsed.samples
-          .map((s) => s.temperatureCelsius)
-          .whereType<double>()
-          .toList();
-      if (temps.isNotEmpty) {
-        merged['waterTemp'] = temps.reduce((a, b) => a < b ? a : b);
-      }
+      final coldest = ParsedDiveProfileMapper.minSampleTemperature(parsed);
+      if (coldest != null) merged['waterTemp'] = coldest;
     }
 
     return merged;

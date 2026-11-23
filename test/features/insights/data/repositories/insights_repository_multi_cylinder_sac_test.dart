@@ -1,0 +1,354 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/query/dive_query_entity.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/domain/role_consumption.dart';
+
+import '../../../../helpers/test_database.dart';
+
+/// Issue #3109: the statistics read SAC from one cylinder on sidemount and
+/// multi-cylinder dives. They follow the dive overview's rules: every
+/// breathed cylinder counts, converted to the reference cylinder by volume,
+/// and a sidemount cylinder with no volume borrows its partner's.
+void main() {
+  late InsightsRepository repository;
+  late AppDatabase db;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    repository = InsightsRepository();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  /// A 42 minute dive at 20 m average depth: 3 bar ambient, so a 126 bar
+  /// drop is 1.0 bar/min at the surface.
+  Future<void> insertDive(String id, {String diveMode = 'oc'}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion(
+            id: Value(id),
+            diveDateTime: Value(now),
+            runtime: const Value(42 * 60),
+            avgDepth: const Value(20.0),
+            maxDepth: const Value(25.0),
+            diveMode: Value(diveMode),
+            createdAt: Value(now),
+            updatedAt: Value(now),
+          ),
+        );
+  }
+
+  Future<void> insertTank(
+    String diveId,
+    int order,
+    String role, {
+    double? volume,
+    double? start = 200,
+    double? end = 74,
+    double o2 = 21.0,
+  }) async {
+    await db
+        .into(db.diveTanks)
+        .insert(
+          DiveTanksCompanion(
+            id: Value('$diveId-$order'),
+            diveId: Value(diveId),
+            startPressure: Value(start),
+            endPressure: Value(end),
+            volume: Value(volume),
+            tankRole: Value(role),
+            o2Percent: Value(o2),
+            hePercent: const Value(0.0),
+            tankOrder: Value(order),
+          ),
+        );
+  }
+
+  Future<double?> queryLanguageSac(String diveId) async {
+    final row = await db
+        .customSelect(
+          'SELECT ${kDiveSacSql.replaceAll('{r}', 'd')} AS sac '
+          'FROM dives d WHERE d.id = ?',
+          variables: [Variable(diveId)],
+        )
+        .getSingle();
+    return row.read<double?>('sac');
+  }
+
+  group('SAC in pressure per minute', () {
+    test('sums a sidemount pair with no volumes', () async {
+      await insertDive('sm');
+      await insertTank('sm', 0, 'sidemountLeft');
+      await insertTank('sm', 1, 'sidemountRight', end: 137);
+
+      // (126 + 63) bar / 42 min / 3 bar = 1.5 bar/min
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+      final records = await repository.getSacPressureRecords();
+      expect(records.best!.value, closeTo(1.5, 1e-9));
+      expect(await queryLanguageSac('sm'), closeTo(1.5, 1e-9));
+    });
+
+    test('converts a stage into back-gas bar by volume', () async {
+      await insertDive('bs');
+      await insertTank('bs', 0, 'backGas', volume: 12);
+      await insertTank('bs', 1, 'stage', volume: 6);
+
+      // 126 + 126 * 6 / 12 = 189 bar / 42 / 3 = 1.5 bar/min
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+      expect(await queryLanguageSac('bs'), closeTo(1.5, 1e-9));
+    });
+
+    test('a borrowed sidemount volume relates the pair', () async {
+      await insertDive('sb');
+      await insertTank('sb', 0, 'sidemountLeft', volume: 11.1);
+      await insertTank('sb', 1, 'sidemountRight', end: 137);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+    });
+
+    test('sums unsized back-gas doubles logged as independents', () async {
+      await insertDive('bb');
+      await insertTank('bb', 0, 'backGas');
+      await insertTank('bb', 1, 'backGas', end: 137);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+      expect(await queryLanguageSac('bb'), closeTo(1.5, 1e-9));
+    });
+
+    test('sums two unsized twin set rows one to one (#3374)', () async {
+      await insertDive('tw');
+      await insertTank('tw', 0, 'twinSet');
+      await insertTank('tw', 1, 'twinSet', end: 137, o2: 32);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+      expect(await queryLanguageSac('tw'), closeTo(1.5, 1e-9));
+    });
+
+    test('a twin set is the reference ahead of a stage (#3374)', () async {
+      await insertDive('ts');
+      // Stage first, so order alone would pick it: 63 bar from a 12 L
+      // stage is 31.5 bar of a 24 L twin set, 126 + 31.5 over 42 min at
+      // 3 bar is 1.25 bar/min.
+      await insertTank('ts', 0, 'stage', volume: 12, end: 137);
+      await insertTank('ts', 1, 'twinSet', volume: 24);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.25, 1e-9));
+      expect(await queryLanguageSac('ts'), closeTo(1.25, 1e-9));
+    });
+
+    test('does not pair back-gas cylinders carrying different gases', () async {
+      await insertDive('bd');
+      await insertTank('bd', 0, 'backGas');
+      await insertTank('bd', 1, 'backGas', end: 137, o2: 50);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.0, 1e-9));
+    });
+
+    test('pairs back gas within the 0.5 point gas tolerance', () async {
+      await insertDive('tol');
+      await insertTank('tol', 0, 'backGas', o2: 20.4);
+      await insertTank('tol', 1, 'backGas', end: 137, o2: 20.6);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+    });
+
+    test('a rebreather dive has no SAC (#3673)', () async {
+      for (final mode in ['ccr', 'scr']) {
+        await insertDive(mode, diveMode: mode);
+        await insertTank(mode, 0, 'diluent', volume: 3);
+        await insertTank(mode, 1, 'oxygenSupply', volume: 3);
+        expect(await queryLanguageSac(mode), isNull, reason: mode);
+      }
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+    });
+
+    test('a reference with no drop adds zero, as Dive.sac (#3974)', () async {
+      await insertDive('nodrop');
+      await insertTank('nodrop', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('nodrop', 1, 'stage', volume: 6);
+
+      // 126 bar of 6 L is 63 bar of 12 L: half of the 1.0 bar/min.
+      final points = await repository.getSacPressurePerDive();
+      expect(points.single.value, closeTo(0.5, 1e-9));
+      final best = (await repository.getSacPressureRecords()).best;
+      expect(best?.value, closeTo(0.5, 1e-9));
+      expect(await queryLanguageSac('nodrop'), closeTo(0.5, 1e-9));
+    });
+
+    test('a reference with no drop still pairs its partner (#3974)', () async {
+      await insertDive('nodrop');
+      await insertTank('nodrop', 0, 'sidemountLeft', end: 200);
+      await insertTank('nodrop', 1, 'sidemountRight');
+
+      expect(await queryLanguageSac('nodrop'), closeTo(1.0, 1e-9));
+    });
+
+    test('a reference that gained pressure adds zero (#3974)', () async {
+      await insertDive('warmed');
+      await insertTank('warmed', 0, 'backGas', volume: 12, end: 205);
+      await insertTank('warmed', 1, 'stage', volume: 6);
+
+      expect(await queryLanguageSac('warmed'), closeTo(0.5, 1e-9));
+    });
+
+    test('no cylinder dropping gives no SAC', () async {
+      await insertDive('idle');
+      await insertTank('idle', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('idle', 1, 'stage', volume: 6, end: 200);
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+      expect(await queryLanguageSac('idle'), isNull);
+    });
+
+    test('a drop that cannot be related gives no SAC, as Dive.sac', () async {
+      await insertDive('unsized');
+      await insertTank('unsized', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('unsized', 1, 'stage');
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+      expect(await queryLanguageSac('unsized'), isNull);
+    });
+
+    test('a reference with no pressures logged gives no SAC', () async {
+      await insertDive('unread');
+      await insertTank(
+        'unread',
+        0,
+        'backGas',
+        volume: 12,
+        start: null,
+        end: null,
+      );
+      await insertTank('unread', 1, 'stage', volume: 6);
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+      expect((await repository.getSacPressureRecords()).best, isNull);
+      expect(await queryLanguageSac('unread'), isNull);
+    });
+  });
+
+  group('RMV borrows a matched partner volume', () {
+    Future<double> rmvOfPair({
+      required double? rightVolume,
+      String leftRole = 'sidemountLeft',
+      String rightRole = 'sidemountRight',
+      double rightO2 = 21.0,
+    }) async {
+      await insertDive('rmv');
+      await insertTank('rmv', 0, leftRole, volume: 11.1);
+      await insertTank('rmv', 1, rightRole, volume: rightVolume, o2: rightO2);
+      final value = (await repository.getSacVolumePerDive()).single.value;
+      final records = await repository.getSacVolumeRecords();
+      expect(records.best!.value, closeTo(value, 1e-9));
+      await db.customStatement("DELETE FROM dive_tanks WHERE dive_id = 'rmv'");
+      await db.customStatement("DELETE FROM dives WHERE id = 'rmv'");
+      return value;
+    }
+
+    test('the trend and records count the unsized cylinder', () async {
+      final borrowed = await rmvOfPair(rightVolume: null);
+      final sized = await rmvOfPair(rightVolume: 11.1);
+      expect(borrowed, closeTo(sized, 1e-9));
+    });
+
+    test('back-gas doubles on one gas borrow like a sidemount pair', () async {
+      final borrowed = await rmvOfPair(
+        rightVolume: null,
+        leftRole: 'backGas',
+        rightRole: 'backGas',
+      );
+      final sized = await rmvOfPair(
+        rightVolume: 11.1,
+        leftRole: 'backGas',
+        rightRole: 'backGas',
+      );
+      expect(borrowed, closeTo(sized, 1e-9));
+    });
+
+    test('twin set rows borrow like a sidemount pair (#3374)', () async {
+      final borrowed = await rmvOfPair(
+        rightVolume: null,
+        leftRole: 'twinSet',
+        rightRole: 'twinSet',
+        rightO2: 32,
+      );
+      final sized = await rmvOfPair(
+        rightVolume: 11.1,
+        leftRole: 'twinSet',
+        rightRole: 'twinSet',
+        rightO2: 32,
+      );
+      expect(borrowed, closeTo(sized, 1e-9));
+    });
+
+    test('back gas on a different gas does not borrow', () async {
+      await insertDive('mix');
+      await insertTank('mix', 0, 'backGas', volume: 12);
+      await insertTank('mix', 1, 'backGas', o2: 50);
+
+      // A fresh repository each read: the raw delete below moves no stamp,
+      // so a repository that already read the dive would reuse its figures.
+      Future<double> bottomGas() async =>
+          (await InsightsRepository().getRoleConsumptionPerDive())
+              .rmv[ConsumptionRoleGroup.bottomGas]!
+              .single
+              .value;
+      final both = await bottomGas();
+      await db.customStatement("DELETE FROM dive_tanks WHERE id = 'mix-1'");
+      expect(both, closeTo(await bottomGas(), 1e-9));
+    });
+
+    test('the bottom gas figure includes the unsized cylinder', () async {
+      await insertDive('role');
+      await insertTank('role', 0, 'sidemountLeft', volume: 11.1);
+      await insertTank('role', 1, 'sidemountRight');
+      // A fresh repository each read: the raw delete below moves no stamp,
+      // so a repository that already read the dive would reuse its figures.
+      Future<double> bottomGas() async =>
+          (await InsightsRepository().getRoleConsumptionPerDive())
+              .rmv[ConsumptionRoleGroup.bottomGas]!
+              .single
+              .value;
+
+      final pair = await bottomGas();
+      await db.customStatement("DELETE FROM dive_tanks WHERE id = 'role-1'");
+      // The right cylinder borrows the left's size and lost the same gas.
+      expect(pair, closeTo(2 * await bottomGas(), 1e-9));
+    });
+
+    test('does not borrow outside the sidemount pair', () async {
+      await insertDive('stage');
+      await insertTank('stage', 0, 'backGas', volume: 12);
+      await insertTank('stage', 1, 'stage');
+      await db
+          .into(db.gasSwitches)
+          .insert(
+            const GasSwitchesCompanion(
+              id: Value('stage-switch'),
+              diveId: Value('stage'),
+              tankId: Value('stage-1'),
+              timestamp: Value(20 * 60),
+              createdAt: Value(0),
+            ),
+          );
+
+      final trend = await repository.getRoleConsumptionPerDive();
+      expect(trend.rmv.keys, [ConsumptionRoleGroup.bottomGas]);
+    });
+  });
+}

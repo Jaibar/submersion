@@ -1,0 +1,128 @@
+import 'package:submersion/features/dive_log/domain/services/dive_consolidation_builder.dart';
+
+/// Every detector threshold, in one place. Detectors never inline numbers.
+/// Units: meters, celsius, bar, seconds unless the name says otherwise.
+abstract final class QualityThresholds {
+  // clock_offset
+  static const int futureGraceDays = 1;
+  static const int minPlausibleYear = 1950;
+  static const int hourOffsetMin = 1;
+  static const int hourOffsetMax = 14;
+  static const int hourOffsetRemainderToleranceMin = 5;
+
+  /// How far a source may sit from where its depth trace fits the primary's
+  /// before its placement is judged to come from a wrong clock (#4296): the
+  /// same tolerance consolidation applies, so a dive merged after the fix is
+  /// never flagged by the check meant for one merged before it.
+  static const Duration sourceProfileFitTolerance =
+      DiveConsolidationBuilder.clockTolerance;
+
+  // duplicate (DiveMatcher supplies its own 0.5/0.7 score thresholds)
+  static const Duration duplicateWindow = Duration(minutes: 15);
+
+  // split_pair
+  static const Duration splitMaxGap = Duration(minutes: 10);
+  static const Duration splitShallowGap = Duration(minutes: 3);
+  static const double splitDeepEndMeters = 1.0;
+
+  // sample_gap
+  static const int gapMinSeconds = 30;
+  static const double gapMedianFactor = 2.0;
+  static const double gapWarnFractionOfRuntime = 0.10;
+  static const int gapFillMaxSeconds = 300;
+
+  // depth_spike
+  static const double spikeRateMetersPerSecond = 3.0;
+  static const double negativeDepthMeters = -0.5;
+  static const double maxDepthMismatchFraction = 0.05;
+  static const double maxDepthMismatchMinMeters = 0.5;
+  static const int maxSpikeFindingsPerDive = 10;
+
+  // impossible_rate
+  static const double impossibleRateMetersPerMinute = 30.0;
+  static const int impossibleRateMinSeconds = 30;
+
+  // temp_anomaly
+  static const double waterTempMinC = -2.0;
+  static const double waterTempMaxC = 40.0;
+  static const double tempJumpPerSampleC = 5.0;
+  static const int tempJumpMaxSampleGapSeconds = 60;
+  static const int maxTempJumpFindingsPerDive = 5;
+
+  // pressure_anomaly
+  static const double pressureRiseBar = 5.0;
+  // A rising run above pressureRiseBar is only reported when it is also
+  // faster than this (#2442). A cylinder warming in the water or a drifting
+  // sensor raises the reading by a few bar over minutes (up to ~6 bar/min in
+  // real logbooks), while a genuine jump arrives within a sample or two.
+  static const double pressureRiseMinBarPerMinute = 10.0;
+  // A rise this large is reported whatever its rate: no cylinder warms by
+  // this much underwater, and a sparsely sampled series (one reading every
+  // few minutes) would otherwise hide a real jump behind a low rate.
+  static const double pressureRiseAlwaysFlagBar = 20.0;
+  static const double pressureEndpointMismatchBar = 10.0;
+  static const double pressureSwapMinDiffBar = 1.0;
+  // How close a recorded pressure must sit to a glitch reading of the series
+  // to count as taken from it (#2441). Sources quantize before converting
+  // (Shearwater logs 2 psi units), so the two can differ by a fraction of a
+  // bar.
+  static const double pressureGlitchMatchBar = 0.5;
+  static const double sacSurfaceLpmMax = 100.0;
+  static const int sacMinSeriesSeconds = 300;
+  static const int switchProximitySeconds = 60;
+  // How close a tank-pressure sample must sit to the depth-based surfacing
+  // moment to describe the end of the dive (#2220). Wide enough to cover a
+  // coarsely sampled series; beyond it the end comparison is suppressed
+  // rather than made against an early-dive reading that says nothing about
+  // surfacing, mirroring pressureStartLookbackSeconds below.
+  static const int pressureSurfacingLookbackSeconds = 120;
+  // How late into the dive a tank's first pressure sample may arrive and
+  // still be compared against the reported start pressure (#2222). A source
+  // that reports a cylinder's start pressure from its own metadata (e.g. a
+  // pairing/power-on reading) rather than the profile can leave a real gap
+  // before the first in-dive sample -- notably a rebreather's O2 supply,
+  // logged only on addition rather than continuously -- and that gap carries
+  // no data-quality signal.
+  static const int pressureStartLookbackSeconds = 120;
+
+  // gas_mod
+  static const double ppO2WarnBar = 1.6;
+  static const double ppO2CriticalBar = 1.8;
+  static const int ppO2SustainSeconds = 60;
+  static const double hypoxicFo2 = 0.16;
+  static const double hypoxicMaxDepthMeters = 3.0;
+  static const int hypoxicSustainSeconds = 120;
+  static const double modToleranceMeters = 1.0;
+
+  // impossible_gas_mix (issue #4714); what is impossible is GasMix.isPossible.
+  /// The least oxygen a mix divided by 100 may hold to be offered as what
+  /// was meant: the gas calculators' hypoxic trimix floor. Less is no
+  /// breathing gas, so dividing does not explain the stored value.
+  static const double rescaledMinO2Percent = 5.0;
+
+  // tank_assignment
+  static const double wrongTankInactiveDropFraction = 0.7;
+  static const double wrongTankMinTotalDropBar = 20.0;
+  static const double twinSeriesMeanDiffBar = 2.0;
+  static const int twinSeriesMinSamples = 10;
+  // Two computers rarely sample on the same second, so twin series are
+  // compared at their nearest samples within this gap rather than at
+  // identical timestamps.
+  static const int twinSeriesMaxTimeGapSeconds = 5;
+
+  // source_conflict
+  static const double sourceDepthDiffFraction = 0.05;
+  static const double sourceDepthDiffMinMeters = 2.0;
+  static const double sourceDurationDiffFraction = 0.10;
+  static const double sourceTempDiffC = 3.0;
+  static const double salinityRatioLow = 1.02;
+  static const double salinityRatioHigh = 1.035;
+
+  // neighbor lookup window for cross-dive detectors
+  static const Duration neighborWindow = Duration(hours: 12);
+
+  // Two profiles' dives share gear only when their times overlap by more
+  // than this: it absorbs unsynchronised dive computer clocks, so a mask
+  // handed over between back-to-back dives is not reported (issue #2853).
+  static const Duration sharedGearOverlapTolerance = Duration(minutes: 5);
+}

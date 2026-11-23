@@ -1,5 +1,9 @@
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
 import 'package:submersion/features/universal_import/data/csv/extractors/buddy_extractor.dart';
+import 'package:submersion/features/universal_import/data/csv/extractors/dive_center_extractor.dart';
 import 'package:submersion/features/universal_import/data/csv/extractors/dive_extractor.dart';
+import 'package:submersion/features/universal_import/data/csv/extractors/dive_type_extractor.dart';
 import 'package:submersion/features/universal_import/data/csv/extractors/gear_extractor.dart';
 import 'package:submersion/features/universal_import/data/csv/extractors/profile_extractor.dart';
 import 'package:submersion/features/universal_import/data/csv/extractors/site_extractor.dart';
@@ -8,7 +12,10 @@ import 'package:submersion/features/universal_import/data/csv/extractors/tank_ex
 import 'package:submersion/features/universal_import/data/csv/models/correlated_payload.dart';
 import 'package:submersion/features/universal_import/data/csv/models/import_configuration.dart';
 import 'package:submersion/features/universal_import/data/csv/models/transformed_rows.dart';
+import 'package:submersion/features/universal_import/data/csv/transforms/buddy_instructor_center.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
+import 'package:submersion/features/universal_import/data/models/import_warning.dart';
+import 'package:submersion/features/universal_import/data/services/gas_mix_cap.dart';
 
 /// Stage 5: Extract and correlate entities from transformed CSV rows.
 ///
@@ -25,13 +32,15 @@ class CsvCorrelator {
   /// Correlate entities from [diveListRows] and optional [profileRows].
   ///
   /// Steps:
-  /// 1. Normalize rows (map 'site' alias to 'siteName').
+  /// 1. Normalize rows (map 'site' alias to 'siteName', split a combined
+  ///    buddy / instructor / centre cell).
   /// 2. Extract dives via [DiveExtractor] - each gets a fresh UUID.
   /// 3. Extract tanks via [TankExtractor] and link to their dive by diveId.
   /// 4. Extract sites via [SiteExtractor] (deduplicated).
-  /// 5. Link each dive to its site using [SiteExtractor.siteIdForName].
+  /// 5. Link each dive to its site using [SiteExtractor.siteIdForRow].
   /// 6. Conditionally extract buddies, tags, and gear.
-  /// 7. Attach tanks list to each dive map.
+  /// 7. Attach tanks list to each dive map, link buddies and tags, and link
+  ///    each dive to the suit gear extracted from its row.
   /// 8. If [profileRows] provided, run [ProfileExtractor] and attach profiles.
   /// 9. Build metadata and return [CorrelatedPayload].
   CorrelatedPayload correlate({
@@ -49,9 +58,18 @@ class CsvCorrelator {
     // Step 3: Extract tanks keyed by dive ID.
     const tankExtractor = TankExtractor();
     final tanksByDiveId = <String, List<Map<String, dynamic>>>{};
+    final gasWarnings = <ImportWarning>[];
     for (var i = 0; i < rows.length; i++) {
       final diveId = dives[i]['id'] as String;
       final tanks = tankExtractor.extract(rows[i], diveId);
+      // Every tank is corrected, but the notice counts dives: one warning
+      // per row, however many of its tanks were over.
+      ImportWarning? capped;
+      for (final tank in tanks) {
+        final warning = _capHelium(tank, i, diveListRows.sourceRowOf(i));
+        capped ??= warning;
+      }
+      if (capped != null) gasWarnings.add(capped);
       if (tanks.isNotEmpty) {
         tanksByDiveId[diveId] = tanks;
       }
@@ -68,13 +86,18 @@ class CsvCorrelator {
     // Step 5: Link dives to their sites (only when sites are enabled).
     final List<Map<String, dynamic>> linkedDives;
     if (siteExtractor != null) {
-      linkedDives = dives.map((dive) {
-        final siteName = dive['siteName'] as String?;
-        if (siteName == null) return dive;
-        final siteId = siteExtractor!.siteIdForName(siteName);
-        if (siteId == null) return dive;
-        return Map<String, dynamic>.from(dive)..['siteId'] = siteId;
-      }).toList();
+      // Linked from the row, not from the dive's `siteName`: a site that
+      // exists only because its row carried `gps` has no name on the dive to
+      // look up (#2212).
+      linkedDives = [
+        for (var i = 0; i < dives.length; i++)
+          switch (siteExtractor.siteIdForRow(rows[i])) {
+            final siteId? => Map<String, dynamic>.from(
+              dives[i],
+            )..['siteId'] = siteId,
+            null => dives[i],
+          },
+      ];
     } else {
       linkedDives = dives;
     }
@@ -88,16 +111,33 @@ class CsvCorrelator {
     }
 
     // Step 6b: Extract tags if requested.
+    TagExtractor? tagExtractor;
     final tags = <Map<String, dynamic>>[];
     if (entityTypes.contains(ImportEntityType.tags)) {
-      tags.addAll(TagExtractor().extractFromRows(rows));
+      tagExtractor = TagExtractor();
+      tags.addAll(tagExtractor.extractFromRows(rows));
     }
 
     // Step 6c: Extract gear/equipment if requested.
+    GearExtractor? gearExtractor;
     final gear = <Map<String, dynamic>>[];
     if (entityTypes.contains(ImportEntityType.equipment)) {
-      gear.addAll(GearExtractor().extractFromRows(rows));
+      gearExtractor = GearExtractor();
+      gear.addAll(gearExtractor.extractFromRows(rows));
     }
+
+    // Step 6d: Extract dive centres if requested.
+    DiveCenterExtractor? diveCenterExtractor;
+    final diveCenters = <Map<String, dynamic>>[];
+    if (entityTypes.contains(ImportEntityType.diveCenters)) {
+      diveCenterExtractor = DiveCenterExtractor();
+      diveCenters.addAll(diveCenterExtractor.extractFromRows(rows));
+    }
+
+    // Step 6e: Extract the dive types the dives reference, if requested.
+    final diveTypes = entityTypes.contains(ImportEntityType.diveTypes)
+        ? const DiveTypeExtractor().extractFromRows(rows)
+        : const <Map<String, dynamic>>[];
 
     // Step 7: Attach tanks to each dive map.
     final divesWithTanks = linkedDives.map((dive) {
@@ -110,13 +150,31 @@ class CsvCorrelator {
     // Step 7b: Link buddies and divemasters to dives so the importer's
     // _linkBuddiesToDive method creates proper entity associations.
     final divesWithBuddyRefs = buddyExtractor != null
-        ? _attachBuddyRefs(divesWithTanks, buddyExtractor)
+        ? _attachBuddyRefs(divesWithTanks, rows, buddyExtractor)
         : divesWithTanks;
+
+    // Step 7b2: Link each dive to the dive centre on its row.
+    final divesWithCenterRefs = diveCenterExtractor != null
+        ? _attachDiveCenterRefs(divesWithBuddyRefs, rows, diveCenterExtractor)
+        : divesWithBuddyRefs;
+
+    // Step 7c: Link tags to dives so the importer's _linkTagsToDive method
+    // attaches them; without tagRefs the tags import linked to no dive.
+    final divesWithTagRefs = tagExtractor != null
+        ? _attachTagRefs(divesWithCenterRefs, rows, tagExtractor)
+        : divesWithCenterRefs;
+
+    // Step 7d: Link each dive to the suit on its row, so the imported suit
+    // is gear the dive wore rather than an item no dive references (#1824).
+    // The suit also stays in the notes (DiveExtractor), as in Subsurface XML.
+    final divesWithGearRefs = gearExtractor != null
+        ? _attachSuitRefs(divesWithTagRefs, rows, gearExtractor)
+        : divesWithTagRefs;
 
     // Step 8: Attach profile data if provided.
     final finalDives = profileRows != null
-        ? _attachProfiles(divesWithBuddyRefs, profileRows.rows)
-        : divesWithBuddyRefs;
+        ? _attachProfiles(divesWithGearRefs, profileRows.rows)
+        : divesWithGearRefs;
 
     // Step 9: Build metadata and entities map.
     final metadata = <String, dynamic>{
@@ -129,13 +187,16 @@ class CsvCorrelator {
       ImportEntityType.dives: finalDives,
       if (sites.isNotEmpty) ImportEntityType.sites: sites,
       if (buddies.isNotEmpty) ImportEntityType.buddies: buddies,
+      if (diveCenters.isNotEmpty) ImportEntityType.diveCenters: diveCenters,
       if (tags.isNotEmpty) ImportEntityType.tags: tags,
       if (gear.isNotEmpty) ImportEntityType.equipment: gear,
+      if (diveTypes.isNotEmpty) ImportEntityType.diveTypes: diveTypes,
     };
 
     final warnings = [
       ...diveListRows.warnings,
       if (profileRows != null) ...profileRows.warnings,
+      ...gasWarnings,
     ];
 
     return CorrelatedPayload(
@@ -149,52 +210,142 @@ class CsvCorrelator {
   // Private helpers
   // ---------------------------------------------------------------------------
 
+  /// Reduces the helium of [tank] when its gas totals more than 100 %, and
+  /// returns the warning that says so.
+  ImportWarning? _capHelium(
+    Map<String, dynamic> tank,
+    int index,
+    int sourceRow,
+  ) {
+    final mix = tank['gasMix'] as GasMix;
+    final keptHe = cappedHelium(mix.o2, mix.he);
+    if (keptHe == null) return null;
+    tank['hePercent'] = keptHe;
+    tank['gasMix'] = GasMix(o2: mix.o2, he: keptHe);
+    return gasMixCappedWarning(
+      o2: mix.o2,
+      he: mix.he,
+      keptHe: keptHe,
+      sourceRow: sourceRow,
+      itemIndex: index,
+      field: 'hePercent',
+    );
+  }
+
+  /// Set `equipmentRefs` on each dive to the gear extracted from the suit on
+  /// the same row. [dives] and [rows] share an index: every dive is
+  /// extracted from the row at its position.
+  List<Map<String, dynamic>> _attachSuitRefs(
+    List<Map<String, dynamic>> dives,
+    List<Map<String, dynamic>> rows,
+    GearExtractor extractor,
+  ) {
+    return [
+      for (var i = 0; i < dives.length; i++)
+        switch (extractor.gearIdForName(
+          rows[i]['suit']?.toString().trim() ?? '',
+        )) {
+          final gearId? => {
+            ...dives[i],
+            'equipmentRefs': [gearId],
+          },
+          null => dives[i],
+        },
+    ];
+  }
+
   /// Convert raw buddy/diveMaster string fields on each dive into the
   /// buddyRefs / unmatchedDiveGuideNames lists that
   /// [UddfEntityImporter._linkBuddiesToDive] expects, and remove the raw
   /// strings so they don't appear as free-text in the Details section.
+  ///
+  /// The instructors on each row (from [rows], index-aligned with [dives])
+  /// become buddyRoleRefs with the instructor role, the exact-role links
+  /// the importer gives precedence (#3629).
   List<Map<String, dynamic>> _attachBuddyRefs(
     List<Map<String, dynamic>> dives,
+    List<Map<String, dynamic>> rows,
     BuddyExtractor extractor,
   ) {
-    return dives.map((dive) {
-      final updated = Map<String, dynamic>.from(dive);
+    return [
+      for (var i = 0; i < dives.length; i++)
+        _withBuddyRefs(dives[i], rows[i], extractor),
+    ];
+  }
 
-      // Buddy field → buddyRefs (IDs of extracted buddy entities).
-      final rawBuddy = updated['buddy']?.toString();
-      if (rawBuddy != null && rawBuddy.isNotEmpty) {
-        final names = rawBuddy
-            .split(',')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty);
-        final refs = <String>[];
-        for (final name in names) {
-          final id = extractor.buddyIdForName(name);
-          if (id != null) refs.add(id);
-        }
-        if (refs.isNotEmpty) {
-          updated['buddyRefs'] = refs;
-          updated.remove('buddy');
-        }
-      }
+  Map<String, dynamic> _withBuddyRefs(
+    Map<String, dynamic> dive,
+    Map<String, dynamic> row,
+    BuddyExtractor extractor,
+  ) {
+    final updated = Map<String, dynamic>.from(dive);
 
-      // DiveMaster field → unmatchedDiveGuideNames so the importer
-      // creates/finds the buddy and links with diveGuide role.
-      final rawDm = updated['diveMaster']?.toString();
-      if (rawDm != null && rawDm.isNotEmpty) {
-        final names = rawDm
-            .split(',')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList();
-        if (names.isNotEmpty) {
-          updated['unmatchedDiveGuideNames'] = names;
-          updated.remove('diveMaster');
-        }
-      }
+    // Instructor field → buddyRoleRefs with the instructor role.
+    final instructorRefs = [
+      for (final name in BuddyExtractor.splitNames(row['instructor']))
+        ?extractor.buddyIdForName(name),
+    ];
+    if (instructorRefs.isNotEmpty) {
+      updated['buddyRoleRefs'] = [
+        for (final ref in instructorRefs)
+          {'buddyRef': ref, 'roleId': DiveRole.instructorId},
+      ];
+    }
 
-      return updated;
-    }).toList();
+    // Buddy field → buddyRefs (IDs of extracted buddy entities).
+    final buddyRefs = [
+      for (final name in BuddyExtractor.splitNames(updated['buddy']))
+        ?extractor.buddyIdForName(name),
+    ];
+    if (buddyRefs.isNotEmpty) {
+      updated['buddyRefs'] = buddyRefs;
+      updated.remove('buddy');
+    }
+
+    // DiveMaster field → unmatchedDiveGuideNames so the importer
+    // creates/finds the buddy and links with diveGuide role.
+    final guideNames = BuddyExtractor.splitNames(updated['diveMaster']);
+    if (guideNames.isNotEmpty) {
+      updated['unmatchedDiveGuideNames'] = guideNames;
+      updated.remove('diveMaster');
+    }
+
+    return updated;
+  }
+
+  /// Set `diveCenterRef` on each dive to the dive centre extracted from the
+  /// same row, as [UddfEntityImporter] expects. [dives] and [rows] are
+  /// index-aligned.
+  List<Map<String, dynamic>> _attachDiveCenterRefs(
+    List<Map<String, dynamic>> dives,
+    List<Map<String, dynamic>> rows,
+    DiveCenterExtractor extractor,
+  ) {
+    return [
+      for (var i = 0; i < dives.length; i++)
+        switch (extractor.centerIdForRow(rows[i])) {
+          final centerId? => {...dives[i], 'diveCenterRef': centerId},
+          null => dives[i],
+        },
+    ];
+  }
+
+  /// Set each dive's tagRefs to the ids of the tags in its source row, as
+  /// [UddfEntityImporter._linkTagsToDive] expects. [dives] and [rows] are
+  /// index-aligned: every dive was extracted from the row at its index.
+  List<Map<String, dynamic>> _attachTagRefs(
+    List<Map<String, dynamic>> dives,
+    List<Map<String, dynamic>> rows,
+    TagExtractor extractor,
+  ) {
+    return [
+      for (var i = 0; i < dives.length; i++)
+        if (extractor.tagIdsForRow(rows[i]) case final refs
+            when refs.isNotEmpty)
+          Map<String, dynamic>.from(dives[i])..['tagRefs'] = refs
+        else
+          dives[i],
+    ];
   }
 
   /// Normalize field name aliases to canonical names for extractors.
@@ -211,8 +362,40 @@ class CsvCorrelator {
           normalized[entry.value] = normalized.remove(entry.key);
         }
       }
+      if (row.containsKey(_combinedPeopleField)) {
+        normalized = _splitCombinedPeople(normalized ?? row);
+      }
       return normalized ?? row;
     }).toList();
+  }
+
+  /// MySSI's "Dive Buddy / Instructor / Center" cell (#3629).
+  static const _combinedPeopleField = 'buddyInstructorCenter';
+
+  /// Replaces the combined people cell on [row] with the buddy, instructor
+  /// and diveCenter fields the extractors read, adding to any of them the
+  /// row already maps from a column of its own.
+  Map<String, dynamic> _splitCombinedPeople(Map<String, dynamic> row) {
+    final updated = Map<String, dynamic>.from(row);
+    final people = splitBuddyInstructorCenter(
+      updated.remove(_combinedPeopleField)?.toString() ?? '',
+    );
+
+    void addNames(String field, List<String> names) {
+      if (names.isEmpty) return;
+      updated[field] = [
+        ...BuddyExtractor.splitNames(updated[field]),
+        ...names,
+      ].join(', ');
+    }
+
+    addNames('buddy', people.buddies);
+    addNames('instructor', people.instructors);
+    final center = people.diveCenter;
+    if (center != null && (updated['diveCenter'] ?? '').toString().isEmpty) {
+      updated['diveCenter'] = center;
+    }
+    return updated;
   }
 
   /// Match profile samples to dives by dive key and attach as 'profile'.

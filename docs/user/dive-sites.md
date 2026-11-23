@@ -1,0 +1,313 @@
+# Dive Sites
+
+Build your personal database of the places you dive, with GPS coordinates, depth ranges, hazards, access notes and attachments, and let the map tie everything together.
+
+> [!NOTE]
+> **Where to find it:** Tap or click **Sites** in the navigation rail (desktop) or the bottom bar (phone). On a phone it is one of the default bottom-bar slots; if you have moved it, it is under **More**.
+
+<!-- screenshot: images/dive-sites/site-list.png: site list view showing sites with dive counts and ratings -->
+
+## Adding a site
+
+Tap the **Add Site** button (the floating button on a phone; on desktop the same button sits in the top-right area of the detail pane). You can also create a site while picking one for a dive: the name you searched for is filled in for you.
+
+The new site opens on its own page, unlocked, with a card for each part of the site. Open a card with its pencil, fill it in and tap **Done**; **Add** along the top brings in a card the site does not show yet. Only the **Name**, in the site's header, is required; everything else is optional and can be filled in later. **Save** creates the site and shows it, locked. **Cancel** on a new site you have not touched closes it without asking.
+
+The sections below list what each card holds.
+
+### Identity
+
+| Field | Notes |
+|-------|-------|
+| **Name** | Required. As you type, autocomplete suggests names from your existing sites. A similarity hint appears if your new name is close to one you already have, which catches duplicates before they happen. |
+| **Description** | Free-text overview of the site. |
+| **Country** | Autocomplete draws from the countries already in your site list. |
+| **Region** | Autocomplete suggests regions already used for the same country; fuzzy matching is enabled so partial names surface near-matches. |
+| **City**, **Island**, **Body of Water** | More location detail, all optional. |
+
+**Look up from coordinates**, under Body of Water, finds the country, region, city and body of water for the site's coordinates. One press fills whatever is blank and offers to replace any value that differs, such as a name in another language. Nothing is stored until you save the site. The button needs coordinates, which you add in the Location section below.
+
+### Location (GPS coordinates)
+
+Two quick-capture buttons are provided:
+
+- **Use My Location** reads the device GPS and fills in latitude and longitude. On mobile, if permission is denied, a snackbar links directly to app settings. When the device returns a location, country and region are reverse-geocoded and pre-filled if those fields are still blank.
+- **Pick from Map** opens a full-screen interactive map where you tap to drop a pin. Country and region are reverse-geocoded from the pin position and pre-filled if still blank.
+
+You can also type decimal latitude and longitude directly. Coordinates are validated on save (latitude −90 to 90, longitude −180 to 180).
+
+> [!TIP]
+> You do not need to be at the dive site to add it. Use **Pick From Map** to place a pin anywhere in the world, or type in coordinates you have from a GPS device or chart.
+
+### Altitude
+
+Record the site's altitude above sea level in metres (or feet if you use imperial). When you enter a non-zero altitude, the Altitude card shows an **altitude group indicator**: a color-coded badge (informational, caution, warning, or severe) that signals how altitude affects decompression calculations. This matters for inland and high-altitude lake diving.
+
+### Dive info
+
+| Field | Notes |
+|-------|-------|
+| **Min depth** | Shallowest point of the site, in your unit preference. |
+| **Max depth** | Deepest point. |
+| **Difficulty** | Choice chip: Beginner, Intermediate, Advanced, or Technical. |
+| **Rating** | Your 1 to 5 star rating. Tap a star to set; a **Clear** link removes it. |
+| **Water Type** | Salt, fresh, or brackish. |
+
+### Access and safety
+
+| Field | Notes |
+|-------|-------|
+| **Access Notes** | Entry and exit points, how to reach the site. |
+| **Mooring Number** | Mooring buoy identifier for boat dives. |
+| **Parking Information** | Parking availability, fees and tips. |
+| **Entry Method** / **Exit Method** | How you usually get in and out (shore, boat, back roll, and so on). |
+| **Hazards** | Currents, boat traffic, marine life warnings, or other hazards. |
+
+### Site types and tags
+
+**Site types** describe the kind of site: reef, wreck, cave, and so on. They are edited in the site's header, with its name, water type and **Shared with** (see [Sharing a site with other profiles](#sharing-a-site-with-other-profiles)). Pick one or more from the built-in types or your own; **Manage types** (also **Settings > Manage > Site Types**) adds, renames or hides them. **Tags** have a card of their own and work as they do for dives (see [Logging Dives](dive-logging.md#tags-and-dive-types)).
+
+### Life and notes
+
+- **Expected Species**: link species you expect to encounter at this site. These appear on the site detail and feed into marine life tracking. (See [Marine Life and Photos](marine-life-and-photos.md).)
+- **Notes**: any other free-text information.
+
+<!-- screenshot: images/dive-sites/site-detail.png: site detail page showing all fields -->
+
+## Changing a site
+
+Open the site and tap the lock (in the top bar on a phone, in the pane's header on desktop). Each card shows its pencil: open the ones you want, change them and tap **Done**, then **Save** at the top. One Save writes every card you changed and adds one entry to the site's **History** (in the menu), from which you can put them all back at once. **Cancel**, or leaving the site with unsaved changes, asks before discarding them. **Delete**, **Remove from my profile** and the menu's other actions on the whole site need it unlocked first.
+
+## On the site's page
+
+Besides everything you entered, the site's detail page shows:
+
+- **Dive Statistics** for the site, from the dives you logged there.
+- **Dives at this Site**, each opening its dive.
+- **Tides**, with no API key needed: from the nearest NOAA tide station when one is close, otherwise an ocean-model estimate (shown with its grid resolution and a caveat for complex coastlines). Times are in the site's local time.
+- **Attachments**: photos, site maps, PDFs and other files for the site. Give each one a category (**Access and entry**, **Anchorage and mooring**, **Parking**, **Site map**, **Underwater**, or **General**) and they are grouped under those headings. An attachment shown Large (by default, everything but Underwater and uncategorized attachments) takes two rows' height at the start of its group, with the other attachments beside it; on a narrow screen where nothing fits beside it, it fills the width. An attachment's details change its category and display size; its file name stays as it is, because that is how your other devices find the file.
+
+Below the map and the site's name, the cards start in a planning-first order: what the site is and whether it suits you (description, depth, difficulty and rating, hazards and access), then how to get in and when (location, tides), then what is down there (seascape, features, species, ecosystem, media), then your own history and records (dive statistics, notes, tags, altitude, documents). **Settings > Appearance > Sites > Section Order & Visibility** (under **Site Details**) reorders and hides them. An order you have already saved is kept; **Reset to Default** on that page switches to this one.
+
+## The map
+
+<!-- screenshot: images/dive-sites/site-map.png: clustered site map with heat map overlay -->
+
+The Sites map is an interactive world map backed by OpenStreetMap tiles. Toggle to it with the map icon in the app bar (on mobile it opens a dedicated map page; on desktop the map appears in the right pane alongside the list).
+
+### Marker clusters
+
+When multiple sites are close together the map groups them into a numbered cluster bubble. Tapping a cluster animates the map to zoom in and spread the markers apart. Individual site markers are color-coded:
+
+- **Rating-based color** (if the site has a rating): dark green for 4.5 and up, green from 4.0, blue from 3, orange from 2, red below 2.
+- **Dive-count color** (no rating set): purple for 10 or more dives, shades of blue for fewer, grey for unvisited sites.
+
+The map scrolls continuously across the 180th meridian, so sites around Fiji or the wider Pacific stay in one piece instead of splitting across the map's edges.
+
+A selected marker enlarges and highlights. Tapping it a second time deselects it.
+
+### Info card
+
+Tapping any marker shows an info card with the site name, location string, dive count, and rating. Tapping **Details** on the card opens the full site detail page.
+
+### Density heat map
+
+The heat map layer shows where your diving activity is concentrated. Toggle it with the heat-map button in the map toolbar (top-right of the map pane). The overlay renders a density-colorized gradient directly over the tile layer: cooler colors for sparse visits, warmer colors where many dives are recorded.
+
+### Built-in sites on the map
+
+The map also draws sites from the built-in catalogue, beneath your own, so you can look around a place before you dive it. They come in two layers, chosen from the globe button in the map's controls (**Built-in sites on the map**):
+
+- **Built-in dive sites**, shown as hollow grey pins. This layer is on unless you turn it off.
+- **Charted wrecks and reefs**, shown as grey anchors. This layer starts off, because there are far more of them than dive sites: around Britain or Florida they alone would fill the map.
+
+Tick or untick either layer in the menu; it stays open so you can change both. Your choice is remembered on this device, and each device keeps its own. With both layers off the map shows only your own sites.
+
+The map marks the built-in sites in view, and reads them again when you move or zoom it. Zoomed far out, a view can hold more than it marks (1,500): dive sites are marked first, then the charted wrecks and reefs nearest the middle, and a note says **Zoom in to see every built-in site**. A built-in site you have already added is drawn as your own, and one that sits within 150 m (490 ft) of a site you created yourself is not drawn.
+
+Tap a pin for a card about the site. **Add to my sites** keeps it, and **Details** opens the site's own page.
+
+### Built-in site pages
+
+Every site in the built-in catalogue has a page you can read without adding the site. Open it with **Details** on a pin's card, or by tapping a result on the Import page. It shows:
+
+- A map of the position, with the depth overlay. The button in its corner opens a map you can move and zoom.
+- The site's name, where it is, and whether it is a **Built-in dive site**, a **Charted wreck** or a **Charted reef**. **Not in your sites** says the page is the catalogue's and not one of yours.
+- **About**: site types, entry, depth and description, when the catalogue has them. Many dive sites in the catalogue are no more than a name and a position, and the page then leaves this out.
+- **Hazards**, including any restriction or protection a wreck register notes.
+- **Location**: country, region, island, sea and GPS coordinates. To copy the coordinates, use the copy button beside them or hold the row.
+- **Tides** and **Ecosystem** for the position, as on your own sites. A fresh-water site has no tides, and a position with no tide data (an inland lake or quarry, say) has no Tides card at all.
+- **Nearby**: your own sites within 10 km (6 mi), then other built-in sites, each with its distance. Tap one to open it.
+- **Source**: where the record came from, who to credit, and its licence, with links to the source and to the site's website. For a charted wreck or reef it adds that the record is a charted position and not a dive guide.
+
+If one of the sites you created yourself sits on the same spot, the page says so (**Your site ... is ... from here**) and opens it.
+
+**Add to my sites** adds the site with everything the catalogue holds for it and opens your own new site's page in its place. A built-in site you have already added has no page of its own any more: wherever you open it, you get your site.
+
+### Map / list split pane (desktop)
+
+On a window at least 1100 px wide the Sites screen uses a split-pane layout: the list occupies the left column and the interactive map fills the right. Selecting a site in the list animates the map to center on that site's marker; tapping a marker highlights the matching row in the list and shows the info card.
+
+### Fit all sites
+
+The crosshairs icon in the map toolbar zooms and pans so that all your sites with valid coordinates are visible at once.
+
+### Offline tile caching
+
+Map tiles are cached locally after the first load, so the map remains usable in areas with limited connectivity. Cached tiles update automatically when a connection is available.
+
+## List, table, and filter views
+
+The site list supports three display modes, **Detailed**, **Compact**, and **Table**, selectable from the overflow menu (three-dot icon in the app bar). **Group by** **Country & region** gathers the list under collapsible country and region headings. Table mode shows a customizable column grid; tap the column-settings icon to add, remove, reorder, or pin columns from the full set of site fields.
+
+Use the filter icon to narrow the list by:
+
+- Country and region
+- Difficulty level
+- Maximum depth range
+- Site type
+- Tags
+- Minimum rating
+- Has GPS coordinates (yes / no)
+- Has logged dives (yes / no)
+
+The filter also takes a written query: `gps is blank` lists the sites with no GPS location.
+
+The search field searches your own sites. While you type plain words in it, a row beneath offers **Search built-in sites for** what you typed: tap it to run the same search on the Import page, over the whole built-in catalogue. It is how you look up a site you do not have yet.
+
+Use the sort icon to order by name, rating, difficulty, max depth, dive count, or when you last dived there.
+
+## Importing sites
+
+Choose **Import** from the overflow menu on the Sites list. Type a site name, a place (a country in any language, a region or an island) or a sea, or choose a quick-search chip (Caribbean, Red Sea, Thailand, Indonesia, Maldives, Philippines). Results appear in two sections:
+
+- **My Sites**: matches from your own site database, shown with a "Saved" badge. Tapping one opens its detail page.
+- **Import from Database**: results from the built-in site catalogue, up to 200 at a time; a note says when there are more, and a more specific search shows them. Tap a result card to open the site's [built-in page](#built-in-site-pages) and read about it, or tap **Import** on the card to add it straight away. A site you have already added shows **Imported**, in this session or any later one, and tapping it opens your own site.
+
+An imported site arrives with everything the catalogue holds for it: name, description, country, region, island, body of water, GPS coordinates, depth, site types, entry method, and hazards. You can edit any field after import.
+
+The same overflow menu offers **Fill in missing location details** (looks up country and region for sites that have coordinates but no place names) and **Refresh place names** (looks them up again, in your chosen place-name language).
+
+## Picking a site for a dive
+
+Wherever you choose a site (on a dive, a planned dive, or a trip day), the same sheet opens: a search bar that matches every location field, a **Nearby** section when your location is known, and your sites grouped under collapsible country and region headings.
+
+### Built-in sites in the picker
+
+When you choose a site for a dive, the sheet also offers sites from the built-in catalogue, so a site you have not logged before rarely needs typing in:
+
+- **More sites nearby** lists built-in dive sites within 50 km (31 mi) of the dive. It shows the first five, with **Show all** for the rest.
+- **Wrecks and reefs nearby** sits below it when charted wrecks or artificial reefs lie within the same distance. It starts closed, as one row with a count (**Show charted wrecks and reefs**); tap the row to list them. Ones you have already added, or already have a site on, are left off the list. There can be hundreds near a busy harbour, so it lists the nearest 200 and you search for the rest.
+- Typing two or more characters adds a **Built-in sites** section with matches from the whole catalogue. The search matches a site's name, its country, region or island, and its sea ("Red Sea"). A country can be typed in any language: "Thaïlande" and "Ägypten" find the sites of Thailand and Egypt. Sites whose own name matches come first, then sites matched by place or sea; within each, those in the dive's area lead.
+
+Tap a built-in site to add it to your sites and select it in one step. It arrives with the catalogue's details, and the dive takes the site's entry method and water type as it does for any site. Tap the **Site details** button on a row to read about a site before you pick it.
+
+A built-in site you have already added is no longer offered, and neither is one that sits within 150 m (490 ft) of a site you created yourself.
+
+When a dive's GPS position is within auto-match distance of both a built-in dive site and a charted wreck, the dive site is the one selected; the wreck is still on the list to choose. A charted wreck is never selected on its own while a dive site lies close behind it: you choose between them. Further out the list runs nearest first, whichever kind is nearest.
+
+### Area memory
+
+Most dive computers record no GPS position, so a downloaded dive often has no location of its own. Submersion then takes the dive's area from the dives around it: the site of the nearest dive on the same trip, or of a dive within three days. The section reads **More sites near** followed by the place (for example, **More sites near Bonaire**), and lists that area's sites by name.
+
+In practice you name the first dive of a trip by searching, and the rest of the trip's dives open with that area's sites ready to tap. If no nearby dive has a site yet, the sheet uses your device's location.
+
+### Where the built-in sites come from
+
+The built-in catalogue holds two kinds of record:
+
+- **Dive sites**: places people dive, from OpenStreetMap, the Florida Keys National Marine Sanctuary's mooring buoys, Wikidata, and sites researched for Submersion from published sources.
+- **Charted wrecks and artificial reefs**: records from registers of what lies on the seabed. Wrecks come from the UK Hydrographic Office, NOAA, Ireland's National Monuments Service, OpenStreetMap and Wikidata; reefs from the reef programs of Florida, New Jersey, North Carolina and other US states.
+
+A register record is a charted position, not a dive guide: its position and depth are the register's own, and nothing says the wreck is worth diving or open to divers. A wreck is included only with a position its register stands behind, and never when its register says it shows above water, lies deeper than 60 m (197 ft), or is closed to divers. Not every register states a depth, so a record with no depth can lie deeper. Wrecks from OpenStreetMap and Wikidata are also left out when they lie on dry land (a crashed aircraft on a hillside, a hull in a museum). Where a register notes a restriction or a protection, it is shown as the site's hazards; check before you dive.
+
+A site researched for Submersion is marked **Not verified** wherever you can choose it: in the picker, on its card and its page, on the Import page, in the review of your own sites and in GPS match review. Its facts were read from published sources (local dive operators, marine parks, survey records, dive guides, a wreck register, an encyclopedia), and nobody checked them on site. The first researched sites each rest on a single page. Every later one is named by at least two independent pages, and its position is either written on a page or read off a page's own map; the Submersion source repository cites each page. A position read off a map can be up to 2 km (1.2 mi) out, so GPS matching offers such a site for a dive up to 2 km away. GPS matching never selects a researched site for you. Once you add it, it is a site of yours like any other.
+
+If a researched site turns out to be wrong, a later version of the app withdraws it. A site you added from it stays as it is, and its page says **Built-in record withdrawn** and why, with a link to the corrected site when there is one.
+
+The catalogue contains information from OpenStreetMap, which is made available under the Open Database License (ODbL). Every source and its licence is on the licenses page (**Settings > About > Open Source Licenses**, under **Dive site data**), and a site you added from the catalogue shows its source at the top of its page. The data is not for navigation.
+
+## Filling in sites you already have
+
+A site you typed in yourself, brought in from another logbook, or added before Submersion kept a link to the catalogue can take the built-in catalogue's details too. Submersion looks for the catalogue record that is the same place as each of your sites and lists what it found for you to review. Nothing changes until you say so.
+
+Open the list from the Sites page's overflow menu (**Check sites against built-in catalogue**). When there is something to review, a line above your site list says so (**Built-in details are available for your sites**) with a **Review** button; close it with the X and it returns only when something new turns up. A site that has a match also says so at the top of its own page.
+
+The list (**Built-in details for your sites**) has two parts:
+
+- **Same site**: sites Submersion is sure about, already ticked. These carry the same name as a catalogue record and sit within 150 m (490 ft) of it, or are already linked to it and the catalogue has since learned more.
+- **Check these**: sites for you to decide, not ticked. A site within 150 m (490 ft) of a record under a different name (your "Thistlegorm", the catalogue's "SS Thistlegorm"); a site with no position whose name matches exactly one record, where the record's position is part of what it offers; and any match that would give a site a position.
+
+Each row says what it would add. Tap **Apply** to act on the ticked rows. A row you leave unticked stays on the list for next time.
+
+Only empty fields are filled. A depth, a description or a position you already have is never replaced, however different the catalogue's is, and your site's name, notes and rating are never touched. A site that is not yet linked gains its link to the record, which shows the source at the top of its page and stops the catalogue offering you that site again.
+
+Tap a row to compare your site with the record field by field. Untick any detail you do not want, then tap **Fill in**; a detail you turn down is not offered again from that record. With every detail unticked, **Link only** links the site and fills nothing. Close the comparison without applying and the row keeps your choice: it names only the details still ticked, and **Apply** fills only those. Two answers take a match off the list for good:
+
+- **Not the same site**, when the record is a different place. The record stays in the catalogue, where you can still find it by name.
+- **No thanks**, on a site already linked, when you want none of the new details.
+
+Your answers are saved with the site and sync to your other devices. For a site in a shared site library, the details you fill in go to the whole library, while the link and your answers stay with your own profile.
+
+## Merging duplicate sites
+
+If you end up with more than one entry for the same place, choose **Select items** from the list's overflow menu, select them, and tap **Merge Selected**. The **Merge Sites** page opens with every section expanded and pre-filled from the first site. For every field that differs between the two sites, a cycle button (two-arrow icon) appears so you can step through the values from each source and keep the one you want. Coordinates, difficulty, and rating each have their own cycle control. Confirm to combine them into one site and relink every dive that was associated with any of them; **Undo** is offered right after. If the sites you merge were added from two different built-in records, the merged site stands for both, so neither record is offered to you again.
+
+## GPS auto-matching of dives to sites
+
+When you download dives from a dive computer that records GPS entry or exit positions, Submersion can automatically match each dive to a nearby site, or surface candidates for you to review.
+
+### How matching works
+
+For each dive with a recorded GPS position, the matcher:
+
+1. Ranks every candidate site (your existing sites plus the bundled database) by great-circle distance from the dive's GPS position, nearest first.
+2. Applies a two-radius confidence rule:
+   - If any **existing** site falls within the **inner radius**, only existing sites compete: an existing site always takes precedence over creating a new entry from the bundled database.
+   - The nearest candidate in the winning pool is an **auto-match** when it is the only one in the pool, or when the next nearest is at least the **separation margin** farther away.
+   - If no candidate falls inside the inner radius but some fall within the outer radius, the dive is marked **Suggested** and queued for the review screen.
+   - No candidates within the outer radius means **No Match**.
+3. Every dive then goes to the review screen: auto-matches arrive already selected, suggestions wait for your choice, and dives with no match are listed so you can create a site for them.
+
+### Sensitivity presets
+
+Three presets control the inner radius, outer radius, and separation margin:
+
+| Preset | Inner radius | Outer radius | Separation |
+|--------|-------------|-------------|------------|
+| **Strict** | 100 m (330 ft) | 500 m (1640 ft) | 100 m (330 ft) |
+| **Balanced** (default) | 150 m (490 ft) | 1000 m (3280 ft) | 75 m (245 ft) |
+| **Relaxed** | 300 m (985 ft) | 2000 m (6560 ft) | 50 m (165 ft) |
+
+Change the preset with **Auto site matching** in **Settings > Data > Advanced > Import options**.
+
+> [!TIP]
+> **Strict** works well when your sites have precise GPS marks and your dive computer records accurate surface positions. **Relaxed** is better when you surface well away from the entry point, or when GPS accuracy on your computer is limited.
+
+### Reviewing matches
+
+After an import, the summary offers **Match N dives to sites**, which opens the review screen; you can also reach it from the overflow menu on the Dives list (**Match Dives to Sites**). It shows each dive that needs a decision alongside a map panel centered on the dive's GPS position. For each dive:
+
+- A list of nearby candidate sites appears (your existing sites and bundled database sites), each showing its distance from the dive position, depth range, location, rating, and difficulty.
+- Tap a candidate card to assign it. The card highlights and the dive row shows a check.
+- On wide screens, the map panel and candidate cards appear on the right while the dive list is on the left. On narrow screens, the map and cards expand inline below the focused dive row.
+
+A dive with no candidate within range shows **No nearby site**, with **Create site here** to make a new site at its GPS position.
+
+Nothing is linked until you tap **Confirm N matches**, which writes every selected match at once, auto-matches included. Deselect any you disagree with first.
+
+## Sharing a site with other profiles
+
+Sites are shared the way trips are (see [Sharing a trip with other profiles](trips.md#sharing-a-trip-with-other-profiles)):
+
+- Unlock the site, open its header with the pencil and tap **Shared with** to choose **Everyone** or only the profiles you tick. To share several sites, select them in the list and choose **Share with...**; **Settings > Shared data > Share all my sites...** shares every site you own. Bulk sharing only ever adds profiles.
+- Only the profile that created the site can delete it, merge it away or change who it is shared with. Any other profile that sees it can edit its details, log its own dives there, or choose **Remove from my profile** to hide it for itself only.
+- When the owner unticks a profile, that profile's dives keep their site; the site just leaves its site list.
+- Merging sites keeps the profiles each site was shared with: the site that is kept is shared with all of them.
+
+## See also
+
+- [Dive Logging](dive-logging.md): record a dive and link it to a site
+- [Trips](trips.md): group dives from the same location or voyage
+- [Marine Life and Photos](marine-life-and-photos.md): attach species and photos to a site
+- [Import / Export](import-export.md): import dive data from a computer or file

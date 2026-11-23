@@ -1,21 +1,53 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/compact_site_list_tile.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/dense_site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_list_tile.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/site_types/domain/entities/site_type_entity.dart';
+import 'package:submersion/features/site_types/presentation/providers/site_type_providers.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/query/names/name_index.dart';
+import 'package:submersion/core/query/units/unit_prefs.dart';
+import 'package:submersion/features/demo_mode/presentation/providers/demo_mode_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/search_built_in_sites_row.dart';
+import 'package:submersion/features/query/presentation/providers/entity_search_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_name_index_provider.dart';
+import 'package:submersion/features/query/presentation/providers/query_unit_prefs_provider.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_header.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/core/data/visibility/item_sharing.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
+import 'package:submersion/core/services/database_service.dart';
 
+import '../../../../helpers/list_create_router.dart';
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
+import '../../../../helpers/selection_contract.dart';
 import '../../../../helpers/test_app.dart';
 import '../../../../helpers/test_database.dart';
+import '../../../../helpers/shared_items_fixture.dart';
 
 void _setMobileTestSurfaceSize(WidgetTester tester) {
   tester.view.devicePixelRatio = 1.0;
@@ -27,33 +59,59 @@ void _setMobileTestSurfaceSize(WidgetTester tester) {
   });
 }
 
+final _now = DateTime.now();
+
 SiteWithDiveCount _makeSite({
   required String id,
   required String name,
   int diveCount = 0,
+  bool isShared = false,
+  double? minDepth,
+  double? maxDepth,
 }) {
   return SiteWithDiveCount(
-    site: DiveSite(id: id, name: name),
+    site: DiveSite(
+      id: id,
+      name: name,
+      isShared: isShared,
+      minDepth: minDepth,
+      maxDepth: maxDepth,
+    ),
     diveCount: diveCount,
   );
 }
+
+Diver _makeDiver(String id) {
+  return Diver(id: id, name: 'Diver $id', createdAt: _now, updatedAt: _now);
+}
+
+/// Mutable source for the contract test's filter step, so the visible list
+/// can be narrowed mid-test the way a real filter or search would.
+final _visibleSitesProvider = StateProvider<List<SiteWithDiveCount>>(
+  (ref) => const [],
+);
 
 Future<List<Override>> _buildPhoneOverrides({
   required List<SiteWithDiveCount> sites,
   required ListViewMode viewMode,
   String? highlightedSiteId,
+  List<Diver>? divers,
+  AppSettings? settings,
+  SiteFilterState? filter,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
 
   return [
     sharedPreferencesProvider.overrideWithValue(prefs),
-    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    if (filter != null) siteFilterProvider.overrideWith((ref) => filter),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier(settings)),
     currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
     sortedSitesWithCountsProvider.overrideWithValue(AsyncValue.data(sites)),
     siteListNotifierProvider.overrideWith((ref) => _MockSiteListNotifier()),
     siteListViewModeProvider.overrideWith((ref) => viewMode),
     highlightedSiteIdProvider.overrideWith((ref) => highlightedSiteId),
+    if (divers != null) allDiversProvider.overrideWith((ref) async => divers),
   ];
 }
 
@@ -66,6 +124,96 @@ class _MockSiteListNotifier extends StateNotifier<AsyncValue<List<DiveSite>>>
 }
 
 void main() {
+  // A selection made outside the list (the map, a deep link, the detail
+  // pane's previous and next) brings its row into view (#3301).
+  testWidgets('scrolls to a site selected from outside the list', (
+    tester,
+  ) async {
+    final overrides = await _buildPhoneOverrides(
+      sites: [
+        for (var i = 0; i < 60; i++)
+          _makeSite(id: 'r$i', name: 'Site ${i.toString().padLeft(2, '0')}'),
+      ],
+      viewMode: ListViewMode.detailed,
+    );
+    final selected = ValueNotifier<String?>(null);
+    addTearDown(selected.dispose);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: ValueListenableBuilder<String?>(
+          valueListenable: selected,
+          builder: (_, id, _) =>
+              SiteListContent(showAppBar: true, selectedId: id),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    selected.value = 'r50';
+    await tester.pumpAndSettle();
+
+    expect(find.text('Site 50'), findsOneWidget);
+  });
+
+  // The title's subtitle counts the list (#2669): "2 sites" unfiltered, and
+  // against every site while a filter narrows it.
+  group('entry count subtitle', () {
+    Finder subtitle(String text) => find.descendant(
+      of: find.byType(FeatureAppBarTitle),
+      matching: find.text(text),
+    );
+
+    for (final showAppBar in const [true, false]) {
+      final bar = showAppBar ? 'app bar' : 'compact bar';
+
+      testWidgets('$bar counts the list', (tester) async {
+        final overrides = await _buildPhoneOverrides(
+          sites: [
+            _makeSite(id: 's1', name: 'Alpha Site'),
+            _makeSite(id: 's2', name: 'Bravo Site'),
+          ],
+          viewMode: ListViewMode.detailed,
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: SiteListContent(showAppBar: showAppBar),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(subtitle('2 sites'), findsOneWidget);
+      });
+
+      testWidgets('$bar counts a filtered list against every site', (
+        tester,
+      ) async {
+        final all = [
+          _makeSite(id: 's1', name: 'Alpha Site'),
+          _makeSite(id: 's2', name: 'Bravo Site'),
+          _makeSite(id: 's3', name: 'Charlie Site'),
+        ];
+        final overrides = await _buildPhoneOverrides(
+          sites: all.take(1).toList(),
+          viewMode: ListViewMode.detailed,
+          filter: const SiteFilterState(minRating: 3),
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              ...overrides,
+              sitesWithCountsProvider.overrideWith((ref) async => all),
+            ],
+            child: SiteListContent(showAppBar: showAppBar),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(subtitle('1 of 3 sites'), findsOneWidget);
+      });
+    }
+  });
   late SharedPreferences prefs;
   late SiteRepository siteRepository;
 
@@ -80,76 +228,81 @@ void main() {
     await tearDownTestDatabase();
   });
 
-  testWidgets(
-    'merge completion exits multi-select mode and selects the merged survivor',
-    (tester) async {
-      _setMobileTestSurfaceSize(tester);
-
-      await siteRepository.createSite(
-        const DiveSite(id: 'site-1', name: 'Alpha Site'),
-      );
-      await siteRepository.createSite(
-        const DiveSite(id: 'site-2', name: 'Bravo Site'),
-      );
-      await siteRepository.createSite(
-        const DiveSite(id: 'site-3', name: 'Charlie Site'),
-      );
-
-      final router = GoRouter(
-        initialLocation: '/',
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (context, state) => const _SiteListSelectionHarness(),
-          ),
-          GoRoute(
-            path: '/sites/merge',
-            builder: (context, state) => Scaffold(
-              body: Center(
-                child: FilledButton(
-                  onPressed: () =>
-                      context.pop(const SiteMergeResult(survivorId: 'site-1')),
-                  child: const Text('Complete Merge'),
-                ),
+  /// Selects the three sites, opens the merge, and completes it with
+  /// [result] from a stand-in merge page, as the list sees a merge end.
+  Future<void> mergeThroughList(
+    WidgetTester tester,
+    SiteMergeResult result,
+  ) async {
+    _setMobileTestSurfaceSize(tester);
+    for (final (id, name) in const [
+      ('site-1', 'Alpha Site'),
+      ('site-2', 'Bravo Site'),
+      ('site-3', 'Charlie Site'),
+    ]) {
+      await siteRepository.createSite(DiveSite(id: id, name: name));
+    }
+    final router = GoRouter(
+      initialLocation: '/',
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const _SiteListSelectionHarness(),
+        ),
+        GoRoute(
+          path: '/sites/merge',
+          builder: (context, state) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => context.pop(result),
+                child: const Text('Complete Merge'),
               ),
             ),
           ),
-        ],
-      );
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            sharedPreferencesProvider.overrideWithValue(prefs),
-            siteRepositoryProvider.overrideWithValue(siteRepository),
-            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
-          ],
-          child: MaterialApp.router(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            routerConfig: router,
-          ),
         ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          siteRepositoryProvider.overrideWithValue(siteRepository),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+        ],
+        child: MaterialApp.router(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          routerConfig: router,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await enterSelectionViaMenu(tester);
+    await tester.tap(find.text('Alpha Site'));
+    await tester.pumpAndSettle();
+    expect(find.text('1 selected'), findsOneWidget);
+    for (final name in const ['Bravo Site', 'Charlie Site']) {
+      await tester.tap(find.text(name));
+      await tester.pumpAndSettle();
+    }
+    expect(find.text('3 selected'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.merge_type));
+    await tester.pumpAndSettle();
+    expect(find.text('Complete Merge'), findsOneWidget);
+    await tester.tap(find.text('Complete Merge'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'merge completion exits multi-select mode and selects the merged survivor',
+    (tester) async {
+      await mergeThroughList(
+        tester,
+        const SiteMergeResult(survivorId: 'site-1'),
       );
-
-      await tester.pumpAndSettle();
-
-      await tester.longPress(find.text('Alpha Site'));
-      await tester.pumpAndSettle();
-      expect(find.text('1 selected'), findsOneWidget);
-
-      await tester.tap(find.text('Bravo Site'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Charlie Site'));
-      await tester.pumpAndSettle();
-      expect(find.text('3 selected'), findsOneWidget);
-
-      await tester.tap(find.byIcon(Icons.merge_type));
-      await tester.pumpAndSettle();
-      expect(find.text('Complete Merge'), findsOneWidget);
-
-      await tester.tap(find.text('Complete Merge'));
-      await tester.pumpAndSettle();
 
       expect(find.text('3 selected'), findsNothing);
       expect(find.text('2 selected'), findsNothing);
@@ -158,6 +311,240 @@ void main() {
       expect(find.text('Dive Sites'), findsOneWidget);
     },
   );
+
+  // The merge page merges the sites still stored, so a site deleted since
+  // the selection is not counted as merged (code review).
+  testWidgets('the merged snackbar counts the sites the merge took in', (
+    tester,
+  ) async {
+    // Three selected, two merged: the third was gone by the merge.
+    await mergeThroughList(
+      tester,
+      const SiteMergeResult(
+        survivorId: 'site-1',
+        snapshot: MergeSnapshot(
+          originalSurvivor: DiveSite(id: 'site-1', name: 'Alpha Site'),
+          deletedSites: [DiveSite(id: 'site-2', name: 'Bravo Site')],
+          diveOriginalSiteIds: {},
+          mediaOriginalSiteIds: {},
+          deletedSpeciesEntries: [],
+          modifiedSpeciesEntries: [],
+        ),
+      ),
+    );
+
+    expect(find.text('Merged 2 sites'), findsOneWidget);
+    expect(find.text('Merged 3 sites'), findsNothing);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Overflow-menu entry into selection mode (discoverable merge)
+  // ---------------------------------------------------------------------------
+
+  group('site type and tag filter chips (issue #1765)', () {
+    final types = {
+      // A built-in shows its translation, not the stored English name.
+      'wreck': SiteTypeEntity(
+        id: 'wreck',
+        name: 'stored-wreck',
+        isBuiltIn: true,
+        createdAt: _now,
+        updatedAt: _now,
+      ),
+      'mine': SiteTypeEntity(
+        id: 'mine',
+        name: 'Mine',
+        createdAt: _now,
+        updatedAt: _now,
+      ),
+    };
+    final tags = [
+      Tag(id: 't1', name: 'To try', createdAt: _now, updatedAt: _now),
+    ];
+
+    Future<void> pumpList(WidgetTester tester, SiteFilterState filter) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site')],
+        viewMode: ListViewMode.detailed,
+        filter: filter,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...overrides,
+            siteTypesByIdProvider.overrideWith((ref) async => types),
+            tagsProvider.overrideWith((ref) async => tags),
+          ],
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    InputChip chip(WidgetTester tester, String label) => tester.widget(
+      find.ancestor(of: find.text(label), matching: find.byType(InputChip)),
+    );
+
+    testWidgets('label each chip with the type or tag name', (tester) async {
+      await pumpList(
+        tester,
+        const SiteFilterState(
+          siteTypeIds: {'wreck', 'mine', 'gone'},
+          tagIds: {'t1', 'lost'},
+        ),
+      );
+
+      expect(find.text('Wreck'), findsOneWidget);
+      expect(find.text('stored-wreck'), findsNothing);
+      expect(find.text('Mine'), findsOneWidget);
+      expect(find.text('To try'), findsOneWidget);
+      // A type or tag deleted since the filter was set falls back to its id.
+      expect(find.text('gone'), findsOneWidget);
+      expect(find.text('lost'), findsOneWidget);
+    });
+
+    testWidgets('deleting a chip removes only that type or tag', (
+      tester,
+    ) async {
+      await pumpList(
+        tester,
+        const SiteFilterState(siteTypeIds: {'wreck', 'mine'}, tagIds: {'t1'}),
+      );
+
+      chip(tester, 'Wreck').onDeleted!();
+      await tester.pumpAndSettle();
+      expect(find.text('Wreck'), findsNothing);
+      expect(find.text('Mine'), findsOneWidget);
+      expect(find.text('To try'), findsOneWidget);
+
+      chip(tester, 'To try').onDeleted!();
+      await tester.pumpAndSettle();
+      expect(find.text('To try'), findsNothing);
+      expect(find.text('Mine'), findsOneWidget);
+    });
+
+    testWidgets(
+      'each top-level query condition is a chip that removes itself',
+      (tester) async {
+        await pumpList(
+          tester,
+          SiteFilterState(
+            query: AndNode([
+              ConditionNode(
+                FieldPath(['rating']),
+                QueryOp.gte,
+                const NumberValue(3, null),
+              ),
+              ConditionNode(
+                FieldPath(['difficulty']),
+                QueryOp.eq,
+                const EnumValue('advanced'),
+              ),
+            ]),
+          ),
+        );
+
+        expect(find.widgetWithText(InputChip, 'rating >= 3'), findsOneWidget);
+        expect(
+          find.widgetWithText(InputChip, 'difficulty = advanced'),
+          findsOneWidget,
+        );
+
+        chip(tester, 'rating >= 3').onDeleted!();
+        await tester.pumpAndSettle();
+        expect(find.widgetWithText(InputChip, 'rating >= 3'), findsNothing);
+        expect(
+          find.widgetWithText(InputChip, 'difficulty = advanced'),
+          findsOneWidget,
+        );
+      },
+    );
+  });
+
+  group('overflow menu "Select items"', () {
+    testWidgets('enters selection mode from the compact app bar', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [
+          _makeSite(id: 's1', name: 'Alpha Site'),
+          _makeSite(id: 's2', name: 'Bravo Site'),
+        ],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No selection UI before opening the menu.
+      expect(find.byIcon(Icons.select_all), findsNothing);
+
+      // The header shows no Select icon of its own (issue #2775).
+      expect(find.byIcon(Icons.checklist), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      // Listed once, under the shared label.
+      expect(find.text('Select items'), findsOneWidget);
+      expect(find.text('Select sites'), findsNothing);
+      // Every entry carries its icon, as in the full app bar's menu.
+      expect(
+        find.ancestor(
+          of: find.byIcon(Icons.download),
+          matching: find.byType(PopupMenuItem<String>),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Select items'));
+      await tester.pumpAndSettle();
+
+      // Selection app bar is now shown (select-all affordance present).
+      expect(find.byIcon(Icons.select_all), findsOneWidget);
+    });
+
+    testWidgets('enters selection mode from the wide app bar', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 900);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final overrides = await _buildPhoneOverrides(
+        sites: [
+          _makeSite(id: 's1', name: 'Alpha Site'),
+          _makeSite(id: 's2', name: 'Bravo Site'),
+        ],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.select_all), findsNothing);
+
+      // The header shows no Select icon of its own (issue #2775).
+      expect(find.byIcon(Icons.checklist), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      // Listed once, under the shared label.
+      expect(find.text('Select items'), findsOneWidget);
+      expect(find.text('Select sites'), findsNothing);
+      await tester.tap(find.text('Select items'));
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.select_all), findsOneWidget);
+    });
+  });
 
   // ---------------------------------------------------------------------------
   // Phone-mode highlight
@@ -230,6 +617,1176 @@ void main() {
         expect(alpha.isSelected, isFalse);
         expect(bravo.isSelected, isFalse);
       },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Shared icon tests — exercises detailed, compact, and dense view modes.
+  // ---------------------------------------------------------------------------
+  group('shared icon', () {
+    testWidgets(
+      'detailed view: renders people_outline icon for shared site when 2+ divers',
+      (tester) async {
+        final sites = [
+          _makeSite(id: 's1', name: 'Shared Reef', isShared: true),
+          _makeSite(id: 's2', name: 'Private Reef', isShared: false),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          sites: sites,
+          viewMode: ListViewMode.detailed,
+          divers: [_makeDiver('d1'), _makeDiver('d2')],
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byIcon(Icons.people_outline), findsOneWidget);
+
+        final sharedTile = find.ancestor(
+          of: find.text('Shared Reef'),
+          matching: find.byType(SiteListTile),
+        );
+        expect(
+          find.descendant(
+            of: sharedTile,
+            matching: find.byIcon(Icons.people_outline),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'compact view: renders people_outline icon for shared site when 2+ divers',
+      (tester) async {
+        final sites = [
+          _makeSite(id: 's1', name: 'Shared Reef', isShared: true),
+          _makeSite(id: 's2', name: 'Private Reef', isShared: false),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          sites: sites,
+          viewMode: ListViewMode.compact,
+          divers: [_makeDiver('d1'), _makeDiver('d2')],
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byIcon(Icons.people_outline), findsOneWidget);
+
+        final sharedTile = find.ancestor(
+          of: find.text('Shared Reef'),
+          matching: find.byType(CompactSiteListTile),
+        );
+        expect(
+          find.descendant(
+            of: sharedTile,
+            matching: find.byIcon(Icons.people_outline),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'dense view: renders people_outline icon for shared site when 2+ divers',
+      (tester) async {
+        final sites = [
+          _makeSite(id: 's1', name: 'Shared Reef', isShared: true),
+          _makeSite(id: 's2', name: 'Private Reef', isShared: false),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          sites: sites,
+          viewMode: ListViewMode.dense,
+          divers: [_makeDiver('d1'), _makeDiver('d2')],
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byIcon(Icons.people_outline), findsOneWidget);
+
+        final sharedTile = find.ancestor(
+          of: find.text('Shared Reef'),
+          matching: find.byType(DenseSiteListTile),
+        );
+        expect(
+          find.descendant(
+            of: sharedTile,
+            matching: find.byIcon(Icons.people_outline),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('does not render icon when only one diver (detailed view)', (
+      tester,
+    ) async {
+      final sites = [_makeSite(id: 's1', name: 'Shared Reef', isShared: true)];
+
+      final overrides = await _buildPhoneOverrides(
+        sites: sites,
+        viewMode: ListViewMode.detailed,
+        divers: [_makeDiver('d1')],
+      );
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.people_outline), findsNothing);
+    });
+
+    testWidgets('does not render icon when only one diver (compact view)', (
+      tester,
+    ) async {
+      final sites = [_makeSite(id: 's1', name: 'Shared Reef', isShared: true)];
+
+      final overrides = await _buildPhoneOverrides(
+        sites: sites,
+        viewMode: ListViewMode.compact,
+        divers: [_makeDiver('d1')],
+      );
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.people_outline), findsNothing);
+    });
+
+    testWidgets('does not render icon when only one diver (dense view)', (
+      tester,
+    ) async {
+      final sites = [_makeSite(id: 's1', name: 'Shared Reef', isShared: true)];
+
+      final overrides = await _buildPhoneOverrides(
+        sites: sites,
+        viewMode: ListViewMode.dense,
+        divers: [_makeDiver('d1')],
+      );
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.people_outline), findsNothing);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phone app bar: search, sort, filter, view-mode popup menu.
+  // ---------------------------------------------------------------------------
+  group('phone app bar actions', () {
+    testWidgets('compact app bar (showAppBar=false) exposes key actions', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site')],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.search), findsWidgets);
+      expect(find.byIcon(Icons.sort), findsWidgets);
+      expect(find.byIcon(Icons.more_vert), findsWidgets);
+    });
+
+    testWidgets('tapping sort icon opens sort bottom sheet', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site')],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.sort).first);
+      await tester.pumpAndSettle();
+      // Sort sheet should appear.
+      expect(find.textContaining('Sort'), findsWidgets);
+    });
+
+    testWidgets('tapping more menu opens view mode choices', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site')],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert).first);
+      await tester.pumpAndSettle();
+      expect(find.byType(PopupMenuItem<String>), findsWidgets);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Empty state
+  // ---------------------------------------------------------------------------
+  group('empty state', () {
+    testWidgets('renders empty state icon when no sites', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Empty state icon or message.
+      expect(find.byType(SiteListContent), findsOneWidget);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Error state
+  // ---------------------------------------------------------------------------
+  group('error state', () {
+    testWidgets('renders error UI on load error', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      SharedPreferences.setMockInitialValues({});
+      final p = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(p),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+            siteListNotifierProvider.overrideWith(
+              (ref) => _MockSiteListNotifier(),
+            ),
+            siteListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.detailed,
+            ),
+            sortedSitesWithCountsProvider.overrideWithValue(
+              AsyncValue.error(Exception('site-list-boom'), StackTrace.current),
+            ),
+          ],
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.error_outline), findsWidgets);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Selection mode flows (exercises _toggleSelection, select-all,
+  // deselect-all, close selection mode).
+  // ---------------------------------------------------------------------------
+  group('selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final all = <SiteWithDiveCount>[
+        _makeSite(id: 's1', name: 'Aaa Site'),
+        _makeSite(id: 's2', name: 'Bbb Site'),
+        _makeSite(id: 's3', name: 'Ccc Site'),
+      ];
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        _visibleSitesProvider.overrideWith((ref) => all),
+        // Reads the mutable provider so narrowing it narrows the list.
+        sortedSitesWithCountsProvider.overrideWith(
+          (ref) => AsyncValue.data(ref.watch(_visibleSitesProvider)),
+        ),
+        siteListNotifierProvider.overrideWith((ref) => _MockSiteListNotifier()),
+        siteListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+        highlightedSiteIdProvider.overrideWith((ref) => null),
+      ];
+
+      await verifySelectionContract(
+        tester,
+        build: () => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: true),
+        ),
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        rowRoot: find.byType(SiteListTile).first,
+        firstRow: find.text('Aaa Site'),
+        applyFilter: (tester) async {
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(SiteListContent)),
+          );
+          container.read(_visibleSitesProvider.notifier).state = [all.first];
+        },
+        visibleAfterFilter: 1,
+      );
+    });
+  });
+
+  group('a new filter', () {
+    for (final mode in [ListViewMode.detailed, ListViewMode.table]) {
+      testWidgets('keeps the checks that stay on screen (${mode.name})', (
+        tester,
+      ) async {
+        // Table mode has no menu inside the list (issue #2775), so both
+        // modes enter through the controller a page would pass in.
+        final controller = SelectionController();
+        addTearDown(controller.dispose);
+        final all = <SiteWithDiveCount>[
+          _makeSite(id: 's1', name: 'Aaa Site'),
+          _makeSite(id: 's2', name: 'Bbb Site'),
+        ];
+
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              sitesWithCountsProvider.overrideWith((ref) async => all),
+              siteListNotifierProvider.overrideWith(
+                (ref) => _MockSiteListNotifier(),
+              ),
+              siteListViewModeProvider.overrideWith((ref) => mode),
+              highlightedSiteIdProvider.overrideWith((ref) => null),
+              // A real id set takes a query's time, so the list has a
+              // loading frame.
+              queryFilteredSiteIdsProvider.overrideWith(
+                (ref, filter) => Future.delayed(
+                  const Duration(milliseconds: 50),
+                  () => const {'s1', 's2'},
+                ),
+              ),
+            ],
+            locale: const Locale('en'),
+            child: SiteListContent(
+              showAppBar: true,
+              selectionController: controller,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        controller.enterExplicit();
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+
+        // The new filter's id set loads first; the selection must survive
+        // that.
+        ProviderScope.containerOf(
+          tester.element(find.byType(SiteListContent)),
+        ).read(siteFilterProvider.notifier).state = const SiteFilterState(
+          country: 'Belize',
+        );
+        // One frame at once, as the app draws it, before the query answers.
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+      });
+    }
+  });
+
+  group('a reload of the rows', () {
+    for (final mode in [ListViewMode.detailed, ListViewMode.table]) {
+      testWidgets('keeps the checks that stay on screen (${mode.name})', (
+        tester,
+      ) async {
+        // Table mode has no menu inside the list (issue #2775), so both
+        // modes enter through the controller a page would pass in.
+        final controller = SelectionController();
+        addTearDown(controller.dispose);
+        final all = <SiteWithDiveCount>[
+          _makeSite(id: 's1', name: 'Aaa Site'),
+          _makeSite(id: 's2', name: 'Bbb Site'),
+        ];
+        // A dependency the rows watch, so bumping it reloads them.
+        final reloadTrigger = StateProvider<int>((ref) => 0);
+        // Rows that reach the list as a reload holding its previous value.
+        // Today's sorted chain drops that value (whenData), so this pins the
+        // list's contract rather than a state the real providers produce:
+        // whatever settled state arrives, the prune reads the same rows the
+        // guard checked.
+        final reloadingSites = FutureProvider<List<SiteWithDiveCount>>((
+          ref,
+        ) async {
+          ref.watch(reloadTrigger);
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return all;
+        });
+
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              sortedSitesWithCountsProvider.overrideWith(
+                (ref) => ref.watch(reloadingSites),
+              ),
+              siteListNotifierProvider.overrideWith(
+                (ref) => _MockSiteListNotifier(),
+              ),
+              siteListViewModeProvider.overrideWith((ref) => mode),
+              highlightedSiteIdProvider.overrideWith((ref) => null),
+            ],
+            locale: const Locale('en'),
+            child: SiteListContent(
+              showAppBar: true,
+              selectionController: controller,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        controller.enterExplicit();
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+
+        // A reload keeps the previous rows while the new ones load; pruning
+        // must read them, not an empty frame.
+        ProviderScope.containerOf(
+          tester.element(find.byType(SiteListContent)),
+        ).read(reloadTrigger.notifier).state++;
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(find.text('2 selected'), findsOneWidget);
+      });
+    }
+  });
+
+  group('selection mode', () {
+    testWidgets(
+      'long press enters selection mode and shows selection app bar',
+      (tester) async {
+        _setMobileTestSurfaceSize(tester);
+        await siteRepository.createSite(
+          const DiveSite(id: 's1', name: 'First Site'),
+        );
+        await siteRepository.createSite(
+          const DiveSite(id: 's2', name: 'Second Site'),
+        );
+        await siteRepository.createSite(
+          const DiveSite(id: 's3', name: 'Third Site'),
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              siteRepositoryProvider.overrideWithValue(siteRepository),
+              validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            ],
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(body: SiteListContent(showAppBar: false)),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await enterSelectionViaMenu(tester);
+        await tester.tap(find.text('First Site'));
+        await tester.pumpAndSettle();
+        expect(find.text('1 selected'), findsOneWidget);
+
+        // Tap select-all.
+        await tester.tap(find.byIcon(Icons.select_all));
+        await tester.pumpAndSettle();
+        expect(find.text('3 selected'), findsOneWidget);
+
+        // Tap deselect-all.
+        await tester.tap(find.byIcon(Icons.deselect));
+        await tester.pumpAndSettle();
+        expect(find.text('0 selected'), findsOneWidget);
+
+        // Tap close to exit selection mode.
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pumpAndSettle();
+        expect(find.text('0 selected'), findsNothing);
+      },
+    );
+
+    testWidgets('Share with... adds a profile to the selected own sites '
+        '(issue #2151)', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      await seedDivers(DatabaseService.instance.database, ['me', 'son']);
+      await siteRepository.createSite(
+        const DiveSite(id: 's1', name: 'First Site', diverId: 'me'),
+      );
+      await siteRepository.createSite(
+        const DiveSite(id: 's2', name: 'Second Site', diverId: 'me'),
+      );
+      final itemShares = FakeItemShares();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            siteRepositoryProvider.overrideWithValue(siteRepository),
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => 'me'),
+            allDiversProvider.overrideWith(
+              (ref) async => [
+                for (final id in ['me', 'son'])
+                  Diver(
+                    id: id,
+                    name: 'Diver $id',
+                    createdAt: DateTime(2024),
+                    updatedAt: DateTime(2024),
+                  ),
+              ],
+            ),
+            itemSharesRepositoryProvider.overrideWithValue(itemShares),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: SiteListContent(showAppBar: false)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.byIcon(Icons.select_all));
+      await tester.pumpAndSettle();
+      final inBar = find.byKey(const ValueKey('selection_action_share'));
+      if (inBar.evaluate().isEmpty) {
+        await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('selection_menu_share')));
+      } else {
+        await tester.tap(inBar);
+      }
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Diver son'),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await tester.pumpAndSettle();
+      await tester.pump();
+      final (ids, added) = itemShares.addCalls.single;
+      expect(ids.toSet(), {'s1', 's2'});
+      expect(added, const ItemSharing(profileIds: {'son'}));
+    });
+
+    testWidgets('long-press on a site does not enter selection mode', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await siteRepository.createSite(
+        const DiveSite(id: 's1', name: 'Held Site'),
+      );
+      final opened = <String?>[];
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            siteRepositoryProvider.overrideWithValue(siteRepository),
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            // Routed through the callback rather than context.push: with no
+            // long-press handler the hold resolves as an ordinary tap on
+            // release, which would otherwise try to navigate.
+            home: Scaffold(
+              body: SiteListContent(
+                showAppBar: false,
+                onItemSelected: opened.add,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(find.text('Held Site'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1 selected'), findsNothing);
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      expect(opened, ['s1']);
+    });
+
+    testWidgets('unchecking the last site keeps the deliberate mode open', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await siteRepository.createSite(
+        const DiveSite(id: 's1', name: 'Toggle Site'),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            siteRepositoryProvider.overrideWithValue(siteRepository),
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: SiteListContent(showAppBar: false)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await enterSelectionViaMenu(tester);
+      await tester.tap(find.text('Toggle Site'));
+      await tester.pumpAndSettle();
+      expect(find.text('1 selected'), findsOneWidget);
+      await tester.tap(find.text('Toggle Site'));
+      await tester.pumpAndSettle();
+      // The Select button is a deliberate entry, so emptying the selection
+      // leaves the bar standing at zero rather than dropping the user out.
+      // Only an implicit entry (modifier-click) evaporates.
+      expect(find.text('0 selected'), findsOneWidget);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Item tap with callback
+  // ---------------------------------------------------------------------------
+  group('item tap callback', () {
+    testWidgets('tapping a site with onItemSelected invokes callback', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final sites = [_makeSite(id: 's1', name: 'Callback Site')];
+      final overrides = await _buildPhoneOverrides(
+        sites: sites,
+        viewMode: ListViewMode.detailed,
+      );
+      String? selectedId;
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: SiteListContent(
+            showAppBar: false,
+            onItemSelected: (id) => selectedId = id,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Callback Site'));
+      await tester.pumpAndSettle();
+      expect(selectedId, 's1');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Mini-map background (SiteListTile renders a FlutterMap when the site has a
+  // location and the showMapBackgroundOnSiteCards setting is enabled).
+  // ---------------------------------------------------------------------------
+  group('site card mini-map', () {
+    testWidgets('SiteListTile renders a FlutterMap for a located site when map '
+        'background is enabled', (tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...await getBaseOverrides(),
+            showMapBackgroundOnSiteCardsProvider.overrideWithValue(true),
+          ],
+          child: const SiteListTile(
+            entry: SiteWithDiveCount(
+              site: DiveSite(
+                id: 'blue-hole',
+                name: 'Blue Hole',
+                country: 'Belize',
+                location: GeoPoint(17.3155, -87.5346),
+              ),
+              diveCount: 0,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(SiteListTile), findsOneWidget);
+      expect(find.byType(FlutterMap), findsWidgets);
+    });
+
+    testWidgets(
+      'SiteListContent detailed view renders a mini-map for a located site',
+      (tester) async {
+        _setMobileTestSurfaceSize(tester);
+        SharedPreferences.setMockInitialValues({});
+        final p = await SharedPreferences.getInstance();
+
+        final sites = [
+          const SiteWithDiveCount(
+            site: DiveSite(
+              id: 's1',
+              name: 'Located Reef',
+              location: GeoPoint(17.3155, -87.5346),
+            ),
+            diveCount: 0,
+          ),
+        ];
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(p),
+              settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+              showMapBackgroundOnSiteCardsProvider.overrideWithValue(true),
+              currentDiverIdProvider.overrideWith(
+                (ref) => MockCurrentDiverIdNotifier(),
+              ),
+              sortedSitesWithCountsProvider.overrideWithValue(
+                AsyncValue.data(sites),
+              ),
+              siteListNotifierProvider.overrideWith(
+                (ref) => _MockSiteListNotifier(),
+              ),
+              siteListViewModeProvider.overrideWith(
+                (ref) => ListViewMode.detailed,
+              ),
+              highlightedSiteIdProvider.overrideWith((ref) => null),
+            ],
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byType(FlutterMap), findsWidgets);
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Modifier and shift clicks seeded by the highlighted row.
+  //
+  // A plain click highlights a site without checking it, so the highlight is
+  // the user's on-screen selection. Shift and Cmd/Ctrl clicks must both treat
+  // it as the origin, the way the dive list does.
+  // ---------------------------------------------------------------------------
+
+  group('selection seeded by the highlighted site', () {
+    List<SiteWithDiveCount> fourSites() => [
+      _makeSite(id: 's1', name: 'Alpha Site'),
+      _makeSite(id: 's2', name: 'Bravo Site'),
+      _makeSite(id: 's3', name: 'Charlie Site'),
+      _makeSite(id: 's4', name: 'Delta Site'),
+    ];
+
+    // Cmd on macOS, Control elsewhere -- mirrors
+    // SelectableListScope.isModifierPressed so the test passes on both the
+    // macOS dev machine and the Linux CI runner.
+    final modifierKey = defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    Future<CompactSiteListTile Function(String)> pumpList(
+      WidgetTester tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: fourSites(),
+        viewMode: ListViewMode.compact,
+        highlightedSiteId: 's2',
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      return (String name) => tester
+          .widgetList<CompactSiteListTile>(find.byType(CompactSiteListTile))
+          .firstWhere((t) => t.name == name);
+    }
+
+    testWidgets('shift-tap extends from the highlighted site', (tester) async {
+      final tile = await pumpList(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.tap(find.text('Delta Site'));
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+
+      expect(tile('Alpha Site').isSelected, isFalse);
+      expect(tile('Bravo Site').isSelected, isTrue);
+      expect(tile('Charlie Site').isSelected, isTrue);
+      expect(tile('Delta Site').isSelected, isTrue);
+    });
+
+    testWidgets('modifier-tap checks the highlighted site too', (tester) async {
+      final tile = await pumpList(tester);
+
+      await tester.sendKeyDownEvent(modifierKey);
+      await tester.tap(find.text('Delta Site'));
+      await tester.sendKeyUpEvent(modifierKey);
+      await tester.pumpAndSettle();
+
+      expect(tile('Bravo Site').isSelected, isTrue);
+      expect(tile('Delta Site').isSelected, isTrue);
+      expect(tile('Alpha Site').isSelected, isFalse);
+      expect(tile('Charlie Site').isSelected, isFalse);
+    });
+
+    // Detailed mode paints the highlight through SiteListTile.isSelected,
+    // which -- unlike the compact and dense tiles -- is not gated on being
+    // outside selection mode. A highlight left set there is what the user
+    // sees as "highlighted, but not selected".
+    testWidgets('detailed view leaves no highlighted-but-unchecked row', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: fourSites(),
+        viewMode: ListViewMode.detailed,
+        highlightedSiteId: 's2',
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyDownEvent(modifierKey);
+      await tester.tap(find.text('Delta Site'));
+      await tester.sendKeyUpEvent(modifierKey);
+      await tester.pumpAndSettle();
+
+      for (final tile in tester.widgetList<SiteListTile>(
+        find.byType(SiteListTile),
+      )) {
+        expect(
+          tile.isSelected && !tile.isChecked,
+          isFalse,
+          reason:
+              '${tile.name} reads as highlighted while no bulk action '
+              'would touch it',
+        );
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Depth unit localization (issue #1257)
+  // ---------------------------------------------------------------------------
+
+  group('detailed view depth respects the diver depth unit', () {
+    testWidgets('renders a max-only depth in feet when the diver is imperial', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site', maxDepth: 40)],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 40 m -> 131.23 ft, rendered without decimals.
+      expect(find.text('131ft'), findsOneWidget);
+      expect(find.text('40m'), findsNothing);
+    });
+
+    testWidgets('renders a depth range in feet with a single trailing symbol', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [
+          _makeSite(id: 's1', name: 'Alpha Site', minDepth: 5, maxDepth: 30),
+        ],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 5 m -> 16.40 ft, 30 m -> 98.43 ft.
+      expect(find.text('16-98ft'), findsOneWidget);
+    });
+
+    testWidgets('still renders meters for a metric diver', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [
+          _makeSite(id: 's1', name: 'Alpha Site', minDepth: 5, maxDepth: 30),
+        ],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('5-30m'), findsOneWidget);
+    });
+  });
+
+  group('active depth filter chip respects the diver depth unit', () {
+    testWidgets('labels a both-ended range in feet', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site', maxDepth: 20)],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+        // Filter bounds are stored in meters, like every other depth value.
+        filter: const SiteFilterState(minDepth: 5, maxDepth: 30),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('16-98ft'), findsOneWidget);
+    });
+
+    testWidgets('labels a max-only bound in feet', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site', maxDepth: 20)],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+        filter: const SiteFilterState(maxDepth: 30),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Up to 98ft'), findsOneWidget);
+    });
+
+    testWidgets('labels a min-only bound in feet', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [_makeSite(id: 's1', name: 'Alpha Site', maxDepth: 20)],
+        viewMode: ListViewMode.detailed,
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+        filter: const SiteFilterState(minDepth: 5),
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const SiteListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('16ft+'), findsOneWidget);
+    });
+  });
+
+  group('empty state beside an open form (issue #3192)', () {
+    Future<GoRouter> pumpEmptyInRouter(
+      WidgetTester tester, {
+      required double width,
+    }) async {
+      final overrides = await _buildPhoneOverrides(
+        sites: [],
+        viewMode: ListViewMode.detailed,
+      );
+      return pumpListInCreateRouter(
+        tester,
+        overrides: overrides,
+        content: const SiteListContent(showAppBar: false),
+        listPath: '/sites',
+        width: width,
+      );
+    }
+
+    testWidgets('the create button opens the full-page form when narrow', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 900);
+
+      await tester.tap(find.text('Add Your First Site'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/sites/new');
+      expect(find.text(kFullPageCreateForm), findsOneWidget);
+    });
+
+    testWidgets('the create button opens the pane form beside a detail pane', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 1400);
+
+      await tester.tap(find.text('Add Your First Site'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/sites?mode=new');
+    });
+
+    Future<void> pumpEmpty(
+      WidgetTester tester, {
+      required bool isFormOpen,
+    }) async {
+      _setMobileTestSurfaceSize(tester);
+      final overrides = await _buildPhoneOverrides(
+        sites: [],
+        viewMode: ListViewMode.detailed,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          // The assertions match English button labels.
+          locale: const Locale('en'),
+          child: MasterDetailFormScope(
+            isFormOpen: isFormOpen,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('offers the create button when no form is open', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: false);
+
+      expect(find.text('Add Your First Site'), findsOneWidget);
+    });
+
+    testWidgets('hides the create button while a form is open beside it', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: true);
+
+      // Beside an open form it reads as the form's submit button, but it only
+      // reopens the create form, so nothing gets saved (issue #3192).
+      expect(find.text('Add Your First Site'), findsNothing);
+      expect(find.text('Import'), findsOneWidget);
+    });
+  });
+
+  // The Sites list searches the diver's own sites. Its search field also
+  // offers to take the typed words to the built-in catalogue (#4514).
+  testWidgets('the search field offers to search built-in sites for what '
+      'is typed', (tester) async {
+    _setMobileTestSurfaceSize(tester);
+    final overrides = await _buildPhoneOverrides(
+      sites: [_makeSite(id: 's1', name: 'Salt Pier')],
+      viewMode: ListViewMode.detailed,
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...overrides,
+          queryNameIndexProvider.overrideWith((ref) async => NameIndex.empty),
+          queryUnitPrefsProvider.overrideWithValue(kMetricPrefs),
+          demoModeActiveProvider.overrideWithValue(false),
+          entitySearchOpenProvider(
+            QuerySubject.sites,
+          ).overrideWith((ref) => true),
+        ],
+        child: const SiteListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final field = find.byKey(entitySearchFieldKey(QuerySubject.sites));
+    await tester.tap(field);
+    await tester.pump();
+    await tester.enterText(field, 'thistlegorm');
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(kSearchBuiltInSitesRowKey), findsOneWidget);
+    expect(
+      find.text('Search built-in sites for "thistlegorm"'),
+      findsOneWidget,
     );
   });
 }

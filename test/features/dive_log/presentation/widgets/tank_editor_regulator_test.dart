@@ -1,0 +1,601 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/tank_presets.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tank_editor.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/tank_presets/domain/entities/tank_preset_entity.dart';
+import 'package:submersion/features/tank_presets/presentation/providers/tank_preset_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+class _PresetListNotifier
+    extends StateNotifier<AsyncValue<List<TankPresetEntity>>>
+    implements TankPresetListNotifier {
+  _PresetListNotifier(List<TankPresetEntity> presets)
+    : super(AsyncValue.data(presets));
+
+  @override
+  Future<void> refresh() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+const _apeks = EquipmentItem(
+  id: 'reg-a',
+  name: 'Apeks XTX',
+  type: EquipmentType.regulator,
+);
+
+const _spareReg = EquipmentItem(
+  id: 'reg-spare',
+  name: 'Spare Octo',
+  type: EquipmentType.regulator,
+  status: EquipmentStatus.spare,
+);
+
+/// Bumped to make the overridden active-equipment list reload, the way a
+/// dependency change (such as the current diver) reloads the real one. The
+/// reload never finishes, so the editor is caught mid-reload.
+final _reload = StateProvider<int>((ref) => 0);
+
+Future<void> _pump(
+  WidgetTester tester, {
+  required List<EquipmentItem> equipment,
+  DiveTank tank = const DiveTank(id: 'tank-1'),
+  void Function(DiveTank)? onChanged,
+  EquipmentRepository? repository,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+  final builtInPresets = TankPresets.all
+      .map((p) => TankPresetEntity.fromBuiltIn(p))
+      .toList();
+
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        tankPresetListNotifierProvider.overrideWith(
+          (ref) => _PresetListNotifier(builtInPresets),
+        ),
+        tankPresetsProvider.overrideWith((ref) => Future.value(builtInPresets)),
+        // [equipment] is every row, as the unfiltered query returns it; the
+        // active list narrows it the way the repository's active query does.
+        activeEquipmentProvider.overrideWith((ref) async {
+          if (ref.watch(_reload) > 0) await Completer<void>().future;
+          return equipment.where((e) => e.isFitted).toList();
+        }),
+        allEquipmentProvider.overrideWith((ref) async => equipment),
+        if (repository != null)
+          equipmentRepositoryProvider.overrideWithValue(repository),
+      ].cast(),
+      child: MaterialApp(
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: TankEditor(
+              tank: tank,
+              tankNumber: 1,
+              onChanged: onChanged ?? (_) {},
+              onRemove: () {},
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openRegulatorPicker(WidgetTester tester) async {
+  await tester.ensureVisible(find.byKey(const Key('tank-regulator-picker')));
+  await tester.tap(find.byKey(const Key('tank-regulator-picker')));
+  await tester.pumpAndSettle();
+}
+
+class _LastRegulators extends EquipmentRepository {
+  _LastRegulators(this.ids);
+
+  final List<String> ids;
+
+  @override
+  Future<List<String>> getLastRegulatorsForPreset(String presetName) async =>
+      ids;
+}
+
+const _reg2 = EquipmentItem(
+  id: 'reg-b',
+  name: 'Scubapro MK25',
+  type: EquipmentType.regulator,
+);
+
+const _reg3 = EquipmentItem(
+  id: 'reg-c',
+  name: 'Poseidon Xstream',
+  type: EquipmentType.regulator,
+);
+
+void main() {
+  testWidgets('choosing a regulator reports it on the tank', (tester) async {
+    DiveTank? changed;
+    await _pump(
+      tester,
+      equipment: const [
+        _apeks,
+        EquipmentItem(id: 'mask', name: 'Mask', type: EquipmentType.mask),
+      ],
+      onChanged: (t) => changed = t,
+    );
+
+    await _openRegulatorPicker(tester);
+    expect(find.text('Mask').hitTestable(), findsNothing);
+    await tester.tap(find.text('Apeks XTX').hitTestable());
+    await tester.pumpAndSettle();
+
+    expect(changed?.regulatorEquipmentId, 'reg-a');
+  });
+
+  group('spare regulators (#1803)', () {
+    testWidgets('are not offered for a tank that does not use one', (
+      tester,
+    ) async {
+      await _pump(tester, equipment: const [_apeks, _spareReg]);
+
+      await _openRegulatorPicker(tester);
+
+      expect(find.text('Apeks XTX').hitTestable(), findsOneWidget);
+      expect(find.text('Spare Octo').hitTestable(), findsNothing);
+    });
+
+    testWidgets('stay shown on a tank already breathing from one', (
+      tester,
+    ) async {
+      // Marking a regulator Spare must not make an existing dive's tank read
+      // "None" for a regulator it really used.
+      await _pump(
+        tester,
+        equipment: const [_apeks, _spareReg],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-spare'),
+      );
+
+      expect(find.text('Spare Octo'), findsOneWidget);
+      expect(find.text('None'), findsNothing);
+    });
+
+    testWidgets('stay shown while the equipment list reloads', (tester) async {
+      // A reload keeps the previous list available. Dropping it for the
+      // loading state would read "None" for the tank's own regulator.
+      await _pump(
+        tester,
+        equipment: const [_apeks, _spareReg],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-spare'),
+      );
+
+      ProviderScope.containerOf(
+        tester.element(find.byType(TankEditor)),
+      ).read(_reload.notifier).state++;
+      await tester.pump();
+
+      expect(find.text('Spare Octo'), findsOneWidget);
+      expect(find.text('None'), findsNothing);
+    });
+  });
+
+  group('regulators with the same name (#3191)', () {
+    EquipmentItem xtx(String id, String identifier) => EquipmentItem(
+      id: id,
+      name: 'Apeks XTX',
+      type: EquipmentType.regulator,
+      attributes: [
+        EquipmentAttribute.curated(
+          equipmentId: id,
+          key: EquipmentAttrKeys.identifier,
+          valueText: identifier,
+        ),
+      ],
+    );
+
+    testWidgets('are told apart by their ID in the picker', (tester) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: [xtx('reg-1', 'Left'), xtx('reg-2', 'Right')],
+        onChanged: (t) => changed = t,
+      );
+
+      await _openRegulatorPicker(tester);
+      expect(
+        find.textContaining('ID Left', findRichText: true).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.textContaining('ID Right', findRichText: true).hitTestable(),
+      );
+      await tester.pumpAndSettle();
+
+      expect(changed?.regulatorEquipmentId, 'reg-2');
+    });
+
+    testWidgets('show the chosen one\'s ID in the closed field', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: [xtx('reg-1', 'Left'), xtx('reg-2', 'Right')],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-2'),
+      );
+
+      expect(
+        find.textContaining('ID Right', findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.textContaining('ID Left', findRichText: true), findsNothing);
+    });
+
+    testWidgets('lead with the ID, ahead of brand and model', (tester) async {
+      // A cut-off label loses its end first; the ID is what tells these two
+      // apart, so it must not be the part that goes.
+      final withModel = xtx(
+        'reg-2',
+        'Right',
+      ).copyWith(brand: 'Apeks', model: 'XTX50 Tungsten');
+      await _pump(
+        tester,
+        equipment: [xtx('reg-1', 'Left'), withModel],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-2'),
+      );
+
+      final label = tester
+          .widget<RichText>(
+            find.textContaining('ID Right', findRichText: true).first,
+          )
+          .text
+          .toPlainText();
+      expect(
+        label.indexOf('ID Right'),
+        lessThan(label.indexOf('Apeks XTX50 Tungsten')),
+      );
+    });
+  });
+
+  group('retired and sold regulators (#3210)', () {
+    const oldReg = EquipmentItem(
+      id: 'reg-old',
+      name: 'Old Mk25',
+      type: EquipmentType.regulator,
+      status: EquipmentStatus.retired,
+      isActive: false,
+    );
+    const soldReg = EquipmentItem(
+      id: 'reg-sold',
+      name: 'Sold Legend',
+      type: EquipmentType.regulator,
+      status: EquipmentStatus.sold,
+      isActive: false,
+    );
+    const showLabel = 'Show retired and sold regulators';
+
+    testWidgets('a tank already using one names it rather than None', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: const [_apeks, oldReg],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-old'),
+      );
+
+      expect(find.textContaining('Old Mk25', findRichText: true), findsOne);
+      expect(find.text('None'), findsNothing);
+    });
+
+    testWidgets('an added picker offers them on request too (#3375)', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, oldReg],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        onChanged: (t) => changed = t,
+      );
+      await tester.tap(find.byKey(const Key('tank-add-regulator')));
+      await tester.pumpAndSettle();
+
+      final extra = find.byKey(const Key('tank-regulator-picker-2'));
+      await tester.tap(extra);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(showLabel).hitTestable());
+      await tester.pumpAndSettle();
+      // Asking to see them is not a choice, and keeps the added picker.
+      expect(changed, isNull);
+      expect(find.text('Regulator 2'), findsOneWidget);
+
+      await tester.tap(extra);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.textContaining('Old Mk25', findRichText: true).hitTestable().last,
+      );
+      await tester.pumpAndSettle();
+      expect(changed?.regulatorIds, ['reg-a', 'reg-old']);
+    });
+
+    testWidgets('are offered only once the diver asks for them', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, oldReg, soldReg],
+        onChanged: (t) => changed = t,
+      );
+
+      await _openRegulatorPicker(tester);
+      expect(find.text('Apeks XTX').hitTestable(), findsOneWidget);
+      expect(find.text('Old Mk25').hitTestable(), findsNothing);
+
+      await tester.tap(find.text(showLabel).hitTestable());
+      await tester.pumpAndSettle();
+      // Asking to see them is not a choice of regulator.
+      expect(changed, isNull);
+      expect(find.text('None'), findsOneWidget);
+
+      await _openRegulatorPicker(tester);
+      expect(find.text(showLabel).hitTestable(), findsNothing);
+      expect(
+        find
+            .textContaining('Old Mk25 · Retired', findRichText: true)
+            .hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find
+            .textContaining('Sold Legend · Sold', findRichText: true)
+            .hitTestable(),
+      );
+      await tester.pumpAndSettle();
+
+      expect(changed?.regulatorEquipmentId, 'reg-sold');
+    });
+
+    testWidgets('asking to see them keeps the tank\'s regulator', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, oldReg],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        onChanged: (t) => changed = t,
+      );
+
+      await _openRegulatorPicker(tester);
+      await tester.tap(find.text(showLabel).hitTestable());
+      await tester.pumpAndSettle();
+
+      expect(changed, isNull);
+      expect(find.textContaining('Apeks XTX', findRichText: true), findsOne);
+    });
+
+    testWidgets('no show item when there are none', (tester) async {
+      await _pump(tester, equipment: const [_apeks]);
+
+      await _openRegulatorPicker(tester);
+      expect(find.text(showLabel), findsNothing);
+    });
+  });
+
+  group('extra regulators (#3375)', () {
+    Future<void> choose(WidgetTester tester, Key picker, String name) async {
+      await tester.ensureVisible(find.byKey(picker));
+      await tester.tap(find.byKey(picker));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name).hitTestable().last);
+      await tester.pumpAndSettle();
+    }
+
+    const addKey = Key('tank-add-regulator');
+
+    testWidgets('no add button before a first regulator', (tester) async {
+      await _pump(tester, equipment: const [_apeks, _reg2]);
+      expect(find.byKey(addKey), findsNothing);
+    });
+
+    testWidgets('adding a second regulator reports it as an extra', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        onChanged: (t) => changed = t,
+      );
+
+      await tester.tap(find.byKey(addKey));
+      await tester.pumpAndSettle();
+      expect(find.text('Regulator 2'), findsOneWidget);
+
+      await choose(
+        tester,
+        const Key('tank-regulator-picker-2'),
+        'Scubapro MK25',
+      );
+      expect(changed?.regulatorEquipmentId, 'reg-a');
+      expect(changed?.extraRegulatorIds, ['reg-b']);
+    });
+
+    testWidgets('an extra picker does not offer the first regulator', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+      );
+      await tester.tap(find.byKey(addKey));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('tank-regulator-picker-2')));
+      await tester.pumpAndSettle();
+      expect(find.text('Scubapro MK25').hitTestable(), findsOneWidget);
+      expect(find.text('Apeks XTX').hitTestable(), findsNothing);
+    });
+
+    testWidgets('removing an extra reports it gone', (tester) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(
+          id: 'tank-1',
+          regulatorEquipmentId: 'reg-a',
+          extraRegulatorIds: ['reg-b'],
+        ),
+        onChanged: (t) => changed = t,
+      );
+
+      await tester.tap(find.byKey(const Key('tank-remove-regulator-2')));
+      await tester.pumpAndSettle();
+      expect(changed?.regulatorIds, ['reg-a']);
+      expect(find.text('Regulator 2'), findsNothing);
+    });
+
+    testWidgets('setting the first to None moves the next one up', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2, _reg3],
+        tank: const DiveTank(
+          id: 'tank-1',
+          regulatorEquipmentId: 'reg-a',
+          extraRegulatorIds: ['reg-b', 'reg-c'],
+        ),
+        onChanged: (t) => changed = t,
+      );
+
+      await choose(tester, const Key('tank-regulator-picker'), 'None');
+      expect(changed?.regulatorEquipmentId, 'reg-b');
+      expect(changed?.extraRegulatorIds, ['reg-c']);
+      expect(find.text('Regulator 2'), findsOneWidget);
+      expect(find.text('Regulator 3'), findsNothing);
+      expect(find.text('Poseidon Xstream'), findsOneWidget);
+    });
+
+    testWidgets('removing an added picker before choosing drops it', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        onChanged: (t) => changed = t,
+      );
+      await tester.tap(find.byKey(addKey));
+      await tester.pumpAndSettle();
+      expect(find.byKey(addKey), findsNothing);
+
+      await tester.tap(find.byKey(const Key('tank-remove-regulator-2')));
+      await tester.pumpAndSettle();
+      expect(find.text('Regulator 2'), findsNothing);
+      expect(find.byKey(addKey), findsOneWidget);
+      expect(changed, isNull, reason: 'an empty picker never reported');
+    });
+
+    testWidgets('an added picker left empty is not reported', (tester) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        onChanged: (t) => changed = t,
+      );
+      await tester.tap(find.byKey(addKey));
+      await tester.pumpAndSettle();
+      // Any other edit reports the tank; the empty picker adds nothing.
+      await choose(tester, const Key('tank-regulator-picker'), 'Apeks XTX');
+      expect(changed?.extraRegulatorIds ?? const <String>[], isEmpty);
+    });
+
+    testWidgets('no add button once every regulator is chosen', (tester) async {
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(
+          id: 'tank-1',
+          regulatorEquipmentId: 'reg-a',
+          extraRegulatorIds: ['reg-b'],
+        ),
+      );
+      expect(find.byKey(addKey), findsNothing);
+    });
+
+    testWidgets('a preset prefills every regulator last used with it', (
+      tester,
+    ) async {
+      DiveTank? changed;
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        repository: _LastRegulators(const ['reg-a', 'reg-b']),
+        onChanged: (t) => changed = t,
+      );
+
+      final preset = find.byKey(const Key('tank-preset-dropdown'));
+      await tester.ensureVisible(preset);
+      await tester.tap(preset);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('AL80').last);
+      await tester.pumpAndSettle();
+
+      expect(changed?.regulatorIds, ['reg-a', 'reg-b']);
+      expect(find.text('Regulator 2'), findsOneWidget);
+    });
+
+    testWidgets('clearing the last regulator also drops an empty added '
+        'picker', (tester) async {
+      await _pump(
+        tester,
+        equipment: const [_apeks, _reg2],
+        tank: const DiveTank(id: 'tank-1', regulatorEquipmentId: 'reg-a'),
+        repository: _LastRegulators(const ['reg-a', 'reg-b']),
+      );
+      await tester.tap(find.byKey(addKey));
+      await tester.pumpAndSettle();
+      await choose(tester, const Key('tank-regulator-picker'), 'None');
+
+      // A preset now prefills both regulators: no empty third picker.
+      final preset = find.byKey(const Key('tank-preset-dropdown'));
+      await tester.ensureVisible(preset);
+      await tester.tap(preset);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('AL80').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Regulator 2'), findsOneWidget);
+      expect(find.text('Regulator 3'), findsNothing);
+    });
+  });
+}

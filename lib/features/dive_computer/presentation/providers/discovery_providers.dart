@@ -1,9 +1,12 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:clock/clock.dart';
+import 'package:collection/collection.dart';
+import 'package:flutter/services.dart';
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:submersion/core/models/log_entry.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/dive_computer/domain/entities/device_model.dart';
@@ -48,6 +51,10 @@ final libdcVersionProvider = FutureProvider<String>((ref) async {
 });
 
 /// Provider for USB-capable device models derived from descriptors.
+///
+/// Sorted by manufacturer, then model, then model code. libdivecomputer's
+/// descriptor table is grouped by download protocol rather than by brand, so
+/// its own order scatters a brand across the list (issue #4480).
 final usbDeviceModelsProvider = FutureProvider<List<DeviceModel>>((ref) async {
   final descriptors = await ref.watch(deviceDescriptorsProvider.future);
   return descriptors
@@ -58,10 +65,28 @@ final usbDeviceModelsProvider = FutureProvider<List<DeviceModel>>((ref) async {
         ),
       )
       .map(DeviceModel.fromDescriptor)
-      .toList();
+      .sorted(compareDeviceModels);
 });
 
+/// Orders device models for display: manufacturer, then model name, both
+/// case-insensitive with numbers compared by value ("Mantis" before
+/// "Mantis 2", "Veo 180" before "Veo 1000"), then libdivecomputer model code
+/// so models that share a name keep a stable order.
+int compareDeviceModels(DeviceModel a, DeviceModel b) {
+  final byManufacturer = compareAsciiLowerCaseNatural(
+    a.manufacturer,
+    b.manufacturer,
+  );
+  if (byManufacturer != 0) return byManufacturer;
+  final byModel = compareAsciiLowerCaseNatural(a.model, b.model);
+  if (byModel != 0) return byModel;
+  return (a.dcModel ?? 0).compareTo(b.dcModel ?? 0);
+}
+
 /// Provider for USB devices grouped by manufacturer.
+///
+/// Keeps the order of [usbDeviceModelsProvider]: brands and the models within
+/// each brand are alphabetical.
 final usbDevicesByManufacturerProvider =
     FutureProvider<Map<String, List<DeviceModel>>>((ref) async {
       final models = await ref.watch(usbDeviceModelsProvider.future);
@@ -84,6 +109,12 @@ class DiscoveryState {
   final List<DiscoveredDevice> discoveredDevices;
   final bool isScanning;
   final String? errorMessage;
+
+  /// Whether [errorMessage] is there because the Bluetooth radio is off or
+  /// missing, which the scan step words in the user's language instead of
+  /// showing the platform's error text. Cleared with [errorMessage], and
+  /// dropped by any new [errorMessage] that does not set it.
+  final bool bluetoothUnavailable;
   final String? customDeviceName;
 
   const DiscoveryState({
@@ -92,6 +123,7 @@ class DiscoveryState {
     this.discoveredDevices = const [],
     this.isScanning = false,
     this.errorMessage,
+    this.bluetoothUnavailable = false,
     this.customDeviceName,
   });
 
@@ -101,6 +133,7 @@ class DiscoveryState {
     List<DiscoveredDevice>? discoveredDevices,
     bool? isScanning,
     String? errorMessage,
+    bool? bluetoothUnavailable,
     String? customDeviceName,
     bool clearError = false,
     bool clearDevice = false,
@@ -113,6 +146,12 @@ class DiscoveryState {
       discoveredDevices: discoveredDevices ?? this.discoveredDevices,
       isScanning: isScanning ?? this.isScanning,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      // A new error message without its own flag replaces the reason too,
+      // so the banner never words a different error as Bluetooth being off.
+      bluetoothUnavailable: clearError
+          ? false
+          : (bluetoothUnavailable ??
+                (errorMessage != null ? false : this.bluetoothUnavailable)),
       customDeviceName: customDeviceName ?? this.customDeviceName,
     );
   }
@@ -121,32 +160,86 @@ class DiscoveryState {
 /// Steps in the device discovery wizard.
 enum DiscoveryStep { scan, select, pair, confirm, download, summary }
 
+/// Logger for the scan lifecycle.
+///
+/// The native scanner reports the devices it sees, but only this layer knows
+/// that a scan was requested at all. Without these entries a submitted debug
+/// log cannot distinguish "the user never scanned" from "the scan started and
+/// found nothing" from "permissions were refused" (issue #123).
+const _discoveryLog = LoggerService('Discovery');
+
 /// Notifier for managing the discovery wizard state.
 ///
 /// Uses DiveComputerService for BLE discovery via libdivecomputer's
 /// native platform backends. Accumulates discovered devices in state.
 class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
   final pigeon.DiveComputerService _service;
+
+  /// Whether this platform gates BLE scanning behind runtime permissions.
+  ///
+  /// Only Android does. Injectable because a refused permission is one of the
+  /// likelier reasons a scan finds nothing, and the branch that reports it is
+  /// otherwise unreachable in tests, which run where `Platform.isAndroid` is
+  /// false (issue #123).
+  final bool _requiresRuntimePermissions;
+
+  /// Whether this platform throttles BLE scan starts. Android lets an app
+  /// start [scanStartLimit] scans in [scanStartWindow] and gives the next one
+  /// no results, with no error, so it reads as an empty scan. The passive
+  /// scan on the Dive Computers section restarts on every return to it
+  /// (issue #3361), which makes that reachable. Injectable like
+  /// [_requiresRuntimePermissions].
+  final bool _paceScanStarts;
+
+  /// When the scans started inside the last [scanStartWindow] began, oldest
+  /// first.
+  List<DateTime> _scanStarts = const [];
+
+  static const scanStartLimit = 5;
+  static const scanStartWindow = Duration(seconds: 30);
+
   StreamSubscription<pigeon.DiscoveredDevice>? _discoverySubscription;
   StreamSubscription<void>? _discoveryCompleteSubscription;
 
-  DiscoveryNotifier({required pigeon.DiveComputerService service})
-    : _service = service,
-      super(const DiscoveryState()) {
+  /// Who started the current scan, and a count of scan starts and stops.
+  /// Every flow shares this one notifier, so a manual flow stopping its scan
+  /// must not stop the auto-connect scan running in its place, a stop that
+  /// finishes late must not mark a newer scan as ended, and a start still
+  /// waiting on the permission prompt must not begin a scan someone stopped
+  /// meanwhile (issue #3361).
+  Object? _scanOwner;
+  int _scanGeneration = 0;
+
+  DiscoveryNotifier({
+    required pigeon.DiveComputerService service,
+    bool? requiresRuntimePermissions,
+    bool? paceScanStarts,
+  }) : _service = service,
+       _requiresRuntimePermissions =
+           requiresRuntimePermissions ?? HostPlatform.isAndroid,
+       _paceScanStarts = paceScanStarts ?? HostPlatform.isAndroid,
+       super(const DiscoveryState()) {
     _discoveryCompleteSubscription = _service.discoveryComplete.listen((_) {
       state = state.copyWith(isScanning: false);
     });
   }
 
-  /// Start scanning for devices via BLE.
-  Future<void> startScan() async {
+  /// Start scanning for devices via BLE. [owner] is null for every manual
+  /// flow (the wizards and download pages), which [stopScan] stops; a scan
+  /// with an owner is stopped only through [stopScanOwnedBy].
+  Future<void> startScan({Object? owner}) async {
+    final generation = ++_scanGeneration;
+    _scanOwner = owner;
     try {
       // Request Bluetooth permissions on Android before scanning.
-      if (Platform.isAndroid) {
+      if (_requiresRuntimePermissions) {
         final statuses = await [
           Permission.bluetoothScan,
           Permission.bluetoothConnect,
         ].request();
+        // Stopped, or replaced by another start, while the prompt was up:
+        // starting now would leave a scan nobody stops.
+        if (generation != _scanGeneration) return;
 
         final denied = statuses.entries
             .where((e) => !e.value.isGranted)
@@ -154,6 +247,10 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
             .toList();
 
         if (denied.isNotEmpty) {
+          _discoveryLog.warning(
+            'Scan blocked: Bluetooth permissions denied (${denied.join(', ')})',
+            category: LogCategory.bluetooth,
+          );
           state = state.copyWith(
             isScanning: false,
             errorMessage:
@@ -175,13 +272,69 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
         _onDeviceDiscovered,
       );
 
+      if (_paceScanStarts) {
+        final wait = _scanStartWait();
+        if (wait > Duration.zero) {
+          _discoveryLog.info(
+            'Waiting ${wait.inSeconds}s before the BLE scan: Android gives '
+            'no results to a scan started too soon after $scanStartLimit '
+            'others',
+            category: LogCategory.bluetooth,
+          );
+          await Future<void>.delayed(wait);
+          // Stopped, or replaced by another start, while waiting.
+          if (generation != _scanGeneration) return;
+        }
+        _scanStarts = [..._scanStarts, clock.now()];
+      }
+
+      _discoveryLog.info(
+        'Starting BLE scan for dive computers',
+        category: LogCategory.bluetooth,
+      );
       await _service.startDiscovery(pigeon.TransportType.ble);
-    } catch (e) {
+    } catch (e, stackTrace) {
+      _discoveryLog.error(
+        'Failed to start BLE scan',
+        category: LogCategory.bluetooth,
+        error: e,
+        stackTrace: stackTrace,
+      );
+      // A start that failed after a newer start or a stop took over must
+      // not tear down that newer scan's subscription or state. The native
+      // calls themselves run in the order they were sent, so a stop sent
+      // after this start already stops whatever this start began.
+      if (generation != _scanGeneration) return;
+      // Cancel the event subscription so stray events from the native side
+      // cannot mutate state after a synchronous start failure.
+      _discoverySubscription?.cancel();
+      _discoverySubscription = null;
       state = state.copyWith(
         isScanning: false,
         errorMessage: 'Failed to start scanning: $e',
+        bluetoothUnavailable:
+            e is PlatformException &&
+            e.code == pigeon.bluetoothUnavailableErrorCode,
       );
     }
+  }
+
+  /// How long a scan start must wait so that no more than [scanStartLimit]
+  /// starts fall inside any [scanStartWindow], plus a second's margin for
+  /// Android's own clock. Forgets the starts already outside the window, and
+  /// any that lie ahead of now: the wall clock was set back, and keeping
+  /// them would hold the next start for as long as the jump.
+  Duration _scanStartWait() {
+    final now = clock.now();
+    _scanStarts = [
+      for (final start in _scanStarts)
+        if (!start.isAfter(now) && now.difference(start) < scanStartWindow)
+          start,
+    ];
+    if (_scanStarts.length < scanStartLimit) return Duration.zero;
+    return scanStartWindow -
+        now.difference(_scanStarts.first) +
+        const Duration(seconds: 1);
   }
 
   void _onDeviceDiscovered(pigeon.DiscoveredDevice pigeonDevice) {
@@ -191,15 +344,144 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
     // Deduplicate by address
     if (existing.any((d) => d.address == device.address)) return;
 
+    _discoveryLog.info(
+      'Discovered ${device.name} (${device.address}) '
+      'as ${pigeonDevice.vendor} ${pigeonDevice.product}',
+      category: LogCategory.bluetooth,
+    );
     state = state.copyWith(discoveredDevices: [...existing, device]);
   }
 
-  /// Stop scanning.
-  Future<void> stopScan() async {
+  /// Stops the current scan if a manual flow started it. An auto-connect
+  /// scan the Dive Computers section restarted in its place keeps running.
+  Future<void> stopScan() => stopScanOwnedBy(null);
+
+  /// Stops the current scan only if [owner] started it (null: a manual
+  /// flow), so closing one flow never stops a scan another one runs.
+  Future<void> stopScanOwnedBy(Object? owner) async {
+    if (!identical(_scanOwner, owner)) return;
+    final generation = ++_scanGeneration;
     _discoverySubscription?.cancel();
     _discoverySubscription = null;
     await _service.stopDiscovery();
+    // A caller stopping a scan it owns as its widget closes can outlive the
+    // provider (issue #3369); the native scan is stopped either way.
+    if (!mounted) return;
+    _discoveryLog.info(
+      'Stopped BLE scan; '
+      '${state.discoveredDevices.length} supported device(s) found',
+      category: LogCategory.bluetooth,
+    );
+    // A scan started while this stop was in flight is running now; marking
+    // it finished would end that caller's wait early.
+    if (generation != _scanGeneration) return;
     state = state.copyWith(isScanning: false);
+  }
+
+  /// Scans until a device advertising [address] is seen, then stops.
+  ///
+  /// Resolves with the freshly discovered device, or with null when the scan
+  /// could not start, native discovery ended, or [timeout] elapsed without
+  /// seeing the address. The scan is stopped on every path, unless
+  /// [stopScanWhenDone] is false: the caller then owns the running scan and
+  /// stops it with [stopScan].
+  ///
+  /// The saved-computer download path uses this to re-acquire the device
+  /// before connecting. A direct connect to a stored address that the
+  /// Bluetooth stack has not seen advertise recently fails on Android and
+  /// Windows, while the very same address connects fine right after a scan
+  /// (issue #1232). macOS and iOS re-scan natively before connecting; this
+  /// gives the other platforms the same behaviour.
+  ///
+  /// The scan-and-download flow connects while its scan is still running,
+  /// and on Android that flow downloaded a saved Shearwater that this path,
+  /// stopping the scan first and connecting straight after, could not
+  /// (issue #3369). The saved-computer download therefore keeps the scan
+  /// going through its connect, as that flow does.
+  Future<DiscoveredDevice?> scanForAddress(
+    String address, {
+    required Duration timeout,
+    bool stopScanWhenDone = true,
+  }) => _scanUntil(
+    (current) => current.discoveredDevices
+        .where((d) => bluetoothAddressesMatch(d.address, address))
+        .firstOrNull,
+    timeout: timeout,
+    stopScanWhenDone: stopScanWhenDone,
+  );
+
+  /// Scans for the whole of [timeout], or until native discovery ends,
+  /// leaving every device seen in [DiscoveryState.discoveredDevices].
+  /// [stopScanWhenDone] is as for [scanForAddress].
+  ///
+  /// Resolves with whether the scan was still running when the window
+  /// closed. False means the search never really ran: the scan could not
+  /// start, or native discovery ended on its own, which iOS and macOS do at
+  /// once when Bluetooth is off or not allowed, without an error, and
+  /// Android does when the adapter has no BLE scanner. The caller reads the
+  /// devices from the provider, which may by then hold a new notifier, since
+  /// this one can be disposed while the window runs (issue #3369).
+  ///
+  /// A saved Bluetooth computer with no address on this device (it was
+  /// saved on another one, issue #3710) is looked for by make and model,
+  /// and only a scan that ran its full length can say whether exactly one
+  /// device of that model is nearby.
+  Future<bool> scanForWindow({
+    required Duration timeout,
+    bool stopScanWhenDone = true,
+  }) async {
+    // The last state the window saw before it closed; a state change after
+    // the timeout no longer reaches the check.
+    var stillScanning = false;
+    await _scanUntil(
+      (current) {
+        stillScanning = current.isScanning;
+        return null;
+      },
+      timeout: timeout,
+      stopScanWhenDone: stopScanWhenDone,
+    );
+    return stillScanning;
+  }
+
+  /// Scans until [found] names a device, native discovery ends, or
+  /// [timeout] elapses, and resolves with that device or null.
+  Future<DiscoveredDevice?> _scanUntil(
+    DiscoveredDevice? Function(DiscoveryState current) found, {
+    required Duration timeout,
+    required bool stopScanWhenDone,
+  }) async {
+    final completer = Completer<DiscoveredDevice?>();
+
+    void check(DiscoveryState current) {
+      if (completer.isCompleted) return;
+      final match = found(current);
+      if (match != null) {
+        completer.complete(match);
+      } else if (!current.isScanning) {
+        completer.complete(null);
+      }
+    }
+
+    // startScan settles isScanning before returning: true once discovery is
+    // running, false (with an error message) when it could not start.
+    await startScan();
+    final subscription = stream.listen(check);
+    check(state);
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete(null);
+    });
+
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      // Not awaited: a broadcast subscription's cancel() resolves to the
+      // root-zone null future, which a fake-async widget test can never
+      // flush. Cancellation itself is synchronous.
+      unawaited(subscription.cancel());
+      if (stopScanWhenDone) await stopScan();
+    }
   }
 
   /// Select a device and move to the next step.
@@ -208,6 +490,15 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
       selectedDevice: device,
       currentStep: DiscoveryStep.confirm,
     );
+  }
+
+  /// Drop the selected device without touching the rest of the state.
+  ///
+  /// Used when a selection left over from an earlier discovery session must
+  /// not be reused, e.g. it does not carry the address of the saved computer
+  /// about to be downloaded from.
+  void clearSelectedDevice() {
+    state = state.copyWith(clearDevice: true);
   }
 
   /// Set a custom name for the device.
@@ -260,6 +551,13 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
     super.dispose();
   }
 }
+
+/// Whether two transport addresses name the same device.
+///
+/// Android reports colon-separated MACs and Windows colon-free hex; both are
+/// stable per platform, so only letter case is normalized.
+bool bluetoothAddressesMatch(String a, String b) =>
+    a.toUpperCase() == b.toUpperCase();
 
 /// Provider for the discovery notifier.
 final discoveryNotifierProvider =

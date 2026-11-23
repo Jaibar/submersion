@@ -1,0 +1,48 @@
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_import/data/services/uddf_entity_importer.dart';
+import 'package:submersion/features/import_wizard/data/adapters/universal_adapter.dart';
+
+import '../../../../helpers/test_database.dart';
+
+/// The repositories a real UDDF import runs with. The optional ones are
+/// optional for legacy callers only; a production import must supply
+/// each, or the entities they own are silently skipped.
+void main() {
+  setUp(setUpTestDatabase);
+  tearDown(tearDownTestDatabase);
+
+  testWidgets('a real import supplies the check-in repository', (tester) async {
+    ImportRepositories? repos;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: Consumer(
+          builder: (context, ref, _) {
+            repos = universalImportRepositories(
+              ProviderScope.containerOf(context, listen: false),
+            );
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+    expect(repos!.equipmentObservationRepository, isNotNull);
+    expect(repos!.serviceRecordRepository, isNotNull);
+    // Without it imported gear arrives with none of its tags (#1942).
+    expect(repos!.equipmentTagRepository, isNotNull);
+    // Without these an import restores sites but not their
+    // classification (#1765).
+    expect(repos!.siteTypeRepository, isNotNull);
+    expect(repos!.siteClassificationRepository, isNotNull);
+    // Without it every site feature in the file is dropped (#2200).
+    expect(repos!.siteFeatureRepository, isNotNull);
+    // Without these every fill in a fills CSV is skipped (cylinder
+    // passports phase 5).
+    expect(repos!.cylinderFillRepository, isNotNull);
+    expect(repos!.cylinderPassportRepository, isNotNull);
+    // Service kinds and clocks (issue #2651).
+    expect(repos!.serviceKindRepository, isNotNull);
+    expect(repos!.serviceScheduleRepository, isNotNull);
+  });
+}

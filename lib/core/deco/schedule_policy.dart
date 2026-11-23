@@ -1,0 +1,254 @@
+/// Air-break policy for long oxygen stops: after [o2Seconds] on a pure-O2
+/// stop gas, breathe the break gas for [breakSeconds], then repeat.
+class AirBreakPolicy {
+  const AirBreakPolicy({this.o2Seconds = 12 * 60, this.breakSeconds = 6 * 60});
+
+  final int o2Seconds;
+  final int breakSeconds;
+
+  /// By value, so a [PlanEngineConfig] rebuilt from unchanged settings
+  /// equals the one before and the planner's dependents do not rebuild.
+  @override
+  bool operator ==(Object other) =>
+      other is AirBreakPolicy &&
+      other.o2Seconds == o2Seconds &&
+      other.breakSeconds == breakSeconds;
+
+  @override
+  int get hashCode => Object.hash(o2Seconds, breakSeconds);
+}
+
+/// Which phase of the ascent a travel leg belongs to.
+///
+/// The rates a diver is taught are named after the phase, not the depth: the
+/// leg off the bottom is a working ascent whether the first stop is at 21 m or
+/// 6 m, and the leg off the last stop is the slow one whether or not anything
+/// deeper was required. Only [betweenStops] needs a depth, to tell an
+/// intermediate stop from a shallow one.
+enum AscentPhase {
+  /// Bottom to the first decompression stop - or, on a dive that owes
+  /// nothing, straight to the surface. A no-deco ascent is this phase and
+  /// only this phase: none of the slower deco rates apply to it.
+  toFirstStop,
+
+  /// Between two decompression stops.
+  betweenStops,
+
+  /// The last decompression stop to the surface.
+  fromLastStop;
+
+  /// The phase of a leg that lands on the surface, given the phase the walk
+  /// over the stops has reached.
+  ///
+  /// Off the last stop once any stop has actually been held; still the
+  /// working ascent when none was, because a dive that owes nothing never
+  /// leaves the [toFirstStop] leg it started on.
+  static AscentPhase surfacingAfter(AscentPhase walked) =>
+      walked == AscentPhase.toFirstStop
+      ? AscentPhase.toFirstStop
+      : AscentPhase.fromLastStop;
+
+  /// The phase of the leg that leaves a stop reached during this phase.
+  ///
+  /// A decompression stop starts the walk over the stops. A stop held only to
+  /// switch gas, with nothing owed there ([gasSwitchOnly], issue #4160),
+  /// leaves the phase as it was: a diver who pauses at 21 m to switch to
+  /// EAN50 on the way to a 12 m first stop is still on the working ascent,
+  /// and on a dive that owes nothing they never leave it.
+  AscentPhase afterStop({bool gasSwitchOnly = false}) =>
+      gasSwitchOnly ? this : AscentPhase.betweenStops;
+}
+
+/// One stretch of ascent travel.
+typedef AscentLeg = ({double fromDepth, double toDepth, int seconds});
+
+/// How a decompression schedule is generated, independent of the tissue
+/// model. Defaults reproduce the engine's legacy behavior.
+class SchedulePolicy {
+  const SchedulePolicy({
+    this.stopIncrement = 3.0,
+    this.lastStopDepth = 3.0,
+    this.shallowStopDepth = 9.0,
+    this.ascentRate = 9.0,
+    double? intermediateAscentRate,
+    double? shallowAscentRate,
+    double? finalAscentRate,
+    this.descentRate = 18.0,
+    this.gasSwitchStopSeconds = 0,
+    this.snapStopsToWholeMinutes = false,
+    this.airBreaks,
+    this.minStopSecondsByDepth = const {},
+  }) : intermediateAscentRate = intermediateAscentRate ?? ascentRate,
+       shallowAscentRate = shallowAscentRate ?? ascentRate,
+       finalAscentRate = finalAscentRate ?? ascentRate;
+
+  /// Deco stop depth increment in meters.
+  final double stopIncrement;
+
+  /// Shallowest deco stop depth in meters (3 or 6).
+  final double lastStopDepth;
+
+  /// Depth in meters below which a decompression stop counts as *shallow*,
+  /// switching travel between stops from [intermediateAscentRate] to
+  /// [shallowAscentRate].
+  ///
+  /// 9 m by convention: the 9/6/3 stops are the shallow ones. Not a plan
+  /// setting, because the standards that name these phases do not
+  /// parameterise the boundary either.
+  final double shallowStopDepth;
+
+  /// Working ascent rate in meters per minute: bottom to the first stop, and
+  /// the whole ascent on a dive that owes no decompression.
+  final double ascentRate;
+
+  /// Ascent rate in meters per minute between intermediate stops - those
+  /// deeper than [shallowStopDepth].
+  ///
+  /// Defaults to [ascentRate], so a caller that knows about only one rate
+  /// keeps its previous behaviour exactly. That is what keeps the dive log,
+  /// profile analysis and VPM-B unaffected: only the planner sets the phases
+  /// apart.
+  final double intermediateAscentRate;
+
+  /// Ascent rate in meters per minute between shallow stops - those at or
+  /// above [shallowStopDepth]. Defaults to [ascentRate].
+  final double shallowAscentRate;
+
+  /// Ascent rate in meters per minute from the last stop to the surface.
+  ///
+  /// The shallowest metres are where a given depth change costs the most
+  /// pressure change, so this is conventionally the slowest. Applies only
+  /// when there was a last stop to leave; see [AscentPhase.toFirstStop].
+  /// Defaults to [ascentRate].
+  final double finalAscentRate;
+
+  /// Descent rate in meters per minute.
+  final double descentRate;
+
+  /// Minimum time in seconds to hold at every gas switch on the ascent
+  /// (0 = no minimum, the switch is made on the fly).
+  ///
+  /// The stop is held at the stop level where the new gas is first
+  /// breathed: the deepest level on the stop grid at or above the switch
+  /// depth. That level is held even when nothing is owed there, before the
+  /// first deco stop or on a dive with no decompression at all, and such a
+  /// stop is marked `DecoStop.isGasSwitchOnly`. A switch at a level that is
+  /// already a deco stop makes that stop at least this long. No other stop
+  /// is lengthened (issue #4160).
+  final int gasSwitchStopSeconds;
+
+  /// Extend each stop so it ends on a whole minute of the ascent clock.
+  ///
+  /// Travel between stops rarely takes a whole number of minutes (3 m at
+  /// 6 m/min is thirty seconds), so without this every stop would start and
+  /// end at odd seconds and a slate could not be read against a watch. With
+  /// it, the stop absorbs the odd seconds of the leg that led to it - at most
+  /// 59 s more at each stop, always in the conservative direction - and the
+  /// schedule reads as whole minutes from the first stop on. Subsurface does
+  /// the same (its first stop chunk is sized to land the clock on a minute).
+  ///
+  /// Off by default so live decompression numbers in the dive log and on the
+  /// profile keep their exact values; the planner turns it on.
+  final bool snapStopsToWholeMinutes;
+
+  /// Optional O2 air-break policy; null = no air breaks.
+  final AirBreakPolicy? airBreaks;
+
+  /// Diver-authored minimum hold time, in seconds, keyed by whole-metre stop
+  /// depth. A stop whose computed duration is shorter than the configured
+  /// minimum is held for the minimum instead, and the extra time is actually
+  /// simulated against the tissues, so later, shallower stops can shorten in
+  /// response. A depth with no entry (or a minimum shorter than the computed
+  /// duration) is unaffected; a depth that the schedule never stops at is
+  /// never turned into a new stop.
+  ///
+  /// Only honored by the Buhlmann engine ([BuhlmannAlgorithm]). VPM-B
+  /// ([VpmBAlgorithm]) does not yet honor this field: applying a minimum
+  /// there would need `_runTime` and the tissue-loading walk to stay in sync
+  /// with the injected extra time, which VPM-B's stop-time computation does
+  /// not currently support.
+  final Map<int, int> minStopSecondsByDepth;
+
+  /// The rate in meters per minute for a leg of [phase] starting at
+  /// [fromDepth].
+  double ascentRateFor(AscentPhase phase, {double fromDepth = 0}) =>
+      switch (phase) {
+        AscentPhase.toFirstStop => ascentRate,
+        AscentPhase.betweenStops =>
+          fromDepth > shallowStopDepth
+              ? intermediateAscentRate
+              : shallowAscentRate,
+        AscentPhase.fromLastStop => finalAscentRate,
+      };
+
+  /// Seconds to ascend from [fromDepth] to [toDepth] during [phase].
+  ///
+  /// Returns 0 for a level or descending leg, which lets callers hand over
+  /// whatever pair of depths they have without guarding first.
+  int ascentSeconds({
+    required double fromDepth,
+    required double toDepth,
+    AscentPhase phase = AscentPhase.toFirstStop,
+  }) {
+    if (fromDepth <= toDepth) return 0;
+    final rate = ascentRateFor(phase, fromDepth: fromDepth);
+    if (rate <= 0) return 0;
+    return ((fromDepth - toDepth) / rate * 60).round();
+  }
+
+  /// The travel legs of an ascent from [fromDepth] that pauses at each of
+  /// [stopDepths] (deepest first) and finishes at the surface. Excludes the
+  /// time held at the stops themselves.
+  ///
+  /// Assigns the phases the way a schedule runs: down to the first stop, then
+  /// between stops, then off the last stop. With no stops at all the whole
+  /// ascent is one [AscentPhase.toFirstStop] leg. A stop whose depth is in
+  /// [gasSwitchOnlyDepths] is held only to switch gas and does not move the
+  /// phase on ([AscentPhase.afterStop]).
+  List<AscentLeg> ascentLegs({
+    required double fromDepth,
+    required Iterable<double> stopDepths,
+    Set<double> gasSwitchOnlyDepths = const {},
+  }) {
+    final legs = <AscentLeg>[];
+    var depth = fromDepth;
+    var phase = AscentPhase.toFirstStop;
+    for (final stop in stopDepths) {
+      legs.add((
+        fromDepth: depth,
+        toDepth: stop,
+        seconds: ascentSeconds(fromDepth: depth, toDepth: stop, phase: phase),
+      ));
+      depth = stop;
+      phase = phase.afterStop(
+        gasSwitchOnly: gasSwitchOnlyDepths.contains(stop),
+      );
+    }
+    if (depth > 0) {
+      legs.add((
+        fromDepth: depth,
+        toDepth: 0.0,
+        seconds: ascentSeconds(
+          fromDepth: depth,
+          toDepth: 0,
+          phase: AscentPhase.surfacingAfter(phase),
+        ),
+      ));
+    }
+    return legs;
+  }
+
+  /// Total seconds spent *travelling* on the ascent [ascentLegs] describes.
+  /// Callers that need the legs individually - to sample the profile, or to
+  /// charge gas against the right cylinder - walk the same sequence, so a
+  /// total can never disagree with the legs it is made of.
+  int ascentTravelSeconds({
+    required double fromDepth,
+    required Iterable<double> stopDepths,
+    Set<double> gasSwitchOnlyDepths = const {},
+  }) => ascentLegs(
+    fromDepth: fromDepth,
+    stopDepths: stopDepths,
+    gasSwitchOnlyDepths: gasSwitchOnlyDepths,
+  ).fold(0, (seconds, leg) => seconds + leg.seconds);
+}

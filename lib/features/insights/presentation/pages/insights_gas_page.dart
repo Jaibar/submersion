@@ -1,0 +1,267 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/providers/provider.dart';
+
+import 'package:submersion/core/constants/gas_consumption_display.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/insights/presentation/info/insights_card_info.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/insights/domain/focus/focus_metric.dart';
+import 'package:submersion/features/insights/domain/focus/focus_selection.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_focus_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_gas_lane_provider.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
+import 'package:submersion/features/insights/presentation/widgets/ccr_gas_use_section.dart';
+import 'package:submersion/features/insights/presentation/widgets/ranking_list.dart';
+import 'package:submersion/features/insights/presentation/widgets/role_consumption_section.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/tank_configuration_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
+import 'package:submersion/features/insights/presentation/widgets/horizontal_category_bar_chart.dart';
+import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+
+class InsightsGasPage extends ConsumerWidget {
+  final bool embedded;
+
+  const InsightsGasPage({super.key, this.embedded = false});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
+    final display = units.settings.gasConsumptionDisplay;
+
+    final content = SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (display == GasConsumptionDisplay.both) ...[
+            _buildLaneSelector(context, ref),
+            const SizedBox(height: 16),
+          ],
+          _buildSacTrendSection(context, ref, units),
+          const SizedBox(height: 16),
+          _buildGasMixSection(context, ref),
+          const SizedBox(height: 16),
+          const TankConfigurationCard(),
+          const SizedBox(height: 16),
+          const RoleConsumptionSection(),
+          const SizedBox(height: 16),
+          const CcrGasUseSection(),
+          _buildSacRecordsSection(context, ref, units),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_gas_appBar_title,
+      body: content,
+    );
+  }
+
+  /// SAC | RMV for the whole page, shown only when the preference displays
+  /// both lanes. Three sections with two lanes each would be six charts.
+  Widget _buildLaneSelector(BuildContext context, WidgetRef ref) {
+    final lane = ref.watch(insightsGasLaneProvider);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SegmentedButton<GasConsumptionLane>(
+        segments: [
+          ButtonSegment(
+            value: GasConsumptionLane.sac,
+            label: Text(context.l10n.gasConsumption_sac),
+          ),
+          ButtonSegment(
+            value: GasConsumptionLane.rmv,
+            label: Text(context.l10n.gasConsumption_rmv),
+          ),
+        ],
+        selected: {lane},
+        showSelectedIcon: false,
+        onSelectionChanged: (selection) =>
+            ref.read(insightsGasLaneOverrideProvider.notifier).state =
+                selection.first,
+      ),
+    );
+  }
+
+  Widget _buildSacTrendSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final lane = ref.watch(insightsGasLaneProvider);
+    final isRmv = lane == GasConsumptionLane.rmv;
+    final unitSymbol = isRmv ? units.rmvSymbol : units.sacSymbol;
+    String format(double v) => isRmv ? units.formatRmv(v) : units.formatSac(v);
+    double convert(double v) =>
+        isRmv ? units.convertRmv(v) : units.convertSac(v);
+    // The axis draws the bare number, so it has to round the way the
+    // tooltip's labelled value does or the two disagree (an imperial RMV
+    // tick read 0.5 where its tooltip said 0.53).
+    final decimals = isRmv ? units.rmvDecimals : units.sacDecimals;
+
+    return TrendChartSection(
+      chartId: TrendChartIds.sac,
+      onDiveSelected: (diveId) => context.push('/dives/$diveId'),
+      title: context.l10n.insights_gas_sacTrend_title,
+      infoSummary: context.l10n.info_insights_sacTrend_summary,
+      infoTerms: gasLaneTerms(isRmv: isRmv),
+      subtitle: context.l10n.insights_gas_sacTrend_subtitle,
+      pointsAsync: ref.watch(sacTrendProvider),
+      errorMessage: context.l10n.insights_gas_sacTrend_error,
+      lineColor: Colors.blue,
+      yAxisLabel: unitSymbol,
+      valueFormatter: format,
+      yAxisFormatter: (value) => convert(value).toStringAsFixed(decimals),
+      rateFormatter: format,
+    );
+  }
+
+  Widget _buildGasMixSection(BuildContext context, WidgetRef ref) {
+    final gasMixAsync = ref.watch(gasMixDistributionProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_gas_gasMix_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_gas_gasMix_title,
+        summary: context.l10n.info_insights_gasMix_summary,
+        terms: const [
+          DiveTerm.nitrox,
+          DiveTerm.trimix,
+          DiveTerm.gasMixCounting,
+        ],
+      ),
+      subtitle: context.l10n.insights_gas_gasMix_subtitle,
+      child: gasMixAsync.when(
+        // Bars rather than a pie (issue #3048): a dive breathing more than
+        // one mix, such as air back gas with a nitrox deco tank, counts under
+        // each, so the counts are not shares of a whole.
+        data: (data) => HorizontalCategoryBarChart(
+          data: [for (final s in data) (label: s.label, count: s.count)],
+          barColor: Colors.blue.shade400,
+          onRowTap: (index) => openChartDives(
+            context,
+            ref,
+            chart: context.l10n.insights_gas_gasMix_title,
+            row: data[index].label,
+            load: (repository, diverId, scope) => repository.getGasMixDiveIds(
+              gasType: data[index].label,
+              diverId: diverId,
+              filter: scope,
+            ),
+          ),
+        ),
+        loading: () => const SizedBox(
+          height: 120,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_gas_gasMix_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSacRecordsSection(
+    BuildContext context,
+    WidgetRef ref,
+    UnitFormatter units,
+  ) {
+    final sacRecordsAsync = ref.watch(sacRecordsProvider);
+    final lane = ref.watch(insightsGasLaneProvider);
+    final isRmv = lane == GasConsumptionLane.rmv;
+    final unitSymbol = isRmv ? units.rmvSymbol : units.sacSymbol;
+    String format(double v) => isRmv ? units.formatRmv(v) : units.formatSac(v);
+    final records = sacRecordsAsync.value;
+    final hasRecords = records?.best != null || records?.worst != null;
+
+    return StatSectionCard(
+      title: context.l10n.insights_gas_sacRecords_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_gas_sacRecords_title,
+        summary: context.l10n.info_insights_sacRecords_summary,
+        terms: gasLaneTerms(isRmv: isRmv),
+      ),
+      subtitle: context.l10n.insights_gas_sacRecords_subtitle,
+      // Only with records to rank: with none, Dive focus would open empty.
+      trailing: hasRecords
+          ? TextButton(
+              key: const ValueKey('gas-records-see-top'),
+              onPressed: () {
+                ref
+                    .read(focusSelectionProvider.notifier)
+                    .state = FocusSelection(
+                  metric: isRmv ? FocusMetric.rmv : FocusMetric.sac,
+                );
+                context.push('/insights/focus');
+              },
+              child: Text(context.l10n.insights_gas_sacRecords_seeTop),
+            )
+          : null,
+      child: sacRecordsAsync.when(
+        data: (records) {
+          if (records.best == null && records.worst == null) {
+            return StatEmptyState(
+              icon: Icons.air,
+              message: context.l10n.insights_gas_sacRecords_empty,
+            );
+          }
+
+          String formatSacRecord(double? value) =>
+              value == null ? '-- $unitSymbol' : format(value);
+
+          return Column(
+            children: [
+              if (records.best != null)
+                ValueRankingCard(
+                  title: isRmv
+                      ? context.l10n.insights_gas_sacRecords_bestRmv
+                      : context.l10n.insights_gas_sacRecords_bestSac,
+                  value: formatSacRecord(records.best!.value),
+                  subtitle: units.formatDate(records.best!.date),
+                  icon: Icons.emoji_events,
+                  iconColor: Colors.green,
+                  onTap: () => context.push('/dives/${records.best!.id}'),
+                ),
+              if (records.best != null && records.worst != null)
+                const SizedBox(height: 8),
+              if (records.worst != null)
+                ValueRankingCard(
+                  title: isRmv
+                      ? context.l10n.insights_gas_sacRecords_highestRmv
+                      : context.l10n.insights_gas_sacRecords_highestSac,
+                  value: formatSacRecord(records.worst!.value),
+                  subtitle: units.formatDate(records.worst!.date),
+                  icon: Icons.speed,
+                  iconColor: Colors.orange,
+                  onTap: () => context.push('/dives/${records.worst!.id}'),
+                ),
+            ],
+          );
+        },
+        loading: () => const SizedBox(
+          height: 120,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_gas_sacRecords_error,
+        ),
+      ),
+    );
+  }
+}

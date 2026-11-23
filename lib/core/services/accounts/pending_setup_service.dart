@@ -1,0 +1,212 @@
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:submersion/core/data/repositories/connected_accounts_repository.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/services/accounts/connected_account.dart'
+    as domain;
+import 'package:submersion/core/services/accounts/account_display_name.dart';
+import 'package:submersion/core/services/accounts/account_kind.dart';
+import 'package:submersion/core/services/accounts/account_provider_adapter.dart';
+import 'package:submersion/core/services/accounts/account_provider_registry.dart';
+import 'package:submersion/core/services/accounts/account_usage_service.dart';
+import 'package:submersion/core/services/media_store/media_store_attach_state.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/media_store/data/media_stores_repository.dart';
+
+/// What a device still needs to set up to match the library's synced
+/// configuration (program spec section 6).
+enum SetupItemKind { mediaStoreAttach, mediaStoreReconnect, accountSignIn }
+
+/// One actionable "finish setting up this device" entry. [key] is stable
+/// per underlying object so per-device dismissals stick.
+class PendingSetupItem {
+  final SetupItemKind kind;
+  final String key;
+
+  /// Display payload: the store hint for [SetupItemKind.mediaStoreAttach] and
+  /// [SetupItemKind.mediaStoreReconnect], the account label for
+  /// [SetupItemKind.accountSignIn].
+  final String label;
+
+  /// For accountSignIn: the account's kind.
+  final AccountKind? accountKind;
+
+  /// For accountSignIn: the roster row that needs signing in.
+  final String? accountId;
+
+  /// For accountSignIn: what uses this account on this device, so a reader
+  /// can say which features stop until it is signed in again. [route] names
+  /// only the first page that can sign it in.
+  final Set<AccountUsageKind> usages;
+
+  /// The settings page that actually resolves this item. Computed by the
+  /// service, which knows what the account drives (sync selection, media
+  /// store descriptor, connector) - the card just navigates.
+  final String route;
+
+  /// The diver dismissed this prompt on this device. Only sign-ins are kept
+  /// once dismissed: the card hides them, but the account still needs a
+  /// sign-in, and the Settings > Data accounts row must keep saying so.
+  final bool dismissed;
+
+  const PendingSetupItem({
+    required this.kind,
+    required this.key,
+    required this.label,
+    required this.route,
+    this.accountKind,
+    this.accountId,
+    this.usages = const {},
+    this.dismissed = false,
+  });
+}
+
+/// Computes the device's pending setup items from synced descriptors and
+/// records per-device dismissals. Never nags: a dismissed key stays
+/// dismissed on this device until the underlying object changes identity.
+class PendingSetupService {
+  PendingSetupService({
+    required SharedPreferences prefs,
+    ConnectedAccountsRepository? accounts,
+    MediaStoresRepository? stores,
+    MediaStoreAttachState? attachState,
+    SyncRepository? syncRepository,
+    AccountUsageService? usage,
+    required AccountProviderRegistry registry,
+  }) : _prefs = prefs,
+       _accounts = accounts ?? ConnectedAccountsRepository(),
+       _stores = stores ?? MediaStoresRepository(),
+       // Same prefs instance as the dismissal store: one source of truth,
+       // and overridden prefs in tests govern the attach state too.
+       _attachState = attachState ?? MediaStoreAttachState(prefs: prefs),
+       _registry = registry {
+    _usage =
+        usage ??
+        AccountUsageService(
+          attachState: _attachState,
+          syncRepository: syncRepository,
+          backupPreferences: BackupPreferences(prefs),
+        );
+  }
+
+  static const String _dismissedPrefix = 'setup_item_dismissed_';
+
+  final SharedPreferences _prefs;
+  final ConnectedAccountsRepository _accounts;
+  final MediaStoresRepository _stores;
+  final MediaStoreAttachState _attachState;
+  final AccountProviderRegistry _registry;
+  late final AccountUsageService _usage;
+
+  bool _isDismissed(String key) =>
+      _prefs.getBool('$_dismissedPrefix$key') ?? false;
+
+  /// Records [key] as dismissed on this device. Needs no repositories, so a
+  /// card can dismiss an item without building the whole service.
+  static Future<void> dismissKey(SharedPreferences prefs, String key) async {
+    await prefs.setBool('$_dismissedPrefix$key', true);
+  }
+
+  Future<List<PendingSetupItem>> compute() async {
+    final items = <PendingSetupItem>[];
+
+    // The library announces a media store (synced descriptor), but this
+    // device is not attached to it - or is still attached to a DIFFERENT
+    // store (switched on another device), which needs the same action.
+    final store = await _stores.getActive();
+    final attachedId = await _attachState.attachedStoreId();
+    if (store != null && attachedId != store.id) {
+      final key = 'store_${store.id}';
+      if (!_isDismissed(key)) {
+        items.add(
+          PendingSetupItem(
+            kind: SetupItemKind.mediaStoreAttach,
+            key: key,
+            label: shortStorageLabel(store.displayHint),
+            route: '/settings/photos-media',
+          ),
+        );
+      }
+    }
+
+    // Attached to the announced store, but the store no longer carries the
+    // marker this device attached to (the preflight remembered it). The
+    // transfer queue is suspended until the user reconnects (media sync
+    // program spec 7.1).
+    if (store != null &&
+        attachedId == store.id &&
+        await _attachState.hasMarkerMismatch()) {
+      final key = 'store_marker_${store.id}';
+      if (!_isDismissed(key)) {
+        items.add(
+          PendingSetupItem(
+            kind: SetupItemKind.mediaStoreReconnect,
+            key: key,
+            label: shortStorageLabel(store.displayHint),
+            route: '/settings/photos-media',
+          ),
+        );
+      }
+    }
+
+    // Roster accounts this device holds no working credentials for.
+    // `unavailable` kinds (e.g. iCloud off-platform) are not actionable
+    // here and are skipped.
+    final usage = await _usage.load();
+    for (final account in await _accounts.getAll()) {
+      // Only accounts this device needs: its sync account, its media store's
+      // account and its libraries' accounts. A row nothing here uses
+      // (another device's server or folder) asks for no sign-in (spec
+      // section 7.2), and is never probed. A Lightroom row always counts as
+      // used: the connector's usage is per kind, not per device.
+      final uses = {for (final u in usage.usagesOf(account)) u.kind};
+      if (uses.isEmpty) continue;
+      final adapter = _registry.capabilityFor<AccountProviderAdapter>(
+        account.kind,
+      );
+      if (adapter == null) continue;
+      if (await adapter.status(account) != AccountStatus.needsSignIn) {
+        continue;
+      }
+      final key = 'account_${account.id}';
+      items.add(
+        PendingSetupItem(
+          kind: SetupItemKind.accountSignIn,
+          key: key,
+          label: account.displayName,
+          accountKind: account.kind,
+          accountId: account.id,
+          usages: Set.unmodifiable(uses),
+          route: _routeFor(account, uses),
+          dismissed: _isDismissed(key),
+        ),
+      );
+    }
+    return items;
+  }
+
+  /// The settings page that can actually sign this account in, from what
+  /// the account drives on this device ([AccountUsageService], shared with
+  /// the Connected Accounts page). Connectors have their own pages; the sync
+  /// account belongs to Cloud Sync; the attached media account to Media
+  /// Storage; a library's account to its own account page, whose Sign in
+  /// again covers every kind.
+  String _routeFor(
+    domain.ConnectedAccount account,
+    Set<AccountUsageKind> kinds,
+  ) {
+    if (kinds.contains(AccountUsageKind.lightroom)) {
+      return '/settings/lightroom';
+    }
+    if (kinds.contains(AccountUsageKind.databaseSync)) {
+      return '/settings/cloud-sync';
+    }
+    if (kinds.contains(AccountUsageKind.mediaStorage)) {
+      return '/settings/photos-media';
+    }
+    if (kinds.contains(AccountUsageKind.backupCopy)) {
+      return '/settings/backup';
+    }
+    return '/settings/connected-accounts/${account.id}';
+  }
+}

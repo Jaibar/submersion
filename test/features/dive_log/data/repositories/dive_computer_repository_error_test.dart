@@ -33,6 +33,14 @@ void main() {
         throwsA(anything),
       );
       await expectLater(
+        repository.findByHardwareIdentity(
+          manufacturer: 'Shearwater',
+          model: 'Perdix',
+          serialNumber: 'SN-12345',
+        ),
+        throwsA(anything),
+      );
+      await expectLater(
         repository.createComputer(
           DiveComputer(
             id: '',
@@ -75,19 +83,11 @@ void main() {
         throwsA(anything),
       );
       await expectLater(
-        repository.getProfilesForDive('test-id'),
-        throwsA(anything),
-      );
-      await expectLater(
         repository.getComputerIdsForDive('test-id'),
         throwsA(anything),
       );
       await expectLater(
         repository.getComputersForDive('test-id'),
-        throwsA(anything),
-      );
-      await expectLater(
-        repository.setPrimaryProfile('test-id', 'computer-id'),
         throwsA(anything),
       );
       await expectLater(
@@ -106,6 +106,10 @@ void main() {
       );
       await expectLater(
         repository.getEventsForDive('test-id'),
+        throwsA(anything),
+      );
+      await expectLater(
+        repository.getEventsForDives(['test-id']),
         throwsA(anything),
       );
       await expectLater(
@@ -129,7 +133,6 @@ void main() {
         DatabaseService.instance.resetForTesting();
 
         // Methods that return null
-        expect(await repository.getPrimaryComputerId('test-id'), isNull);
         expect(
           await repository.findMatchingDive(
             profileStartTime: DateTime.now(),

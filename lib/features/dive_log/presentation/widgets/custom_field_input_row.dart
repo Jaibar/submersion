@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
@@ -26,7 +27,10 @@ class CustomFieldInputRow extends StatelessWidget {
         children: [
           ReorderableDragStartListener(
             index: index,
-            child: const Icon(Icons.drag_handle, color: Colors.grey),
+            child: Icon(
+              Icons.drag_handle,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -38,9 +42,9 @@ class CustomFieldInputRow extends StatelessWidget {
                   return keySuggestions;
                 }
                 return keySuggestions.where(
-                  (s) => s.toLowerCase().contains(
-                    textEditingValue.text.toLowerCase(),
-                  ),
+                  (s) => foldForSearch(
+                    s,
+                  ).contains(foldForSearch(textEditingValue.text)),
                 );
               },
               onSelected: (value) {
@@ -58,6 +62,8 @@ class CustomFieldInputRow extends StatelessWidget {
                   onChanged: (value) {
                     onChanged(field.copyWith(key: value));
                   },
+                  // Commits the arrow-key highlight from the suggestion list.
+                  onFieldSubmitted: (_) => onSubmitted(),
                 );
               },
             ),

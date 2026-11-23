@@ -1,0 +1,319 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/core/built_ins/hidden_built_ins_codec.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/equipment/domain/entities/exposure_unit.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart'
+    as domain;
+import 'package:submersion/features/equipment/data/repositories/service_kind_repository.dart';
+
+/// CRUD for service clocks plus the auto-attach hook that seeds clocks on
+/// newly created equipment.
+class ServiceScheduleRepository {
+  AppDatabase get _db => DatabaseService.instance.database;
+  final SyncRepository _syncRepository = SyncRepository();
+  final _uuid = const Uuid();
+
+  /// Emits whenever a service clock or the settings that grade it change, so
+  /// the schedule providers refresh after a sync or any other write that
+  /// bypasses the notifiers. Watches `diver_settings` as well because
+  /// [getDueSoonWindowDays] reads the reminder-days list from it: changing
+  /// the reminder settings moves the dueSoon threshold without any
+  /// `service_schedules` row being written.
+  Stream<void> watchSchedulesChanges() => _db.tableUpdates(
+    TableUpdateQuery.allOf([
+      TableUpdateQuery.onTable(_db.serviceSchedules),
+      TableUpdateQuery.onTable(_db.diverSettings),
+    ]),
+  );
+
+  Future<List<domain.ServiceSchedule>> getSchedulesForEquipment(
+    String equipmentId,
+  ) async {
+    final rows = await (_db.select(
+      _db.serviceSchedules,
+    )..where((t) => t.equipmentId.equals(equipmentId))).get();
+    return rows.map(_mapRow).toList();
+  }
+
+  /// [getSchedulesForEquipment] for many items at once, keyed by equipment
+  /// id; an item without schedules is absent. One statement per chunk of
+  /// ids instead of one per item.
+  Future<Map<String, List<domain.ServiceSchedule>>> getSchedulesForEquipmentIds(
+    List<String> equipmentIds,
+  ) async {
+    if (equipmentIds.isEmpty) return {};
+    final byItem = <String, List<domain.ServiceSchedule>>{};
+    for (final chunk in seriesIdChunks(equipmentIds)) {
+      final rows = await (_db.select(
+        _db.serviceSchedules,
+      )..where((t) => t.equipmentId.isIn(chunk))).get();
+      for (final row in rows) {
+        byItem.putIfAbsent(row.equipmentId, () => []).add(_mapRow(row));
+      }
+    }
+    return byItem;
+  }
+
+  Future<List<domain.ServiceSchedule>> getAllSchedules() async {
+    final rows = await _db.select(_db.serviceSchedules).get();
+    return rows.map(_mapRow).toList();
+  }
+
+  /// Creates [schedule]. With [notify] false the caller notifies sync once
+  /// its own transaction commits.
+  Future<domain.ServiceSchedule> createSchedule(
+    domain.ServiceSchedule schedule, {
+    bool notify = true,
+  }) async {
+    final id = schedule.id.isEmpty ? _uuid.v4() : schedule.id;
+    final now = DateTime.now();
+    await _db
+        .into(_db.serviceSchedules)
+        .insert(
+          ServiceSchedulesCompanion(
+            id: Value(id),
+            equipmentId: Value(schedule.equipmentId),
+            serviceKindId: Value(schedule.serviceKindId),
+            intervalDays: Value(schedule.intervalDays),
+            intervalDives: Value(schedule.intervalDives),
+            intervalHours: Value(schedule.intervalHours),
+            exposureIntervals: Value(
+              encodeExposureIntervals(schedule.exposureIntervals),
+            ),
+            defaultCost: Value(schedule.defaultCost),
+            defaultCurrency: Value(schedule.defaultCurrency),
+            anchorDate: Value(schedule.anchorDate?.millisecondsSinceEpoch),
+            anchorSetAt: Value(schedule.anchorSetAt?.millisecondsSinceEpoch),
+            enabled: Value(schedule.enabled),
+            createdAt: Value(now.millisecondsSinceEpoch),
+            updatedAt: Value(now.millisecondsSinceEpoch),
+          ),
+        );
+    await _syncRepository.markRecordPending(
+      entityType: 'serviceSchedules',
+      recordId: id,
+      localUpdatedAt: now.millisecondsSinceEpoch,
+    );
+    if (notify) SyncEventBus.notifyLocalChange();
+    return schedule.copyWith(id: id, createdAt: now, updatedAt: now);
+  }
+
+  /// Pass [notify] false inside a transaction and notify once after it
+  /// commits, as [createSchedule] does.
+  Future<void> updateSchedule(
+    domain.ServiceSchedule schedule, {
+    bool notify = true,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(
+      _db.serviceSchedules,
+    )..where((t) => t.id.equals(schedule.id))).write(
+      ServiceSchedulesCompanion(
+        intervalDays: Value(schedule.intervalDays),
+        intervalDives: Value(schedule.intervalDives),
+        intervalHours: Value(schedule.intervalHours),
+        exposureIntervals: Value(
+          encodeExposureIntervals(schedule.exposureIntervals),
+        ),
+        defaultCost: Value(schedule.defaultCost),
+        defaultCurrency: Value(schedule.defaultCurrency),
+        anchorDate: Value(schedule.anchorDate?.millisecondsSinceEpoch),
+        anchorSetAt: Value(schedule.anchorSetAt?.millisecondsSinceEpoch),
+        enabled: Value(schedule.enabled),
+        updatedAt: Value(now),
+      ),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'serviceSchedules',
+      recordId: schedule.id,
+      localUpdatedAt: now,
+    );
+    if (notify) SyncEventBus.notifyLocalChange();
+  }
+
+  Future<void> deleteSchedule(String id) async {
+    await (_db.delete(
+      _db.serviceSchedules,
+    )..where((t) => t.id.equals(id))).go();
+    await _syncRepository.logDeletion(
+      entityType: 'serviceSchedules',
+      recordId: id,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// Creates one enabled schedule per auto-attach kind matching [type] that
+  /// the item does not already have. Deterministic ids keep this idempotent
+  /// and collision-free across devices.
+  ///
+  /// Kinds are scoped to [diverId]: built-ins and unowned customs always
+  /// apply; another diver's custom kinds never auto-attach. [notify] as for
+  /// [createSchedule].
+  Future<void> autoAttachForEquipment({
+    required String equipmentId,
+    required EquipmentType type,
+    String? diverId,
+    bool notify = true,
+  }) async {
+    final existing = await getSchedulesForEquipment(equipmentId);
+    final now = DateTime.now();
+    for (final kind in await autoAttachKindsFor(
+      type: type,
+      diverId: diverId,
+      existingKindIds: existing.map((s) => s.serviceKindId).toSet(),
+    )) {
+      await createSchedule(
+        domain.ServiceSchedule(
+          id: 'auto-${kind.id}-$equipmentId',
+          equipmentId: equipmentId,
+          serviceKindId: kind.id,
+          createdAt: now,
+          updatedAt: now,
+        ),
+        notify: notify,
+      );
+    }
+  }
+
+  /// The kinds [autoAttachForEquipment] gives an item of [type] owned by
+  /// [diverId] a clock for, leaving out [existingKindIds]. For a caller that
+  /// must say what a create adds before it writes, such as an agent's plan.
+  Future<List<ServiceKind>> autoAttachKindsFor({
+    required EquipmentType type,
+    String? diverId,
+    Set<String> existingKindIds = const {},
+  }) async {
+    final hidden = await hiddenServiceKindIds(diverId);
+    return [
+      for (final kind in await ServiceKindRepository().getAllKinds())
+        // Another diver's custom kind never attaches; a built-in kind the
+        // owning diver hid (issue #401) would only nag with due reminders.
+        if ((kind.isBuiltIn ||
+                kind.diverId == null ||
+                kind.diverId == diverId) &&
+            kind.autoAttach &&
+            kind.appliesTo(type) &&
+            !(kind.isBuiltIn && hidden.contains(kind.id)) &&
+            !existingKindIds.contains(kind.id))
+          kind,
+    ];
+  }
+
+  /// Sets each of [equipmentId]'s clocks named in [baselines] (service kind
+  /// id to date) to count from that date, as the clock's own dialog does
+  /// when the diver picks one (issue #3662), and clears the baseline of each
+  /// clock named in [cleared] that still holds the date given there. A kind
+  /// the item has no clock for is skipped. [notify] as for [createSchedule].
+  Future<void> applyBaselines(
+    String equipmentId,
+    Map<String, DateTime> baselines, {
+    Map<String, DateTime> cleared = const {},
+    bool notify = true,
+  }) async {
+    if (baselines.isEmpty && cleared.isEmpty) return;
+    final now = DateTime.now();
+    for (final schedule in await getSchedulesForEquipment(equipmentId)) {
+      final kindId = schedule.serviceKindId;
+      final updated = switch ((baselines[kindId], cleared[kindId])) {
+        (final DateTime date, _) => schedule.withBaseline(
+          date,
+          now: now,
+          picked: true,
+        ),
+        (null, final DateTime date) when schedule.anchorDate == date =>
+          schedule.withBaseline(null, now: now),
+        _ => null,
+      };
+      if (updated == null) continue;
+      await updateSchedule(updated, notify: notify);
+    }
+  }
+
+  /// Anchors every tank's VIP and hydro clock that has no baseline and no
+  /// service of its kind on the tank's inspection date: the v317 backfill
+  /// (issue #3662), for rows that reach the database without passing
+  /// through the equipment save, such as clocks restored from a backup
+  /// written before v317. Returns how many clocks it anchored.
+  Future<int> anchorFromInspectionDates() async {
+    final anchored = await _db.backfillTankInspectionBaselines();
+    if (anchored > 0) {
+      _db.notifyUpdates({
+        TableUpdate.onTable(_db.serviceSchedules, kind: UpdateKind.update),
+      });
+    }
+    return anchored;
+  }
+
+  /// The built-in service kinds [diverId] hid from the pickers (issue #401).
+  /// Read straight from diver_settings, as [getDueSoonWindowDays] does, so
+  /// equipment creation does not depend on the settings notifier.
+  Future<Set<String>> hiddenServiceKindIds(String? diverId) async {
+    if (diverId == null) return const {};
+    final row =
+        await (_db.select(_db.diverSettings)
+              ..where((t) => t.diverId.equals(diverId))
+              ..limit(1))
+            .getSingleOrNull();
+    return decodeHiddenBuiltIns(
+          row?.hiddenBuiltInIds,
+        )[BuiltInCatalog.serviceKinds.key] ??
+        const {};
+  }
+
+  /// The widest configured reminder-days value for [diverId] (default 30):
+  /// used as the dueSoon threshold so a clock turns amber as soon as its
+  /// earliest reminder would fire. Read straight from diver_settings rather
+  /// than the settings notifier to keep clock evaluation free of provider
+  /// initialization order.
+  Future<int> getDueSoonWindowDays({String? diverId}) async {
+    if (diverId == null) return 30;
+    final row =
+        await (_db.select(_db.diverSettings)
+              ..where((t) => t.diverId.equals(diverId))
+              ..limit(1))
+            .getSingleOrNull();
+    if (row == null) return 30;
+    try {
+      final days = (jsonDecode(row.serviceReminderDays) as List<dynamic>)
+          .cast<int>();
+      if (days.isEmpty) return 30;
+      return days.reduce((a, b) => a > b ? a : b);
+    } catch (_) {
+      return 30;
+    }
+  }
+
+  domain.ServiceSchedule _mapRow(ServiceScheduleRow row) {
+    return domain.ServiceSchedule(
+      id: row.id,
+      equipmentId: row.equipmentId,
+      serviceKindId: row.serviceKindId,
+      intervalDays: row.intervalDays,
+      intervalDives: row.intervalDives,
+      intervalHours: row.intervalHours,
+      exposureIntervals: decodeExposureIntervals(row.exposureIntervals),
+      defaultCost: row.defaultCost,
+      defaultCurrency: row.defaultCurrency,
+      anchorDate: row.anchorDate == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(row.anchorDate!),
+      anchorSetAt: row.anchorSetAt == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(row.anchorSetAt!),
+      enabled: row.enabled,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+    );
+  }
+}

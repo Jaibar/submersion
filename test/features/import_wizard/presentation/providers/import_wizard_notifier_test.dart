@@ -2,13 +2,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
+import 'package:submersion/core/domain/models/incoming_dive_data.dart';
 import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/import_wizard/domain/adapters/import_source_adapter.dart';
+import 'package:submersion/features/import_wizard/domain/models/diver_import_outcome.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_cancellation_token.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_phase.dart';
 import 'package:submersion/features/import_wizard/domain/models/tag_selection.dart';
 import 'package:submersion/features/import_wizard/domain/models/unified_import_result.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_job_provider.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
@@ -36,6 +40,10 @@ class _TestAdapter implements ImportSourceAdapter {
     DuplicateAction.importAsNew,
     DuplicateAction.consolidate,
   };
+
+  @override
+  Set<DuplicateAction> duplicateActionsFor(ImportEntityType type) =>
+      supportedDuplicateActions;
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
@@ -151,8 +159,10 @@ void main() {
       List<EntityItem>? diveItems,
       Set<int> diveDuplicateIndices = const {},
       Map<int, DiveMatchResult>? diveMatchResults,
+      Set<int>? diveAutoSkipIndices,
       List<EntityItem>? siteItems,
       Set<int> siteDuplicateIndices = const {},
+      String? currentComputerId,
     }) {
       final groups = <ImportEntityType, EntityGroup>{};
 
@@ -161,6 +171,7 @@ void main() {
           items: diveItems,
           duplicateIndices: diveDuplicateIndices,
           matchResults: diveMatchResults,
+          autoSkipIndices: diveAutoSkipIndices,
         );
       }
 
@@ -172,9 +183,10 @@ void main() {
       }
 
       return ImportBundle(
-        source: const ImportSourceInfo(
+        source: ImportSourceInfo(
           type: ImportSourceType.uddf,
           displayName: 'test.uddf',
+          currentComputerId: currentComputerId,
         ),
         groups: groups,
       );
@@ -182,9 +194,13 @@ void main() {
 
     EntityItem makeItem(String title) => EntityItem(title: title, subtitle: '');
 
-    DiveMatchResult makeMatchResult(double score) => DiveMatchResult(
+    DiveMatchResult makeMatchResult(
+      double score, {
+      String? matchedComputerId,
+    }) => DiveMatchResult(
       diveId: 'existing-dive',
       score: score,
+      matchedComputerId: matchedComputerId,
       timeDifferenceMs: 0,
     );
 
@@ -196,6 +212,12 @@ void main() {
       when(mockAdapter.acquisitionSteps).thenReturn([]);
       when(
         mockAdapter.supportedDuplicateActions,
+      ).thenReturn({DuplicateAction.skip, DuplicateAction.importAsNew});
+      // The notifier gates writes on the per-type set, so the mock has to
+      // answer duplicateActionsFor too -- unstubbed it returns an empty set
+      // and every setDuplicateAction/applyBulkAction call becomes a no-op.
+      when(
+        mockAdapter.duplicateActionsFor(any),
       ).thenReturn({DuplicateAction.skip, DuplicateAction.importAsNew});
       notifier = ImportWizardNotifier(
         mockAdapter,
@@ -318,6 +340,179 @@ void main() {
         expect(notifier.state.pendingFor(ImportEntityType.dives), equals({0}));
       });
 
+      // -----------------------------------------------------------------
+      // Cross-computer auto-consolidate default (Task 8)
+      // -----------------------------------------------------------------
+
+      test('score >= kAutoConsolidateScore with a DIFFERENT matchedComputerId '
+          'is auto-seeded with DuplicateAction.consolidate and drained from '
+          'pending', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {
+            0: makeMatchResult(0.9, matchedComputerId: 'computer-other'),
+          },
+          currentComputerId: 'computer-current',
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.consolidate,
+        );
+        expect(
+          notifier.state.pendingFor(ImportEntityType.dives),
+          isNot(contains(0)),
+        );
+        expect(notifier.state.selections[ImportEntityType.dives], contains(0));
+      });
+
+      test('score >= kAutoConsolidateScore with the SAME matchedComputerId as '
+          'the current computer seeds nothing -- stays pending', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {
+            0: makeMatchResult(0.9, matchedComputerId: 'computer-current'),
+          },
+          currentComputerId: 'computer-current',
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives],
+          anyOf(isNull, isEmpty),
+        );
+        expect(notifier.state.pendingFor(ImportEntityType.dives), equals({0}));
+      });
+
+      test('score below kAutoConsolidateScore with a different computer seeds '
+          'nothing -- stays pending per #200', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {
+            0: makeMatchResult(0.7, matchedComputerId: 'computer-other'),
+          },
+          currentComputerId: 'computer-current',
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives],
+          anyOf(isNull, isEmpty),
+        );
+        expect(notifier.state.pendingFor(ImportEntityType.dives), equals({0}));
+      });
+
+      // -----------------------------------------------------------------
+      // Exact-source-hit re-download must default to skip (Task 8, PR
+      // review finding 1)
+      // -----------------------------------------------------------------
+
+      test('matchedExistingSource=true with score 1.0 and a DIFFERENT '
+          'matchedComputerId is seeded with DuplicateAction.skip -- NOT '
+          'consolidate -- and drained from pending', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {
+            0: const DiveMatchResult(
+              diveId: 'existing-dive',
+              score: 1.0,
+              timeDifferenceMs: 0,
+              matchedComputerId: 'computer-other',
+              matchedExistingSource: true,
+            ),
+          },
+          currentComputerId: 'computer-current',
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.skip,
+        );
+        expect(
+          notifier.state.pendingFor(ImportEntityType.dives),
+          isNot(contains(0)),
+        );
+        expect(
+          notifier.state.selections[ImportEntityType.dives],
+          isNot(contains(0)),
+        );
+      });
+
+      // -----------------------------------------------------------------
+      // Tier-1 first-sync cutoff auto-skip (Task 6)
+      // -----------------------------------------------------------------
+
+      test('an index in autoSkipIndices is seeded with DuplicateAction.skip '
+          'and drained from pending', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1'), makeItem('Dive 2')],
+          diveAutoSkipIndices: {0},
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.skip,
+        );
+        expect(
+          notifier.state.pendingFor(ImportEntityType.dives),
+          isNot(contains(0)),
+        );
+        expect(
+          notifier.state.selections[ImportEntityType.dives],
+          isNot(contains(0)),
+        );
+        // The unaffected index is untouched: selected, no action, not pending.
+        expect(notifier.state.selections[ImportEntityType.dives], contains(1));
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[1],
+          isNull,
+        );
+      });
+
+      test('an index that is both matchedExistingSource AND in autoSkipIndices '
+          'ends up skipped once, not double-handled', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {
+            0: const DiveMatchResult(
+              diveId: 'existing-dive',
+              score: 1.0,
+              timeDifferenceMs: 0,
+              matchedExistingSource: true,
+            ),
+          },
+          diveAutoSkipIndices: {0},
+        );
+
+        notifier.setBundle(bundle);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.skip,
+        );
+        expect(
+          notifier.state.pendingFor(ImportEntityType.dives),
+          isNot(contains(0)),
+        );
+        expect(
+          notifier.state.selections[ImportEntityType.dives],
+          isNot(contains(0)),
+        );
+      });
+
       test('handles bundle with no duplicates — empty duplicateActions', () {
         final bundle = buildBundle(
           diveItems: [makeItem('Dive 1'), makeItem('Dive 2')],
@@ -387,6 +582,88 @@ void main() {
 
         expect(notifier.state.selections[ImportEntityType.sites], contains(0));
       });
+
+      // -----------------------------------------------------------------
+      // First-sync cutoff rescue: re-selecting an auto-skipped
+      // NON-duplicate dive must clear the seeded skip action, or
+      // DiveComputerAdapter.performImport silently drops it even though
+      // the review list shows it selected with a green IMPORT badge.
+      // -----------------------------------------------------------------
+
+      test('toggling on an auto-skipped non-duplicate index clears its '
+          'seeded skip action so it is not silently dropped from import', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1'), makeItem('Dive 2')],
+          diveAutoSkipIndices: {0},
+        );
+        notifier.setBundle(bundle);
+        // Sanity: setBundle seeded the first-sync-cutoff auto-skip default.
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.skip,
+        );
+        expect(
+          notifier.state.selections[ImportEntityType.dives],
+          isNot(contains(0)),
+        );
+
+        notifier.toggleSelection(ImportEntityType.dives, 0);
+
+        expect(notifier.state.selections[ImportEntityType.dives], contains(0));
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          isNull,
+          reason:
+              'A stale DuplicateAction.skip left in place after '
+              're-selecting would make performImport silently skip this '
+              'dive even though it shows an IMPORT badge.',
+        );
+      });
+
+      test('toggling an auto-skipped index off then back on ends up selected '
+          'with no skip action', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveAutoSkipIndices: {0},
+        );
+        notifier.setBundle(bundle);
+
+        notifier.toggleSelection(ImportEntityType.dives, 0); // rescue
+        notifier.toggleSelection(ImportEntityType.dives, 0); // re-skip
+        notifier.toggleSelection(ImportEntityType.dives, 0); // rescue again
+
+        expect(notifier.state.selections[ImportEntityType.dives], contains(0));
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          isNull,
+        );
+      });
+
+      test('toggling a genuine duplicate index does not touch its recorded '
+          'action', () {
+        final bundle = buildBundle(
+          diveItems: [makeItem('Dive 1')],
+          diveDuplicateIndices: {0},
+          diveMatchResults: {0: makeMatchResult(0.9)},
+        );
+        notifier.setBundle(bundle);
+        notifier.setDuplicateAction(
+          ImportEntityType.dives,
+          0,
+          DuplicateAction.importAsNew,
+        );
+
+        notifier.toggleSelection(ImportEntityType.dives, 0);
+
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+          DuplicateAction.importAsNew,
+          reason:
+              'toggleSelection must never clobber a user-chosen '
+              'duplicate action -- only the seeded auto-skip default on '
+              'NON-duplicate indices is cleared.',
+        );
+      });
     });
 
     // -------------------------------------------------------------------------
@@ -415,6 +692,40 @@ void main() {
         expect(selections, contains(0));
         expect(selections, isNot(contains(1))); // duplicate excluded
         expect(selections, contains(2));
+      });
+
+      test('selectAll clears seeded skip actions for auto-skipped indices', () {
+        final bundle = buildBundle(
+          diveItems: [
+            makeItem('Dive 1'),
+            makeItem('Dive 2'),
+            makeItem('Dive 3'),
+          ],
+          diveDuplicateIndices: {1},
+          diveMatchResults: {1: makeMatchResult(0.9)},
+          diveAutoSkipIndices: {2},
+        );
+        notifier.setBundle(bundle);
+        // Sanity: setBundle seeded the auto-skip default for index 2.
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[2],
+          DuplicateAction.skip,
+        );
+
+        notifier.selectAll(ImportEntityType.dives);
+
+        final selections = notifier.state.selections[ImportEntityType.dives]!;
+        expect(selections, contains(0));
+        expect(selections, isNot(contains(1))); // genuine duplicate
+        expect(selections, contains(2)); // rescued auto-skip row
+        expect(
+          notifier.state.duplicateActions[ImportEntityType.dives]?[2],
+          isNull,
+          reason:
+              'selectAll must clear the seeded skip action for the '
+              'rescued auto-skip row, or performImport would silently '
+              'drop it despite it showing as selected.',
+        );
       });
     });
 
@@ -511,6 +822,151 @@ void main() {
           isNull,
         );
       });
+
+      group('a copy of another dive in the same import (#3110)', () {
+        // Dive 1 is flagged as the same dive as dive 0, which stays selected.
+        ImportBundle pair() => buildBundle(
+          diveItems: [makeItem('Dive 0'), makeItem('Dive 1')],
+          diveDuplicateIndices: {1},
+          diveMatchResults: {
+            1: const DiveMatchResult(
+              diveId: '',
+              inBatchIndex: 0,
+              score: 1.0,
+              timeDifferenceMs: 0,
+            ),
+          },
+        );
+
+        Set<int> selected() =>
+            notifier.state.selections[ImportEntityType.dives] ?? const {};
+
+        test('defaults to keeping the other copy', () {
+          notifier.setBundle(pair());
+          expect(selected(), {0});
+        });
+
+        test('keeping this copy drops the other', () {
+          notifier.setBundle(pair());
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.importAsNew,
+          );
+          expect(selected(), {1});
+        });
+
+        test('skipping it again brings the other back', () {
+          notifier.setBundle(pair());
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.importAsNew,
+          );
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.skip,
+          );
+          expect(selected(), {0});
+        });
+
+        test('skipping one of three copies does not bring the kept one back '
+            'while another copy is kept', () {
+          // Dives 1 and 2 are both copies of dive 0.
+          const copyOf0 = DiveMatchResult(
+            diveId: '',
+            inBatchIndex: 0,
+            score: 1.0,
+            timeDifferenceMs: 0,
+          );
+          notifier.setBundle(
+            buildBundle(
+              diveItems: [
+                makeItem('Dive 0'),
+                makeItem('Dive 1'),
+                makeItem('Dive 2'),
+              ],
+              diveDuplicateIndices: {1, 2},
+              diveMatchResults: {1: copyOf0, 2: copyOf0},
+            ),
+          );
+          for (final i in [1, 2]) {
+            notifier.setDuplicateAction(
+              ImportEntityType.dives,
+              i,
+              DuplicateAction.importAsNew,
+            );
+          }
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.skip,
+          );
+          expect(selected(), {2});
+        });
+
+        test('a partner that is itself flagged keeps its own decision', () {
+          // Dive 0 matches a stored dive and the diver chose to import it;
+          // dive 1 is an in-batch copy of dive 0.
+          notifier.setBundle(
+            buildBundle(
+              diveItems: [makeItem('Dive 0'), makeItem('Dive 1')],
+              diveDuplicateIndices: {0, 1},
+              diveMatchResults: {
+                0: makeMatchResult(0.85),
+                1: const DiveMatchResult(
+                  diveId: '',
+                  inBatchIndex: 0,
+                  score: 1.0,
+                  timeDifferenceMs: 0,
+                ),
+              },
+            ),
+          );
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            0,
+            DuplicateAction.importAsNew,
+          );
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.importAsNew,
+          );
+          expect(selected(), {0, 1});
+        });
+
+        test('the other copy can still be ticked to keep both', () {
+          notifier.setBundle(pair());
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.importAsNew,
+          );
+          notifier.toggleSelection(ImportEntityType.dives, 0);
+          expect(selected(), {0, 1});
+        });
+
+        test('cannot be consolidated, having no stored dive to fold into', () {
+          when(mockAdapter.duplicateActionsFor(any)).thenReturn({
+            DuplicateAction.skip,
+            DuplicateAction.importAsNew,
+            DuplicateAction.consolidate,
+          });
+          notifier.setBundle(pair());
+          notifier.setDuplicateAction(
+            ImportEntityType.dives,
+            1,
+            DuplicateAction.consolidate,
+          );
+          expect(
+            notifier.state.duplicateActions[ImportEntityType.dives]?[1],
+            isNot(DuplicateAction.consolidate),
+          );
+          expect(selected(), {0});
+        });
+      });
     });
 
     // -------------------------------------------------------------------------
@@ -540,6 +996,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((_) async {
           // Capture during import — state should be importing
@@ -550,6 +1007,72 @@ void main() {
 
         expect(isImportingValues, contains(true));
         expect(notifier.state.isImporting, isFalse);
+      });
+
+      group('retain source dive numbers (issue #1832)', () {
+        const importResult = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 1},
+          consolidatedCount: 0,
+          skippedCount: 0,
+        );
+
+        void stubImport() {
+          when(
+            mockAdapter.performImport(
+              any,
+              any,
+              any,
+              retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+              onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
+            ),
+          ).thenAnswer((_) async => importResult);
+        }
+
+        bool? retainedFlag() =>
+            verify(
+                  mockAdapter.performImport(
+                    any,
+                    any,
+                    any,
+                    retainSourceDiveNumbers: captureAnyNamed(
+                      'retainSourceDiveNumbers',
+                    ),
+                    onProgress: anyNamed('onProgress'),
+                    cancelToken: anyNamed('cancelToken'),
+                  ),
+                ).captured.single
+                as bool?;
+
+        test('passes the option on when a dive carries a number', () async {
+          notifier.setBundle(
+            buildBundle(
+              diveItems: [
+                const EntityItem(
+                  title: 'Dive 1',
+                  subtitle: '',
+                  diveData: IncomingDiveData(diveNumber: 4),
+                ),
+              ],
+            ),
+          );
+          notifier.setRetainSourceDiveNumbers(true);
+          stubImport();
+
+          await notifier.performImport();
+
+          expect(retainedFlag(), isTrue);
+        });
+
+        test('drops the option when no dive carries a number', () async {
+          notifier.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+          notifier.setRetainSourceDiveNumbers(true);
+          stubImport();
+
+          await notifier.performImport();
+
+          expect(retainedFlag(), isFalse);
+        });
       });
 
       test(
@@ -582,6 +1105,7 @@ void main() {
               any,
               any,
               onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
             ),
           ).thenAnswer((_) async => importResult);
 
@@ -594,6 +1118,7 @@ void main() {
               captureAny,
               retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
               onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
             ),
           ).captured;
 
@@ -630,6 +1155,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((_) async => importResult);
 
@@ -651,6 +1177,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenThrow(Exception('DB error'));
 
@@ -679,6 +1206,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((_) async => importResult);
 
@@ -705,6 +1233,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((invocation) async {
           final onProgress =
@@ -729,6 +1258,228 @@ void main() {
         expect(notifier.state.importResult, isNotNull);
       });
 
+      test('stops an import that cannot go on without the wizard', () async {
+        // Its own notifier: this one is disposed inside the test.
+        final leaving = ImportWizardNotifier(
+          mockAdapter,
+          tagRepository: mockTagRepo,
+          diverId: 'diver-1',
+        );
+        leaving.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+        ImportCancellationToken? seen;
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((invocation) async {
+          seen =
+              invocation.namedArguments[#cancelToken]
+                  as ImportCancellationToken?;
+          leaving.dispose();
+          return const UnifiedImportResult(
+            importedCounts: {ImportEntityType.dives: 1},
+            consolidatedCount: 0,
+            skippedCount: 0,
+          );
+        });
+
+        await leaving.performImport();
+
+        expect(seen!.isCancelled, isTrue);
+      });
+
+      test('keeps importing when the wizard goes away mid-import', () async {
+        // Its own notifier: this one is disposed inside the test.
+        final leaving = ImportWizardNotifier(
+          mockAdapter,
+          tagRepository: mockTagRepo,
+          diverId: 'diver-1',
+          continuesWithoutWizard: true,
+        );
+        leaving.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+        final reported = <int>[];
+
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((invocation) async {
+          final onProgress =
+              invocation.namedArguments[#onProgress]
+                  as void Function(ImportPhase, int, int)?;
+          onProgress?.call(ImportPhase.dives, 1, 3);
+          reported.add(1);
+          leaving.dispose();
+          // Progress after the wizard is gone must not throw, or the rest
+          // of the import would be abandoned.
+          onProgress?.call(ImportPhase.dives, 2, 3);
+          reported.add(2);
+          onProgress?.call(ImportPhase.dives, 3, 3);
+          reported.add(3);
+          return const UnifiedImportResult(
+            importedCounts: {ImportEntityType.dives: 1},
+            consolidatedCount: 0,
+            skippedCount: 0,
+          );
+        });
+
+        await leaving.performImport();
+
+        expect(reported, [1, 2, 3]);
+      });
+
+      group('with an import job', () {
+        late ProviderContainer jobs;
+        late ImportJobNotifier job;
+        const done = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 1},
+          consolidatedCount: 0,
+          skippedCount: 0,
+        );
+
+        setUp(() {
+          jobs = ProviderContainer();
+          job = jobs.read(importJobProvider.notifier);
+        });
+
+        tearDown(() => jobs.dispose());
+
+        ImportWizardNotifier withJob({bool continuesWithoutWizard = true}) =>
+            ImportWizardNotifier(
+              mockAdapter,
+              tagRepository: mockTagRepo,
+              diverId: 'diver-1',
+              job: job,
+              continuesWithoutWizard: continuesWithoutWizard,
+            )..setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+
+        void stubImport(
+          Future<UnifiedImportResult> Function(ImportCancellationToken token)
+          body,
+        ) {
+          when(
+            mockAdapter.performImport(
+              any,
+              any,
+              any,
+              retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+              onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
+            ),
+          ).thenAnswer(
+            (invocation) => body(
+              invocation.namedArguments[#cancelToken]
+                  as ImportCancellationToken,
+            ),
+          );
+        }
+
+        test(
+          'runs on the job, so either side cancels the same import',
+          () async {
+            final wizard = withJob();
+            addTearDown(wizard.dispose);
+            stubImport((token) async {
+              expect(jobs.read(importJobProvider).isRunning, isTrue);
+              wizard.cancelImport();
+              expect(token.isCancelled, isTrue);
+              expect(
+                jobs.read(importJobProvider).isCancellationRequested,
+                isTrue,
+              );
+              return done;
+            });
+
+            await wizard.performImport();
+
+            expect(jobs.read(importJobProvider).isRunning, isFalse);
+          },
+        );
+
+        test('closing the wizard detaches the import from it', () async {
+          final wizard = withJob();
+          stubImport((token) async {
+            wizard.dispose();
+            await Future<void>.delayed(Duration.zero);
+            expect(jobs.read(importJobProvider).isAttached, isFalse);
+            expect(token.isCancelled, isFalse);
+            return done;
+          });
+
+          await wizard.performImport();
+
+          expect(
+            jobs.read(importJobProvider).backgroundOutcome?.kind,
+            ImportJobOutcomeKind.finished,
+          );
+        });
+
+        test('refuses to start while another import runs', () async {
+          final other = job.start(continuesWithoutWizard: true)!;
+          final wizard = withJob();
+          addTearDown(wizard.dispose);
+
+          await wizard.performImport();
+
+          verifyNever(
+            mockAdapter.performImport(
+              any,
+              any,
+              any,
+              retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+              onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
+            ),
+          );
+          expect(wizard.state.importResult?.errorMessage, isNotNull);
+          expect(wizard.state.importRefused, isTrue);
+          expect(other.isCancelled, isFalse);
+        });
+      });
+
+      test('ends on the finishing phase, not on the last photo', () async {
+        notifier.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((invocation) async {
+          final onProgress =
+              invocation.namedArguments[#onProgress]
+                  as void Function(ImportPhase, int, int)?;
+          onProgress?.call(ImportPhase.photos, 4, 4);
+          return const UnifiedImportResult(
+            importedCounts: {ImportEntityType.dives: 1},
+            consolidatedCount: 0,
+            skippedCount: 0,
+          );
+        });
+        final phases = <(ImportPhase?, int)>[];
+        notifier.addListener(
+          (state) => phases.add((state.importPhase, state.importTotal)),
+        );
+
+        await notifier.performImport();
+
+        final afterPhotos = phases.skipWhile((p) => p.$1 != ImportPhase.photos);
+        expect(afterPhotos.skip(1).first, (ImportPhase.finishing, 0));
+      });
+
       test('does nothing when no bundle is set', () async {
         // No setBundle called
         await notifier.performImport();
@@ -740,6 +1491,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         );
         expect(notifier.state.isImporting, isFalse);
@@ -769,6 +1521,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenThrow(Exception('Database connection lost'));
 
@@ -800,6 +1553,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenThrow(Exception('IO failure'));
 
@@ -811,6 +1565,55 @@ void main() {
         expect(notifier.state.importResult!.errorMessage, isNotNull);
         expect(notifier.state.isImporting, isFalse);
       });
+
+      test(
+        'still tags the dives when the wizard goes away mid-import',
+        () async {
+          // Its own notifier: this one is disposed inside the test.
+          final leaving = ImportWizardNotifier(
+            mockAdapter,
+            tagRepository: mockTagRepo,
+            diverId: 'diver-1',
+            continuesWithoutWizard: true,
+          );
+          leaving.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+          leaving.addImportTag(const TagSelection(name: 'Vacation'));
+
+          when(
+            mockAdapter.performImport(
+              any,
+              any,
+              any,
+              retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+              onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
+            ),
+          ).thenAnswer((_) async {
+            leaving.dispose();
+            return const UnifiedImportResult(
+              importedCounts: {ImportEntityType.dives: 1},
+              consolidatedCount: 0,
+              skippedCount: 0,
+              importedDiveIds: ['dive-1'],
+            );
+          });
+          when(
+            mockTagRepo.getOrCreateTag('Vacation', diverId: 'diver-1'),
+          ).thenAnswer(
+            (_) async => Tag(
+              id: 'tag-new',
+              name: 'Vacation',
+              createdAt: DateTime(2026),
+              updatedAt: DateTime(2026),
+            ),
+          );
+          when(mockTagRepo.addTagToDive(any, any)).thenAnswer((_) async {});
+
+          await leaving.performImport();
+
+          verify(mockTagRepo.addTagToDive('dive-1', 'tag-new')).called(1);
+        },
+      );
 
       test('applies import tags to all imported dives after import', () async {
         final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
@@ -833,6 +1636,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((_) async => importResult);
 
@@ -854,6 +1658,72 @@ void main() {
           mockTagRepo.getOrCreateTag('Vacation', diverId: 'diver-1'),
         ).called(1);
         verify(mockTagRepo.addTagToDive('dive-1', 'tag-new')).called(1);
+      });
+
+      test('resolves each tag per profile in a multi-profile import', () async {
+        notifier.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+        notifier.addImportTag(
+          const TagSelection(existingTagId: 'tag-existing', name: 'Existing'),
+        );
+        notifier.addImportTag(const TagSelection(name: 'Vacation'));
+
+        const importResult = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 2},
+          consolidatedCount: 0,
+          skippedCount: 0,
+          importedDiveIds: ['d1'],
+          diverOutcomes: [
+            DiverImportOutcome(
+              diverId: 'diver-1',
+              name: 'Me',
+              isNew: false,
+              isActive: true,
+              diveIds: ['d1'],
+            ),
+            DiverImportOutcome(
+              diverId: 'diver-2',
+              name: 'Bo Ray',
+              isNew: true,
+              isActive: false,
+              diveIds: ['d2'],
+            ),
+          ],
+        );
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((_) async => importResult);
+
+        Tag tag(String id, String name) => Tag(
+          id: id,
+          name: name,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        );
+        when(
+          mockTagRepo.getOrCreateTag('Vacation', diverId: 'diver-1'),
+        ).thenAnswer((_) async => tag('v1', 'Vacation'));
+        when(
+          mockTagRepo.getOrCreateTag('Existing', diverId: 'diver-2'),
+        ).thenAnswer((_) async => tag('e2', 'Existing'));
+        when(
+          mockTagRepo.getOrCreateTag('Vacation', diverId: 'diver-2'),
+        ).thenAnswer((_) async => tag('v2', 'Vacation'));
+        when(mockTagRepo.addTagToDive(any, any)).thenAnswer((_) async {});
+
+        await notifier.performImport();
+
+        verify(mockTagRepo.addTagToDive('d1', 'tag-existing')).called(1);
+        verify(mockTagRepo.addTagToDive('d1', 'v1')).called(1);
+        verify(mockTagRepo.addTagToDive('d2', 'e2')).called(1);
+        verify(mockTagRepo.addTagToDive('d2', 'v2')).called(1);
+        verifyNever(mockTagRepo.addTagToDive('d2', 'tag-existing'));
       });
 
       test(
@@ -882,6 +1752,7 @@ void main() {
               any,
               retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
               onProgress: anyNamed('onProgress'),
+              cancelToken: anyNamed('cancelToken'),
             ),
           ).thenAnswer((_) async => importResult);
 
@@ -912,6 +1783,7 @@ void main() {
             any,
             retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
             onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
           ),
         ).thenAnswer((_) async => importResult);
 
@@ -919,6 +1791,119 @@ void main() {
 
         verifyNever(mockTagRepo.getOrCreateTag(any));
         verifyNever(mockTagRepo.addTagToDive(any, any));
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // cancelImport
+    // -------------------------------------------------------------------------
+
+    group('cancelImport', () {
+      test('does nothing when no import is in progress', () {
+        // No-op when no token has been created (never started).
+        notifier.cancelImport();
+        expect(notifier.state.isCancellationRequested, isFalse);
+      });
+
+      test('sets isCancellationRequested while import is running', () async {
+        final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
+        notifier.setBundle(bundle);
+
+        const importResult = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 1},
+          consolidatedCount: 0,
+          skippedCount: 0,
+        );
+
+        // Stub performImport to call cancel mid-flight and observe state.
+        var observedCancellationFlag = false;
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((_) async {
+          notifier.cancelImport();
+          observedCancellationFlag = notifier.state.isCancellationRequested;
+          return importResult;
+        });
+
+        await notifier.performImport();
+
+        expect(observedCancellationFlag, isTrue);
+      });
+
+      test('passes a live cancelToken to the adapter', () async {
+        final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
+        notifier.setBundle(bundle);
+
+        const importResult = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 0},
+          consolidatedCount: 0,
+          skippedCount: 0,
+        );
+
+        ImportCancellationToken? capturedToken;
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((invocation) async {
+          capturedToken =
+              invocation.namedArguments[#cancelToken]
+                  as ImportCancellationToken?;
+          notifier.cancelImport();
+          return importResult;
+        });
+
+        await notifier.performImport();
+
+        expect(capturedToken, isNotNull);
+        expect(capturedToken!.isCancelled, isTrue);
+      });
+
+      test('clears isCancellationRequested after import completes', () async {
+        final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
+        notifier.setBundle(bundle);
+
+        const importResult = UnifiedImportResult(
+          importedCounts: {ImportEntityType.dives: 1},
+          consolidatedCount: 0,
+          skippedCount: 0,
+        );
+
+        when(
+          mockAdapter.performImport(
+            any,
+            any,
+            any,
+            retainSourceDiveNumbers: anyNamed('retainSourceDiveNumbers'),
+            onProgress: anyNamed('onProgress'),
+            cancelToken: anyNamed('cancelToken'),
+          ),
+        ).thenAnswer((_) async {
+          notifier.cancelImport();
+          return importResult;
+        });
+
+        await notifier.performImport();
+
+        // The finally block clears both the live token and the
+        // isCancellationRequested flag so a subsequent import starts fresh.
+        expect(notifier.state.isCancellationRequested, isFalse);
+
+        // A second cancelImport() is a no-op — no live token, no stale flag.
+        notifier.cancelImport();
+        expect(notifier.state.isCancellationRequested, isFalse);
       });
     });
 
@@ -957,7 +1942,7 @@ void main() {
         final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
         notifier.setBundle(bundle);
 
-        notifier.initializeDefaultTag();
+        notifier.initializeDefaultTag(autoTagImports: true);
 
         expect(notifier.state.importTags.length, equals(1));
         expect(
@@ -974,9 +1959,260 @@ void main() {
         final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
         notifier.setBundle(bundle);
 
-        notifier.initializeDefaultTag();
-        notifier.initializeDefaultTag();
+        notifier.initializeDefaultTag(autoTagImports: true);
+        notifier.initializeDefaultTag(autoTagImports: true);
 
+        expect(notifier.state.importTags.length, equals(1));
+      });
+
+      // Issue #998: repeated imports otherwise pile up one dated tag per
+      // session. Applies uniformly regardless of source -- mockAdapter
+      // defaults to ImportSourceType.uddf in setUp, so this also covers
+      // file-based sources, not just dive computer downloads.
+      test('skips the default tag entirely when the setting is off', () {
+        when(
+          mockAdapter.defaultTagName,
+        ).thenReturn('test.uddf Import 2026-03-26');
+        final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
+        notifier.setBundle(bundle);
+
+        notifier.initializeDefaultTag(autoTagImports: false);
+
+        expect(notifier.state.importTags, isEmpty);
+      });
+    });
+
+    group('defaultTagName / isAutoTagForThisImportEnabled / '
+        'setAutoTagForThisImport', () {
+      setUp(() {
+        when(
+          mockAdapter.defaultTagName,
+        ).thenReturn('test.uddf Import 2026-03-26');
+        final bundle = buildBundle(diveItems: [makeItem('Dive 1')]);
+        notifier.setBundle(bundle);
+      });
+
+      test('defaultTagName exposes the adapter default tag name', () {
+        expect(notifier.defaultTagName, equals('test.uddf Import 2026-03-26'));
+      });
+
+      test('isAutoTagForThisImportEnabled is false before the default tag '
+          'is added', () {
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('isAutoTagForThisImportEnabled is true once the default tag is '
+          'present', () {
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
+      });
+
+      test('setAutoTagForThisImport(true) adds the default tag', () {
+        notifier.setAutoTagForThisImport(true);
+
+        expect(notifier.state.importTags.length, equals(1));
+        expect(
+          notifier.state.importTags.first.name,
+          equals('test.uddf Import 2026-03-26'),
+        );
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
+      });
+
+      test('setAutoTagForThisImport(true) is a no-op when already present', () {
+        notifier.initializeDefaultTag(autoTagImports: true);
+        notifier.setAutoTagForThisImport(true);
+
+        expect(notifier.state.importTags.length, equals(1));
+      });
+
+      test('setAutoTagForThisImport(false) removes the default tag, '
+          'leaving other tags untouched', () {
+        notifier.initializeDefaultTag(autoTagImports: true);
+        const manual = TagSelection(name: 'Vacation');
+        notifier.addImportTag(manual);
+
+        notifier.setAutoTagForThisImport(false);
+
+        expect(notifier.state.importTags, equals([manual]));
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('setAutoTagForThisImport(false) is a no-op when already absent', () {
+        notifier.setAutoTagForThisImport(false);
+
+        expect(notifier.state.importTags, isEmpty);
+      });
+
+      test('defaultTagName stays stable even if the adapter would return a '
+          'different name on a later call', () {
+        // Real adapters build this string from DateTime.now(), so a
+        // notifier that re-derived it on every read would drift to a
+        // different name if the review step stayed open across midnight
+        // (issue #998 follow-up). The mock stands in for that drift by
+        // switching its answer after the first call.
+        var callCount = 0;
+        when(mockAdapter.defaultTagName).thenAnswer((_) {
+          callCount++;
+          return callCount == 1
+              ? 'test.uddf Import 2026-03-26'
+              : 'test.uddf Import 2026-03-27';
+        });
+
+        final first = notifier.defaultTagName;
+        notifier.initializeDefaultTag(autoTagImports: true);
+        final second = notifier.defaultTagName;
+
+        expect(first, equals('test.uddf Import 2026-03-26'));
+        expect(second, equals(first));
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
+      });
+
+      // A tag the diver typed or picked by hand is theirs, even when it
+      // happens to share the default name: the switch tracks auto-tagging
+      // itself, not whichever chip matches by name.
+      test('a hand-added tag sharing the default name does not read as '
+          'auto-tagged', () {
+        notifier.initializeDefaultTag(autoTagImports: false);
+        notifier.addImportTag(
+          const TagSelection(name: 'test.uddf Import 2026-03-26'),
+        );
+
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('turning the switch on over a hand-added same-name tag adds no '
+          'duplicate, and turning it off leaves that tag in place', () {
+        const manual = TagSelection(name: 'test.uddf Import 2026-03-26');
+        notifier.initializeDefaultTag(autoTagImports: false);
+        notifier.addImportTag(manual);
+
+        notifier.setAutoTagForThisImport(true);
+        expect(notifier.state.importTags, equals([manual]));
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
+
+        notifier.setAutoTagForThisImport(false);
+        expect(notifier.state.importTags, equals([manual]));
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('deleting the default chip from the tag field turns the switch '
+          'off', () {
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        notifier.removeImportTag(0);
+
+        expect(notifier.state.importTags, isEmpty);
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+    });
+
+    // Back from review, then Next again, builds a new bundle and seeds its
+    // tag a second time on the same notifier.
+    group('initializeDefaultTag on a later bundle', () {
+      void installNextBundle() {
+        notifier.setBundle(buildBundle(diveItems: [makeItem('Dive 1')]));
+      }
+
+      test('swaps the previous bundle\'s default tag for its own, keeping '
+          'the diver\'s other tags', () {
+        when(mockAdapter.defaultTagName).thenReturn('a.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+        const manual = TagSelection(name: 'Vacation');
+        notifier.addImportTag(manual);
+
+        // The diver went back and picked a different file.
+        when(mockAdapter.defaultTagName).thenReturn('b.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        expect(
+          notifier.state.importTags.map((t) => t.name),
+          equals(['Vacation', 'b.uddf Import 2026-03-26']),
+        );
+        expect(notifier.defaultTagName, equals('b.uddf Import 2026-03-26'));
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
+      });
+
+      test('keeps the switch off when the diver turned it off for this '
+          'import', () {
+        when(
+          mockAdapter.defaultTagName,
+        ).thenReturn('test.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+        notifier.setAutoTagForThisImport(false);
+
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        expect(notifier.state.importTags, isEmpty);
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('keeps the switch off when the bundle\'s tag name also changed', () {
+        when(mockAdapter.defaultTagName).thenReturn('a.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+        notifier.removeImportTag(0);
+
+        when(mockAdapter.defaultTagName).thenReturn('b.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        expect(notifier.state.importTags, isEmpty);
+        expect(notifier.isAutoTagForThisImportEnabled, isFalse);
+      });
+
+      test('keeps the switch on when the diver turned it on for this import '
+          'despite a saved "off"', () {
+        when(mockAdapter.defaultTagName).thenReturn('a.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: false);
+        notifier.setAutoTagForThisImport(true);
+
+        when(mockAdapter.defaultTagName).thenReturn('b.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: false);
+
+        expect(
+          notifier.state.importTags.map((t) => t.name),
+          equals(['b.uddf Import 2026-03-26']),
+        );
+      });
+
+      test('leaves a hand-added tag with the old default name in place', () {
+        const manual = TagSelection(name: 'a.uddf Import 2026-03-26');
+        when(mockAdapter.defaultTagName).thenReturn('a.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: false);
+        notifier.addImportTag(manual);
+        notifier.setAutoTagForThisImport(true);
+
+        when(mockAdapter.defaultTagName).thenReturn('b.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: false);
+
+        expect(
+          notifier.state.importTags.map((t) => t.name),
+          equals(['a.uddf Import 2026-03-26', 'b.uddf Import 2026-03-26']),
+        );
+      });
+
+      test('reset starts the next session from the saved preference '
+          'again', () {
+        when(
+          mockAdapter.defaultTagName,
+        ).thenReturn('test.uddf Import 2026-03-26');
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: false);
+
+        notifier.reset();
+        installNextBundle();
+        notifier.initializeDefaultTag(autoTagImports: true);
+
+        expect(notifier.isAutoTagForThisImportEnabled, isTrue);
         expect(notifier.state.importTags.length, equals(1));
       });
     });
@@ -1028,6 +2264,48 @@ void main() {
         notifier.removeImportTag(5);
 
         expect(notifier.state.importTags.length, equals(1));
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // setDiveSortField
+    // -------------------------------------------------------------------------
+
+    group('setDiveSortField', () {
+      test('defaults to date, descending (newest first)', () {
+        expect(notifier.state.diveSortField, DiveReviewSortField.date);
+        expect(notifier.state.diveSortAscending, isFalse);
+      });
+
+      test('switching to a different field resets direction to descending', () {
+        notifier.setDiveSortField(DiveReviewSortField.depth);
+
+        expect(notifier.state.diveSortField, DiveReviewSortField.depth);
+        expect(notifier.state.diveSortAscending, isFalse);
+      });
+
+      test('re-picking the active field flips the direction', () {
+        notifier.setDiveSortField(DiveReviewSortField.duration);
+        expect(notifier.state.diveSortAscending, isFalse);
+
+        notifier.setDiveSortField(DiveReviewSortField.duration);
+        expect(notifier.state.diveSortField, DiveReviewSortField.duration);
+        expect(notifier.state.diveSortAscending, isTrue);
+
+        notifier.setDiveSortField(DiveReviewSortField.duration);
+        expect(notifier.state.diveSortAscending, isFalse);
+      });
+
+      test('picking a new field after a flip resets to descending', () {
+        // Default field is already `date`, so this first call itself is a
+        // "re-pick" that flips the direction.
+        notifier.setDiveSortField(DiveReviewSortField.date);
+        expect(notifier.state.diveSortAscending, isTrue);
+
+        notifier.setDiveSortField(DiveReviewSortField.depth);
+
+        expect(notifier.state.diveSortField, DiveReviewSortField.depth);
+        expect(notifier.state.diveSortAscending, isFalse);
       });
     });
 
@@ -1284,11 +2562,9 @@ void main() {
         notifier.toggleSelection(ImportEntityType.dives, 0);
 
         final state = container.read(importWizardNotifierProvider);
-        expect(
-          state.pendingFor(ImportEntityType.dives),
-          {1},
-          reason: 'Pending for duplicate should be unchanged',
-        );
+        expect(state.pendingFor(ImportEntityType.dives), {
+          1,
+        }, reason: 'Pending for duplicate should be unchanged');
         expect(state.selections[ImportEntityType.dives], isNot(contains(0)));
       },
     );
@@ -1445,11 +2721,9 @@ void main() {
         );
 
         final state = container.read(importWizardNotifierProvider);
-        expect(
-          state.pendingFor(ImportEntityType.dives),
-          {1},
-          reason: 'Weak match (score 0.55) should remain pending',
-        );
+        expect(state.pendingFor(ImportEntityType.dives), {
+          1,
+        }, reason: 'Weak match (score 0.55) should remain pending');
         expect(
           state.duplicateActions[ImportEntityType.dives]?[0],
           DuplicateAction.consolidate,
@@ -1461,6 +2735,77 @@ void main() {
         );
       },
     );
+
+    test('consolidate gate never touches a matchedExistingSource match: '
+        "setBundle's skip default survives a subsequent bulk consolidate, "
+        'while a qualifying pending match is still consolidated', () async {
+      const bundle = ImportBundle(
+        source: ImportSourceInfo(
+          type: ImportSourceType.uddf,
+          displayName: 'existing-source.uddf',
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [
+              EntityItem(title: 'Dive 1', subtitle: ''),
+              EntityItem(title: 'Dive 2', subtitle: ''),
+            ],
+            duplicateIndices: {0, 1},
+            matchResults: {
+              // Exact re-download: auto-seeded to skip by setBundle and
+              // drained from pending, so it can never reach the bulk
+              // consolidate gate through the normal review flow.
+              0: DiveMatchResult(
+                diveId: 'e1',
+                score: 1.0,
+                timeDifferenceMs: 0,
+                matchedExistingSource: true,
+              ),
+              // Ordinary probable match: stays pending, eligible for the
+              // bulk consolidate gate (score >= 0.7).
+              1: DiveMatchResult(diveId: 'e2', score: 0.9, timeDifferenceMs: 0),
+            },
+          ),
+        },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          importWizardNotifierProvider.overrideWith(
+            (ref) => ImportWizardNotifier(_TestAdapter()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(importWizardNotifierProvider.notifier);
+      notifier.setBundle(bundle);
+
+      // Sanity check: index 0 was already resolved to skip by setBundle
+      // and is not part of what the bulk action below can touch.
+      expect(
+        notifier.state.duplicateActions[ImportEntityType.dives]?[0],
+        DuplicateAction.skip,
+      );
+      expect(notifier.state.pendingFor(ImportEntityType.dives), {1});
+
+      notifier.applyBulkAction(
+        ImportEntityType.dives,
+        DuplicateAction.consolidate,
+      );
+
+      final state = container.read(importWizardNotifierProvider);
+      expect(
+        state.duplicateActions[ImportEntityType.dives]?[0],
+        DuplicateAction.skip,
+        reason:
+            'matchedExistingSource match must never become '
+            'consolidate, even via bulk action',
+      );
+      expect(
+        state.duplicateActions[ImportEntityType.dives]?[1],
+        DuplicateAction.consolidate,
+      );
+      expect(state.pendingFor(ImportEntityType.dives), isEmpty);
+    });
 
     test('no-op when pending for type is empty', () async {
       final bundle = bundleWithTwoPendingDives();
@@ -1606,6 +2951,96 @@ void main() {
       expect(after, isNotNull);
       expect(after!.type, ImportEntityType.sites);
       expect(after.index, 0);
+    });
+  });
+
+  group('setSelections', () {
+    test('updates selectedIndices correctly for a range', () {
+      final container = ProviderContainer(
+        overrides: [
+          importWizardNotifierProvider.overrideWith(
+            (ref) => ImportWizardNotifier(_TestAdapter()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(importWizardNotifierProvider.notifier);
+
+      const bundle = ImportBundle(
+        source: ImportSourceInfo(
+          type: ImportSourceType.uddf,
+          displayName: 'test_source',
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [
+              EntityItem(title: 'Dive 1', subtitle: ''),
+              EntityItem(title: 'Dive 2', subtitle: ''),
+              EntityItem(title: 'Dive 3', subtitle: ''),
+              EntityItem(title: 'Dive 4', subtitle: ''),
+            ],
+          ),
+        },
+      );
+
+      notifier.setBundle(bundle);
+      // setBundle defaults non-duplicates to selected, so deselect them first
+      notifier.setSelections(ImportEntityType.dives, {0, 1, 2, 3}, false);
+
+      // Verify nothing is selected yet
+      var state = container.read(importWizardNotifierProvider);
+      expect(state.selections[ImportEntityType.dives], isEmpty);
+
+      // Select indices {1, 2, 3}
+      notifier.setSelections(ImportEntityType.dives, {1, 2, 3}, true);
+      state = container.read(importWizardNotifierProvider);
+      expect(state.selections[ImportEntityType.dives], {1, 2, 3});
+
+      // Deselect index 2
+      notifier.setSelections(ImportEntityType.dives, {2}, false);
+      state = container.read(importWizardNotifierProvider);
+      expect(state.selections[ImportEntityType.dives], {1, 3});
+    });
+
+    test('ignores indices that are duplicates (which cannot be selected)', () {
+      final container = ProviderContainer(
+        overrides: [
+          importWizardNotifierProvider.overrideWith(
+            (ref) => ImportWizardNotifier(_TestAdapter()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(importWizardNotifierProvider.notifier);
+
+      const bundle = ImportBundle(
+        source: ImportSourceInfo(
+          type: ImportSourceType.uddf,
+          displayName: 'test_source',
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [
+              EntityItem(title: 'Dive 1', subtitle: ''),
+              EntityItem(title: 'Dive 2', subtitle: ''),
+              EntityItem(title: 'Dive 3', subtitle: ''),
+            ],
+            duplicateIndices: {1}, // Index 1 is a duplicate
+          ),
+        },
+      );
+
+      notifier.setBundle(bundle);
+
+      // Attempt to select {0, 1, 2}
+      notifier.setSelections(ImportEntityType.dives, {0, 1, 2}, true);
+
+      final state = container.read(importWizardNotifierProvider);
+
+      // Index 1 should NOT be selected because it's in duplicateIndices
+      expect(state.selections[ImportEntityType.dives], {0, 2});
     });
   });
 }

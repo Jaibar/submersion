@@ -1,0 +1,260 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/setup_wizard/domain/setup_wizard_models.dart';
+import 'package:submersion/features/setup_wizard/presentation/providers/setup_wizard_providers.dart';
+import 'package:submersion/features/setup_wizard/presentation/widgets/steps/finish_step.dart';
+
+import '../../../../../helpers/test_app.dart';
+import '../../../../../helpers/test_database.dart';
+
+void main() {
+  late SharedPreferences prefs;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    await setUpTestDatabase();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  testWidgets('start logging applies draft and navigates to dashboard', (
+    tester,
+  ) async {
+    var dashboardShown = false;
+    var seeded = false;
+    final router = GoRouter(
+      initialLocation: '/wizard',
+      routes: [
+        GoRoute(
+          path: '/wizard',
+          builder: (context, state) => Consumer(
+            builder: (context, ref, _) {
+              // Watch keeps the autoDispose family instance alive for the
+              // whole test (in production the wizard shell watches it).
+              ref.watch(setupWizardProvider(SetupWizardMode.firstRun));
+              // Seed a completed fresh-path draft after this build frame
+              // (mutating providers during build is forbidden). Once only:
+              // the mutation rebuilds this watcher, which must not reseed.
+              if (!seeded) {
+                seeded = true;
+                Future.microtask(() {
+                  final notifier = ref.read(
+                    setupWizardProvider(SetupWizardMode.firstRun).notifier,
+                  );
+                  notifier.choosePath(SetupPath.fresh);
+                  notifier.setName('Eric');
+                });
+              }
+              return const Scaffold(
+                body: FinishStep(mode: SetupWizardMode.firstRun),
+              );
+            },
+          ),
+        ),
+        GoRoute(
+          path: '/dashboard',
+          builder: (context, state) {
+            dashboardShown = true;
+            return const Scaffold(body: Text('dashboard'));
+          },
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text("You're all set"), findsOneWidget);
+    expect(find.text('Download dives from your dive computer'), findsOneWidget);
+
+    await tester.tap(find.text('Get started'));
+    await tester.runAsync(() async {
+      // Apply performs real DB writes; let them settle outside fake time.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await tester.pumpAndSettle();
+
+    expect(dashboardShown, isTrue);
+    final divers = await tester.runAsync(
+      () => DiverRepository().getAllDivers(),
+    );
+    expect(divers, hasLength(1));
+    expect(divers!.single.name, 'Eric');
+  });
+
+  // Issue #3111: the first diver's place names follow the device language,
+  // as the app language itself does, instead of always starting in English.
+  testWidgets('a first run stores place names in the device language', (
+    tester,
+  ) async {
+    tester.binding.platformDispatcher.localesTestValue = const [
+      Locale('de', 'DE'),
+    ];
+    addTearDown(tester.binding.platformDispatcher.clearLocalesTestValue);
+
+    var seeded = false;
+    await tester.pumpWidget(
+      testApp(
+        locale: const Locale('en'),
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+        child: Consumer(
+          builder: (context, ref, _) {
+            ref.watch(setupWizardProvider(SetupWizardMode.firstRun));
+            if (!seeded) {
+              seeded = true;
+              Future.microtask(() {
+                final notifier = ref.read(
+                  setupWizardProvider(SetupWizardMode.firstRun).notifier,
+                );
+                notifier.choosePath(SetupPath.fresh);
+                notifier.setName('Eric');
+              });
+            }
+            return const FinishStep(mode: SetupWizardMode.firstRun);
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Get started'));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await tester.pumpAndSettle();
+
+    final stored = await tester.runAsync(() async {
+      final diver = (await DiverRepository().getAllDivers()).single;
+      return DiverSettingsRepository().getSettingsForDiver(diver.id);
+    });
+    expect(stored!.placeNameLanguage, 'de');
+  });
+
+  testWidgets('the Insights tile uses the section glyph', (tester) async {
+    final router = GoRouter(
+      initialLocation: '/wizard',
+      routes: [
+        GoRoute(
+          path: '/wizard',
+          builder: (context, state) => Consumer(
+            builder: (context, ref, _) {
+              ref.watch(setupWizardProvider(SetupWizardMode.firstRun));
+              return const Scaffold(
+                body: FinishStep(mode: SetupWizardMode.firstRun),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Explore insights about your diving'), findsOneWidget);
+    expect(find.byIcon(Icons.insights), findsOneWidget);
+    expect(find.byIcon(Icons.query_stats), findsNothing);
+  });
+
+  testWidgets('a browser is not offered the dive computer download', (
+    tester,
+  ) async {
+    final router = GoRouter(
+      initialLocation: '/wizard',
+      routes: [
+        GoRoute(
+          path: '/wizard',
+          builder: (context, state) => Consumer(
+            builder: (context, ref, _) {
+              ref.watch(setupWizardProvider(SetupWizardMode.firstRun));
+              return const Scaffold(
+                body: FinishStep(mode: SetupWizardMode.firstRun),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          deviceCapabilitiesProvider.overrideWithValue(DeviceCapabilities.web),
+        ],
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Download dives from your dive computer'), findsNothing);
+    expect(find.text('Import logs from files and other apps'), findsOneWidget);
+  });
+
+  testWidgets('with no diver and no name, Finish asks for the profile '
+      'instead of failing', (tester) async {
+    var seeded = false;
+    var asked = 0;
+    await tester.pumpWidget(
+      testApp(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+        child: Consumer(
+          builder: (context, ref, _) {
+            ref.watch(setupWizardProvider(SetupWizardMode.firstRun));
+            if (!seeded) {
+              seeded = true;
+              // The existing-data path never asks for a name.
+              Future.microtask(
+                () => ref
+                    .read(
+                      setupWizardProvider(SetupWizardMode.firstRun).notifier,
+                    )
+                    .choosePath(SetupPath.existingData),
+              );
+            }
+            return FinishStep(
+              mode: SetupWizardMode.firstRun,
+              onNeedsName: () => asked++,
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Get started'));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await tester.pumpAndSettle();
+
+    expect(asked, 1);
+    expect(find.textContaining('Could not complete setup'), findsNothing);
+    final button = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Get started'),
+    );
+    expect(button.onPressed, isNotNull);
+  });
+}

@@ -1,0 +1,154 @@
+import 'package:submersion/core/services/export/csv/codec/csv_unit.dart';
+
+/// One unit-bearing column of a Submersion CSV export, declared once so the
+/// exporter and the importer agree on its name and quantity.
+class CsvColumn {
+  const CsvColumn(
+    this.base,
+    this.quantity, {
+    required this.metricDecimals,
+    this.exact = false,
+  });
+
+  /// Header text before the unit suffix.
+  final String base;
+
+  final CsvQuantity quantity;
+
+  /// Decimals the Metric export has always used for this column. Null means
+  /// the value was written with `double.toString()`, which Metric mode keeps.
+  final int? metricDecimals;
+
+  /// Written unrounded in every mode, My units included. For values whose
+  /// exact edge matters on the way back in: a visibility range that drifts
+  /// by rounding leaves its band (issue #3226).
+  final bool exact;
+}
+
+/// Every unit-bearing column the dives, sites, equipment and fills exports
+/// write.
+abstract final class CsvColumns {
+  static const maxDepth = CsvColumn(
+    'Max Depth',
+    CsvQuantity.depth,
+    metricDecimals: 1,
+  );
+  static const minDepth = CsvColumn(
+    'Min Depth',
+    CsvQuantity.depth,
+    metricDecimals: 1,
+  );
+
+  /// Height above sea level, for altitude diving. A depth quantity because
+  /// it is the same length unit the diver already chose.
+  static const altitude = CsvColumn(
+    'Altitude',
+    CsvQuantity.depth,
+    metricDecimals: 1,
+  );
+  static const avgDepth = CsvColumn(
+    'Avg Depth',
+    CsvQuantity.depth,
+    metricDecimals: 1,
+  );
+  static const waterTemp = CsvColumn(
+    'Water Temp',
+    CsvQuantity.temperature,
+    metricDecimals: 0,
+  );
+  static const airTemp = CsvColumn(
+    'Air Temp',
+    CsvQuantity.temperature,
+    metricDecimals: 0,
+  );
+  static const visibility = CsvColumn(
+    'Visibility',
+    CsvQuantity.depth,
+    metricDecimals: 1,
+  );
+
+  /// Low end of a visibility range (issue #3226), inclusive; empty for a
+  /// measured or legacy dive.
+  static const visibilityMin = CsvColumn(
+    'Visibility Min',
+    CsvQuantity.depth,
+    metricDecimals: null,
+    exact: true,
+  );
+
+  /// High end of a visibility range, exclusive.
+  static const visibilityMax = CsvColumn(
+    'Visibility Max',
+    CsvQuantity.depth,
+    metricDecimals: null,
+    exact: true,
+  );
+  static const startPressure = CsvColumn(
+    'Start Pressure',
+    CsvQuantity.pressure,
+    metricDecimals: 1,
+  );
+  static const endPressure = CsvColumn(
+    'End Pressure',
+    CsvQuantity.pressure,
+    metricDecimals: 1,
+  );
+
+  /// Physical volume in litres, or rated gas capacity when the unit is cuft
+  /// (see `tank_capacity.dart`).
+  static const tankVolume = CsvColumn(
+    'Tank Volume',
+    CsvQuantity.volume,
+    metricDecimals: 0,
+  );
+
+  /// My units only: lets the importer turn a rated cuft back into litres.
+  static const workingPressure = CsvColumn(
+    'Working Pressure',
+    CsvQuantity.pressure,
+    metricDecimals: 1,
+  );
+  static const windSpeed = CsvColumn(
+    'Wind Speed',
+    CsvQuantity.windSpeed,
+    metricDecimals: 1,
+  );
+  static const buoyancy = CsvColumn(
+    'Buoyancy',
+    CsvQuantity.weight,
+    metricDecimals: null,
+  );
+  static const dryWeight = CsvColumn(
+    'Dry Weight',
+    CsvQuantity.weight,
+    metricDecimals: null,
+  );
+
+  /// Fills sheet (cylinder passports phase 5): gas pressure at the fill.
+  static const fillPressure = CsvColumn(
+    'Pressure',
+    CsvQuantity.pressure,
+    metricDecimals: 1,
+  );
+
+  /// Fills sheet: gas temperature at the reading.
+  static const fillTemperature = CsvColumn(
+    'Temperature',
+    CsvQuantity.temperature,
+    metricDecimals: 1,
+  );
+
+  /// Trip gas record (issue #2325): the fill in effect at the dive.
+  static const recordFillPressure = CsvColumn(
+    'Fill Pressure',
+    CsvQuantity.pressure,
+    metricDecimals: 1,
+  );
+
+  /// Trip gas record: free gas breathed from the tank.
+  static const gasBreathed = CsvColumn(
+    'Gas Breathed',
+    CsvQuantity.volume,
+    metricDecimals: 0,
+  );
+}

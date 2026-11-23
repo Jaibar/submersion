@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/domain/models/dive_comparison_result.dart';
 import 'package:submersion/core/domain/models/incoming_dive_data.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
 
 // Helper to create a minimal Dive for testing.
 Dive _makeDive({
@@ -29,11 +30,11 @@ Dive _makeDive({
     diveComputerSerial: diveComputerSerial,
     tanks: const [],
     profile: const [],
-    equipment: const [],
+    gear: looseGear(const []),
     notes: '',
     photoIds: const [],
     sightings: const [],
-    diveTypeId: '',
+    diveTypeIds: [''],
     weights: const [],
     tags: const [],
     customFields: const [],
@@ -658,6 +659,47 @@ void main() {
         (f) => f.name == 'max depth',
       );
       expect(maxDepthDiff.delta, -5.0);
+    });
+  });
+
+  group('compareIncomingPair', () {
+    // Two copies of one dive inside the same imported file (#3110).
+    final start = DateTime.utc(2026, 8, 1, 10, 15);
+
+    test('identical copies have only same fields', () {
+      final copy = IncomingDiveData(
+        startTime: start,
+        maxDepth: 18.4,
+        avgDepth: 12.1,
+        durationSeconds: 2460,
+        waterTemp: 27,
+        computerModel: 'Peregrine',
+      );
+      final result = compareIncomingPair(copy, copy);
+      expect(result.diffFields, isEmpty);
+      expect(
+        result.sameFields.map((f) => f.name),
+        containsAll(['date/time', 'max depth', 'duration', 'computer']),
+      );
+    });
+
+    test('a field one copy lacks is a difference', () {
+      final other = IncomingDiveData(
+        startTime: start,
+        maxDepth: 18.4,
+        durationSeconds: 2460,
+      );
+      final incoming = IncomingDiveData(
+        startTime: start,
+        maxDepth: 18.4,
+        durationSeconds: 2460,
+        waterTemp: 27,
+      );
+      final result = compareIncomingPair(other, incoming);
+      final temp = result.diffFields.single;
+      expect(temp.name, 'water temp');
+      expect(temp.existingRaw, isNull);
+      expect(temp.incomingRaw, 27);
     });
   });
 }

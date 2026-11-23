@@ -1,10 +1,23 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart' as db;
 import 'package:submersion/core/performance/perf_timer.dart';
+import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/tank_pressure_series_codec.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+import 'package:submersion/features/nav_track/data/repositories/nav_track_repository.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track.dart';
+import 'package:submersion/features/nav_track/domain/entities/nav_track_point.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
@@ -47,13 +60,14 @@ void main() {
       diveNumber: diveNumber,
       dateTime: dateTime ?? DateTime.now(),
       bottomTime: duration,
+      runtime: duration,
       maxDepth: maxDepth,
       avgDepth: avgDepth,
       site: site,
       tanks: tanks,
       notes: notes,
       waterTemp: waterTemp,
-      diveTypeId: diveTypeId,
+      diveTypeIds: [diveTypeId],
       buddy: buddy,
       rating: rating,
     );
@@ -61,6 +75,21 @@ void main() {
 
   group('DiveRepository', () {
     group('createDive', () {
+      test('persists entryLocation to latitude/longitude columns', () async {
+        final dive = createTestDive(
+          diveNumber: 1,
+          maxDepth: 18.5,
+        ).copyWith(entryLocation: const GeoPoint(35.815, 14.451));
+
+        final created = await repository.createDive(dive);
+        final loaded = await repository.getDiveById(created.id);
+
+        expect(loaded, isNotNull);
+        expect(loaded!.entryLocation, isNotNull);
+        expect(loaded.entryLocation!.latitude, closeTo(35.815, 1e-6));
+        expect(loaded.entryLocation!.longitude, closeTo(14.451, 1e-6));
+      });
+
       test(
         'should create a new dive with generated ID when ID is empty',
         () async {
@@ -70,6 +99,25 @@ void main() {
 
           expect(createdDive.id, isNotEmpty);
           expect(createdDive.diveNumber, equals(1));
+        },
+      );
+
+      test(
+        'diverRoleId round-trips through create, read, and update',
+        () async {
+          final dive = createTestDive(
+            diveNumber: 42,
+          ).copyWith(diverRoleIds: ['rearGuard']);
+
+          final created = await repository.createDive(dive);
+          var loaded = await repository.getDiveById(created.id);
+          expect(loaded!.diverRoleIds.firstOrNull, 'rearGuard');
+
+          await repository.updateDive(
+            loaded.copyWith(diverRoleIds: ['instructor']),
+          );
+          loaded = await repository.getDiveById(created.id);
+          expect(loaded!.diverRoleIds.firstOrNull, 'instructor');
         },
       );
 
@@ -136,6 +184,27 @@ void main() {
         expect(fetchedDive.tanks[0].gasMix.o2, equals(32.0));
       });
 
+      test(
+        'should keep a tank transmitter serial through create and read',
+        () async {
+          final dive = createTestDive(
+            tanks: [
+              const DiveTank(
+                id: '',
+                gasMix: GasMix(o2: 32.0),
+                order: 0,
+                transmitterSerial: '180777',
+              ),
+            ],
+          );
+
+          final createdDive = await repository.createDive(dive);
+          final fetchedDive = await repository.getDiveById(createdDive.id);
+
+          expect(fetchedDive!.tanks.single.transmitterSerial, '180777');
+        },
+      );
+
       test('should create a dive with site', () async {
         final site = await siteRepository.createSite(
           const DiveSite(id: '', name: 'Test Site'),
@@ -197,9 +266,156 @@ void main() {
         expect(result[1].diveNumber, equals(2));
         expect(result[2].diveNumber, equals(1)); // Oldest
       });
+
+      test('hydrates equipment attributes ordered by sortOrder', () async {
+        final equipmentRepository = EquipmentRepository();
+        final gear = await equipmentRepository.createEquipment(
+          const EquipmentItem(
+            id: '',
+            name: 'Wetsuit',
+            type: EquipmentType.wetsuit,
+            // Deliberately out of sort order to prove the query orders them.
+            attributes: [
+              EquipmentAttribute(
+                id: '',
+                equipmentId: '',
+                key: 'size',
+                valueText: 'L',
+                sortOrder: 2,
+              ),
+              EquipmentAttribute(
+                id: '',
+                equipmentId: '',
+                key: 'thickness_mm',
+                valueText: '5',
+                valueNum: 5.0,
+                sortOrder: 0,
+              ),
+              EquipmentAttribute(
+                id: '',
+                equipmentId: '',
+                key: 'buoyancy_kg',
+                valueNum: 1.5,
+                sortOrder: 1,
+              ),
+            ],
+          ),
+        );
+        await repository.createDive(
+          createTestDive(diveNumber: 1).copyWith(gear: looseGear([gear])),
+        );
+
+        final result = await repository.getAllDives();
+
+        expect(result, hasLength(1));
+        final attrs = result.single.equipment.single.attributes;
+        expect(attrs.map((a) => a.sortOrder), [
+          0,
+          1,
+          2,
+        ], reason: 'attributes come back ascending by sortOrder');
+        expect(attrs.map((a) => a.key), [
+          'thickness_mm',
+          'buoyancy_kg',
+          'size',
+        ]);
+      });
+
+      // Issue #626: junction buddies must be hydrated onto the Dive entities
+      // so the table view's Buddy / Dive Master columns can render them.
+      test('hydrates junction buddies onto each dive', () async {
+        final created = await repository.createDive(
+          createTestDive(diveNumber: 1, dateTime: DateTime(2024, 1, 1)),
+        );
+        final buddyRepo = BuddyRepository();
+        final alice = await buddyRepo.createBuddy(
+          Buddy(
+            id: 'b1',
+            name: 'Alice',
+            createdAt: DateTime(2024, 1, 1),
+            updatedAt: DateTime(2024, 1, 1),
+          ),
+        );
+        await buddyRepo.addBuddyToDive(created.id, alice.id, DiveRole.buddyId);
+
+        final result = await repository.getAllDives();
+
+        expect(result.single.buddies, hasLength(1));
+        expect(result.single.buddies.single.buddy.name, 'Alice');
+        expect(result.single.buddies.single.primaryRole.id, DiveRole.buddyId);
+      });
+
+      test('leaves buddies empty for dives with no junction records', () async {
+        await repository.createDive(
+          createTestDive(diveNumber: 1, dateTime: DateTime(2024, 1, 1)),
+        );
+
+        final result = await repository.getAllDives();
+
+        expect(result.single.buddies, isEmpty);
+      });
     });
 
     group('updateDive', () {
+      test(
+        'keeps a stored transmitter serial when the edited tank omits it',
+        () async {
+          // The serial is computer-owned, like computerId: an edit flow that
+          // rebuilds the tank without it must not wipe what the download wrote.
+          final created = await repository.createDive(
+            createTestDive(
+              tanks: [
+                const DiveTank(
+                  id: '',
+                  gasMix: GasMix(o2: 32.0),
+                  order: 0,
+                  transmitterSerial: '180777',
+                ),
+              ],
+            ),
+          );
+          final loaded = (await repository.getDiveById(created.id))!;
+          final edited = loaded.copyWith(
+            tanks: [
+              loaded.tanks.single.copyWith(
+                startPressure: 210.0,
+                clearTransmitterSerial: true,
+              ),
+            ],
+          );
+
+          await repository.updateDive(edited);
+          final result = (await repository.getDiveById(created.id))!;
+
+          expect(result.tanks.single.startPressure, 210.0);
+          expect(result.tanks.single.transmitterSerial, '180777');
+        },
+      );
+
+      test(
+        'stores the transmitter serial on a tank added by an update',
+        () async {
+          final created = await repository.createDive(createTestDive());
+          final loaded = (await repository.getDiveById(created.id))!;
+
+          await repository.updateDive(
+            loaded.copyWith(
+              tanks: [
+                const DiveTank(
+                  id: 'added-tank',
+                  gasMix: GasMix(o2: 32.0),
+                  order: 0,
+                  transmitterSerial: '180777',
+                ),
+              ],
+            ),
+          );
+          final result = (await repository.getDiveById(created.id))!;
+
+          expect(result.tanks.single.transmitterSerial, '180777');
+        },
+      );
+
       test('should update dive fields', () async {
         final dive = await repository.createDive(
           createTestDive(
@@ -238,10 +454,16 @@ void main() {
           ),
         );
 
-        final updatedDive = dive.copyWith(
+        // Fetch the dive to get the generated tank IDs
+        final fetchedDive = await repository.getDiveById(dive.id);
+        expect(fetchedDive, isNotNull);
+        expect(fetchedDive!.tanks.isNotEmpty, isTrue);
+        final tankId = fetchedDive.tanks[0].id;
+
+        final updatedDive = fetchedDive.copyWith(
           tanks: [
-            const DiveTank(
-              id: '',
+            DiveTank(
+              id: tankId,
               volume: 15.0,
               startPressure: 210,
               endPressure: 40,
@@ -255,6 +477,131 @@ void main() {
         expect(result!.tanks.length, equals(1));
         expect(result.tanks[0].volume, equals(15.0));
         expect(result.tanks[0].startPressure, equals(210));
+      });
+
+      test(
+        'should throw error when updating dive with empty tank IDs',
+        () async {
+          final dive = await repository.createDive(
+            createTestDive(
+              tanks: [
+                const DiveTank(
+                  id: '',
+                  volume: 12.0,
+                  startPressure: 200,
+                  endPressure: 50,
+                ),
+              ],
+            ),
+          );
+
+          // Try to update with tanks that have empty IDs (which should fail)
+          final updatedDive = dive.copyWith(
+            tanks: [
+              const DiveTank(
+                id: '', // Empty ID - this should trigger validation error
+                volume: 15.0,
+                startPressure: 210,
+                endPressure: 40,
+              ),
+            ],
+          );
+
+          expect(
+            () => repository.updateDive(updatedDive),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => e.message,
+                'message',
+                contains('tank(s) at index(es) 0 have empty IDs'),
+              ),
+            ),
+          );
+        },
+      );
+
+      test('should preserve tank_pressure_profiles and gas_switches', () async {
+        final database = DatabaseService.instance.database;
+
+        // Create a dive with one tank
+        final dive = await repository.createDive(
+          createTestDive(
+            tanks: [
+              const DiveTank(
+                id: '',
+                volume: 12.0,
+                startPressure: 200,
+                endPressure: 50,
+              ),
+            ],
+          ),
+        );
+
+        // Get the actual tank ID
+        final createdDive = await repository.getDiveById(dive.id);
+        expect(createdDive!.tanks.length, equals(1));
+        final tankId = createdDive.tanks[0].id;
+
+        // Insert the tank's pressure series
+        final tankSeries = TankPressureSeriesRepository();
+        await tankSeries.insertSeries(
+          diveId: dive.id,
+          tankId: tankId,
+          samples: const [TankPressureSample(timestamp: 0, pressure: 200.0)],
+        );
+
+        // Insert gas switches
+        await database
+            .into(database.gasSwitches)
+            .insert(
+              db.GasSwitchesCompanion(
+                id: const Value('switch1'),
+                diveId: Value(dive.id),
+                tankId: Value(tankId),
+                timestamp: const Value(300),
+                createdAt: Value(DateTime.now().millisecondsSinceEpoch),
+              ),
+            );
+
+        // Verify initial data
+        var pressureSeries = await tankSeries.getSeriesForDive(dive.id);
+        expect(pressureSeries.length, equals(1));
+
+        var gasSwitches = await (database.select(
+          database.gasSwitches,
+        )..where((t) => t.diveId.equals(dive.id))).get();
+        expect(gasSwitches.length, equals(1));
+
+        // Update the dive WITHOUT changing tanks (just update dive fields)
+        final updatedDive = createdDive.copyWith(
+          maxDepth: 25.0,
+          notes: 'Updated dive notes',
+          rating: 5,
+        );
+
+        await repository.updateDive(updatedDive);
+
+        // Verify that the pressure series and gas_switches are still present
+        pressureSeries = await tankSeries.getSeriesForDive(dive.id);
+        expect(
+          pressureSeries.length,
+          equals(1),
+          reason:
+              'Tank pressure series should not be deleted when updating dive',
+        );
+
+        gasSwitches = await (database.select(
+          database.gasSwitches,
+        )..where((t) => t.diveId.equals(dive.id))).get();
+        expect(
+          gasSwitches.length,
+          equals(1),
+          reason: 'Gas switches should not be deleted when updating dive',
+        );
+
+        // Verify the data is unchanged
+        expect(pressureSeries[0].samples.single.pressure, equals(200.0));
+        expect(gasSwitches[0].timestamp, equals(300));
       });
     });
 
@@ -292,6 +639,37 @@ void main() {
         expect(result, isNull);
         // Tanks are cascade deleted with the dive
       });
+
+      test('unlinks a linked nav track and marks it pending instead of leaving '
+          'a stale linkMode after the diveId FK clears it', () async {
+        final dive = await repository.createDive(createTestDive(diveNumber: 1));
+        final navTrackRepository = NavTrackRepository();
+        final routeId = await navTrackRepository.insertImportedRoute(
+          points: const [
+            NavTrackPoint(timestamp: 1700000000, north: 0, east: 0, depth: 5),
+            NavTrackPoint(timestamp: 1700000010, north: 10, east: 0, depth: 5),
+          ],
+          source: NavTrackSource.seacraftEnc,
+          sourceRef: 'unlink_test.csv',
+          diveId: dive.id,
+        );
+
+        await repository.deleteDive(dive.id);
+
+        final route = await navTrackRepository.getById(routeId);
+        expect(route, isNotNull);
+        expect(route!.diveId, isNull);
+        expect(route.linkMode, isNull);
+        expect(route.isPrimary, isTrue);
+
+        final pending = await DatabaseService.instance.database
+            .customSelect(
+              "SELECT local_updated_at FROM sync_records "
+              "WHERE entity_type = 'navTracks' AND record_id = '$routeId'",
+            )
+            .getSingleOrNull();
+        expect(pending, isNotNull);
+      });
     });
 
     group('getDivesForSite', () {
@@ -323,6 +701,47 @@ void main() {
         final result = await repository.getDivesForSite(site.id);
 
         expect(result, isEmpty);
+      });
+    });
+
+    // The mirror undo asks only which profiles still log a dive at a site,
+    // so it reads the ids rather than hydrating every dive (issue #4252).
+    group('getDiverIdsAtSite', () {
+      Future<void> sql(String statement, List<Object?> args) =>
+          DatabaseService.instance.database.customStatement(statement, args);
+
+      test('returns each diver with a dive at the site once', () async {
+        for (final id in ['ana', 'ben', 'cy']) {
+          await sql(
+            'INSERT INTO divers (id, name, created_at, updated_at) '
+            'VALUES (?, ?, 0, 0)',
+            [id, id],
+          );
+        }
+        for (final id in ['S', 'T']) {
+          await sql(
+            'INSERT INTO dive_sites (id, name, created_at, updated_at) '
+            'VALUES (?, ?, 0, 0)',
+            [id, id],
+          );
+        }
+        for (final (id, diver, site) in [
+          ('d1', 'ana', 'S'),
+          ('d2', 'ana', 'S'),
+          ('d3', 'ben', 'S'),
+          ('d4', 'cy', 'T'),
+          ('d5', null, 'S'),
+        ]) {
+          await sql(
+            'INSERT INTO dives (id, diver_id, site_id, dive_date_time, '
+            'created_at, updated_at) VALUES (?, ?, ?, 0, 0, 0)',
+            [id, diver, site],
+          );
+        }
+
+        expect(await repository.getDiverIdsAtSite('S'), {'ana', 'ben'});
+        expect(await repository.getDiverIdsAtSite('T'), {'cy'});
+        expect(await repository.getDiverIdsAtSite('none'), isEmpty);
       });
     });
 
@@ -405,21 +824,21 @@ void main() {
       });
 
       test('should find dives by notes', () async {
-        final results = await repository.searchDives('coral');
+        final results = await repository.searchDiveSummaries('coral');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(1));
       });
 
       test('should find dives by buddy', () async {
-        final results = await repository.searchDives('Bob');
+        final results = await repository.searchDiveSummaries('Bob');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(2));
       });
 
       test('should return empty list for no matches', () async {
-        final results = await repository.searchDives('NonExistent');
+        final results = await repository.searchDiveSummaries('NonExistent');
 
         expect(results, isEmpty);
       });
@@ -430,7 +849,7 @@ void main() {
         );
         await repository.createDive(createTestDive(diveNumber: 10, site: site));
 
-        final results = await repository.searchDives('Blue Hole');
+        final results = await repository.searchDiveSummaries('Blue Hole');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(10));
@@ -442,7 +861,7 @@ void main() {
         );
         await repository.createDive(createTestDive(diveNumber: 11, site: site));
 
-        final results = await repository.searchDives('Thailand');
+        final results = await repository.searchDiveSummaries('Thailand');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(11));
@@ -454,7 +873,7 @@ void main() {
         );
         await repository.createDive(createTestDive(diveNumber: 12, site: site));
 
-        final results = await repository.searchDives('Cozumel');
+        final results = await repository.searchDiveSummaries('Cozumel');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(12));
@@ -473,9 +892,9 @@ void main() {
         final dive = await repository.createDive(
           createTestDive(diveNumber: 13),
         );
-        await buddyRepo.addBuddyToDive(dive.id, buddy.id, BuddyRole.buddy);
+        await buddyRepo.addBuddyToDive(dive.id, buddy.id, DiveRole.buddyId);
 
-        final results = await repository.searchDives('Cousteau');
+        final results = await repository.searchDiveSummaries('Cousteau');
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(13));
@@ -496,7 +915,9 @@ void main() {
         );
         await tagRepo.addTagToDive(dive.id, tag.id);
 
-        final results = await repository.searchDives('wreck-exploration');
+        final results = await repository.searchDiveSummaries(
+          'wreck-exploration',
+        );
 
         expect(results.length, equals(1));
         expect(results[0].diveNumber, equals(14));
@@ -673,10 +1094,13 @@ void main() {
         const DiveProfilePoint(timestamp: 4, depth: 5.0),
       ]);
 
-      // getProfilesBySource should show both
-      final sources = await repository.getProfilesBySource(createdDive.id);
-      expect(sources.length, 2); // original + edited
-      expect(sources.containsKey('user-edited'), isTrue);
+      // The primary source's profile is the edited variant; the demoted
+      // originals stay restorable via restoreOriginalProfile but are not
+      // surfaced as a sibling source (spec 2026-07-04).
+      await repository.backfillPrimaryDataSource(createdDive.id);
+      final sources = await repository.getProfilesByDataSource(createdDive.id);
+      expect(sources.length, 1);
+      expect(sources.values.single.isEdited, isTrue);
     });
 
     test(
@@ -706,7 +1130,8 @@ void main() {
       },
     );
 
-    test('getProfilesBySource returns both original and edited', () async {
+    test('getProfilesByDataSource surfaces the edited profile as the '
+        'primary source', () async {
       final dive = createTestDive();
       final createdDive = await repository.createDive(
         dive.copyWith(
@@ -724,11 +1149,13 @@ void main() {
         const DiveProfilePoint(timestamp: 8, depth: 15.0),
       ]);
 
-      final sources = await repository.getProfilesBySource(createdDive.id);
-      expect(sources.length, 2);
-      // Check user-edited source
-      expect(sources['user-edited']!.length, 3);
-      expect(sources['user-edited']![2].depth, 15.0);
+      await repository.backfillPrimaryDataSource(createdDive.id);
+      final sources = await repository.getProfilesByDataSource(createdDive.id);
+      expect(sources.length, 1);
+      final primary = sources.values.single;
+      expect(primary.isEdited, isTrue);
+      expect(primary.points.length, 3);
+      expect(primary.points[2].depth, 15.0);
     });
 
     test('saveEditedProfile recalculates dive stats', () async {

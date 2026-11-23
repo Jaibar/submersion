@@ -1,23 +1,49 @@
-import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueNotifier;
+
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/cloud_identifier_source.dart';
 import 'package:submersion/features/media/data/services/enrichment_service.dart';
+import 'package:submersion/features/media/data/services/local_file_handle_factory.dart';
+import 'package:submersion/features/media/data/services/local_file_link_service.dart';
 import 'package:submersion/features/media/data/services/media_import_service.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service_desktop.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service_mobile.dart';
+import 'package:submersion/features/media/presentation/providers/media_byte_retention.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_resolver_providers.dart';
+import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_enqueue_provider.dart';
 
 /// Provider for the platform-appropriate PhotoPickerService.
 ///
 /// Returns PhotoPickerServiceMobile on iOS, Android, and macOS.
 /// Returns PhotoPickerServiceDesktop on Windows and Linux.
 final photoPickerServiceProvider = Provider<PhotoPickerService>((ref) {
-  if (Platform.isWindows || Platform.isLinux) {
+  if (HostPlatform.isWindows || HostPlatform.isLinux) {
     return PhotoPickerServiceDesktop();
   }
   return PhotoPickerServiceMobile();
+});
+
+/// How many photo pickers are open right now.
+///
+/// A desktop drop lands on the window's one drop target even while a picker
+/// covers the screen, and a second picker opened on top would clear the
+/// first one's staged files: the Files tab's notifier is shared and not
+/// autoDispose. The drop target reads this to turn such a drop away.
+///
+/// A [ValueNotifier] rather than provider state because the picker changes
+/// it from initState and dispose, where Riverpod forbids provider writes.
+final openPhotoPickerSessionsProvider = Provider<ValueNotifier<int>>((ref) {
+  final sessions = ValueNotifier(0);
+  ref.onDispose(sessions.dispose);
+  return sessions;
 });
 
 /// Parameters for photo picker date range query.
@@ -59,25 +85,35 @@ final photoPermissionProvider = FutureProvider<PhotoPermissionStatus>((
 });
 
 /// Provider for getting a thumbnail for a specific asset.
+///
+/// Auto-disposing with a retention window. Riverpod 3 keeps a family entry
+/// forever by default, so scrolling a large picker used to leave one thumbnail
+/// buffer per asset on the heap for the process lifetime (#1175).
 final assetThumbnailProvider = FutureProvider.family<Uint8List?, String>((
   ref,
   assetId,
 ) async {
+  retainFor(ref, thumbnailRetention);
   final service = ref.watch(photoPickerServiceProvider);
   return service.getThumbnail(assetId);
-});
+}, isAutoDispose: true);
 
 /// Provider for getting full-resolution image bytes for a specific asset.
 ///
 /// Use this for displaying photos in the full-screen viewer.
-/// Results are cached by Riverpod to avoid repeated fetches during swipe navigation.
+///
+/// Cached to avoid repeated fetches during swipe navigation, but only for
+/// [fullResolutionRetention] after the last watcher leaves. These are
+/// megabyte-scale buffers and the cache used to be permanent, so a long
+/// browsing session accumulated every photo it had shown (#1175).
 final assetFullResolutionProvider = FutureProvider.family<Uint8List?, String>((
   ref,
   assetId,
 ) async {
+  retainFor(ref, fullResolutionRetention);
   final service = ref.watch(photoPickerServiceProvider);
   return service.getFileBytes(assetId);
-});
+}, isAutoDispose: true);
 
 /// Provider for getting a video file path for playback.
 ///
@@ -159,12 +195,14 @@ class PhotoPickerNotifier extends StateNotifier<PhotoPickerState> {
 
     try {
       final status = await _service.requestPermission();
+      if (!mounted) return;
       state = state.copyWith(
         permissionRequested: true,
         permissionStatus: status,
         isLoading: false,
       );
     } catch (e) {
+      if (!mounted) return;
       state = state.copyWith(
         isLoading: false,
         error: 'Failed to request permission: $e',
@@ -176,8 +214,10 @@ class PhotoPickerNotifier extends StateNotifier<PhotoPickerState> {
   Future<void> checkPermission() async {
     try {
       final status = await _service.checkPermission();
+      if (!mounted) return;
       state = state.copyWith(permissionStatus: status);
     } catch (e) {
+      if (!mounted) return;
       state = state.copyWith(error: 'Failed to check permission: $e');
     }
   }
@@ -223,8 +263,16 @@ class PhotoPickerNotifier extends StateNotifier<PhotoPickerState> {
 }
 
 /// StateNotifierProvider for photo picker state management.
+///
+/// autoDispose scopes the selection to one picker session. The picker is
+/// opened from a dive or a dive site, and a global selection carried the
+/// photos picked for one owner into the next session as preselected
+/// (issue #1996). [PhotoPickerPage] watches this for its whole lifetime, so
+/// the state still survives switching between its tabs.
 final photoPickerNotifierProvider =
-    StateNotifierProvider<PhotoPickerNotifier, PhotoPickerState>((ref) {
+    StateNotifierProvider.autoDispose<PhotoPickerNotifier, PhotoPickerState>((
+      ref,
+    ) {
       final service = ref.watch(photoPickerServiceProvider);
       return PhotoPickerNotifier(service);
     });
@@ -235,9 +283,32 @@ final enrichmentServiceProvider = Provider<EnrichmentService>((ref) {
 });
 
 /// Provider for the media import service.
+// no-tick: a service rather than a cached query result. The dive repository
+// is read inside a closure each time a pick is imported.
 final mediaImportServiceProvider = Provider<MediaImportService>((ref) {
   return MediaImportService(
     mediaRepository: MediaRepository(),
     enrichmentService: ref.watch(enrichmentServiceProvider),
+    onMediaCreated: ref.watch(mediaStoreEnqueueProvider),
+    linkedGalleryAssets: ref.watch(linkedGalleryAssetsProvider),
+    cloudIdentifiers: const PhotoManagerCloudIdentifierSource(),
+    // Read when a pick is imported, not when the service is built, so a
+    // screen that only holds the service needs no dive repository.
+    primarySourceEntry: (diveId) =>
+        ref.read(diveRepositoryProvider).getPrimarySourceEntry(diveId),
+  );
+});
+
+/// Links files in place as `localFile` rows (no byte copy). Used by the
+/// import wizard for photos a logbook referenced by path.
+final localFileLinkServiceProvider = Provider<LocalFileLinkService>((ref) {
+  return LocalFileLinkService(
+    mediaRepository: ref.watch(mediaRepositoryProvider),
+    handles: LocalFileHandleFactory(
+      platform: ref.watch(localMediaPlatformProvider),
+      bookmarkStorage: ref.watch(localBookmarkStorageProvider),
+    ),
+    readMetadata: ref.watch(exifExtractorProvider).extract,
+    onMediaCreated: ref.watch(mediaStoreEnqueueProvider),
   );
 });

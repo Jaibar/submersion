@@ -1,0 +1,240 @@
+import 'package:submersion/core/services/export/csv/codec/tank_capacity.dart';
+import 'package:submersion/core/utils/number_display.dart';
+import 'package:submersion/core/utils/number_input.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/constants/focal_length.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_colors.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_item_units.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_l10n.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_color_names.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+/// Canonical metric -> diver's display units. thicknessMm and none are
+/// identity (mm is the industry convention in every market); shortLengthM
+/// reads metres as cm or inches.
+double attributeDisplayFromMetric(
+  AttributeDimension d,
+  UnitFormatter units,
+  double metric,
+) => switch (d) {
+  AttributeDimension.massKg => units.convertWeight(metric),
+  AttributeDimension.volumeL => units.convertVolume(metric),
+  AttributeDimension.pressureBar => units.convertPressure(metric),
+  AttributeDimension.lengthM ||
+  AttributeDimension.depthM => units.convertDepth(metric),
+  AttributeDimension.shortLengthM => units.convertShortLength(metric),
+  // Stored in m/s (see AttributeDimension.speedMps), read as distance per
+  // minute: m/s -> m/min is x60, then the depth conversion carries it to
+  // ft/min for an imperial diver. Same shape as the ascent-rate axis, which
+  // is the app's other distance-per-minute readout.
+  AttributeDimension.speedMps => units.convertDepth(metric * 60),
+  // Stored in hours, read in minutes; a minute is a minute in every market.
+  AttributeDimension.durationH => metric * 60,
+  AttributeDimension.thicknessMm || AttributeDimension.none => metric,
+};
+
+/// Diver's display units -> canonical metric (storage).
+double attributeMetricFromDisplay(
+  AttributeDimension d,
+  UnitFormatter units,
+  double display,
+) => switch (d) {
+  AttributeDimension.massKg => units.weightToKg(display),
+  AttributeDimension.volumeL => units.volumeToLiters(display),
+  AttributeDimension.pressureBar => units.pressureToBar(display),
+  AttributeDimension.lengthM ||
+  AttributeDimension.depthM => units.depthToMeters(display),
+  AttributeDimension.shortLengthM => units.shortLengthToMeters(display),
+  AttributeDimension.speedMps => units.depthToMeters(display) / 60,
+  AttributeDimension.durationH => display / 60,
+  AttributeDimension.thicknessMm || AttributeDimension.none => display,
+};
+
+String attributeUnitSymbol(AttributeDimension d, UnitFormatter units) =>
+    switch (d) {
+      AttributeDimension.massKg => units.weightSymbol,
+      AttributeDimension.volumeL => units.volumeSymbol,
+      AttributeDimension.pressureBar => units.pressureSymbol,
+      AttributeDimension.lengthM ||
+      AttributeDimension.depthM => units.depthSymbol,
+      AttributeDimension.shortLengthM => units.shortLengthSymbol,
+      AttributeDimension.speedMps => units.depthRateSymbol,
+      AttributeDimension.durationH => 'min',
+      AttributeDimension.thicknessMm => 'mm',
+      AttributeDimension.none => '',
+    };
+
+/// The display value of a metric-stored number formatted for a text field or
+/// label, with no unit symbol: integers render without decimals, otherwise
+/// [_editingFractionDigits] decimal places for the dimension. Keeps edit
+/// fields readable after a unit conversion (e.g. kg->lbs) instead of leaking
+/// full floating-point precision.
+///
+/// Rendered in the diver's locale, matching how the field is read back with
+/// [parseUserDecimal]. Seeding "7.5" where ',' is the decimal separator and '.'
+/// groups thousands would make an untouched re-save store 75 (#1091).
+String formatAttributeNumberForEditing(
+  AttributeDimension dimension,
+  UnitFormatter units,
+  double metricValue,
+) {
+  final display = attributeDisplayFromMetric(dimension, units, metricValue);
+  // Rounds to the fraction digits actually rendered BEFORE deciding whether
+  // the value is whole, then drops a trailing zero. A per-time round trip
+  // (100 min -> 1.666..h -> 100.000...1) is binary noise, not a fraction the
+  // diver typed, and must still read as "100" rather than "100.0".
+  return formatRoundedForInput(
+    display,
+    _editingFractionDigits(dimension, metricValue),
+  );
+}
+
+/// Decimal places [formatAttributeNumberForEditing] rounds to before
+/// rendering. One digit is plenty for most dimensions, but a mass like a
+/// 0.35 kg (350 g) trim weight needs two: at one digit it seeded and
+/// displayed as "0.3", silently dropping the tens-of-grams digit rather than
+/// just trailing noise. A cylinder's volume follows the tank editor's rule
+/// ([UnitFormatter.tankVolumeLiterDecimals]): a 0.85 L argon bottle keeps
+/// both its digits (issue #4243).
+int _editingFractionDigits(AttributeDimension dimension, double metricValue) =>
+    switch (dimension) {
+      AttributeDimension.massKg => 2,
+      AttributeDimension.volumeL => UnitFormatter.tankVolumeLiterDecimals(
+        metricValue,
+      ),
+      _ => 1,
+    };
+
+/// [metric] for [def] as typed in [unit]: the figure [formatAttributeValue]
+/// shows and the Details editor seeds, with no unit symbol (issue #4534).
+String formatAttributeNumberIn(
+  EquipmentAttributeDef def,
+  AttributeUnit unit,
+  double metric, {
+  double? workingPressureBar,
+}) {
+  final value = attributeValueIn(
+    def,
+    unit,
+    metric,
+    workingPressureBar: workingPressureBar,
+  );
+  if (isCylinderGasVolume(def, unit)) return formatRoundedForInput(value, 1);
+  return formatRoundedForInput(
+    value,
+    _editingFractionDigits(def.dimension, metric),
+  );
+}
+
+/// [metric] shown in [unit] with its symbol, the way the detail page reads
+/// an item's own spec. A cylinder's cubic feet are rated gas capacity, whole
+/// numbers, marked "~" when the cylinder has no working pressure, as
+/// [UnitFormatter.formatTankVolume] shows them; Both shows the diver's
+/// pressure unit first.
+String _formatInUnit(
+  EquipmentAttributeDef def,
+  AttributeUnit unit,
+  double metric,
+  UnitFormatter units,
+  AppLocalizations l10n,
+  double? workingPressureBar,
+) {
+  if (unit == AttributeUnit.dual) {
+    final first = attributeTypingUnit(unit, units);
+    final second = first == AttributeUnit.bar
+        ? AttributeUnit.psi
+        : AttributeUnit.bar;
+    return '${_formatInUnit(def, first, metric, units, l10n, null)} / '
+        '${_formatInUnit(def, second, metric, units, l10n, null)}';
+  }
+  final symbol = attributeUnitLabel(def, unit, l10n);
+  if (isCylinderGasVolume(def, unit)) {
+    final known = workingPressureBar != null && workingPressureBar > 0;
+    final cuft = ratedCapacityCuft(metric, workingPressureBar);
+    return '${known ? '' : '~'}${formatFixedForDisplay(cuft, 0)} $symbol';
+  }
+  return '${formatAttributeNumberIn(def, unit, metric)} $symbol';
+}
+
+/// Display string for a stored attribute value on the detail page. The
+/// equipment CSV does not use it: Metric mode writes each attribute's raw
+/// canonical value, as its `_m` / `_kg` key names promise, and My units
+/// converts through [attributeDisplayFromMetric] and [attributeUnitSymbol]
+/// with a locale-free decimal (`csv_attribute_codec.dart`), because a CSV
+/// value must read back the same on any device.
+///
+/// A number reads in the item's own unit when one was picked (issue #4534),
+/// else in the diver's. [workingPressureBar] is the cylinder's, for a volume
+/// in cubic feet.
+String formatAttributeValue(
+  EquipmentAttribute attr,
+  EquipmentAttributeDef? def,
+  UnitFormatter units,
+  AppLocalizations l10n, {
+  double? workingPressureBar,
+}) {
+  if (def == null) return attr.valueText ?? attr.valueNum?.toString() ?? '';
+  switch (def.kind) {
+    case AttributeKind.text:
+    // Shown exactly as the diver typed it: the https:// a bare host gets is
+    // assumed at launch time only, so the row never claims a scheme that is
+    // not in the stored value.
+    case AttributeKind.url:
+      return attr.valueText ?? '';
+    case AttributeKind.thickness:
+      if (attr.valueText == null) return '';
+      // Strip any unit the stored designation already carries (legacy values
+      // like "6mm" that the v124 migration preserved verbatim) so the unit is
+      // appended exactly once.
+      final raw = attr.valueText!.trim();
+      final base = raw.toLowerCase().endsWith('mm')
+          ? raw.substring(0, raw.length - 2).trim()
+          : raw;
+      return base.isEmpty ? '' : '$base mm';
+    case AttributeKind.focalLength:
+      return formatFocalLength(
+        valueText: attr.valueText,
+        valueNum: attr.valueNum,
+      );
+    case AttributeKind.number:
+      if (attr.valueNum == null) return '';
+      final unit = attributeUnitInForce(def, attr, units);
+      if (unit != null) {
+        return _formatInUnit(
+          def,
+          unit,
+          attr.valueNum!,
+          units,
+          l10n,
+          workingPressureBar,
+        );
+      }
+      final text = formatAttributeNumberForEditing(
+        def.dimension,
+        units,
+        attr.valueNum!,
+      );
+      final symbol = attributeUnitSymbol(def.dimension, units);
+      return symbol.isEmpty ? text : '$text $symbol';
+    case AttributeKind.choice:
+      return attr.valueText == null
+          ? ''
+          : attributeChoiceLabel(l10n, def.key, attr.valueText!);
+    case AttributeKind.flag:
+      // Unset (null) renders empty like the other kinds; only an explicit 0/1
+      // maps to No/Yes.
+      if (attr.valueNum == null) return '';
+      return attr.valueNum == 1 ? l10n.attr_flagYes : l10n.attr_flagNo;
+    case AttributeKind.color:
+      final code = normalizeEquipmentColor(attr.valueText);
+      return code == null ? '' : equipmentColorName(l10n, code);
+    case AttributeKind.date:
+      return attr.valueNum == null
+          ? ''
+          : units.formatDate(
+              DateTime.fromMillisecondsSinceEpoch(attr.valueNum!.toInt()),
+            );
+  }
+}

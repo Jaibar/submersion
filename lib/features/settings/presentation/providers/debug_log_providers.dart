@@ -1,12 +1,22 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:submersion/core/models/log_entry.dart';
+import 'package:submersion/core/platform/file_saver.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/log_environment.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/core/services/log_redactor.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/export/shared/file_export_utils.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 /// Provider for the LogFileService singleton.
 /// Must be overridden in ProviderScope with the initialized instance.
@@ -15,15 +25,16 @@ final logFileServiceProvider = Provider<LogFileService>((ref) {
 });
 
 /// Provider that loads all log entries from the file.
-/// Automatically re-reads when [LoggerService.logStream] emits, so the
-/// debug log viewer updates in real time without a manual refresh.
+/// Automatically re-reads when [LoggerService.persistedLogStream] emits, so
+/// the debug log viewer updates in real time without a manual refresh.
 final logEntriesProvider = FutureProvider<List<LogEntry>>((ref) async {
   final service = ref.watch(logFileServiceProvider);
   final entries = await service.readEntries();
 
-  // After the initial read, listen for new log entries and trigger a
-  // re-read.  Riverpod coalesces rapid invalidations into a single rebuild.
-  final sub = LoggerService.logStream.listen((_) {
+  // After the initial read, re-read whenever a line has been written.
+  // Lines the file does not keep (debug and info outside debug mode) never
+  // trigger a read. Riverpod coalesces rapid invalidations into one rebuild.
+  final sub = LoggerService.persistedLogStream.listen((_) {
     ref.invalidateSelf();
   });
   ref.onDispose(sub.cancel);
@@ -44,6 +55,7 @@ class LogFilterState {
       LogCategory.serial,
       LogCategory.libdc,
       LogCategory.database,
+      LogCategory.media,
     },
     this.minimumSeverity = LogLevel.debug,
     this.searchQuery = '',
@@ -120,48 +132,156 @@ final filteredLogEntriesProvider = Provider<AsyncValue<List<LogEntry>>>((ref) {
   });
 });
 
+/// Name the exported copy carries in the share sheet and the save dialog.
+const _exportFileName = 'submersion-debug-logs.txt';
+const _mediaReportFileName = 'submersion-media-report.txt';
+
+/// Resolve the header prepended to every export.
+///
+/// Callers may pass a captured [LogEnvironment]; otherwise it is read here.
+/// Attaching the build and device to the logs is what turns a pasted excerpt
+/// into something triageable (issue #1246).
+Future<String> _exportHeader(LogEnvironment? environment) async {
+  final resolved = environment ?? await LogEnvironment.capture();
+  return resolved.toExportHeader();
+}
+
+/// The log file's content behind the export header, as UTF-8 bytes.
+///
+/// Decoded leniently rather than with `readAsString`: the log carries
+/// whatever a device name or a native log message put in it, and a strict
+/// decode throws on a malformed UTF-8 sequence. Losing the whole export to
+/// one bad byte is a worse outcome than a replacement character.
+///
+/// Redacted on the way out (#1826) because a file written by an older build
+/// predates the logger's own redaction, and an export is what gets attached
+/// to a public bug report.
+@visibleForTesting
+Future<Uint8List> buildLogExportBytes(File file, String header) async {
+  final content = utf8.decode(await file.readAsBytes(), allowMalformed: true);
+  return utf8.encode('$header${redactSecrets(content)}');
+}
+
+/// A browser's export: its log is lines in memory rather than a file.
+@visibleForTesting
+Uint8List buildBrowserLogExportBytes(List<String> lines, String header) =>
+    utf8.encode('$header${redactSecrets(lines.join('\n'))}');
+
+/// A browser has no temp file or save dialog, so an export is a download.
+Future<void> _downloadBrowserLogs(
+  LogFileService service,
+  LogEnvironment? environment,
+  String? mediaReport,
+) async {
+  final bytes = buildBrowserLogExportBytes(
+    await service.readLines(),
+    await _exportHeader(environment),
+  );
+  await FileSaver.saveBytes(
+    bytes,
+    fileName: _exportFileName,
+    mimeType: 'text/plain',
+  );
+  if (mediaReport != null) {
+    await FileSaver.saveBytes(
+      utf8.encode(mediaReport),
+      fileName: _mediaReportFileName,
+      mimeType: 'text/plain',
+    );
+  }
+}
+
 /// Share the full log file via system share sheet.
-Future<void> shareLogFile(LogFileService service) async {
-  final path = service.logFilePath;
-  final file = File(path);
+///
+/// Shares a header-prefixed copy rather than the log file itself, so the
+/// recipient sees which build and device produced the lines.
+///
+/// [sharePositionOrigin] anchors the iPad share popover; this function has no
+/// [BuildContext] of its own, so the caller resolves it from the share button
+/// (see `shareAnchorFrom`). Ignored on every other platform.
+///
+/// [mediaReport] is the media health report as text; when given, it travels
+/// as a second file so a photo-sync report carries the row facts alongside
+/// the log lines.
+Future<void> shareLogFile(
+  LogFileService service,
+  AppLocalizations l10n, {
+  LogEnvironment? environment,
+  Rect? sharePositionOrigin,
+  String? mediaReport,
+}) async {
+  if (HostPlatform.isWeb) {
+    return _downloadBrowserLogs(service, environment, mediaReport);
+  }
+  final file = File(service.logFilePath);
   if (!file.existsSync()) return;
+
+  final header = await _exportHeader(environment);
+
+  // Written to the temp directory rather than shared in place: the log file
+  // has to stay untouched (it is still being appended to), and the copy is
+  // disposable once the share sheet has read it. Sharing a *copy* is also what
+  // lets the export carry the header at all. Reusing one name bounds the temp
+  // directory to a single file across repeated shares.
+  final tempDir = await getTemporaryDirectory();
+  final export = File(p.join(tempDir.path, _exportFileName));
+  await export.writeAsBytes(await buildLogExportBytes(file, header));
+  final files = [XFile(export.path, mimeType: 'text/plain')];
+  if (mediaReport != null) {
+    final report = File(p.join(tempDir.path, _mediaReportFileName));
+    await report.writeAsString(mediaReport);
+    files.add(XFile(report.path, mimeType: 'text/plain'));
+  }
 
   await SharePlus.instance.share(
     ShareParams(
-      files: [XFile(path, mimeType: 'text/plain')],
-      subject: 'Submersion Debug Logs',
+      files: files,
+      subject: l10n.settings_debugLog_shareSubject,
+      sharePositionOrigin: sharePositionOrigin,
     ),
   );
 }
 
-/// Copy the filtered log entries to clipboard.
-Future<void> copyFilteredLogs(List<LogEntry> entries) async {
-  final text = entries.map((e) => e.toLogLine()).join('\n');
-  await Clipboard.setData(ClipboardData(text: text));
+/// Copy the filtered log entries to clipboard, behind the export header.
+///
+/// The header is unconditional, so even a one-line excerpt names the build it
+/// came from. That is deliberately not special-cased for an empty list, but it
+/// is also not reachable that way today: the Copy button in
+/// [DebugLogViewerPage] guards on a non-empty list, so an empty filter result
+/// copies nothing at all rather than a bare header.
+Future<void> copyFilteredLogs(
+  List<LogEntry> entries, {
+  LogEnvironment? environment,
+}) async {
+  final header = await _exportHeader(environment);
+  // Redacted for the same reason as buildLogExportBytes: entries read back
+  // from a file an older build wrote predate the logger's redaction.
+  final text = redactSecrets(entries.map((e) => e.toLogLine()).join('\n'));
+  await Clipboard.setData(ClipboardData(text: '$header$text'));
 }
 
 /// Save the full log file to a user-chosen location.
-Future<String?> saveLogFile(LogFileService service) async {
-  final path = service.logFilePath;
-  final file = File(path);
+Future<String?> saveLogFile(
+  LogFileService service,
+  AppLocalizations l10n, {
+  LogEnvironment? environment,
+}) async {
+  if (HostPlatform.isWeb) {
+    await _downloadBrowserLogs(service, environment, null);
+    return _exportFileName;
+  }
+  final file = File(service.logFilePath);
   if (!file.existsSync()) return null;
 
-  final bytes = await file.readAsBytes();
+  final header = await _exportHeader(environment);
   final result = await FilePicker.saveFile(
-    dialogTitle: 'Save Debug Logs',
-    fileName: 'submersion-debug-logs.txt',
+    dialogTitle: l10n.settings_debugLog_saveDialogTitle,
+    fileName: _exportFileName,
     type: FileType.custom,
-    allowedExtensions: ['txt', 'log'],
-    bytes: bytes,
+    bytes: await buildLogExportBytes(file, header),
+    mimeType: 'text/plain',
   );
 
   if (result == null) return null;
-
-  // On some platforms, saveFile returns a path but doesn't write
-  if (!Platform.isAndroid) {
-    final outFile = File(result);
-    await outFile.writeAsBytes(bytes);
-  }
-
-  return result;
+  return savedFileLocation(result);
 }

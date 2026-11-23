@@ -7,23 +7,36 @@ import 'package:submersion/features/dive_import/domain/services/dive_matcher.dar
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart'
     hide DiveMatchResult;
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
 import 'package:submersion/features/import_wizard/data/adapters/dive_computer_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
 
-@GenerateMocks([DiveImportService, DiveComputerRepository, DiveRepository])
+@GenerateMocks([
+  DiveImportService,
+  DiveComputerRepository,
+  DiveRepository,
+  DiveConsolidationService,
+])
 import 'dive_computer_adapter_reimport_test.mocks.dart';
 
 void main() {
   late MockDiveImportService importService;
   late MockDiveComputerRepository computerRepo;
   late MockDiveRepository diveRepo;
+  late MockDiveConsolidationService consolidationService;
 
   setUp(() {
     importService = MockDiveImportService();
+    // The registry notice reads this after every import; no unmatched
+    // serials unless a test says otherwise.
+    when(
+      importService.unmatchedTransmitterSerials,
+    ).thenReturn(const <String>[]);
     computerRepo = MockDiveComputerRepository();
     diveRepo = MockDiveRepository();
+    consolidationService = MockDiveConsolidationService();
   });
 
   group('forceFullDownload field', () {
@@ -32,6 +45,7 @@ void main() {
         importService: importService,
         computerRepository: computerRepo,
         diveRepository: diveRepo,
+        consolidationService: consolidationService,
         diverId: 'diver-1',
       );
       expect(adapter.forceFullDownload, isFalse);
@@ -42,6 +56,7 @@ void main() {
         importService: importService,
         computerRepository: computerRepo,
         diveRepository: diveRepo,
+        consolidationService: consolidationService,
         diverId: 'diver-1',
         forceFullDownload: true,
       );
@@ -53,6 +68,7 @@ void main() {
         importService: importService,
         computerRepository: computerRepo,
         diveRepository: diveRepo,
+        consolidationService: consolidationService,
         diverId: 'diver-1',
         forceFullDownload: false,
       );
@@ -87,6 +103,7 @@ void main() {
           importService: importService,
           computerRepository: computerRepo,
           diveRepository: diveRepo,
+          consolidationService: consolidationService,
           diverId: diverId,
         );
 

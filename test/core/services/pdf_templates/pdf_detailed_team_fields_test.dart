@@ -1,0 +1,201 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/pdf_templates.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_template_detailed.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../../helpers/pdf_text.dart';
+
+/// The Team section follows the same junction-authoritative rule as the dive
+/// list's Buddy and Dive Master columns (`dive_field_extractor.dart`): once the
+/// `dive_buddies` junction holds anyone, the legacy `Dive.buddy` and
+/// `Dive.diveMaster` text is stale and must not print (#1864).
+void main() {
+  final epoch = DateTime(2024, 1, 1);
+
+  BuddyWithRole person(String name, String roleId, String roleName) =>
+      BuddyWithRole(
+        buddy: Buddy(id: name, name: name, createdAt: epoch, updatedAt: epoch),
+        roles: [
+          DiveRole(
+            id: roleId,
+            name: roleName,
+            isBuiltIn: true,
+            createdAt: epoch,
+            updatedAt: epoch,
+          ),
+        ],
+      );
+
+  final alice = person('Alice', DiveRole.buddyId, 'Buddy');
+  // The name the database seeds for this built-in role; the PDF prints the
+  // role's localized name (#2252), which is the same word in English.
+  final guido = person('Guido', DiveRole.diveMasterId, 'Divemaster');
+
+  Dive teamDive({List<BuddyWithRole> buddies = const [], String? diveMaster}) =>
+      Dive(
+        id: 'd1',
+        diveNumber: 42,
+        dateTime: DateTime(2026, 8, 17, 11, 7),
+        maxDepth: 18.0,
+        buddies: buddies,
+        diveMaster: diveMaster,
+      );
+
+  Future<List<int>> render(Dive dive) => PdfTemplateDetailed().buildPdf(
+    dives: [dive],
+    pageSize: PdfPageSize.a4,
+    dates: PdfDateFormatter(
+      dateFormat: DateFormatPreference.ddmmyyyy,
+      timeFormat: TimeFormat.twentyFourHour,
+    ),
+    units: const UnitFormatter(AppSettings()),
+  );
+
+  int occurrences(List<int> bytes, String token) =>
+      pdfTextTokens(bytes).where((t) => t == token).length;
+
+  group('Team section dive master', () {
+    test('omits stale legacy dive master text once a team is linked', () async {
+      final text = pdfVisibleText(
+        await render(teamDive(buddies: [alice], diveMaster: 'Hendricks')),
+      );
+
+      expect(text, contains('Alice'));
+      expect(
+        text,
+        isNot(contains('Hendricks')),
+        reason: 'the junction is authoritative once it holds anyone',
+      );
+      expect(text, isNot(contains('Dive Master')));
+    });
+
+    test(
+      'lists a linked dive master once when the legacy text names them too',
+      () async {
+        final bytes = await render(
+          teamDive(buddies: [alice, guido], diveMaster: 'Guido'),
+        );
+
+        expect(pdfVisibleText(bytes), contains('Divemaster'));
+        expect(
+          occurrences(bytes, 'Guido'),
+          1,
+          reason: 'the legacy scalar duplicated the linked Dive Master row',
+        );
+      },
+    );
+
+    test('prints the legacy dive master when no team is linked', () async {
+      final text = pdfVisibleText(
+        await render(teamDive(diveMaster: 'Hendricks')),
+      );
+
+      expect(text, contains('Dive Master'));
+      expect(
+        text,
+        contains('Hendricks'),
+        reason: 'a dive logged before the junction existed keeps its text',
+      );
+    });
+  });
+
+  group('several roles per person (#1221)', () {
+    DiveRole builtIn(String id) => DiveRole(
+      id: id,
+      name: id,
+      isBuiltIn: true,
+      createdAt: epoch,
+      updatedAt: epoch,
+    );
+
+    test("a buddy's line names every role", () async {
+      final both = BuddyWithRole(
+        buddy: Buddy(id: 'b', name: 'Bea', createdAt: epoch, updatedAt: epoch),
+        roles: [
+          builtIn(DiveRole.instructorId),
+          builtIn(DiveRole.safetyDiverId),
+        ],
+      );
+      final text = pdfVisibleText(await render(teamDive(buddies: [both])));
+      expect(text, contains('Instructor, Safety Diver'));
+    });
+
+    test("the diver's own roles print", () async {
+      final dive = teamDive().copyWith(
+        diverRoleIds: const [DiveRole.diveGuideId, DiveRole.diveMasterId],
+      );
+      final bytes = await PdfTemplateDetailed().buildPdf(
+        dives: [dive],
+        pageSize: PdfPageSize.a4,
+        dates: PdfDateFormatter(
+          dateFormat: DateFormatPreference.ddmmyyyy,
+          timeFormat: TimeFormat.twentyFourHour,
+        ),
+        units: const UnitFormatter(AppSettings()),
+        diveRolesById: {for (final id in DiveRole.builtInIds) id: builtIn(id)},
+      );
+      expect(pdfVisibleText(bytes), contains('Dive Guide, Divemaster'));
+    });
+
+    Future<String> renderOwnRoles({String? diveOwnerId, Diver? diver}) async {
+      final dive = teamDive().copyWith(
+        diverId: diveOwnerId,
+        diverRoleIds: const [DiveRole.rearGuardId],
+      );
+      final bytes = await PdfTemplateDetailed().buildPdf(
+        dives: [dive],
+        pageSize: PdfPageSize.a4,
+        dates: PdfDateFormatter(
+          dateFormat: DateFormatPreference.ddmmyyyy,
+          timeFormat: TimeFormat.twentyFourHour,
+        ),
+        units: const UnitFormatter(AppSettings()),
+        diveRolesById: {for (final id in DiveRole.builtInIds) id: builtIn(id)},
+        diver: diver,
+      );
+      return pdfVisibleText(bytes);
+    }
+
+    Diver logbookDiver(String name) =>
+        Diver(id: 'owner', name: name, createdAt: epoch, updatedAt: epoch);
+
+    // The cover and diver pages print the name too, so the check is on the
+    // Team row itself: its roles followed by its label.
+    test("labels the diver's own roles with their name (#4458)", () async {
+      final text = await renderOwnRoles(
+        diveOwnerId: 'owner',
+        diver: logbookDiver('Zed Quill'),
+      );
+      expect(text, contains('Rear Guard Zed Quill'));
+      expect(text, isNot(contains('Rear Guard Me')));
+    });
+
+    test('a dive with no owner uses the logbook diver', () async {
+      final text = await renderOwnRoles(diver: logbookDiver('Zed Quill'));
+      expect(text, contains('Rear Guard Zed Quill'));
+    });
+
+    test('keeps Me for another profile\'s dive', () async {
+      final text = await renderOwnRoles(
+        diveOwnerId: 'someone-else',
+        diver: logbookDiver('Zed Quill'),
+      );
+      expect(text, contains('Rear Guard Me'));
+    });
+
+    test('keeps Me without a logbook diver or with a blank name', () async {
+      expect(await renderOwnRoles(), contains('Rear Guard Me'));
+      expect(
+        await renderOwnRoles(diveOwnerId: 'owner', diver: logbookDiver(' ')),
+        contains('Rear Guard Me'),
+      );
+    });
+  });
+}

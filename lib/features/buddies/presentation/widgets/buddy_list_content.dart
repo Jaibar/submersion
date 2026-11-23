@@ -1,13 +1,31 @@
-import 'dart:io' show Platform;
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/buddies/presentation/editing/buddy_new_sitting.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
+import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
+import 'package:submersion/features/buddies/data/services/contact_photo_loader.dart';
+import 'package:submersion/core/services/images/profile_photo_codec.dart';
+import 'package:submersion/shared/widgets/master_detail/estimated_row_scroll.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
+import 'package:submersion/shared/widgets/master_detail/list_position_restorer.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/utils/contact_import_support.dart';
+import 'package:submersion/shared/selection/bulk_action.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selectable_list_scope.dart';
+import 'package:submersion/shared/selection/selection_app_bar.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
@@ -20,9 +38,24 @@ import 'package:submersion/features/buddies/data/repositories/buddy_repository.d
 import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_list_tile.dart';
+import 'package:submersion/features/buddies/presentation/widgets/compact_buddy_list_tile.dart';
 import 'package:submersion/features/buddies/presentation/widgets/dense_buddy_list_tile.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/shared/widgets/debounced_search_results.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_query_providers.dart';
+import 'package:submersion/features/buddies/query/buddy_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_frame.dart';
+import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
+import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_list_count_provider.dart';
+import 'package:submersion/features/buddies/presentation/widgets/swap/swap_with_buddy_button.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
 /// Content widget for the buddy list, used in master-detail layout.
 ///
@@ -41,12 +74,37 @@ class BuddyListContent extends ConsumerStatefulWidget {
   /// Optional floating action button to display when showAppBar is true.
   final Widget? floatingActionButton;
 
+  /// Test seam: replaces the native contact picker, which is a static entry
+  /// point with no place to inject a fake. Returns the picked contact, or null
+  /// when the user cancels. Mirrors [OcrScanPage.pickImageOverride].
+  final ContactPickerFn? pickContactOverride;
+
+  /// Test seam: replaces the contacts permission probe, which talks to a
+  /// platform channel widget tests cannot answer. Supplying it also opts the
+  /// test into the permission branch, which [pickContactOverride] alone skips.
+  final ContactAccessProbeFn? ensureAccessOverride;
+
+  /// Test seam: replaces the trip to system settings offered after a
+  /// permanently denied permission.
+  final VoidCallback? openSettingsOverride;
+
+  /// Drives bulk selection from outside the list when set.
+  ///
+  /// In table mode the page's header carries the overflow menu, "Select
+  /// items" among it, so the page has to reach the same controller the rows
+  /// use. Left null, the list owns its own.
+  final SelectionController? selectionController;
+
   const BuddyListContent({
     super.key,
     this.onItemSelected,
     this.selectedId,
     this.showAppBar = true,
     this.floatingActionButton,
+    @visibleForTesting this.pickContactOverride,
+    @visibleForTesting this.ensureAccessOverride,
+    @visibleForTesting this.openSettingsOverride,
+    this.selectionController,
   });
 
   @override
@@ -57,29 +115,44 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
   final ScrollController _scrollController = ScrollController();
   String? _lastScrolledToId;
   bool _selectionFromList = false;
-  bool _isSelectionMode = false;
-  final Set<String> _selectedIds = {};
-  BuddyMergeSnapshot? _mergeSnapshot;
 
-  /// Check if contact import is supported on this platform
-  bool get _isContactImportSupported {
-    if (kIsWeb) return false;
-    return Platform.isIOS || Platform.isAndroid;
+  /// Brings the list back to the buddy last opened when it is built again
+  /// after the diver left it (#3301).
+  late final ListPositionRestorer _positionRestorer = ListPositionRestorer(
+    controller: _scrollController,
+    attempt: _restoreRememberedBuddy,
+  );
+
+  /// The bulk-selection state machine for this list: the page's when it
+  /// passes one, otherwise this list's own.
+  late final SelectionController _selection = _adoptSelection();
+
+  /// Only a controller this list created is this list's to dispose. Set in
+  /// the same step that picks the controller, so the two cannot disagree.
+  bool _ownsSelection = false;
+
+  SelectionController _adoptSelection() {
+    final external = widget.selectionController;
+    _ownsSelection = external == null;
+    return external ?? SelectionController();
   }
+
+  /// Convenience mirrors of the controller, so the widget tree reads clearly.
+  bool get _isSelectionMode => _selection.value.isActive;
+  Set<String> get _selectedIds => _selection.value.checkedIds;
+  BuddyMergeSnapshot? _mergeSnapshot;
 
   @override
   void initState() {
     super.initState();
-    if (widget.selectedId != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToSelectedItem();
-      });
-    }
+    _positionRestorer.start(ref, filteredBuddiesWithDiveCountProvider);
   }
 
   @override
   void dispose() {
+    _positionRestorer.dispose();
     _scrollController.dispose();
+    if (_ownsSelection) _selection.dispose();
     super.dispose();
   }
 
@@ -98,32 +171,40 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
   }
 
-  void _scrollToSelectedItem() {
-    if (widget.selectedId == null) return;
+  /// One try at showing the selected buddy (one in the address) or, failing
+  /// that, the buddy last opened, for [_positionRestorer]: true once there
+  /// is nothing left to wait for. A list pushed over another page starts at
+  /// its top unless its address names one.
+  bool _restoreRememberedBuddy() {
+    if (!mounted) return true;
+    return restoreListPosition(
+      context,
+      items: ref.read(filteredBuddiesWithDiveCountProvider),
+      selectedId: widget.selectedId,
+      rememberedId: ref.read(highlightedBuddyIdProvider),
+      idOf: (item) => item.buddy.id,
+      controller: _scrollController,
+      scrollTo: (id) => _scrollToSelectedItem(targetId: id, jump: true),
+    );
+  }
 
-    final buddiesAsync = ref.read(allBuddiesWithDiveCountProvider);
-    buddiesAsync.whenData((buddies) {
-      final index = buddies.indexWhere((b) => b.buddy.id == widget.selectedId);
-      if (index >= 0 && _scrollController.hasClients) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_scrollController.hasClients || buddies.isEmpty) return;
-
-          final maxScroll = _scrollController.position.maxScrollExtent;
-          final viewportHeight = _scrollController.position.viewportDimension;
-          final totalContentHeight = maxScroll + viewportHeight - 80;
-          final avgItemHeight = totalContentHeight / buddies.length;
-          final targetOffset = (index * avgItemHeight) - (viewportHeight / 3);
-          final clampedOffset = targetOffset.clamp(0.0, maxScroll);
-
-          _scrollController.animateTo(
-            clampedOffset,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-          );
-          _lastScrolledToId = widget.selectedId;
-        });
-      }
-    });
+  /// Scrolls to [targetId], or the selected buddy when omitted. [jump] moves
+  /// straight there, for a list being restored, which should not visibly
+  /// travel from the top.
+  void _scrollToSelectedItem({String? targetId, bool jump = false}) {
+    final target = targetId ?? widget.selectedId;
+    if (target == null || !_scrollController.hasClients) return;
+    final items = ref.read(filteredBuddiesWithDiveCountProvider).value;
+    if (items == null) return;
+    final index = items.indexWhere((item) => item.buddy.id == target);
+    if (index < 0) return;
+    _lastScrolledToId = target;
+    scrollToEstimatedRow(
+      _scrollController,
+      index: index,
+      rowCount: items.length,
+      jump: jump,
+    );
   }
 
   void _handleItemTap(Buddy buddy) {
@@ -133,6 +214,7 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
 
     ref.read(highlightedBuddyIdProvider.notifier).state = buddy.id;
+    forgetClosedPane(ref, RecordListSection.buddies);
 
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
@@ -142,65 +224,91 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
   }
 
-  void _enterSelectionMode(String? initialId) {
-    setState(() {
-      _isSelectionMode = true;
-      _selectedIds.clear();
-      if (initialId != null) {
-        _selectedIds.add(initialId);
-      }
-    });
+  /// Enter selection mode implicitly, from a modifier-click, checking [id].
+  ///
+  /// Clearing the highlight keeps the detail pane from arguing with the bulk
+  /// selection about what the row means: a row left highlighted but unchecked
+  /// reads as selected while no bulk action would touch it.
+  ///
+  /// The Select controls route to [SelectionController.enterExplicit] directly
+  /// -- they have no row to check -- so this helper only ever serves the
+  /// implicit path, which since the removal of long-press entry means
+  /// modifier-click alone.
+  void _enterImplicitSelection(String id, {String? seedId}) {
+    ref.read(highlightedBuddyIdProvider.notifier).state = null;
+    _selection.enterImplicit(id, seedId: seedId);
   }
 
-  void _exitSelectionMode() {
-    setState(() {
-      _isSelectionMode = false;
-      _selectedIds.clear();
-    });
+  void _exitSelectionMode() => _selection.exit();
+
+  void _toggleSelection(String id) => _selection.toggle(id);
+
+  /// Select the contiguous span from the anchor buddy to [targetId].
+  ///
+  /// With no anchor yet, the highlighted row is the origin, matching Finder.
+  void _selectRangeTo(String targetId, List<String> orderedIds) {
+    _selection.extendTo(
+      targetId,
+      orderedIds,
+      fallbackAnchorId: ref.read(highlightedBuddyIdProvider),
+    );
   }
 
-  void _toggleSelection(String id) {
-    setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
-        if (_selectedIds.isEmpty) {
-          _isSelectionMode = false;
-        }
-      } else {
-        _selectedIds.add(id);
-      }
-    });
+  /// Cmd/Ctrl-click [id], carrying the highlighted buddy into the selection.
+  ///
+  /// Outside selection mode the highlighted row is what the user sees as
+  /// selected, so a modifier-click adds to it rather than replacing it. A
+  /// highlight that filtering has pushed out of [orderedIds] is ignored, so
+  /// the count can never include a buddy that is not on screen.
+  void _modifierTap(String id, List<String> orderedIds) {
+    final highlighted = ref.read(highlightedBuddyIdProvider);
+    _enterImplicitSelection(
+      id,
+      seedId: highlighted != null && orderedIds.contains(highlighted)
+          ? highlighted
+          : null,
+    );
   }
 
-  void _selectAll(List<BuddyWithDiveCount> buddies) {
-    setState(() {
-      _selectedIds.addAll(buddies.map((b) => b.buddy.id));
-    });
+  /// One tap policy for every buddy row, in every view mode.
+  ///
+  /// A held modifier turns a tap into an implicit entry -- the one path that
+  /// still evaporates at zero checked, since touch has no gesture entry left.
+  /// Shift extends from the anchor, falling back to the highlighted row.
+  void _handleRowTap(String id, List<BuddyWithDiveCount> buddies) {
+    final orderedIds = buddies.map((b) => b.buddy.id).toList();
+    if (SelectableListScope.isShiftPressed()) {
+      _selectRangeTo(id, orderedIds);
+      return;
+    }
+    if (SelectableListScope.isModifierPressed()) {
+      _modifierTap(id, orderedIds);
+      return;
+    }
+    if (_isSelectionMode) {
+      _selection.toggle(id);
+      return;
+    }
+    final index = buddies.indexWhere((b) => b.buddy.id == id);
+    if (index < 0) return;
+    _handleItemTap(buddies[index].buddy);
   }
 
-  void _deselectAll() {
-    setState(() {
-      _selectedIds.clear();
-    });
-  }
-
-  Future<void> _startMerge() async {
+  Future<BulkActionOutcome> _startMerge() async {
     final selectedCount = _selectedIds.length;
     final result = await context.push<BuddyMergeResult>(
       '/buddies/merge',
       extra: _selectedIds.toList(),
     );
 
-    if (!mounted || result == null) return;
+    if (result == null) return BulkActionOutcome.cancelled;
+    if (!mounted) return BulkActionOutcome.completed;
 
     _mergeSnapshot = result.snapshot;
     final mergedId = result.survivorId;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
 
-    setState(() {
-      _isSelectionMode = false;
-      _selectedIds.clear();
-    });
+    _selection.exit();
 
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
@@ -216,6 +324,7 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
           ),
           duration: const Duration(seconds: 5),
           showCloseIcon: true,
+          persist: false,
           action: SnackBarAction(
             label: context.l10n.buddies_list_merge_undo,
             onPressed: () async {
@@ -238,9 +347,10 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
         ),
       );
     }
+    return BulkActionOutcome.completed;
   }
 
-  Future<void> _confirmAndDelete() async {
+  Future<BulkActionOutcome> _confirmAndDelete() async {
     final count = _selectedIds.length;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -283,11 +393,15 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
           ),
         );
       }
+      return BulkActionOutcome.completed;
     }
+    return BulkActionOutcome.cancelled;
   }
 
   Future<void> _importFromContacts(BuildContext context) async {
-    if (!_isContactImportSupported) {
+    // An injected picker implies support: the test host is a desktop, where
+    // the real guard would short-circuit before any of the logic below.
+    if (widget.pickContactOverride == null && !isContactImportSupported) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -301,36 +415,38 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
 
     try {
-      if (!await FlutterContacts.permissions.has(PermissionType.read)) {
-        await FlutterContacts.permissions.request(PermissionType.read);
-        if (!await FlutterContacts.permissions.has(PermissionType.read)) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  context.l10n.buddies_message_contactPermissionRequired,
-                ),
-              ),
+      // Only Android needs a permission here. The native picker itself is
+      // permissionless on both platforms, and asking it for properties always
+      // works on iOS, so the iOS build never shows an address-book prompt.
+      //
+      // An injected picker on its own skips the check, because the test host
+      // is a desktop where the real probe would short-circuit anyway. A test
+      // that wants the permission branch injects the probe as well.
+      final override = widget.pickContactOverride;
+      final ensureAccess = widget.ensureAccessOverride;
+      if (override == null || ensureAccess != null) {
+        final allowed = await ensureContactAccessOrExplain(
+          context,
+          deniedMessage: context.l10n.buddies_message_contactPermissionRequired,
+          ensureAccessOverride: ensureAccess,
+          openSettingsOverride: widget.openSettingsOverride,
+        );
+        if (!allowed) return;
+      }
+
+      // One call: flutter_contacts 2.3.1's picker returns the contact with the
+      // requested properties already populated, so there is no follow-up get.
+      final fullContact = override != null
+          ? await override()
+          : await FlutterContacts.native.showPicker(
+              properties: {
+                ContactProperty.name,
+                ContactProperty.email,
+                ContactProperty.phone,
+                ...contactPhotoProperties,
+              },
             );
-          }
-          return;
-        }
-      }
-
-      final contactId = await FlutterContacts.native.showPicker();
-      if (contactId == null) return;
-
-      final fullContact = await FlutterContacts.get(contactId);
-      if (fullContact == null) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.buddies_message_contactLoadFailed),
-            ),
-          );
-        }
-        return;
-      }
+      if (fullContact == null) return;
 
       final name = fullContact.displayName;
       final email = fullContact.emails.isNotEmpty
@@ -340,17 +456,43 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
           ? fullContact.phones.first.number
           : null;
 
-      if (context.mounted) {
-        if (ResponsiveBreakpoints.isMasterDetail(context)) {
-          // For desktop, pass data via query params (simplified approach)
-          final state = GoRouterState.of(context);
-          context.go('${state.uri.path}?mode=new');
-        } else {
-          context.push(
-            '/buddies/new',
-            extra: {'name': name, 'email': email, 'phone': phone},
-          );
+      // Centered automatically with no crop dialog: the user is mid-import and
+      // did not ask to frame a photo. They can adjust it afterwards on the
+      // buddy's page.
+      final rawPhoto =
+          fullContact.photo?.fullSize ?? fullContact.photo?.thumbnail;
+      Uint8List? photo;
+      if (rawPhoto != null) {
+        // No declaredName: the address book gives no filename and a contact
+        // photo is not guaranteed to be JPEG. decodeNamedImage picks the
+        // decoder purely by extension with no fallback, so claiming '.jpg'
+        // over PNG bytes would report a valid photo as undecodable.
+        final encoded = await encodeStoredImage(
+          ImageEncodeRequest.fromBytes(
+            bytes: rawPhoto,
+            spec: ImageEncodeSpec.avatar,
+          ),
+        );
+        if (encoded.outcome == ImageEncodeOutcome.encoded) {
+          photo = encoded.bytes;
         }
+      }
+
+      if (context.mounted) {
+        // One push for every layout. `/buddies/new` declares
+        // parentNavigatorKey: rootNavigatorKey so it renders in the foreground
+        // rather than under the shell, which is why the old master-detail
+        // special case was not just buggy (it carried no data, so an iPad in
+        // landscape landed on a blank form) but unnecessary.
+        openNewBuddy(
+          context,
+          seed: NewBuddySeed(
+            name: name,
+            email: email,
+            phone: phone,
+            photo: photo,
+          ),
+        );
       }
     } catch (e) {
       if (context.mounted) {
@@ -365,10 +507,23 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
   }
 
+  void _setQuery(QueryNode? query) =>
+      ref.read(buddyQueryProvider.notifier).state = query;
+
+  /// The list body with the query's chips above it (#2365).
+  Widget _withQueryChips(Widget child) => EntitySearchFrame(
+    subject: QuerySubject.buddies,
+    root: buddyQueryEntity,
+    query: ref.watch(buddyQueryProvider),
+    onChanged: _setQuery,
+    child: child,
+  );
+
   @override
   Widget build(BuildContext context) {
+    ref.watch(certificationCatalogSyncProvider);
     final viewMode = ref.watch(buddyListViewModeProvider);
-    final buddiesAsync = ref.watch(allBuddiesWithDiveCountProvider);
+    final buddiesAsync = ref.watch(filteredBuddiesWithDiveCountProvider);
 
     // Table mode uses a dedicated scaffold with column configuration support.
     if (viewMode == ListViewMode.table) {
@@ -376,97 +531,147 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
 
     final sort = ref.watch(buddySortProvider);
-    final content = buddiesAsync.when(
-      data: (buddies) {
-        final sorted = applyBuddyWithDiveCountSorting(buddies, sort);
-        return sorted.isEmpty
-            ? _buildEmptyState(context)
-            : _buildBuddyList(context, ref, sorted);
-      },
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => _buildErrorState(context, error),
-    );
 
-    if (!widget.showAppBar) {
-      return Column(
-        children: [
-          _isSelectionMode
-              ? _buildCompactSelectionAppBar(
-                  context,
-                  buddiesAsync.valueOrNull ?? [],
-                )
-              : _buildCompactAppBar(context),
-          Expanded(child: content),
-        ],
+    // Built inside the selection listener below so rows re-render as checks
+    // change; computing it here would leave the list frozen mid-selection.
+    Widget buildContent() {
+      return _withQueryChips(
+        buddiesAsync.when(
+          data: (buddies) {
+            // Favorites are pinned to the top regardless of the chosen sort
+            // field (issue #1336), matching the "Add buddy" picker sheet.
+            final (:favorites, :others) = pinFavoriteBuddiesToTop(
+              buddies,
+              sort,
+            );
+            final sorted = [...favorites, ...others];
+            return sorted.isEmpty
+                ? _buildEmptyState(context)
+                : _buildBuddyList(context, ref, sorted);
+          },
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (error, stack) => _buildErrorState(context, error),
+        ),
       );
     }
 
-    return Scaffold(
-      appBar: _isSelectionMode
-          ? _buildSelectionAppBar(buddiesAsync.valueOrNull ?? [])
-          : AppBar(
-              title: Text(context.l10n.buddies_title),
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.sort),
-                  tooltip: context.l10n.buddies_action_sort,
-                  onPressed: () => _showSortSheet(context),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.search),
-                  tooltip: context.l10n.buddies_action_search,
-                  onPressed: () {
-                    showSearch(
-                      context: context,
-                      delegate: BuddySearchDelegate(ref),
-                    );
-                  },
-                ),
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert),
-                  tooltip: context.l10n.buddies_action_moreOptions,
-                  onSelected: (value) {
-                    if (value == 'import') {
-                      _importFromContacts(context);
-                    } else if (value.startsWith('view_')) {
-                      final mode = ListViewMode.fromName(
-                        value.replaceFirst('view_', ''),
-                      );
-                      ref.read(buddyListViewModeProvider.notifier).state = mode;
-                    }
-                  },
-                  itemBuilder: (context) {
-                    final currentMode = ref.read(buddyListViewModeProvider);
-                    return [
-                      ...ListViewModeToggle.menuItems(
-                        context,
-                        currentMode: currentMode,
-                        modes: const [
-                          ListViewMode.detailed,
-                          ListViewMode.compact,
-                          ListViewMode.table,
-                        ],
-                      ),
-                      const PopupMenuDivider(),
-                      PopupMenuItem(
-                        value: 'import',
-                        child: ListTile(
-                          leading: const Icon(Icons.contacts),
-                          title: Text(
-                            context.l10n.buddies_action_importFromContacts,
+    final loadedBuddies = buddiesAsync.value ?? const <BuddyWithDiveCount>[];
+    final visibleIds = loadedBuddies.map((b) => b.buddy.id).toList();
+
+    // Drop checked buddies that fell out of the visible list, so the count
+    // always matches what is on screen. pruneToSettled is a no-op when nothing
+    // changed, which keeps this off a rebuild loop.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          buddiesAsync,
+          (rows) => rows.map((b) => b.buddy.id),
+        );
+      }
+    });
+
+    if (!widget.showAppBar) {
+      return SelectableListScope(
+        controller: _selection,
+        selectableIds: visibleIds,
+        child: ValueListenableBuilder<SelectionState>(
+          valueListenable: _selection,
+          builder: (context, selection, _) => Column(
+            children: [
+              selection.isActive
+                  ? _buildCompactSelectionAppBar(context, loadedBuddies)
+                  : _buildCompactAppBar(context),
+              Expanded(child: buildContent()),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) => Scaffold(
+          appBar: selection.isActive
+              ? _buildSelectionAppBar(loadedBuddies)
+              : AppBar(
+                  title: FeatureAppBarTitle(
+                    featureId: 'buddies',
+                    title: context.l10n.buddies_title,
+                    subtitle: buddyListCountLabel(context, ref),
+                  ),
+                  actions: [
+                    const SwapWithBuddyButton(),
+                    EntitySearchAction(
+                      subject: QuerySubject.buddies,
+                      active: ref.watch(buddyQueryProvider) != null,
+                      tooltip: context.l10n.buddies_action_search,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.sort),
+                      tooltip: context.l10n.buddies_action_sort,
+                      onPressed: () => _showSortSheet(context),
+                    ),
+                    QueryFilterAction(
+                      provider: buddyQueryProvider,
+                      subject: QuerySubject.buddies,
+                      root: buddyQueryEntity,
+                    ),
+                    PopupMenuButton<String>(
+                      icon: const Icon(Icons.more_vert),
+                      tooltip: context.l10n.buddies_action_moreOptions,
+                      onSelected: (value) {
+                        if (value == 'import') {
+                          _importFromContacts(context);
+                        } else if (value.startsWith('view_')) {
+                          final mode = ListViewMode.fromName(
+                            value.replaceFirst('view_', ''),
+                          );
+                          ref
+                              .read(settingsProvider.notifier)
+                              .setBuddyListViewMode(mode);
+                        }
+                      },
+                      itemBuilder: (context) {
+                        final currentMode = ref.read(buddyListViewModeProvider);
+                        return [
+                          ...selectItemsMenuEntries(
+                            context,
+                            onSelect: _selection.enterExplicit,
                           ),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                    ];
-                  },
+                          ...ListViewModeToggle.menuItems(
+                            context,
+                            currentMode: currentMode,
+                            modes: const [
+                              ListViewMode.detailed,
+                              ListViewMode.compact,
+                              ListViewMode.table,
+                            ],
+                          ),
+                          const PopupMenuDivider(),
+                          PopupMenuItem(
+                            value: 'import',
+                            child: ListTile(
+                              leading: const Icon(Icons.contacts),
+                              title: Text(
+                                context.l10n.buddies_action_importFromContacts,
+                              ),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ];
+                      },
+                    ),
+                  ],
                 ),
-              ],
-            ),
-      body: content,
-      floatingActionButton: _isSelectionMode
-          ? null
-          : widget.floatingActionButton,
+          body: buildContent(),
+          floatingActionButton: selection.isActive
+              ? null
+              : widget.floatingActionButton,
+        ),
+      ),
     );
   }
 
@@ -479,17 +684,46 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     BuildContext context,
     AsyncValue<List<BuddyWithDiveCount>> buddiesAsync,
   ) {
-    final tableContent = _buildTableView(context, buddiesAsync);
+    final loadedBuddies = buddiesAsync.value ?? const <BuddyWithDiveCount>[];
+    final visibleIds = loadedBuddies.map((b) => b.buddy.id).toList();
 
-    if (_isSelectionMode) {
-      return Column(
-        children: [
-          _buildCompactSelectionAppBar(context, buddiesAsync.valueOrNull ?? []),
-          Expanded(child: tableContent),
-        ],
-      );
-    }
-    return tableContent;
+    // Same pruning the list path does: drop checked buddies that fell out of
+    // the visible list, so the count always matches what is on screen.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          buddiesAsync,
+          (rows) => rows.map((b) => b.buddy.id),
+        );
+      }
+    });
+
+    // The scope carries Escape, Ctrl/Cmd-A and the Android back handling, and
+    // the builder is what repaints the table as checks change -- the table is
+    // built inside it for that reason.
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) {
+          final tableContent = _withQueryChips(
+            _buildTableView(context, buddiesAsync),
+          );
+
+          // Table mode has no app bar of its own: "Select items" sits in the
+          // page header's overflow menu, and the contextual bar opens above
+          // the table while selecting.
+          return Column(
+            children: [
+              if (selection.isActive)
+                _buildCompactSelectionAppBar(context, loadedBuddies),
+              Expanded(child: tableContent),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   /// Build the [EntityTableView] for buddy table mode.
@@ -506,30 +740,50 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
         }
         final config = ref.watch(buddyTableConfigProvider);
         final notifier = ref.read(buddyTableConfigProvider.notifier);
-        final settings = ref.watch(settingsProvider);
-        final units = UnitFormatter(settings);
-
-        // Convert BuddyWithDiveCount (class) to BuddyWithCount (record) as
-        // required by BuddyFieldAdapter.
-        final buddyRecords = buddies
-            .map((b) => (buddy: b.buddy, diveCount: b.diveCount))
-            .toList();
+        final units = ref.watch(unitFormatterProvider);
 
         return EntityTableView<BuddyWithCount, BuddyField>(
-          entities: buddyRecords,
+          entities: buddies,
           idExtractor: (b) => b.buddy.id,
-          adapter: BuddyFieldAdapter.instance,
+          adapter: BuddyFieldAdapter.withCatalog(context.certificationCatalog),
           config: config,
           units: units,
+          // A photo is not a sortable text value, so it rides in the row's
+          // leading slot rather than joining BuddyField, which also avoids the
+          // saved-layout breakage that renaming that enum causes.
+          leadingBuilder: (entry) => ProfileAvatar(
+            photo: entry.buddy.photo,
+            initials: entry.buddy.initials,
+            radius: 14,
+          ),
           onSortFieldChanged: notifier.setSortField,
           onResizeColumn: notifier.resizeColumn,
+          onHideColumn: notifier.hideColumn,
           onEntityTapDown: (id) {
-            if (!_isSelectionMode) {
-              ref.read(highlightedBuddyIdProvider.notifier).state = id;
+            // Rows carry a double-tap, so onEntityTap only resolves after the
+            // double-tap timer -- long after this fires. A modified click is a
+            // selection gesture, not a navigation one: moving the highlight
+            // here would overwrite the very anchor the shift-click is about to
+            // extend from.
+            if (_isSelectionMode ||
+                SelectableListScope.isShiftPressed() ||
+                SelectableListScope.isModifierPressed()) {
+              return;
             }
+            ref.read(highlightedBuddyIdProvider.notifier).state = id;
+            // The same row again sets no new highlight; the pane is reopened all
+            // the same, so it is no longer one the diver emptied (#3301).
+            forgetClosedPane(ref, RecordListSection.buddies);
           },
           onEntityTap: (id) {
-            if (_isSelectionMode) {
+            // Table mode honours modifier and shift clicks too, so selection
+            // works the same way as in the list view modes.
+            final orderedIds = buddies.map((b) => b.buddy.id).toList();
+            if (SelectableListScope.isShiftPressed()) {
+              _selectRangeTo(id, orderedIds);
+            } else if (SelectableListScope.isModifierPressed()) {
+              _modifierTap(id, orderedIds);
+            } else if (_isSelectionMode) {
               _toggleSelection(id);
             }
           },
@@ -537,9 +791,6 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
             if (_isSelectionMode) return;
             context.push('/buddies/$id');
           },
-          onEntityLongPress: _isSelectionMode
-              ? null
-              : (id) => _enterSelectionMode(id),
           selectedIds: _selectedIds,
           isSelectionMode: _isSelectionMode,
           highlightedId: ref.watch(highlightedBuddyIdProvider),
@@ -563,24 +814,36 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
       child: Row(
         children: [
           const SizedBox(width: 8),
-          Text(
-            context.l10n.buddies_title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          // Expanded, and no Spacer: the title must be the row's only flexible
+          // child, or Spacer takes half the free space and the leftover half
+          // lands after the last icon (see trip_list_content for the detail).
+          Expanded(
+            child: FeatureAppBarTitle(
+              featureId: 'buddies',
+              title: context.l10n.buddies_title,
+              subtitle: buddyListCountLabel(context, ref),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
           ),
-          const Spacer(),
+          const SwapWithBuddyButton(iconSize: 20),
+          EntitySearchAction(
+            subject: QuerySubject.buddies,
+            active: ref.watch(buddyQueryProvider) != null,
+            tooltip: context.l10n.buddies_action_search,
+            compact: true,
+          ),
           IconButton(
             icon: const Icon(Icons.sort, size: 20),
             tooltip: context.l10n.buddies_action_sort,
             onPressed: () => _showSortSheet(context),
           ),
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
-            tooltip: context.l10n.buddies_action_search,
-            onPressed: () {
-              showSearch(context: context, delegate: BuddySearchDelegate(ref));
-            },
+          QueryFilterAction(
+            provider: buddyQueryProvider,
+            subject: QuerySubject.buddies,
+            root: buddyQueryEntity,
+            compact: true,
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, size: 20),
@@ -592,12 +855,16 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(buddyListViewModeProvider.notifier).state = mode;
+                ref.read(settingsProvider.notifier).setBuddyListViewMode(mode);
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(buddyListViewModeProvider);
               return [
+                ...selectItemsMenuEntries(
+                  context,
+                  onSelect: _selection.enterExplicit,
+                ),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -624,100 +891,44 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     );
   }
 
+  /// Buddy-specific extras. Select-all, deselect-all and delete are supplied
+  /// by SelectionAppBar. Computed once and shared by both shells so the pane
+  /// cannot drift from the full-width bar.
+  List<BulkAction> _bulkActions(List<BuddyWithDiveCount> buddies) {
+    return [
+      BulkAction(
+        id: 'merge',
+        icon: Icons.merge_type,
+        label: context.l10n.buddies_list_selection_mergeTooltip,
+        minCount: 2,
+        onInvoke: _startMerge,
+      ),
+    ];
+  }
+
+  /// Contextual bar for the master pane, which is too narrow for every icon.
   Widget _buildCompactSelectionAppBar(
     BuildContext context,
     List<BuddyWithDiveCount> buddies,
   ) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer,
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).colorScheme.outline,
-            width: 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.close, size: 20),
-            tooltip: context.l10n.buddies_list_selection_closeTooltip,
-            onPressed: _exitSelectionMode,
-          ),
-          Text(
-            context.l10n.buddies_list_selection_count(_selectedIds.length),
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const Spacer(),
-          IconButton(
-            icon: const Icon(Icons.select_all, size: 20),
-            tooltip: context.l10n.buddies_list_selection_selectAllTooltip,
-            onPressed: _selectedIds.length < buddies.length
-                ? () => _selectAll(buddies)
-                : null,
-          ),
-          IconButton(
-            icon: const Icon(Icons.deselect, size: 20),
-            tooltip: context.l10n.buddies_list_selection_deselectAllTooltip,
-            onPressed: _selectedIds.isNotEmpty ? _deselectAll : null,
-          ),
-          IconButton(
-            icon: const Icon(Icons.merge_type, size: 20),
-            tooltip: context.l10n.buddies_list_selection_mergeTooltip,
-            onPressed: _selectedIds.length > 1 ? _startMerge : null,
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.delete,
-              size: 20,
-              color: Theme.of(context).colorScheme.error,
-            ),
-            tooltip: context.l10n.buddies_list_selection_deleteTooltip,
-            onPressed: _selectedIds.isNotEmpty ? _confirmAndDelete : null,
-          ),
-        ],
-      ),
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: buddies.map((b) => b.buddy.id).toList(),
+      actions: _bulkActions(buddies),
+      shell: SelectionBarShell.pane,
+      maxInlineActions: 1,
+      onDelete: _confirmAndDelete,
     );
   }
 
-  AppBar _buildSelectionAppBar(List<BuddyWithDiveCount> buddies) {
-    return AppBar(
-      leading: IconButton(
-        icon: const Icon(Icons.close),
-        tooltip: context.l10n.buddies_list_selection_closeTooltip,
-        onPressed: _exitSelectionMode,
-      ),
-      title: Text(
-        context.l10n.buddies_list_selection_count(_selectedIds.length),
-      ),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.select_all),
-          tooltip: context.l10n.buddies_list_selection_selectAllTooltip,
-          onPressed: _selectedIds.length < buddies.length
-              ? () => _selectAll(buddies)
-              : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.deselect),
-          tooltip: context.l10n.buddies_list_selection_deselectAllTooltip,
-          onPressed: _selectedIds.isNotEmpty ? _deselectAll : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.merge_type),
-          tooltip: context.l10n.buddies_list_selection_mergeTooltip,
-          onPressed: _selectedIds.length > 1 ? _startMerge : null,
-        ),
-        IconButton(
-          icon: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
-          tooltip: context.l10n.buddies_list_selection_deleteTooltip,
-          onPressed: _selectedIds.isNotEmpty ? _confirmAndDelete : null,
-        ),
-      ],
+  /// Contextual bar for the full-width standalone layout.
+  SelectionAppBar _buildSelectionAppBar(List<BuddyWithDiveCount> buddies) {
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: buddies.map((b) => b.buddy.id).toList(),
+      actions: _bulkActions(buddies),
+      shell: SelectionBarShell.appBar,
+      onDelete: _confirmAndDelete,
     );
   }
 
@@ -729,13 +940,12 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
       currentField: sort.field,
       currentDirection: sort.direction,
       fields: BuddySortField.values,
-      getFieldDisplayName: (field) => field.displayName,
+      getFieldDisplayName: (field) => field.localizedName(context.l10n),
       getFieldIcon: (field) => field.icon,
       onSortChanged: (field, direction) {
-        ref.read(buddySortProvider.notifier).state = SortState(
-          field: field,
-          direction: direction,
-        );
+        ref
+            .read(settingsProvider.notifier)
+            .setBuddySort(SortState(field: field, direction: direction));
       },
     );
   }
@@ -749,52 +959,65 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
       onRefresh: () async {
         ref.invalidate(allBuddiesWithDiveCountProvider);
       },
-      child: ListView.builder(
-        controller: _scrollController,
-        padding: const EdgeInsets.only(bottom: 80),
-        itemCount: buddies.length,
-        itemBuilder: (context, index) {
-          final buddyWithCount = buddies[index];
-          final buddy = buddyWithCount.buddy;
-          final highlightedId = ref.watch(highlightedBuddyIdProvider);
-          final isHighlighted = highlightedId == buddy.id;
-          final isSelected = widget.selectedId == buddy.id || isHighlighted;
-          final isChecked = _selectedIds.contains(buddy.id);
-          final viewMode = ref.watch(buddyListViewModeProvider);
-          return switch (viewMode) {
-            ListViewMode.detailed || ListViewMode.compact => GestureDetector(
-              onLongPress: _isSelectionMode
-                  ? null
-                  : () => _enterSelectionMode(buddy.id),
-              child: BuddyListTile(
-                buddy: buddy,
-                diveCount: buddyWithCount.diveCount,
+      child: KeyboardListNavigator(
+        keys: [for (final b in buddies) b.buddy.id],
+        currentKey: widget.selectedId ?? ref.watch(highlightedBuddyIdProvider),
+        onMove: (id) => moveListCursor(
+          context,
+          canOpen: !_isSelectionMode && widget.onItemSelected != null,
+          open: () => _handleRowTap(id, buddies),
+          highlight: () =>
+              ref.read(highlightedBuddyIdProvider.notifier).state = id,
+        ),
+        onActivate: (id) => _handleRowTap(id, buddies),
+        child: ListView.builder(
+          controller: _scrollController,
+          padding: const EdgeInsets.only(bottom: 80),
+          itemCount: buddies.length,
+          itemBuilder: (context, index) {
+            final buddyWithCount = buddies[index];
+            final buddy = buddyWithCount.buddy;
+            final highlightedId = ref.watch(highlightedBuddyIdProvider);
+            final isHighlighted = highlightedId == buddy.id;
+            final isSelected = widget.selectedId == buddy.id || isHighlighted;
+            final isChecked = _selectedIds.contains(buddy.id);
+            final viewMode = ref.watch(buddyListViewModeProvider);
+            final tile = switch (viewMode) {
+              ListViewMode.detailed => BuddyListTile(
+                entry: buddyWithCount,
                 isSelected: isSelected,
                 isChecked: isChecked,
                 isSelectionMode: _isSelectionMode,
-                onTap: () => _handleItemTap(buddy),
+                onTap: () => _handleRowTap(buddy.id, buddies),
               ),
-            ),
-            ListViewMode.dense || ListViewMode.table => GestureDetector(
-              onLongPress: _isSelectionMode
-                  ? null
-                  : () => _enterSelectionMode(buddy.id),
-              child: DenseBuddyListTile(
+              ListViewMode.compact => CompactBuddyListTile(
+                entry: buddyWithCount,
+                isSelectionMode: _isSelectionMode,
+                isSelected: isChecked,
+                isHighlighted: !_isSelectionMode && isHighlighted,
+                onTap: () => _handleRowTap(buddy.id, buddies),
+              ),
+              ListViewMode.dense || ListViewMode.table => DenseBuddyListTile(
                 buddy: buddy,
                 diveCount: buddyWithCount.diveCount,
                 isChecked: isChecked,
                 isHighlighted: !_isSelectionMode && isHighlighted,
                 isSelectionMode: _isSelectionMode,
-                onTap: () => _handleItemTap(buddy),
+                onTap: () => _handleRowTap(buddy.id, buddies),
               ),
-            ),
-          };
-        },
+            };
+            return KeyboardListItem(navigationKey: buddy.id, child: tile);
+          },
+        ),
       ),
     );
   }
 
   Widget _buildEmptyState(BuildContext context) {
+    // A query that hid every buddy is not "no buddies yet".
+    if (ref.watch(buddyQueryProvider) != null) {
+      return QueryNoMatchState(onClear: () => _setQuery(null));
+    }
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -817,19 +1040,23 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
             ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () {
-              if (ResponsiveBreakpoints.isMasterDetail(context)) {
-                final routerState = GoRouterState.of(context);
-                context.go('${routerState.uri.path}?mode=new');
-              } else {
-                context.push('/buddies/new');
-              }
-            },
-            icon: const Icon(Icons.person_add),
-            label: Text(context.l10n.buddies_action_addFirst),
-          ),
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!MasterDetailFormScope.isFormOpenOf(context)) ...[
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: () {
+                if (ResponsiveBreakpoints.isMasterDetail(context)) {
+                  final routerState = GoRouterState.of(context);
+                  context.go('${routerState.uri.path}?mode=new');
+                } else {
+                  openNewBuddy(context);
+                }
+              },
+              icon: const Icon(Icons.person_add),
+              label: Text(context.l10n.buddies_action_addFirst),
+            ),
+          ],
         ],
       ),
     );
@@ -845,226 +1072,15 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
           Text(context.l10n.buddies_error_loading(error.toString())),
           const SizedBox(height: 16),
           FilledButton(
-            onPressed: () => ref.invalidate(allBuddiesWithDiveCountProvider),
+            onPressed: () {
+              // An id-set error shows here too: run the query again as well.
+              ref.invalidate(entityQueryIdsProvider);
+              ref.invalidate(allBuddiesWithDiveCountProvider);
+            },
             child: Text(context.l10n.buddies_action_retry),
           ),
         ],
       ),
-    );
-  }
-}
-
-/// List item widget for displaying a buddy
-class BuddyListTile extends StatelessWidget {
-  final Buddy buddy;
-  final int? diveCount;
-  final bool isSelected;
-  final bool isChecked;
-  final bool isSelectionMode;
-  final VoidCallback? onTap;
-
-  const BuddyListTile({
-    super.key,
-    required this.buddy,
-    this.diveCount,
-    this.isSelected = false,
-    this.isChecked = false,
-    this.isSelectionMode = false,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      color: isChecked
-          ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
-          : isSelected
-          ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
-          : null,
-      child: ListTile(
-        onTap: onTap,
-        leading: isSelectionMode
-            ? SizedBox(
-                width: 40,
-                height: 40,
-                child: Center(
-                  child: Checkbox(
-                    value: isChecked,
-                    onChanged: (_) => onTap?.call(),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                ),
-              )
-            : CircleAvatar(
-                backgroundColor: theme.colorScheme.primaryContainer,
-                backgroundImage: buddy.photoPath != null
-                    ? AssetImage(buddy.photoPath!)
-                    : null,
-                child: buddy.photoPath == null
-                    ? Text(
-                        buddy.initials,
-                        style: TextStyle(
-                          color: theme.colorScheme.onPrimaryContainer,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      )
-                    : null,
-              ),
-        title: Text(buddy.name),
-        subtitle: _buildSubtitle(context),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (diveCount != null)
-              Text(
-                context.l10n.buddies_label_diveCount(diveCount!),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            if (diveCount != null) const SizedBox(width: 8),
-            ExcludeSemantics(
-              child: Icon(
-                Icons.chevron_right,
-                color: theme.colorScheme.outline,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget? _buildSubtitle(BuildContext context) {
-    final parts = <String>[];
-
-    if (buddy.certificationLevel != null) {
-      parts.add(buddy.certificationLevel!.displayName);
-    }
-    if (buddy.certificationAgency != null) {
-      parts.add(buddy.certificationAgency!.displayName);
-    }
-
-    if (parts.isEmpty) {
-      return null;
-    }
-
-    return Text(parts.join(' - '));
-  }
-}
-
-/// Search delegate for buddies
-class BuddySearchDelegate extends SearchDelegate<Buddy?> {
-  final WidgetRef ref;
-
-  BuddySearchDelegate(this.ref);
-
-  @override
-  String get searchFieldLabel => 'Search buddies...';
-
-  @override
-  List<Widget> buildActions(BuildContext context) {
-    return [
-      if (query.isNotEmpty)
-        IconButton(
-          icon: const Icon(Icons.clear),
-          tooltip: context.l10n.buddies_action_clearSearch,
-          onPressed: () => query = '',
-        ),
-    ];
-  }
-
-  @override
-  Widget buildLeading(BuildContext context) {
-    return IconButton(
-      icon: const Icon(Icons.arrow_back),
-      tooltip: context.l10n.common_action_back,
-      onPressed: () => close(context, null),
-    );
-  }
-
-  @override
-  Widget buildResults(BuildContext context) {
-    return _buildSearchResults(context);
-  }
-
-  @override
-  Widget buildSuggestions(BuildContext context) {
-    if (query.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.search,
-              size: 64,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              context.l10n.buddies_search_hint,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return _buildSearchResults(context);
-  }
-
-  Widget _buildSearchResults(BuildContext context) {
-    return DebouncedSearchResults<Buddy>(
-      query: query,
-      watchProvider: (ref, q) => ref.watch(buddySearchProvider(q)),
-      dataBuilder: (context, buddies) {
-        return ListView.builder(
-          itemCount: buddies.length,
-          itemBuilder: (context, index) {
-            final buddy = buddies[index];
-            return BuddyListTile(
-              buddy: buddy,
-              onTap: () {
-                close(context, buddy);
-                context.push('/buddies/${buddy.id}');
-              },
-            );
-          },
-        );
-      },
-      emptyBuilder: (context, query) {
-        return Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.search_off,
-                size: 64,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                context.l10n.buddies_search_noResults(query),
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-      errorBuilder: (context, error) {
-        return Center(child: Text('Error: $error'));
-      },
     );
   }
 }

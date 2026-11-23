@@ -17,21 +17,21 @@ import 'package:submersion/features/dive_sites/data/repositories/site_repository
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/location_picker_map.dart';
-import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_map_content.dart';
 import 'package:submersion/features/maps/domain/entities/heat_map_point.dart';
 import 'package:submersion/features/maps/presentation/providers/heat_map_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/features/trips/domain/entities/liveaboard_details.dart';
-import 'package:submersion/features/trips/presentation/providers/liveaboard_providers.dart';
-import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/domain/services/trip_story_builder.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_story_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/story/trip_day_picker.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_overview_tab.dart';
-import 'package:submersion/features/trips/presentation/widgets/trip_voyage_map.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../helpers/mock_providers.dart';
+import '../helpers/fake_hosts.dart';
 
 /// Helper to create overrides with map backgrounds enabled.
 /// Builds the list from scratch to avoid duplicate settingsProvider overrides.
@@ -54,6 +54,16 @@ Future<List<Override>> _getMapEnabledOverrides() async {
 ///
 /// See: https://github.com/submersion-app/submersion/issues/132
 void main() {
+  // The code under test calls Nominatim; it answers as offline, as it
+  // would on a device without a network. The map's tiles come from the OSM
+  // tile server: flutter_map declines to request them in tests (no
+  // unblockOSM define), and the host is declared so that never depends on
+  // a refusal either.
+  setUp(() {
+    serveFakeHost('nominatim.openstreetmap.org');
+    serveFakeHost('tile.openstreetmap.org');
+  });
+
   // -- DiveListTile (covers 4 patch lines: httpHeaders block) --
   group('DiveListTile OSM tile User-Agent (issue #132)', () {
     testWidgets(
@@ -115,10 +125,14 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: SiteListTile(
-                name: 'Blue Hole',
-                latitude: 17.3161,
-                longitude: -87.5347,
-                diveCount: 5,
+                entry: SiteWithDiveCount(
+                  site: DiveSite(
+                    id: 'blue-hole',
+                    name: 'Blue Hole',
+                    location: GeoPoint(17.3161, -87.5347),
+                  ),
+                  diveCount: 5,
+                ),
               ),
             ),
           ),
@@ -145,7 +159,12 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      // Bounded pumps, not pumpAndSettle: the initial location starts a
+      // reverse geocode, which the test harness refuses (no network), and its
+      // spinner can keep animating while the lookup's rate-limit wait runs on
+      // the real clock. Nothing here depends on the lookup.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
 
       expect(find.byType(TileLayer), findsOneWidget);
     });
@@ -235,53 +254,11 @@ void main() {
     });
   });
 
-  // -- TripVoyageMap (covers 1 patch line: trip_voyage_map.dart:67) --
-  group('TripVoyageMap TileLayer', () {
-    testWidgets('renders TileLayer when trip has locations', (tester) async {
-      final overrides = await getBaseOverrides();
-      final now = DateTime.now();
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            ...overrides,
-            liveaboardDetailsProvider('trip-1').overrideWith(
-              (ref) async => LiveaboardDetails(
-                id: 'lb-1',
-                tripId: 'trip-1',
-                vesselName: 'Test Vessel',
-                embarkLatitude: 17.0,
-                embarkLongitude: -87.0,
-                createdAt: now,
-                updatedAt: now,
-              ),
-            ),
-            tripSitesWithLocationsProvider('trip-1').overrideWith(
-              (ref) async => <DiveSite>[
-                const DiveSite(
-                  id: 'site-1',
-                  name: 'Test Site',
-                  location: GeoPoint(17.5, -87.5),
-                ),
-              ],
-            ),
-          ].cast(),
-          child: const MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(body: TripVoyageMap(tripId: 'trip-1')),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byType(TileLayer), findsOneWidget);
-    });
-  });
-
-  // -- TripOverviewTab (covers 1 patch line: trip_overview_tab.dart:200) --
+  // -- TripOverviewTab / story map header (covers the tile user agent on the
+  // trip story's pinned map, which replaced TripVoyageMap and the old overview
+  // map background) --
   group('TripOverviewTab TileLayer', () {
-    testWidgets('renders TileLayer when trip has site locations', (
+    testWidgets('renders TileLayer when the trip has site locations', (
       tester,
     ) async {
       final overrides = await getBaseOverrides();
@@ -299,33 +276,38 @@ void main() {
 
       final tripWithStats = TripWithStats(
         trip: trip,
-        diveCount: 2,
-        totalBottomTime: 75 * 60,
-        maxDepth: 30.0,
+        diveCount: 1,
+        totalRuntime: 45 * 60,
+        maxDepth: 25.0,
       );
 
-      final dives = [
-        createTestDiveWithBottomTime(
-          id: 'trip-dive-1',
-          diveNumber: 1,
-          maxDepth: 25.0,
-        ),
-      ];
+      // A dive at a located site gives the story map a point to render.
+      final story = buildTripStory(
+        trip: trip,
+        dives: [
+          Dive(
+            id: 'trip-dive-1',
+            dateTime: DateTime(2026, 3, 25, 10),
+            maxDepth: 25.0,
+            site: const DiveSite(
+              id: 'site-1',
+              name: 'Test Site',
+              location: GeoPoint(17.5, -87.5),
+            ),
+          ),
+        ],
+        itineraryDays: [],
+        mediaByDiveId: {},
+        sightingsByDiveId: {},
+        checklistItems: [],
+        today: DateTime(2026, 6, 1),
+      );
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             ...overrides,
-            divesForTripProvider(trip.id).overrideWith((ref) async => dives),
-            tripSitesWithLocationsProvider(trip.id).overrideWith(
-              (ref) async => <DiveSite>[
-                const DiveSite(
-                  id: 'site-1',
-                  name: 'Test Site',
-                  location: GeoPoint(17.5, -87.5),
-                ),
-              ],
-            ),
+            tripStoryProvider(trip.id).overrideWith((ref) async => story),
           ].cast(),
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -334,9 +316,15 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      // Avoid pumpAndSettle: the FlutterMap tile layer animates indefinitely.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      // A finished trip opens on its Trip page, which has no map: the map
+      // belongs to a day, so pick the day that was dived.
+      await tester.tap(find.byKey(TripDayPicker.dayTileKey(1)));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
 
-      // The header should render a FlutterMap with TileLayer
       expect(find.byType(TileLayer), findsWidgets);
     });
   });

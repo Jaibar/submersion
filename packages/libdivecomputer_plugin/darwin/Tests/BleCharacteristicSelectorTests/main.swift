@@ -1,0 +1,566 @@
+import CoreBluetooth
+import Foundation
+
+// Standalone test runner for BleCharacteristicSelector (no XCTest: the
+// LibDCDarwin package cannot build under SwiftPM because it depends on Flutter
+// modules only present in the CocoaPods build). Run via run_native_tests.sh.
+
+var failures = 0
+
+func expect(_ condition: Bool, _ message: String, line: Int = #line) {
+    if condition {
+        print("PASS: \(message)")
+    } else {
+        print("FAIL: \(message) (main.swift:\(line))")
+        failures += 1
+    }
+}
+
+func char(_ uuid: String, _ properties: CBCharacteristicProperties)
+    -> BleCharacteristicSelector.Characteristic {
+    BleCharacteristicSelector.Characteristic(uuid: CBUUID(string: uuid), properties: properties)
+}
+
+/// Resolve a selection back to concrete UUIDs the way BleIoStream does, by
+/// indexing into the original services. Returns nil for a nil selection.
+func resolve(_ services: [BleCharacteristicSelector.Service],
+             _ selection: BleCharacteristicSelector.Selection?)
+    -> (write: CBUUID, notify: CBUUID, serviceIndex: Int)? {
+    guard let selection else { return nil }
+    let service = services[selection.serviceIndex]
+    return (
+        service.characteristics[selection.writeIndex].uuid,
+        service.characteristics[selection.responseIndex].uuid,
+        selection.serviceIndex
+    )
+}
+
+let halcyonService = "00000001-8C3B-4F2C-A59E-8C08224F3253"
+let halcyonRx = "00000101-8C3B-4F2C-A59E-8C08224F3253"
+let halcyonTx = "00000201-8C3B-4F2C-A59E-8C08224F3253"
+let pelagicWrite = "6606AB42-89D5-4A00-A8CE-4EB5E1414EE0"
+let preferredService = "CB3C4555-D670-4670-BC20-B61DBC851E9A"
+
+// 1. Halcyon Symbios (issue #288). On a real device BOTH characteristics
+// advertise read+write+indicate (confirmed by the GATT discovery log on the
+// issue), so the raw write/notify scores tie and a preferred UUID must decide
+// the pair. The Tx/Rx names are device-centric -- Subsurface's qt-ble.cpp
+// labels 00000101 "Rx" and 00000201 "Tx" and writes commands to the device's
+// Rx while reading replies from the device's Tx. So the app must WRITE to
+// 00000101 (halcyonRx) and SUBSCRIBE on 00000201 (halcyonTx). PR #356 mapped
+// these backwards (wrote to Tx, listened on Rx); the device received the write
+// at the ATT layer but never answered (result=-7). This asserts the corrected
+// mapping that matches the known-working Subsurface implementation.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: halcyonService),
+            characteristics: [
+                char(halcyonRx, [.read, .write, .indicate]),
+                char(halcyonTx, [.read, .write, .indicate]),
+            ]
+        )
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.write == CBUUID(string: halcyonRx),
+           "halcyon: app writes commands to the device Rx (00000101), "
+               + "got \(result?.write.uuidString ?? "nil")")
+    expect(result?.notify == CBUUID(string: halcyonTx),
+           "halcyon: app reads replies from the device Tx (00000201), "
+               + "got \(result?.notify.uuidString ?? "nil")")
+    expect(BleCharacteristicSelector.select(services: services)?.responseMode == .notify,
+           "halcyon: a notify-capable device keeps the notify response path")
+}
+
+// 2. Regression: a device with one write-only and one notify-only
+// characteristic (e.g. Aqualung i300C) must keep them split. Exercises the
+// write-without-response (+4) write-score branch.
+do {
+    let writeUUID = "0000fefb-0000-1000-8000-00805f9b34fb"
+    let notifyUUID = "0000fefc-0000-1000-8000-00805f9b34fb"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000fef5-0000-1000-8000-00805f9b34fb"),
+            characteristics: [
+                char(writeUUID, [.write, .writeWithoutResponse]),
+                char(notifyUUID, [.notify]),
+            ]
+        )
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.write == CBUUID(string: writeUUID), "split: write characteristic chosen")
+    expect(result?.notify == CBUUID(string: notifyUUID), "split: notify characteristic chosen")
+}
+
+// 3. Regression: a single characteristic that is both writable and notifiable
+// is used for both roles.
+do {
+    let combined = "0000ffe1-0000-1000-8000-00805f9b34fb"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000ffe0-0000-1000-8000-00805f9b34fb"),
+            characteristics: [char(combined, [.writeWithoutResponse, .notify])]
+        )
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.write == CBUUID(string: combined), "combined: single char used for write")
+    expect(result?.notify == CBUUID(string: combined), "combined: single char used for notify")
+}
+
+// 4. A service with no notify/indicate characteristic is not selectable.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000180a-0000-1000-8000-00805f9b34fb"),
+            characteristics: [char("00002a29-0000-1000-8000-00805f9b34fb", [.read])]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: services) == nil,
+           "no-notify: service without a notify characteristic is not selected")
+}
+
+// 5. Empty input yields no selection.
+do {
+    expect(BleCharacteristicSelector.select(services: []) == nil,
+           "empty: no services yields nil")
+}
+
+// 6. A preferred-service UUID (+1000) wins over a service with a higher raw
+// score, and the preferred-write UUID (+1000) is chosen within it. The plain
+// service has the higher raw score (writeNoResponse+notify = 4+4) yet the
+// preferred service still wins.
+do {
+    let plainService = "0000aaaa-0000-1000-8000-00805f9b34fb"
+    let plainWrite = "0000aab1-0000-1000-8000-00805f9b34fb"
+    let plainNotify = "0000aab2-0000-1000-8000-00805f9b34fb"
+    let prefNotify = "0000bbb2-0000-1000-8000-00805f9b34fb"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: plainService),
+            characteristics: [
+                char(plainWrite, [.writeWithoutResponse]),
+                char(plainNotify, [.notify]),
+            ]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: preferredService),
+            characteristics: [
+                char(pelagicWrite, [.write]),  // preferred-write +1000
+                char(prefNotify, [.indicate]),
+            ]
+        ),
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.serviceIndex == 1, "preferred: preferred service wins despite lower raw score")
+    expect(result?.write == CBUUID(string: pelagicWrite), "preferred: preferred write UUID wins")
+}
+
+// 7. Copilot review: resolution must not be UUID-only. Two service instances
+// share the same UUID; the SECOND scores higher (notify +4 vs indicate +2).
+// The selection must identify the second instance by index so the caller
+// resolves the correct live characteristics, not the first same-UUID service.
+do {
+    let dupUUID = "0000dddd-0000-1000-8000-00805f9b34fb"
+    let firstWrite = "0000dd01-0000-1000-8000-00805f9b34fb"
+    let firstNotify = "0000dd02-0000-1000-8000-00805f9b34fb"
+    let secondWrite = "0000dd03-0000-1000-8000-00805f9b34fb"
+    let secondNotify = "0000dd04-0000-1000-8000-00805f9b34fb"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: dupUUID),
+            characteristics: [char(firstWrite, [.write]), char(firstNotify, [.indicate])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: dupUUID),
+            characteristics: [char(secondWrite, [.write]), char(secondNotify, [.notify])]
+        ),
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.serviceIndex == 1,
+           "dup-uuid: higher-scoring same-UUID instance selected by index")
+    expect(result?.write == CBUUID(string: secondWrite),
+           "dup-uuid: write resolves to the correct service instance")
+    expect(result?.notify == CBUUID(string: secondNotify),
+           "dup-uuid: notify resolves to the correct service instance")
+}
+
+// 8. Within one service, a later notify candidate with a higher score
+// (notify +4) replaces an earlier lower one (indicate +2); likewise a later
+// write candidate (writeNoResponse +4) replaces an earlier write (+2).
+do {
+    let writeLow = "0000ee01-0000-1000-8000-00805f9b34fb"
+    let notifyLow = "0000ee02-0000-1000-8000-00805f9b34fb"
+    let notifyHigh = "0000ee03-0000-1000-8000-00805f9b34fb"
+    let writeHigh = "0000ee04-0000-1000-8000-00805f9b34fb"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000ee00-0000-1000-8000-00805f9b34fb"),
+            characteristics: [
+                char(writeLow, [.write]),  // score 2
+                char(notifyLow, [.indicate]),  // score 2
+                char(notifyHigh, [.notify]),  // score 4 -> replaces notifyLow
+                char(writeHigh, [.writeWithoutResponse]),  // score 4 -> replaces writeLow
+            ]
+        )
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.write == CBUUID(string: writeHigh),
+           "higher-score: later write candidate replaces the earlier one")
+    expect(result?.notify == CBUUID(string: notifyHigh),
+           "higher-score: later notify candidate replaces the earlier one")
+}
+
+// 9. Heinrichs Weikamp OSTC4 (issue #923). The real GATT table enumerated from
+// the reporter's device: the Telit/Stollmann Terminal I/O service alongside the
+// Stollmann vendor service. The transport must land on the TIO service, write
+// commands to UART Data RX, listen on UART Data TX, and surface the credit
+// characteristics so the caller can run the handshake that opens the UART
+// bridge. Without the handshake the first command write fails and
+// libdivecomputer reports "Failed to send the command".
+do {
+    let tioService = "0000FEFB-0000-1000-8000-00805F9B34FB"
+    let dataRx = "00000001-0000-1000-8000-008025000000"
+    let dataTx = "00000002-0000-1000-8000-008025000000"
+    let creditsRx = "00000003-0000-1000-8000-008025000000"
+    let creditsTx = "00000004-0000-1000-8000-008025000000"
+    let vendorService = "53544D54-4552-494F-5345-525631303030"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: tioService),
+            characteristics: [
+                char(dataRx, [.writeWithoutResponse]),
+                char(dataTx, [.notify]),
+                char(creditsRx, [.write]),
+                char(creditsTx, [.indicate]),
+            ]
+        ),
+        // The vendor service ties on raw score (writeNoResponse+notify = 8) and
+        // would win on discovery order if the TIO service were not preferred.
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: vendorService),
+            characteristics: [
+                char("53544D01-4552-494F-5345-525631303030", [.writeWithoutResponse]),
+                char("53544D02-4552-494F-5345-525631303030", [.notify]),
+            ]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    let result = resolve(services, selection)
+    expect(result?.serviceIndex == 0, "ostc4: Terminal I/O service selected over the vendor service")
+    expect(result?.write == CBUUID(string: dataRx), "ostc4: commands go to UART Data RX")
+    expect(result?.notify == CBUUID(string: dataTx), "ostc4: replies arrive on UART Data TX")
+    expect(selection?.terminalIoCredits?.writeIndex == 2, "ostc4: UART Credits RX located")
+    expect(selection?.terminalIoCredits?.notifyIndex == 3, "ostc4: UART Credits TX located")
+    expect(selection?.terminalIoCredits?.required == true,
+           "ostc4: Telit credits are mandatory (bridge stays closed without them)")
+}
+
+// 10. Discovery order must not decide it: the same two services in the reverse
+// order still select the Terminal I/O service.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "53544D54-4552-494F-5345-525631303030"),
+            characteristics: [
+                char("53544D01-4552-494F-5345-525631303030", [.writeWithoutResponse]),
+                char("53544D02-4552-494F-5345-525631303030", [.notify]),
+            ]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FEFB-0000-1000-8000-00805F9B34FB"),
+            characteristics: [
+                char("00000001-0000-1000-8000-008025000000", [.writeWithoutResponse]),
+                char("00000002-0000-1000-8000-008025000000", [.notify]),
+                char("00000003-0000-1000-8000-008025000000", [.write]),
+                char("00000004-0000-1000-8000-008025000000", [.indicate]),
+            ]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    expect(selection?.serviceIndex == 1,
+           "ostc4-reordered: Terminal I/O service wins regardless of discovery order")
+    expect(selection?.terminalIoCredits != nil,
+           "ostc4-reordered: credit characteristics still located")
+}
+
+// 11. Devices with no credit characteristics must be left exactly as they
+// were: no handshake, so every currently-working device stays on today's
+// plain write/notify path.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000ffe0-0000-1000-8000-00805f9b34fb"),
+            characteristics: [char("0000ffe1-0000-1000-8000-00805f9b34fb",
+                                   [.writeWithoutResponse, .notify])]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: services)?.terminalIoCredits == nil,
+           "non-TIO: no credit handshake requested")
+}
+
+// 12. A partial Telit layout -- data characteristics with no credit pair, and
+// not u-blox either -- is an unknown shape and must not trigger a handshake.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FEFB-0000-1000-8000-00805F9B34FB"),
+            characteristics: [
+                char("00000001-0000-1000-8000-008025000000", [.writeWithoutResponse]),
+                char("00000002-0000-1000-8000-008025000000", [.notify]),
+            ]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: services)?.terminalIoCredits == nil,
+           "partial-TIO: incomplete characteristic set does not trigger the handshake")
+}
+
+// 13. u-blox serial service: one characteristic carries data in both
+// directions and one carries credits in both directions, so the write and
+// notify roles collapse onto the same index on each side. Credits are
+// OPTIONAL here -- a device on this service (the OSTC nano, #280/#394)
+// downloads today with no handshake at all, so a rejected grant must be able
+// to fall back rather than fail the connection.
+do {
+    let ubloxData = "2456E1B9-26E2-8F83-E744-F34F01E9D703"
+    let ubloxCredits = "2456E1B9-26E2-8F83-E744-F34F01E9D704"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "2456E1B9-26E2-8F83-E744-F34F01E9D701"),
+            characteristics: [
+                char(ubloxData, [.writeWithoutResponse, .notify]),
+                char(ubloxCredits, [.write, .indicate]),
+            ]
+        )
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    let result = resolve(services, selection)
+    expect(result?.write == CBUUID(string: ubloxData), "ublox: commands go to the FIFO characteristic")
+    expect(result?.notify == CBUUID(string: ubloxData), "ublox: replies arrive on the same FIFO characteristic")
+    expect(selection?.terminalIoCredits?.writeIndex == 1, "ublox: credits characteristic located for writes")
+    expect(selection?.terminalIoCredits?.notifyIndex == 1, "ublox: same characteristic used for credit indications")
+    expect(selection?.terminalIoCredits?.required == false,
+           "ublox: credits are optional, so a failed grant can fall back")
+}
+
+// 14. The u-blox credits characteristic must never be mistaken for the data
+// characteristic. Here credits advertise write-without-response + notify --
+// the top raw score on both sides -- so only the preferred-UUID pin on the
+// FIFO keeps commands off the credits endpoint.
+do {
+    let ubloxData = "2456E1B9-26E2-8F83-E744-F34F01E9D703"
+    let ubloxCredits = "2456E1B9-26E2-8F83-E744-F34F01E9D704"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "2456E1B9-26E2-8F83-E744-F34F01E9D701"),
+            characteristics: [
+                char(ubloxCredits, [.writeWithoutResponse, .notify]),
+                char(ubloxData, [.write, .indicate]),
+            ]
+        )
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.write == CBUUID(string: ubloxData),
+           "ublox-pin: FIFO wins the write role despite the lower raw score")
+    expect(result?.notify == CBUUID(string: ubloxData),
+           "ublox-pin: FIFO wins the notify role despite the lower raw score")
+}
+
+// Issue #422: the Cressi service (Goa family) is preferred, as in Subsurface.
+// A plain service with the higher raw score must still lose to it.
+do {
+    let plainService = "0000cccc-0000-1000-8000-00805f9b34fb"
+    let plainWrite = "0000ccc1-0000-1000-8000-00805f9b34fb"
+    let plainNotify = "0000ccc2-0000-1000-8000-00805f9b34fb"
+    let cressiService = "6E400001-B5A3-F393-E0A9-E50E24DC10B8"
+    let cressiWrite = "6E400002-B5A3-F393-E0A9-E50E24DC10B8"
+    let cressiIndicate = "6E400006-B5A3-F393-E0A9-E50E24DC10B8"
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: plainService),
+            characteristics: [
+                char(plainWrite, [.writeWithoutResponse]),
+                char(plainNotify, [.notify]),
+            ]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: cressiService),
+            characteristics: [
+                char(cressiWrite, [.write]),
+                char(cressiIndicate, [.indicate]),
+            ]
+        ),
+    ]
+    let result = resolve(services, BleCharacteristicSelector.select(services: services))
+    expect(result?.serviceIndex == 1, "cressi: Cressi service is preferred")
+}
+
+// Read-poll tier (issue #1454). The Seac Tablet's only data characteristic can
+// be read and written but cannot notify or indicate (libdivecomputer 415778c),
+// so the host must read it for every packet.
+let seacService = "84968FFE-D26D-478A-B953-5010BCF58BCA"
+let seacData = "43C620C2-1B09-4951-BC1E-9C75298CDDEB"
+
+// 15. The Tablet as Android and BlueZ enumerate it: Generic Access (whose
+// Device Name is read+write on some peripherals) and Device Information ahead
+// of the Seac service. Only the Seac service may be chosen, in read mode, with
+// the one characteristic serving both roles.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "00001800-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("00002A00-0000-1000-8000-00805F9B34FB", [.read, .write])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000180A-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("00002A29-0000-1000-8000-00805F9B34FB", [.read])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char(seacData, [.read, .write])]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    let result = resolve(services, selection)
+    expect(selection?.responseMode == .read, "seac: read-poll response path selected")
+    expect(result?.serviceIndex == 2, "seac: the Seac service is chosen over GAP and DIS")
+    expect(result?.write == CBUUID(string: seacData), "seac: commands go to the data characteristic")
+    expect(result?.notify == CBUUID(string: seacData), "seac: replies are read from the same characteristic")
+    expect(selection?.terminalIoCredits == nil, "seac: no credit handshake")
+}
+
+// 16. The allowlist is the whole read tier: the same read+write shape under
+// any other service, or another characteristic under the Seac service, is
+// not selectable.
+do {
+    let elsewhere = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char(seacData, [.read, .write])]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: elsewhere) == nil,
+           "allowlist: the Seac characteristic under another service is not selected")
+    let otherCharacteristic = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char("0000FFE1-0000-1000-8000-00805F9B34FB", [.read, .write])]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: otherCharacteristic) == nil,
+           "allowlist: another characteristic under the Seac service is not selected")
+}
+
+// 17. The Seac service wins over a write/notify pair elsewhere on the device,
+// whatever the discovery order. A Tablet on Android 1.8.1 (issue #1454) took
+// the other service's pair, and its commands were rejected with ATT 0x0D.
+do {
+    let notifyService = BleCharacteristicSelector.Service(
+        uuid: CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),
+        characteristics: [char("0000FFE1-0000-1000-8000-00805F9B34FB", [.writeWithoutResponse, .notify])]
+    )
+    let seac = BleCharacteristicSelector.Service(
+        uuid: CBUUID(string: seacService),
+        characteristics: [char(seacData, [.read, .write])]
+    )
+    let seacFirst = BleCharacteristicSelector.select(services: [seac, notifyService])
+    expect(seacFirst?.responseMode == .read && seacFirst?.serviceIndex == 0,
+           "seac-first: the Seac service wins when listed first")
+    let seacLast = BleCharacteristicSelector.select(services: [notifyService, seac])
+    expect(seacLast?.responseMode == .read && seacLast?.serviceIndex == 1,
+           "seac-first: the Seac service wins when listed second")
+}
+
+// 17b. Nordic's buttonless DFU service carries a write+indicate pair, so it is
+// the shape most likely to shadow the Seac service on real hardware.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("00002A19-0000-1000-8000-00805F9B34FB", [.read, .notify])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FE59-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("8EC90003-F315-4F60-9FB8-838830DAEA50", [.write, .indicate])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char(seacData, [.read, .write])]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    let result = resolve(services, selection)
+    expect(selection?.responseMode == .read, "seac-dfu: read-poll response path selected")
+    expect(result?.serviceIndex == 2, "seac-dfu: the Seac service is chosen")
+    expect(result?.write == CBUUID(string: seacData), "seac-dfu: commands go to the data characteristic")
+    expect(result?.notify == CBUUID(string: seacData), "seac-dfu: replies are read from the same characteristic")
+}
+
+// 17c. A Seac service that cannot carry the link (no READ, no pair of its own)
+// does not stop the search: another service's pair is still chosen.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char(seacData, [.write])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("0000FFE1-0000-1000-8000-00805F9B34FB", [.writeWithoutResponse, .notify])]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: services)
+    expect(selection?.responseMode == .notify && selection?.serviceIndex == 1,
+           "seac-unusable: another service's pair is chosen")
+}
+
+// 18. The allowlisted characteristic needs both directions: READ for replies
+// and a write property for commands. Write-without-response alone is enough.
+do {
+    func selectSeac(_ properties: CBCharacteristicProperties) -> BleCharacteristicSelector.Selection? {
+        BleCharacteristicSelector.select(services: [
+            BleCharacteristicSelector.Service(
+                uuid: CBUUID(string: seacService),
+                characteristics: [char(seacData, properties)]
+            )
+        ])
+    }
+    expect(selectSeac([.write]) == nil, "seac-props: no READ, not selected")
+    expect(selectSeac([.read]) == nil, "seac-props: no write property, not selected")
+    expect(selectSeac([.read, .writeWithoutResponse])?.responseMode == .read,
+           "seac-props: read + write-without-response is selected")
+}
+
+// 19. If future firmware adds notify to the characteristic, the ordinary
+// notify path takes it, still on the Seac service even when another service's
+// pair scores higher.
+do {
+    let services = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char(seacData, [.read, .write, .notify])]
+        )
+    ]
+    expect(BleCharacteristicSelector.select(services: services)?.responseMode == .notify,
+           "seac-notify: a characteristic that notifies uses the notify path")
+    let withOther = [
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),
+            characteristics: [char("0000FFE1-0000-1000-8000-00805F9B34FB", [.writeWithoutResponse, .notify])]
+        ),
+        BleCharacteristicSelector.Service(
+            uuid: CBUUID(string: seacService),
+            characteristics: [char(seacData, [.read, .write, .notify])]
+        ),
+    ]
+    let selection = BleCharacteristicSelector.select(services: withOther)
+    expect(selection?.responseMode == .notify && selection?.serviceIndex == 1,
+           "seac-notify: the Seac service's own pair beats a higher-scoring one elsewhere")
+}
+
+if failures == 0 {
+    print("All BleCharacteristicSelector tests passed.")
+    exit(0)
+} else {
+    print("\(failures) BleCharacteristicSelector test(s) FAILED.")
+    exit(1)
+}

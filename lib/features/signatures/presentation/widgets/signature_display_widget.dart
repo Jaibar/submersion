@@ -1,11 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
-/// Widget to display a saved instructor signature
-class SignatureDisplayWidget extends StatelessWidget {
+/// Heading for a saved signature: a buddy's signature is titled as one, and an
+/// instructor's (or a legacy untyped one) as an instructor's (issue #3034).
+String _signatureTitle(BuildContext context, Signature signature) =>
+    signature.isBuddySignature
+    ? context.l10n.signatures_buddySignature
+    : context.l10n.signatures_instructorSignature;
+
+/// Widget to display a saved instructor or buddy signature
+class SignatureDisplayWidget extends ConsumerWidget {
   final Signature signature;
   final VoidCallback? onTap;
   final VoidCallback? onDelete;
@@ -20,9 +28,9 @@ class SignatureDisplayWidget extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
-    final dateFormat = DateFormat.yMMMd().add_jm();
+    final units = ref.watch(unitFormatterProvider);
 
     return Card(
       child: Semantics(
@@ -48,7 +56,7 @@ class SignatureDisplayWidget extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            context.l10n.signatures_instructorSignature,
+                            _signatureTitle(context, signature),
                             style: Theme.of(context).textTheme.titleSmall,
                           ),
                           Text(
@@ -99,7 +107,10 @@ class SignatureDisplayWidget extends StatelessWidget {
                     const SizedBox(width: 4),
                     Text(
                       context.l10n.signatures_signedDate(
-                        dateFormat.format(signature.signedAt),
+                        units.formatDateTime(
+                          signature.signedAt,
+                          l10n: context.l10n,
+                        ),
                       ),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: colorScheme.onSurfaceVariant,
@@ -176,15 +187,15 @@ class SignatureDisplayWidget extends StatelessWidget {
 }
 
 /// Full-view dialog for signature
-class SignatureFullViewDialog extends StatelessWidget {
+class SignatureFullViewDialog extends ConsumerWidget {
   final Signature signature;
 
   const SignatureFullViewDialog({super.key, required this.signature});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
-    final dateFormat = DateFormat.yMMMd().add_jm();
+    final units = ref.watch(unitFormatterProvider);
 
     return Dialog(
       child: Container(
@@ -205,7 +216,7 @@ class SignatureFullViewDialog extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          context.l10n.signatures_instructorSignature,
+                          _signatureTitle(context, signature),
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         Text(
@@ -257,7 +268,10 @@ class SignatureFullViewDialog extends StatelessWidget {
                   const SizedBox(width: 4),
                   Text(
                     context.l10n.signatures_signedDate(
-                      dateFormat.format(signature.signedAt),
+                      units.formatDateTime(
+                        signature.signedAt,
+                        l10n: context.l10n,
+                      ),
                     ),
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: colorScheme.onSurfaceVariant,

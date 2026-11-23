@@ -1,21 +1,50 @@
+import 'package:flutter/foundation.dart';
+
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/performance/perf_timer.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/text/text_sort.dart';
 
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/profile_hides_providers.dart';
 import 'package:submersion/features/dive_log/data/repositories/view_config_repository.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_classification_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/data/services/catalogue_adoption_service.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_classification.dart';
+import 'package:submersion/features/site_types/domain/entities/site_type_entity.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart'
     as domain;
+import 'package:submersion/features/dive_sites/domain/entities/site_dive_statistics.dart';
+import 'package:submersion/features/dive_sites/domain/models/entry_exit_suggestion.dart';
+import 'package:submersion/features/dive_sites/domain/utils/location_options.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_catalogue_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_feature_providers.dart';
+import 'package:submersion/features/dive_sites/query/site_filter_query.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
 import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/features/query/presentation/providers/narrow_by_ids.dart';
+import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
+import 'package:submersion/shared/providers/entity_card_config_providers.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 // ============================================================================
 // Site Filter State
@@ -35,6 +64,23 @@ class SiteFilterState {
   final bool? hasCoordinates;
   final bool? hasDives;
 
+  /// Sites carrying any of these types (issue #1765). Empty means no filter.
+  final Set<String> siteTypeIds;
+
+  /// Sites carrying any of these tags (issue #1765). Empty means no filter.
+  final Set<String> tagIds;
+
+  /// The advanced part (#2365): a typed or built query, ANDed with every
+  /// axis above by `SiteFilterQuery.toQuery`.
+  final QueryNode? query;
+
+  /// A shared site library id, or [personalLibrary] for sites in no library;
+  /// null means every site (issue #2567).
+  final String? libraryId;
+
+  /// The [libraryId] value that selects personal sites only.
+  static const String personalLibrary = 'personal';
+
   const SiteFilterState({
     this.country,
     this.region,
@@ -44,6 +90,10 @@ class SiteFilterState {
     this.minRating,
     this.hasCoordinates,
     this.hasDives,
+    this.siteTypeIds = const {},
+    this.tagIds = const {},
+    this.query,
+    this.libraryId,
   });
 
   /// Whether any filter is currently active.
@@ -55,74 +105,11 @@ class SiteFilterState {
       maxDepth != null ||
       minRating != null ||
       hasCoordinates != null ||
-      hasDives != null;
-
-  /// Apply all active filters to a list of sites with dive counts.
-  List<SiteWithDiveCount> apply(List<SiteWithDiveCount> sites) {
-    return sites.where((siteWithCount) {
-      final site = siteWithCount.site;
-      final diveCount = siteWithCount.diveCount;
-
-      // Country filter (case-insensitive contains)
-      if (country != null && country!.isNotEmpty) {
-        if (site.country == null ||
-            !site.country!.toLowerCase().contains(country!.toLowerCase())) {
-          return false;
-        }
-      }
-
-      // Region filter (case-insensitive contains)
-      if (region != null && region!.isNotEmpty) {
-        if (site.region == null ||
-            !site.region!.toLowerCase().contains(region!.toLowerCase())) {
-          return false;
-        }
-      }
-
-      // Difficulty filter
-      if (difficulty != null) {
-        if (site.difficulty != difficulty) {
-          return false;
-        }
-      }
-
-      // Depth range filter
-      if (minDepth != null) {
-        if (site.maxDepth == null || site.maxDepth! < minDepth!) {
-          return false;
-        }
-      }
-      if (maxDepth != null) {
-        if (site.maxDepth == null || site.maxDepth! > maxDepth!) {
-          return false;
-        }
-      }
-
-      // Minimum rating filter
-      if (minRating != null) {
-        if (site.rating == null || site.rating! < minRating!) {
-          return false;
-        }
-      }
-
-      // Has coordinates filter
-      if (hasCoordinates != null) {
-        if (site.hasCoordinates != hasCoordinates) {
-          return false;
-        }
-      }
-
-      // Has dives filter
-      if (hasDives != null) {
-        final siteHasDives = diveCount > 0;
-        if (siteHasDives != hasDives) {
-          return false;
-        }
-      }
-
-      return true;
-    }).toList();
-  }
+      hasDives != null ||
+      siteTypeIds.isNotEmpty ||
+      tagIds.isNotEmpty ||
+      libraryId != null ||
+      query != null;
 
   SiteFilterState copyWith({
     String? country,
@@ -133,6 +120,10 @@ class SiteFilterState {
     double? minRating,
     bool? hasCoordinates,
     bool? hasDives,
+    // A non-null set replaces the current one; pass `const {}` to clear.
+    Set<String>? siteTypeIds,
+    Set<String>? tagIds,
+    QueryNode? query,
     // Clear flags
     bool clearCountry = false,
     bool clearRegion = false,
@@ -142,6 +133,9 @@ class SiteFilterState {
     bool clearMinRating = false,
     bool clearHasCoordinates = false,
     bool clearHasDives = false,
+    bool clearQuery = false,
+    String? libraryId,
+    bool clearLibraryId = false,
   }) {
     return SiteFilterState(
       country: clearCountry ? null : (country ?? this.country),
@@ -154,8 +148,55 @@ class SiteFilterState {
           ? null
           : (hasCoordinates ?? this.hasCoordinates),
       hasDives: clearHasDives ? null : (hasDives ?? this.hasDives),
+      siteTypeIds: siteTypeIds ?? this.siteTypeIds,
+      tagIds: tagIds ?? this.tagIds,
+      query: clearQuery ? null : (query ?? this.query),
+      libraryId: clearLibraryId ? null : (libraryId ?? this.libraryId),
     );
   }
+
+  // Value equality, so an unchanged filter set again is no change to a
+  // listener and the id-set family reuses its instance for an equal filter.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SiteFilterState &&
+          other.country == country &&
+          other.region == region &&
+          other.difficulty == difficulty &&
+          other.minDepth == minDepth &&
+          other.maxDepth == maxDepth &&
+          other.minRating == minRating &&
+          other.hasCoordinates == hasCoordinates &&
+          other.hasDives == hasDives &&
+          setEquals(other.siteTypeIds, siteTypeIds) &&
+          setEquals(other.tagIds, tagIds) &&
+          other.query == query &&
+          other.libraryId == libraryId;
+
+  @override
+  int get hashCode => Object.hash(
+    country,
+    region,
+    difficulty,
+    minDepth,
+    maxDepth,
+    minRating,
+    hasCoordinates,
+    hasDives,
+    Object.hashAllUnordered(siteTypeIds),
+    Object.hashAllUnordered(tagIds),
+    query,
+    libraryId,
+  );
+
+  @override
+  String toString() =>
+      'SiteFilterState(country: $country, region: $region, '
+      'difficulty: $difficulty, depth: $minDepth..$maxDepth, '
+      'minRating: $minRating, hasCoordinates: $hasCoordinates, '
+      'hasDives: $hasDives, types: $siteTypeIds, tags: $tagIds, '
+      'query: $query, libraryId: $libraryId)';
 }
 
 /// Site filter provider
@@ -173,13 +214,47 @@ final siteRepositoryProvider = Provider<SiteRepository>((ref) {
 });
 
 /// All sites provider
+///
+/// A [FutureProvider] that self-invalidates whenever the `dive_sites` table is
+/// written (e.g. after a sync applies remote changes), so the list refreshes
+/// while imperative `ref.read(sitesProvider.future)` reads still resolve.
 final sitesProvider = FutureProvider<List<domain.DiveSite>>((ref) async {
   final repository = ref.watch(siteRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchSitesChanges());
   return repository.getAllSites(diverId: validatedDiverId);
 });
+
+/// Distinct country labels across all of the diver's sites, for the sites
+/// filter's country dropdown (issue #1373).
+final siteCountryOptionsProvider = Provider<AsyncValue<List<String>>>((ref) {
+  final sitesAsync = ref.watch(sitesProvider);
+  return sitesAsync.whenData(
+    (sites) => distinctLocationLabels(sites.map((site) => site.country)),
+  );
+});
+
+/// Distinct region labels among sites in [country], or across all sites when
+/// [country] is null - the sites filter's cascading region dropdown (issue
+/// #1373): picking a country narrows this list to the regions that actually
+/// occur there instead of every region in the diver's log.
+final siteRegionOptionsProvider =
+    Provider.family<AsyncValue<List<String>>, String?>((ref, country) {
+      final sitesAsync = ref.watch(sitesProvider);
+      return sitesAsync.whenData((sites) {
+        final scoped = country == null
+            ? sites
+            : sites.where(
+                (site) =>
+                    site.country != null &&
+                    locationDedupKey(site.country!) ==
+                        locationDedupKey(country),
+              );
+        return distinctLocationLabels(scoped.map((site) => site.region));
+      });
+    });
 
 /// Sites with dive counts provider
 final sitesWithCountsProvider = FutureProvider<List<SiteWithDiveCount>>((
@@ -189,25 +264,91 @@ final sitesWithCountsProvider = FutureProvider<List<SiteWithDiveCount>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  invalidateOnSiteListChanges(ref);
   return repository.getSitesWithDiveCounts(diverId: validatedDiverId);
 });
 
+/// Rebuilds [ref]'s provider whenever [sitesWithCountsProvider] would
+/// refresh, for a read of some of the same entries (Global Search's rows,
+/// issue #4247).
+void invalidateOnSiteListChanges(Ref ref) {
+  ref.invalidateSelfWhen(ref.read(siteRepositoryProvider).watchSitesChanges());
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchMeasuredRuntimeChanges(),
+  );
+  // Feature chips on the list card come from site_features, so a feature
+  // placed on the site map must refresh the list too.
+  ref.invalidateSelfWhen(
+    ref.read(siteFeatureRepositoryProvider).watchFeatureChanges(),
+  );
+  // Type and tag chips (issue #1765) come from the classification junctions.
+  ref.invalidateSelfWhen(
+    ref.read(siteClassificationRepositoryProvider).watchChanges(),
+  );
+}
+
+/// The site type and site tag junctions (issue #1765).
+final siteClassificationRepositoryProvider =
+    Provider<SiteClassificationRepository>((ref) {
+      return SiteClassificationRepository();
+    });
+
+/// A site's types, in the diver's chosen order.
+final siteTypesForSiteProvider =
+    FutureProvider.family<List<SiteTypeEntity>, String>((ref, siteId) async {
+      final repository = ref.watch(siteClassificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchChanges());
+      return repository.getTypesForSite(siteId);
+    });
+
+/// A site's tags, by name.
+final tagsForSiteProvider = FutureProvider.family<List<Tag>, String>((
+  ref,
+  siteId,
+) async {
+  final repository = ref.watch(siteClassificationRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchChanges());
+  return repository.getTagsForSite(siteId);
+});
+
 /// Site sort state provider
-final siteSortProvider = StateProvider<SortState<SiteSortField>>(
-  (ref) => const SortState(
-    field: SiteSortField.name,
-    direction: SortDirection.descending,
-  ),
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final siteSortProvider = Provider<SortState<SiteSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(settingsProvider.select((s) => s.listArrangements.siteSort)),
+        SiteSortField.values,
+      ) ??
+      const SortState(
+        field: SiteSortField.name,
+        direction: SortDirection.descending,
+      ),
 );
 
-/// Filtered sites with counts provider
-/// Applies active filters to the full site list.
+/// The ids the site filter selects, from the compiled query (#2365). Keyed
+/// on the filter's value, so an equal filter reuses its instance; a write to
+/// any table the query read refreshes it in place. A shared site's dives
+/// are the active diver's alone, as its tile counts them.
+final queryFilteredSiteIdsProvider = FutureProvider.autoDispose
+    .family<Set<String>, SiteFilterState>((ref, filter) async {
+      final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+      return watchQueryIds(ref, compileSiteFilter(filter, diverId: diverId));
+    });
+
+/// The site list: every visible site narrowed to the compiled query's ids.
 final filteredSitesWithCountsProvider =
     Provider<AsyncValue<List<SiteWithDiveCount>>>((ref) {
       final sitesAsync = ref.watch(sitesWithCountsProvider);
       final filter = ref.watch(siteFilterProvider);
-
-      return sitesAsync.whenData((sites) => filter.apply(sites));
+      if (!filter.hasActiveFilters) return sitesAsync;
+      return narrowByIds(
+        sitesAsync,
+        ref.watch(queryFilteredSiteIdsProvider(filter)),
+        (s) => s.site.id,
+      );
     });
 
 /// Sorted and filtered sites with counts provider
@@ -217,16 +358,17 @@ final sortedSitesWithCountsProvider =
       final sitesAsync = ref.watch(filteredSitesWithCountsProvider);
       final sort = ref.watch(siteSortProvider);
 
-      return sitesAsync.whenData((sites) => _applySiteSorting(sites, sort));
+      return sitesAsync.whenData((sites) => applySiteSorting(sites, sort));
     });
 
 /// Apply sorting to a list of sites
-List<SiteWithDiveCount> _applySiteSorting(
+List<SiteWithDiveCount> applySiteSorting(
   List<SiteWithDiveCount> sites,
   SortState<SiteSortField> sort,
 ) {
   return PerfTimer.measureSync('applySiteSorting', () {
     final sorted = List<SiteWithDiveCount>.from(sites);
+    final collator = TextCollator();
 
     sorted.sort((a, b) {
       int comparison;
@@ -235,7 +377,7 @@ List<SiteWithDiveCount> _applySiteSorting(
 
       switch (sort.field) {
         case SiteSortField.name:
-          comparison = a.site.name.compareTo(b.site.name);
+          comparison = collator.compare(a.site.name, b.site.name);
         case SiteSortField.rating:
           comparison = (a.site.rating ?? 0).compareTo(b.site.rating ?? 0);
         case SiteSortField.difficulty:
@@ -246,6 +388,23 @@ List<SiteWithDiveCount> _applySiteSorting(
           comparison = (a.site.maxDepth ?? 0).compareTo(b.site.maxDepth ?? 0);
         case SiteSortField.diveCount:
           comparison = a.diveCount.compareTo(b.diveCount);
+        case SiteSortField.lastDived:
+          // Sites never dived always sort last regardless of direction, and
+          // ties (including the never-dived group) always break A->Z for
+          // determinism, independent of direction. Both cases return early,
+          // before the direction inversion below, so neither is flipped.
+          final aDate = a.lastDivedAt;
+          final bDate = b.lastDivedAt;
+          if (aDate == null || bDate == null) {
+            if (aDate == null && bDate == null) {
+              return collator.compare(a.site.name, b.site.name);
+            }
+            return aDate == null ? 1 : -1;
+          }
+          comparison = aDate.compareTo(bDate);
+          if (comparison == 0) {
+            return collator.compare(a.site.name, b.site.name);
+          }
       }
 
       if (invertForText) {
@@ -268,6 +427,7 @@ final siteProvider = FutureProvider.family<domain.DiveSite?, String>((
   id,
 ) async {
   final repository = ref.watch(siteRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSitesChanges());
   return repository.getSiteById(id);
 });
 
@@ -281,9 +441,28 @@ final siteSearchProvider = FutureProvider.family<List<domain.DiveSite>, String>(
       return ref.watch(sitesProvider).value ?? [];
     }
     final repository = ref.watch(siteRepositoryProvider);
+    ref.invalidateSelfWhen(repository.watchSitesChanges());
     return repository.searchSites(query, diverId: validatedDiverId);
   },
 );
+
+/// Site search results carrying the same dive figures as the site list.
+///
+/// [siteSearchProvider] returns bare sites, and the search page used to wrap
+/// each one with a dive count of 0, so every hit claimed the site had never
+/// been dived (#3377). The hits keep the search's order; their figures come
+/// from [sitesWithCountsProvider], which already refreshes on dive changes.
+final siteSearchWithDiveCountProvider =
+    FutureProvider.family<List<SiteWithDiveCount>, String>((ref, query) async {
+      final withCounts = await ref.watch(sitesWithCountsProvider.future);
+      if (query.isEmpty) return withCounts;
+      final sites = await ref.watch(siteSearchProvider(query).future);
+      final byId = {for (final entry in withCounts) entry.site.id: entry};
+      return [
+        for (final site in sites)
+          byId[site.id] ?? SiteWithDiveCount(site: site, diveCount: 0),
+      ];
+    });
 
 /// Dive count for a specific site
 final siteDiveCountProvider = FutureProvider.family<int, String>((
@@ -297,6 +476,62 @@ final siteDiveCountProvider = FutureProvider.family<int, String>((
   return siteWithCount?.diveCount ?? 0;
 });
 
+/// The entry/exit pairing most often logged at [siteId], or null when the
+/// site has no dives that record an entry method (issue #1104).
+///
+/// Takes the dives tick because site merges, bulk edits, and sync pulls all
+/// change which dives belong to a site without touching the site row, the
+/// same reason [mediaCountFromDivesAtSiteProvider] subscribes to it.
+final siteEntryExitSuggestionProvider =
+    FutureProvider.family<EntryExitSuggestion?, String>((ref, siteId) async {
+      final diveRepository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(diveRepository.watchDivesChanges());
+
+      final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+      if (diverId == null) return null;
+
+      final stats = ref.watch(insightsRepositoryProvider);
+      final pairs = await stats.getEntryExitMethodPairsForSite(
+        siteId: siteId,
+        diverId: diverId,
+      );
+      if (pairs.isEmpty) return null;
+
+      final top = pairs.first;
+      final entry = EntryMethod.values.asNameMap()[top.entryMethod];
+      if (entry == null) return null;
+
+      return EntryExitSuggestion(
+        entry: entry,
+        exit: top.exitMethod == null
+            ? null
+            : EntryMethod.values.asNameMap()[top.exitMethod],
+        count: top.count,
+      );
+    });
+
+/// Auto-computed dive statistics (depth range, duration, first/last dive) for
+/// the dives logged at [siteId] (submersion-app/submersion#1018, #1038).
+///
+/// Distinct from the manually entered [domain.DiveSite.minDepth]/`maxDepth`
+/// shown in the "Depth Range" card - this is derived from the dives
+/// themselves and never written back to the site row.
+///
+/// Takes the dives tick for the same reason [siteEntryExitSuggestionProvider]
+/// does: site merges, bulk edits, and sync pulls change which dives belong to
+/// a site without touching the site row itself.
+final siteDiveStatisticsProvider =
+    FutureProvider.family<SiteDiveStatistics, String>((ref, siteId) async {
+      final diveRepository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(diveRepository.watchMeasuredRuntimeChanges());
+
+      final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+      if (diverId == null) return SiteDiveStatistics.empty;
+
+      final stats = ref.watch(insightsRepositoryProvider);
+      return stats.getSiteDiveStatistics(siteId: siteId, diverId: diverId);
+    });
+
 /// Site list notifier for mutations
 class SiteListNotifier
     extends StateNotifier<AsyncValue<List<domain.DiveSite>>> {
@@ -306,7 +541,7 @@ class SiteListNotifier
 
   SiteListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(_initializeAndLoad(), SiteListNotifier, 'initialize and load');
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -315,7 +550,11 @@ class SiteListNotifier
         _ref.invalidate(validatedCurrentDiverIdProvider);
         _ref.invalidate(sitesProvider);
         _ref.invalidate(sitesWithCountsProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          SiteListNotifier,
+          'initialize and load',
+        );
       }
     });
   }
@@ -346,7 +585,11 @@ class SiteListNotifier
     _ref.invalidate(sitesWithCountsProvider);
   }
 
-  Future<domain.DiveSite> addSite(domain.DiveSite site) async {
+  /// Creates [site]; a [classification] (issue #1765) is written with it.
+  Future<domain.DiveSite> addSite(
+    domain.DiveSite site, {
+    SiteClassification? classification,
+  }) async {
     // Get fresh validated diver ID before creating
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
 
@@ -354,41 +597,157 @@ class SiteListNotifier
     final siteWithDiver = validatedId != null
         ? site.copyWith(diverId: validatedId)
         : site;
-    final newSite = await _repository.createSite(siteWithDiver);
+    final newSite = await _repository.createSite(
+      siteWithDiver,
+      classification: classification,
+    );
     await _loadSites();
     return newSite;
   }
 
-  Future<void> updateSite(domain.DiveSite site) async {
-    await _repository.updateSite(site);
+  /// Makes the current diver's site from the built-in catalogue [site], or
+  /// returns the one they already adopted from it. The result says which,
+  /// so a caller runs its "after create" rules only on a new site.
+  Future<CatalogueAdoption> adoptCatalogueSite(CatalogueSite site) async {
+    final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    final adoption = await _ref
+        .read(catalogueAdoptionServiceProvider)
+        .adopt(site, diverId: validatedId);
+    if (adoption.created) await _loadSites();
+    return adoption;
+  }
+
+  /// Updates [site]. Its types and tags change only when a [classification]
+  /// is passed (issue #1765).
+  Future<void> updateSite(
+    domain.DiveSite site, {
+    SiteClassification? classification,
+  }) async {
+    final actingDiverId = await _ref.read(
+      validatedCurrentDiverIdProvider.future,
+    );
+    await _repository.updateSite(
+      site,
+      classification: classification,
+      actingDiverId: actingDiverId,
+    );
     await _loadSites();
   }
 
-  Future<void> deleteSite(String id) async {
-    await _repository.deleteSite(id);
+  /// Altitude write-back for a looked-up site altitude. Patches the one
+  /// column; never send a copied entity through [updateSite] for this
+  /// (issue #1187).
+  Future<void> updateSiteAltitude(String siteId, double altitudeMeters) async {
+    await _repository.updateSiteAltitude(siteId, altitudeMeters);
     await _loadSites();
   }
 
-  /// Bulk delete multiple sites
-  /// Returns the deleted sites for potential undo
-  Future<List<domain.DiveSite>> bulkDeleteSites(List<String> ids) async {
-    // Get the sites before deleting for undo capability
-    final sitesToDelete = await _repository.getSitesByIds(ids);
-    await _repository.bulkDeleteSites(ids);
+  /// Coordinates (and optionally altitude) write-back, e.g. from a photo's
+  /// GPS. Patches only those columns.
+  Future<void> updateSiteCoordinates(
+    String siteId,
+    domain.GeoPoint location, {
+    double? altitude,
+  }) async {
+    await _repository.updateSiteCoordinates(
+      siteId,
+      location,
+      altitude: altitude,
+    );
     await _loadSites();
-    _ref.invalidate(sitesProvider);
-    _ref.invalidate(sitesWithCountsProvider);
-    return sitesToDelete;
   }
 
-  /// Restore multiple sites (for undo functionality)
-  Future<void> restoreSites(List<domain.DiveSite> sites) async {
-    for (final site in sites) {
-      await _repository.createSite(site);
+  /// Deletes [id] when the active profile may (issue #2594). False, with
+  /// nothing changed, for a shared site another profile owns.
+  Future<bool> deleteSite(String id) async {
+    final actingDiverId = await _ref.read(
+      validatedCurrentDiverIdProvider.future,
+    );
+    final deleted = await _repository.deleteSite(
+      id,
+      actingDiverId: actingDiverId,
+    );
+    await _loadSites();
+    return deleted;
+  }
+
+  /// Bulk delete multiple sites: only those the active profile may destroy
+  /// (issue #2594); callers hide the rest with [hideSites].
+  ///
+  /// Returns the deleted sites and the dives and plans the delete left
+  /// without a site, so [restoreSites] can undo both.
+  Future<({List<domain.DiveSite> sites, SiteLinks links})> bulkDeleteSites(
+    List<String> ids,
+  ) async {
+    final actingDiverId = await _ref.read(
+      validatedCurrentDiverIdProvider.future,
+    );
+    final sitesToDelete = [
+      for (final site in await _repository.getSitesByIds(ids))
+        if (canDestroySharedItem(
+          ownerId: site.diverId,
+          activeDiverId: actingDiverId,
+        ))
+          site,
+    ];
+    // The delete reports the links it cleared, read in its own transaction.
+    final links = await _repository.bulkDeleteSites([
+      for (final site in sitesToDelete) site.id,
+    ], actingDiverId: actingDiverId);
+    await _loadSites();
+    _invalidateSiteProviders(ids);
+    return (sites: sitesToDelete, links: links);
+  }
+
+  /// Hides other profiles' shared sites [ids] from the active profile only
+  /// (issue #2594). Returns how many are hidden afterwards.
+  Future<int> hideSites(List<String> ids) async {
+    final diverId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return 0;
+    final hidden = await _ref
+        .read(profileHidesRepositoryProvider)
+        .hideAll(SharedItemKind.site, ids, diverId);
+    await _loadSites();
+    _invalidateSiteProviders(ids);
+    _ref.invalidate(hiddenItemsProvider);
+    return hidden;
+  }
+
+  /// Shows hidden sites [ids] to the active profile again.
+  Future<void> unhideSites(List<String> ids) async {
+    final diverId = await _ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return;
+    final hides = _ref.read(profileHidesRepositoryProvider);
+    for (final id in ids) {
+      await hides.unhide(SharedItemKind.site, id, diverId);
     }
     await _loadSites();
-    _ref.invalidate(sitesProvider);
-    _ref.invalidate(sitesWithCountsProvider);
+    _invalidateSiteProviders(ids);
+    _ref.invalidate(hiddenItemsProvider);
+  }
+
+  /// Restore multiple sites (for undo functionality), then point the dives
+  /// and plans of [links] back at them.
+  Future<void> restoreSites(
+    List<domain.DiveSite> sites, {
+    SiteLinks links = const SiteLinks(),
+  }) async {
+    await ChangeLogScope.bulk(
+      DatabaseService.instance.databaseOrNull,
+      label: ChangeLogLabels.bulkEdit,
+      body: () async {
+        for (final site in sites) {
+          await _repository.createSite(site);
+        }
+        await _repository.restoreSiteLinks(links);
+      },
+    );
+    // The delete cancelled the restored documents' reminders (#2613).
+    await _ref.read(documentMutationsProvider).rearmReminders([
+      for (final entry in links.documents) entry.document,
+    ]);
+    await _loadSites();
+    _invalidateSiteProviders([for (final site in sites) site.id]);
   }
 
   Future<MergeSnapshot?> mergeSites(
@@ -400,13 +759,17 @@ class SiteListNotifier
     final dedupedSiteIds = orderedSiteIds.toSet().toList(growable: false);
     final survivorId = dedupedSiteIds.first;
 
+    final actingDiverId = await _ref.read(
+      validatedCurrentDiverIdProvider.future,
+    );
     final snapshot = await _repository.mergeSites(
       mergedSite: mergedSite.copyWith(id: survivorId),
       siteIds: dedupedSiteIds,
+      actingDiverId: actingDiverId,
     );
 
     await _loadSites();
-    _invalidateMergeProviders(dedupedSiteIds);
+    _invalidateSiteProviders(dedupedSiteIds);
 
     return snapshot;
   }
@@ -419,10 +782,12 @@ class SiteListNotifier
       snapshot.originalSurvivor.id,
       ...snapshot.deletedSites.map((s) => s.id),
     ];
-    _invalidateMergeProviders(allSiteIds);
+    _invalidateSiteProviders(allSiteIds);
   }
 
-  void _invalidateMergeProviders(List<String> siteIds) {
+  /// Refreshes the site lists, the dive lists (a merge, delete or undo
+  /// re-points dives) and each of [siteIds]' own providers.
+  void _invalidateSiteProviders(List<String> siteIds) {
     _ref.invalidate(sitesProvider);
     _ref.invalidate(sitesWithCountsProvider);
     _ref.invalidate(divesProvider);
@@ -444,200 +809,6 @@ final siteListNotifierProvider =
     ) {
       final repository = ref.watch(siteRepositoryProvider);
       return SiteListNotifier(repository, ref);
-    });
-
-// ============================================================================
-// External Dive Site API Providers
-// ============================================================================
-
-/// Provider for the dive site API service.
-final diveSiteApiServiceProvider = Provider<DiveSiteApiService>((ref) {
-  return DiveSiteApiService();
-});
-
-/// State for external dive site search.
-class ExternalSiteSearchState {
-  final String query;
-  final bool isLoading;
-  final DiveSiteSearchResult? result;
-  final String? errorMessage;
-  final List<domain.DiveSite> localSites;
-
-  const ExternalSiteSearchState({
-    this.query = '',
-    this.isLoading = false,
-    this.result,
-    this.errorMessage,
-    this.localSites = const [],
-  });
-
-  ExternalSiteSearchState copyWith({
-    String? query,
-    bool? isLoading,
-    DiveSiteSearchResult? result,
-    String? errorMessage,
-    bool clearError = false,
-    List<domain.DiveSite>? localSites,
-  }) {
-    return ExternalSiteSearchState(
-      query: query ?? this.query,
-      isLoading: isLoading ?? this.isLoading,
-      result: result ?? this.result,
-      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
-      localSites: localSites ?? this.localSites,
-    );
-  }
-
-  List<ExternalDiveSite> get sites => result?.sites ?? [];
-  bool get hasResults => sites.isNotEmpty || localSites.isNotEmpty;
-  bool get hasError => errorMessage != null;
-  bool get hasLocalResults => localSites.isNotEmpty;
-  bool get hasExternalResults => sites.isNotEmpty;
-}
-
-/// Notifier for searching external dive site APIs.
-class ExternalSiteSearchNotifier
-    extends StateNotifier<ExternalSiteSearchState> {
-  final DiveSiteApiService _apiService;
-  final SiteListNotifier _siteListNotifier;
-  final SiteRepository _siteRepository;
-  final Ref _ref;
-
-  ExternalSiteSearchNotifier(
-    this._apiService,
-    this._siteListNotifier,
-    this._siteRepository,
-    this._ref,
-  ) : super(const ExternalSiteSearchState());
-
-  /// Search for dive sites by query.
-  Future<void> search(String query) async {
-    if (query.trim().isEmpty) {
-      state = const ExternalSiteSearchState();
-      return;
-    }
-
-    state = state.copyWith(query: query, isLoading: true, clearError: true);
-
-    try {
-      // Search local database first
-      final validatedDiverId = await _ref.read(
-        validatedCurrentDiverIdProvider.future,
-      );
-      final localResults = await _siteRepository.searchSites(
-        query,
-        diverId: validatedDiverId,
-      );
-
-      // Search external sources (API/bundled)
-      final result = await _apiService.searchSites(query);
-
-      if (result.isSuccess) {
-        state = state.copyWith(
-          isLoading: false,
-          result: result,
-          localSites: localResults,
-        );
-      } else {
-        // Even if external search fails, show local results
-        state = state.copyWith(
-          isLoading: false,
-          result: result,
-          localSites: localResults,
-          errorMessage: localResults.isEmpty
-              ? (result.errorMessage ?? 'Search failed')
-              : null,
-        );
-      }
-    } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Search error: $e',
-      );
-    }
-  }
-
-  /// Search for dive sites by country.
-  Future<void> searchByCountry(String country) async {
-    state = state.copyWith(query: country, isLoading: true, clearError: true);
-
-    try {
-      // Search local database first
-      final validatedDiverId = await _ref.read(
-        validatedCurrentDiverIdProvider.future,
-      );
-      final localResults = await _siteRepository.searchSites(
-        country,
-        diverId: validatedDiverId,
-      );
-
-      final result = await _apiService.searchByCountry(country);
-
-      if (result.isSuccess) {
-        state = state.copyWith(
-          isLoading: false,
-          result: result,
-          localSites: localResults,
-        );
-      } else {
-        state = state.copyWith(
-          isLoading: false,
-          result: result,
-          localSites: localResults,
-          errorMessage: localResults.isEmpty
-              ? (result.errorMessage ?? 'Search failed')
-              : null,
-        );
-      }
-    } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Search error: $e',
-      );
-    }
-  }
-
-  /// Import an external dive site into the local database.
-  Future<domain.DiveSite?> importSite(ExternalDiveSite externalSite) async {
-    try {
-      // Get the validated diver ID
-      final validatedDiverId = await _ref.read(
-        validatedCurrentDiverIdProvider.future,
-      );
-
-      // Convert to local dive site
-      final site = externalSite.toDiveSite(diverId: validatedDiverId);
-
-      // Save to database
-      final savedSite = await _siteListNotifier.addSite(site);
-
-      return savedSite;
-    } catch (e) {
-      state = state.copyWith(errorMessage: 'Failed to import site: $e');
-      return null;
-    }
-  }
-
-  /// Clear search results.
-  void clear() {
-    state = const ExternalSiteSearchState();
-  }
-}
-
-/// Provider for external site search.
-final externalSiteSearchProvider =
-    StateNotifierProvider<ExternalSiteSearchNotifier, ExternalSiteSearchState>((
-      ref,
-    ) {
-      final apiService = ref.watch(diveSiteApiServiceProvider);
-      final siteListNotifier = ref.watch(siteListNotifierProvider.notifier);
-      final siteRepository = ref.watch(siteRepositoryProvider);
-      return ExternalSiteSearchNotifier(
-        apiService,
-        siteListNotifier,
-        siteRepository,
-        ref,
-      );
     });
 
 // ============================================================================
@@ -687,29 +858,67 @@ final siteTableConfigProvider =
 // Site Card View Config
 // ============================================================================
 
-/// Default card slot configuration for the detailed site card view.
+/// Detailed site card slots. Persisted per diver under `card_detailed_sites`.
 final siteDetailedCardConfigProvider =
-    StateProvider<EntityCardViewConfig<SiteField>>(
-      (ref) => const EntityCardViewConfig<SiteField>(
-        slots: [
-          EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
-          EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.location),
-          EntityCardSlotConfig(slotId: 'stat1', field: SiteField.maxDepth),
-          EntityCardSlotConfig(slotId: 'stat2', field: SiteField.diveCount),
-        ],
-        extraFields: [],
-      ),
-    );
+    StateNotifierProvider<
+      EntityCardConfigNotifier<SiteField>,
+      EntityCardViewConfig<SiteField>
+    >((ref) {
+      final notifier = EntityCardConfigNotifier<SiteField>(
+        defaultConfig: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.location),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.depthRange),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.diveCount),
+          ],
+          // No extra fields by default. The card leads with the site itself,
+          // and the personal aggregates (last dived, your max, your avg,
+          // avg time) read as clutter in a long list. They stay in the field
+          // catalogue, so a diver can add any of them back from card
+          // settings, and a diver who already did keeps their layout.
+        ),
+        fieldFromName: SiteFieldAdapter.instance.fieldFromName,
+      );
+      final diverId = ref.watch(currentDiverIdProvider);
+      if (diverId != null) {
+        final repo = ref.watch(viewConfigRepositoryProvider);
+        notifier.init(repo, diverId, 'card_detailed_sites');
+      }
+      return notifier;
+    });
 
-/// Default card slot configuration for the compact site card view.
+/// Compact site card slots. Persisted per diver under `card_compact_sites`.
 final siteCompactCardConfigProvider =
-    StateProvider<EntityCardViewConfig<SiteField>>(
-      (ref) => const EntityCardViewConfig<SiteField>(
-        slots: [
-          EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
-          EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.location),
-          EntityCardSlotConfig(slotId: 'stat1', field: SiteField.maxDepth),
-          EntityCardSlotConfig(slotId: 'stat2', field: SiteField.diveCount),
-        ],
-      ),
-    );
+    StateNotifierProvider<
+      EntityCardConfigNotifier<SiteField>,
+      EntityCardViewConfig<SiteField>
+    >((ref) {
+      final notifier = EntityCardConfigNotifier<SiteField>(
+        defaultConfig: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.location),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.diveCount),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.depthRange),
+          ],
+        ),
+        fieldFromName: SiteFieldAdapter.instance.fieldFromName,
+      );
+      final diverId = ref.watch(currentDiverIdProvider);
+      if (diverId != null) {
+        final repo = ref.watch(viewConfigRepositoryProvider);
+        notifier.init(repo, diverId, 'card_compact_sites');
+      }
+      return notifier;
+    });
+
+/// The site a list returned to reopens and scrolls back to: the one last
+/// opened, while the list as filtered still shows it (#3301).
+final rememberedSiteIdProvider = Provider<AsyncValue<String?>>(
+  (ref) => rememberedListedId(
+    items: ref.watch(sortedSitesWithCountsProvider),
+    rememberedId: ref.watch(highlightedSiteIdProvider),
+    idOf: (entry) => entry.site.id,
+  ),
+);

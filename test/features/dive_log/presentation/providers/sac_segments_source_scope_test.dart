@@ -1,0 +1,431 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/data/services/gas_analysis_service.dart';
+import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/domain/entities/source_profile.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/gas_analysis_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+
+/// Phase and gas breakdowns follow the data source in view, as the time chart
+/// does. `dive.profile` interleaves every computer's samples.
+class _FakeTankPressures implements TankPressureRepository {
+  final List<(String?, String?)> scopedCalls = [];
+
+  @override
+  Future<Map<String, List<TankPressurePoint>>> getTankPressuresForComputer(
+    String diveId,
+    String? computerId, {
+    String? sourceId,
+  }) async {
+    scopedCalls.add((computerId, sourceId));
+    return const {};
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  const diveId = 'dive-1';
+  final now = DateTime(2026, 5, 6);
+
+  List<DiveProfilePoint> samples(int seconds) => [
+    for (var t = 0; t <= seconds; t += 10)
+      DiveProfilePoint(timestamp: t, depth: 20),
+  ];
+
+  const shared = DiveTank(
+    id: 'shared',
+    name: 'Shared',
+    role: TankRole.backGas,
+    startPressure: 200,
+    endPressure: 100,
+    gasMix: GasMix(o2: 21, he: 0),
+  );
+  const theirs = DiveTank(
+    id: 'theirs',
+    name: 'Theirs',
+    role: TankRole.stage,
+    computerId: 'primary-dc',
+    startPressure: 200,
+    endPressure: 150,
+    gasMix: GasMix(o2: 50, he: 0),
+  );
+
+  DiveDataSource source(
+    String id,
+    String computer, {
+    required bool isPrimary,
+  }) => DiveDataSource(
+    id: id,
+    diveId: diveId,
+    computerId: computer,
+    isPrimary: isPrimary,
+    importedAt: now,
+    createdAt: now,
+  );
+
+  SourceProfile bucket(String id, String computer, int seconds) =>
+      SourceProfile(
+        sourceId: id,
+        computerId: computer,
+        isEdited: false,
+        points: samples(seconds),
+      );
+
+  GasSwitchWithTank switchTo(DiveTank tank, int timestamp, String computer) =>
+      GasSwitchWithTank(
+        gasSwitch: GasSwitch(
+          id: 'gs-$timestamp',
+          diveId: diveId,
+          timestamp: timestamp,
+          tankId: tank.id,
+          computerId: computer,
+          createdAt: now,
+        ),
+        tankName: tank.name!,
+        gasMix: 'mix',
+        o2Fraction: 0.21,
+      );
+
+  ProviderContainer container({
+    required List<DiveDataSource> sources,
+    required Map<String, SourceProfile> profiles,
+    required List<GasSwitchWithTank> switches,
+    TankPressureRepository? pressures,
+    double? altitude,
+    WaterType? waterType,
+    ProfileAnalysis? analysis,
+    List<DiveProfilePoint>? profile,
+  }) {
+    final dive = Dive(
+      id: diveId,
+      dateTime: now,
+      tanks: const [shared, theirs],
+      profile: profile ?? samples(3600),
+      altitude: altitude,
+      waterType: waterType,
+    );
+    final result = ProviderContainer(
+      overrides: [
+        diveProvider(diveId).overrideWith((ref) async => dive),
+        diveDataSourcesProvider(diveId).overrideWith((ref) async => sources),
+        sourceProfilesProvider(diveId).overrideWith((ref) async => profiles),
+        gasSwitchesProvider(diveId).overrideWith((ref) async => switches),
+        tankPressuresProvider(diveId).overrideWith(
+          (ref) async => const <String, List<TankPressurePoint>>{},
+        ),
+        tankPressureRepositoryProvider.overrideWithValue(
+          pressures ?? _FakeTankPressures(),
+        ),
+        gasAnalysisServiceProvider.overrideWithValue(
+          const GasAnalysisService(),
+        ),
+        if (analysis != null)
+          sourceProfileAnalysisProvider((
+            diveId: diveId,
+            sourceId: null,
+          )).overrideWith((ref) async => analysis),
+      ],
+    );
+    addTearDown(result.dispose);
+    return result;
+  }
+
+  final twoComputers = [
+    source('a', 'primary-dc', isPrimary: true),
+    source('b', 'second-dc', isPrimary: false),
+  ];
+  final twoProfiles = {
+    'a': bucket('a', 'primary-dc', 1800),
+    'b': bucket('b', 'second-dc', 1200),
+  };
+
+  test('a dive that no longer exists has no breakdown', () async {
+    final result = ProviderContainer(
+      overrides: [
+        diveProvider(diveId).overrideWith((ref) async => null),
+        gasAnalysisServiceProvider.overrideWithValue(
+          const GasAnalysisService(),
+        ),
+      ],
+    );
+    addTearDown(result.dispose);
+
+    expect(
+      await result.read(
+        phaseSegmentsProvider((diveId: diveId, sourceId: null)).future,
+      ),
+      isNull,
+    );
+  });
+
+  test('phases use the viewed source\'s samples', () async {
+    final segments = await container(
+      sources: twoComputers,
+      profiles: twoProfiles,
+      switches: const [],
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: 'b')).future);
+
+    expect(segments!.last.endTimestamp, lessThanOrEqualTo(1200));
+  });
+
+  test('no source selected means the primary\'s samples', () async {
+    final segments = await container(
+      sources: twoComputers,
+      profiles: twoProfiles,
+      switches: const [],
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+    expect(segments!.last.endTimestamp, inInclusiveRange(1201, 1800));
+  });
+
+  test('a dive with one source keeps the whole profile', () async {
+    final segments = await container(
+      sources: [source('a', 'primary-dc', isPrimary: true)],
+      profiles: const {},
+      switches: const [],
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+    expect(segments!.last.endTimestamp, greaterThan(1800));
+  });
+
+  test('phases name the deco stops the analysis found (#4079)', () async {
+    // 20 minutes at 20 m, then 6 minutes held at 5 m from 1210 s.
+    final segments = await container(
+      sources: [source('a', 'primary-dc', isPrimary: true)],
+      profiles: const {},
+      switches: const [],
+      profile: [
+        for (var t = 0; t <= 1200; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 20),
+        for (var t = 1210; t <= 1570; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 5),
+      ],
+      analysis: ProfileAnalysis.empty().copyWith(
+        decoStopWindows: const [(start: 1210, end: 1570)],
+      ),
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+    final phases = segments!.map((s) => s.phase);
+    expect(phases, contains(DivePhase.deco));
+    expect(phases, isNot(contains(DivePhase.safetyStop)));
+  });
+
+  test('phases read the analysis\'s NDL curve (#4079)', () async {
+    // 20 minutes at 20 m, then 6 minutes held at 5 m, all of it owing deco.
+    final points = [
+      for (var t = 0; t <= 1200; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 20),
+      for (var t = 1210; t <= 1570; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 5),
+    ];
+
+    final segments = await container(
+      sources: [source('a', 'primary-dc', isPrimary: true)],
+      profiles: const {},
+      switches: const [],
+      profile: points,
+      analysis: ProfileAnalysis.empty().copyWith(
+        ndlCurve: List.filled(points.length, -1),
+      ),
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+    expect(
+      segments!.map((s) => s.phase),
+      isNot(contains(DivePhase.safetyStop)),
+    );
+  });
+
+  test('a stop the chart keeps stays a safety stop (#4079)', () async {
+    // The NDL curve reads deco throughout, but the analysis kept the stop, as
+    // it does when the computer flagged a safety stop in the hold.
+    final points = [
+      for (var t = 0; t <= 1200; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 20),
+      for (var t = 1210; t <= 1570; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 5),
+    ];
+    ProfileEvent stopEvent(int timestamp, {required bool isStart}) =>
+        ProfileEvent.safetyStop(
+          id: 'stop-$timestamp',
+          diveId: diveId,
+          timestamp: timestamp,
+          depth: 5,
+          createdAt: now,
+          isStart: isStart,
+        );
+
+    final segments = await container(
+      sources: [source('a', 'primary-dc', isPrimary: true)],
+      profiles: const {},
+      switches: const [],
+      profile: points,
+      analysis: ProfileAnalysis.empty().copyWith(
+        ndlCurve: List.filled(points.length, -1),
+        events: [
+          stopEvent(1210, isStart: true),
+          stopEvent(1570, isStart: false),
+        ],
+      ),
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+    final phases = segments!.map((s) => s.phase);
+    expect(phases, contains(DivePhase.safetyStop));
+    expect(phases, isNot(contains(DivePhase.deco)));
+  });
+
+  group('a safety stop recorded by a computer (#4079)', () {
+    final points = [
+      for (var t = 0; t <= 1200; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 20),
+      for (var t = 1210; t <= 1570; t += 10)
+        DiveProfilePoint(timestamp: t, depth: 5),
+    ];
+
+    /// The phases of the primary source, on an NDL curve that reads deco
+    /// throughout, with a stop on the 5 m hold recorded by [computerId]. As
+    /// every import writes one, it is a start with no end.
+    Future<Iterable<DivePhase?>> phasesWithStopFrom(String computerId) async {
+      final segments = await container(
+        sources: twoComputers,
+        profiles: {
+          'a': SourceProfile(
+            sourceId: 'a',
+            computerId: 'primary-dc',
+            isEdited: false,
+            points: points,
+          ),
+          'b': bucket('b', 'second-dc', 1200),
+        },
+        switches: const [],
+        analysis: ProfileAnalysis.empty().copyWith(
+          ndlCurve: List.filled(points.length, -1),
+          events: [
+            ProfileEvent.safetyStop(
+              id: 'recorded',
+              diveId: diveId,
+              timestamp: 1210,
+              depth: 5,
+              createdAt: now,
+              source: EventSource.imported,
+            ).copyWith(computerId: computerId),
+          ],
+        ),
+      ).read(phaseSegmentsProvider((diveId: diveId, sourceId: null)).future);
+
+      return segments!.map((s) => s.phase);
+    }
+
+    test('stays a safety stop on the computer that recorded it', () async {
+      final phases = await phasesWithStopFrom('primary-dc');
+
+      expect(phases, contains(DivePhase.safetyStop));
+      expect(phases, isNot(contains(DivePhase.deco)));
+    });
+
+    test('says nothing about the computer in view', () async {
+      // The chart hides this computer's events, so the hold in view is judged
+      // on its own NDL curve.
+      final phases = await phasesWithStopFrom('second-dc');
+
+      expect(phases, contains(DivePhase.deco));
+      expect(phases, isNot(contains(DivePhase.safetyStop)));
+    });
+  });
+
+  test('gas rows ignore another computer\'s switches', () async {
+    final segments = await container(
+      sources: twoComputers,
+      profiles: twoProfiles,
+      switches: [
+        switchTo(shared, 300, 'second-dc'),
+        switchTo(theirs, 600, 'primary-dc'),
+      ],
+    ).read(gasSwitchSegmentsProvider((diveId: diveId, sourceId: 'b')).future);
+
+    expect(segments!.map((s) => s.tankId).toSet(), {'shared'});
+    expect(segments.last.endTimestamp, lessThanOrEqualTo(1200));
+  });
+
+  group('in the dive\'s environment (issue #3958)', () {
+    final environment = DiveEnvironment.forConditions(
+      altitudeMeters: 3000,
+      waterType: WaterType.fresh,
+    );
+    // Every sample is at 20 m, 3 bar on the flat model.
+    final scale = 3.0 / environment.pressureAtDepth(20);
+
+    Future<double> firstSac({
+      required List<DiveDataSource> sources,
+      required Map<String, SourceProfile> profiles,
+      required bool byGas,
+      required bool atSite,
+    }) async {
+      const key = (diveId: diveId, sourceId: null);
+      final read = container(
+        sources: sources,
+        profiles: profiles,
+        switches: byGas ? [switchTo(theirs, 900, 'primary-dc')] : const [],
+        altitude: atSite ? 3000 : null,
+        waterType: atSite ? WaterType.fresh : null,
+      );
+      final segments = await read.read(
+        byGas
+            ? gasSwitchSegmentsProvider(key).future
+            : phaseSegmentsProvider(key).future,
+      );
+      return segments!.first.sacRate;
+    }
+
+    for (final byGas in [false, true]) {
+      final name = byGas ? 'gas' : 'phase';
+
+      test('$name rows on one source read it', () async {
+        final one = [source('a', 'primary-dc', isPrimary: true)];
+        final profiles = {'a': bucket('a', 'primary-dc', 1800)};
+        Future<double> sac(bool atSite) => firstSac(
+          sources: one,
+          profiles: profiles,
+          byGas: byGas,
+          atSite: atSite,
+        );
+
+        expect(await sac(true), closeTo(await sac(false) * scale, 1e-9));
+      });
+
+      test('$name rows scoped to a computer read it', () async {
+        Future<double> sac(bool atSite) => firstSac(
+          sources: twoComputers,
+          profiles: twoProfiles,
+          byGas: byGas,
+          atSite: atSite,
+        );
+
+        expect(await sac(true), closeTo(await sac(false) * scale, 1e-9));
+      });
+    }
+  });
+
+  test('pressures come from the viewed source\'s own series', () async {
+    final pressures = _FakeTankPressures();
+
+    await container(
+      sources: twoComputers,
+      profiles: twoProfiles,
+      switches: const [],
+      pressures: pressures,
+    ).read(phaseSegmentsProvider((diveId: diveId, sourceId: 'b')).future);
+
+    expect(pressures.scopedCalls, [('second-dc', 'b')]);
+  });
+}

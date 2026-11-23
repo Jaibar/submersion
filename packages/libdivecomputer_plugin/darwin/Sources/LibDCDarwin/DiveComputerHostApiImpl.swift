@@ -12,7 +12,29 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
     private var downloadSession: OpaquePointer?  // libdc_download_session_t*
     private var activeBleStream: BleIoStream?
     private var serialScanner: SerialScanner?
-    private var activeSerialStream: SerialIoStream?
+    // Holds the open byte pipe for the duration of a USB or serial download.
+    // Typed as AnyObject because it is a SerialIoStream, or an FtdiUsbIoStream
+    // for a cable the operating system never exposed as a serial port (issue
+    // #732), or a UsbHidIoStream for a computer that speaks HID rather than a
+    // serial protocol (issue #1271). Nothing calls methods on it: its only job
+    // is to keep the stream alive, because the callback table's userdata
+    // pointer is unretained.
+    private var activeSerialStream: AnyObject?
+
+    /// Why the most recent candidate could not be opened, for the error the
+    /// user sees when nothing opens at all.
+    private var lastCandidateFailure = ""
+
+    // Dive buffering for the multi-port serial probe. When more than one serial
+    // port is a candidate (manual model selection with no exact path), each port
+    // is tried with a full download; dives from a wrong port must not be sent to
+    // Flutter. While `isBufferingDives` is set, on_dive accumulates into
+    // `bufferedDives` instead of dispatching; the probe flushes on success and
+    // discards on failure. Guarded by `diveBufferLock` because on_dive fires on
+    // libdivecomputer's download thread.
+    private var isBufferingDives = false
+    private var bufferedDives: [ParsedDive] = []
+    private let diveBufferLock = NSLock()
 
     init(messenger: FlutterBinaryMessenger) {
         self.messenger = messenger
@@ -40,7 +62,8 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                     vendor: vendor,
                     product: product,
                     model: Int64(info.model),
-                    transports: transports
+                    transports: transports,
+                    deliversOldestFirst: info.delivers_oldest_first != 0
                 ))
             }
 
@@ -49,22 +72,21 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
         }
     }
 
+    /// The rules live in `DescriptorTransportMapping`, which has no Flutter
+    /// dependency and is unit-tested standalone. This is only the translation
+    /// into the Pigeon enum: the USB tab is a static catalog driven by this
+    /// mapping, so a bit dropped here makes a supported computer unselectable
+    /// with no error to explain it, and that deserves a test (issue #1271).
     private static func mapTransports(_ bitmask: UInt32) -> [TransportType] {
-        var transports: [TransportType] = []
-        if bitmask & UInt32(LIBDC_TRANSPORT_BLE) != 0 {
-            transports.append(.ble)
+        let transports = DescriptorTransportMapping.Transport(rawValue: bitmask)
+        return DescriptorTransportMapping.modes(for: transports).map { mode in
+            switch mode {
+            case .ble: return .ble
+            case .usb: return .usb
+            case .serial: return .serial
+            case .infrared: return .infrared
+            }
         }
-        if bitmask & UInt32(LIBDC_TRANSPORT_USB) != 0 ||
-           bitmask & UInt32(LIBDC_TRANSPORT_USBHID) != 0 {
-            transports.append(.usb)
-        }
-        if bitmask & UInt32(LIBDC_TRANSPORT_SERIAL) != 0 {
-            transports.append(.serial)
-        }
-        if bitmask & UInt32(LIBDC_TRANSPORT_IRDA) != 0 {
-            transports.append(.infrared)
-        }
-        return transports
     }
 
     // MARK: - Discovery
@@ -91,14 +113,14 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
     }
 
     func stopDiscovery() throws {
-        bleScanner?.stop()
+        bleScanner?.stop(reportCompletion: false)
         bleScanner = nil
         serialScanner?.stop()
         serialScanner = nil
     }
 
     private func startBleDiscovery() {
-        bleScanner?.stop()
+        bleScanner?.stop(reportCompletion: false)
         let scanner = BleScanner()
         scanner.onDeviceDiscovered = { [weak self] device in
             DispatchQueue.main.async {
@@ -133,12 +155,12 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
 
     // MARK: - Download
 
-    func startDownload(device: DiscoveredDevice, fingerprint: String?, completion: @escaping (Result<Void, Error>) -> Void) {
+    func startDownload(device: DiscoveredDevice, fingerprint: String?, syncClock: Bool, completion: @escaping (Result<Void, Error>) -> Void) {
         completion(.success(()))
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            self.performDownload(device: device, fingerprint: fingerprint)
+            self.performDownload(device: device, fingerprint: fingerprint, syncClock: syncClock)
         }
     }
 
@@ -155,7 +177,21 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
         stream.submitPinCode(pinCode)
     }
 
-    private func performDownload(device: DiscoveredDevice, fingerprint: String?) {
+    /// Result of a single libdc_download_run attempt.
+    private struct RunResult {
+        let rc: Int32
+        let serial: UInt32
+        let firmware: UInt32
+        /// Wire name from libdc_clock_sync_status_name (issue #1216).
+        let clockSyncStatus: String
+        let errorMessage: String
+        /// The product and model code the device reported about itself, when
+        /// they differ from the ones it was scanned as (issue #422).
+        var reportedProduct: String? = nil
+        var reportedModel: Int64? = nil
+    }
+
+    private func performDownload(device: DiscoveredDevice, fingerprint: String?, syncClock: Bool) {
         // Create download session.
         guard let session = libdc_download_session_new() else {
             reportError(code: "session_failed", message: "Failed to create download session")
@@ -185,19 +221,43 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             nil
         )
 
-        // Get I/O callbacks based on transport type.
-        var ioCallbacks: libdc_io_callbacks_t
+        let downloadCallbacks = makeDownloadCallbacks()
+        let fingerprintBytes = decodeFingerprint(fingerprint)
+
+        // Dispatch by transport. Exhaustive (no `default:`) on purpose: the
+        // original "Invalid device address" bug was a `.usb` device silently
+        // falling into the BLE path via a default case. Keeping this exhaustive
+        // forces any future transport to be handled explicitly.
         switch device.transport {
-        case .serial:
-            guard let callbacks = connectSerial(device: device, session: session) else { return }
-            ioCallbacks = callbacks
-        default:
-            guard let callbacks = connectBle(device: device, session: session) else { return }
-            ioCallbacks = callbacks
+        case .ble:
+            performBleDownload(
+                device: device, session: session,
+                downloadCallbacks: downloadCallbacks, fingerprint: fingerprintBytes,
+                syncClock: syncClock)
+        case .serial, .usb:
+            // Serial-over-USB (e.g. Mares Puck Pro on an FTDI cable). The Dart
+            // layer folds libdivecomputer's serial transport into `.usb`, so both
+            // route here and download over LIBDC_TRANSPORT_SERIAL.
+            performSerialDownload(
+                device: device, session: session,
+                downloadCallbacks: downloadCallbacks, fingerprint: fingerprintBytes,
+                syncClock: syncClock)
+        case .infrared:
+            reportError(
+                code: "unsupported_transport",
+                message: "Infrared transport is not supported on this platform")
         }
 
-        // Build download callbacks.
-        // We pass self as userdata via Unmanaged to receive dive/progress events.
+        // Cleanup (single owner of the session, so no path double-frees).
+        libdc_download_session_free(session)
+        self.downloadSession = nil
+        self.activeBleStream = nil
+        self.activeSerialStream = nil
+    }
+
+    /// Builds the progress/dive callbacks. `on_dive` buffers instead of
+    /// dispatching while a multi-port serial probe is in progress.
+    private func makeDownloadCallbacks() -> libdc_download_callbacks_t {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
         var downloadCallbacks = libdc_download_callbacks_t()
@@ -218,51 +278,63 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             let parsedDive = hostApi.convertParsedDive(dive.pointee)
             NativeLogger.d("DiveComputerHost", category: "LDC",
                 "Dive parsed: depth=\(parsedDive.maxDepthMeters)m, duration=\(parsedDive.durationSeconds)s, samples=\(parsedDive.samples.count)")
-            DispatchQueue.main.async {
-                hostApi.flutterApi.onDiveDownloaded(dive: parsedDive) { _ in }
+            hostApi.diveBufferLock.lock()
+            let buffering = hostApi.isBufferingDives
+            if buffering {
+                hostApi.bufferedDives.append(parsedDive)
+            }
+            hostApi.diveBufferLock.unlock()
+            if !buffering {
+                DispatchQueue.main.async {
+                    hostApi.flutterApi.onDiveDownloaded(dive: parsedDive) { _ in }
+                }
             }
         }
         downloadCallbacks.userdata = selfPtr
+        return downloadCallbacks
+    }
 
-        // Map transport type.
-        let transportValue: UInt32
-        switch device.transport {
-        case .ble:
-            transportValue = UInt32(LIBDC_TRANSPORT_BLE)
-        case .usb:
-            transportValue = UInt32(LIBDC_TRANSPORT_USB)
-        case .serial:
-            transportValue = UInt32(LIBDC_TRANSPORT_SERIAL)
-        case .infrared:
-            transportValue = UInt32(LIBDC_TRANSPORT_IRDA)
+    /// Decodes a hex fingerprint string to bytes for incremental download.
+    private func decodeFingerprint(_ hex: String?) -> [UInt8]? {
+        guard let hex = hex, !hex.isEmpty else { return nil }
+        return stride(from: 0, to: hex.count, by: 2).compactMap { i in
+            let start = hex.index(hex.startIndex, offsetBy: i)
+            let end = hex.index(start, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+            return UInt8(hex[start..<end], radix: 16)
         }
+    }
 
-        // Decode fingerprint from hex string if provided.
-        var fingerprintBytes: [UInt8]? = nil
-        if let hex = fingerprint, !hex.isEmpty {
-            fingerprintBytes = stride(from: 0, to: hex.count, by: 2).compactMap { i in
-                let start = hex.index(hex.startIndex, offsetBy: i)
-                let end = hex.index(start, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-                return UInt8(hex[start..<end], radix: 16)
-            }
-        }
-
-        // Run the download (blocks until complete).
+    /// Runs a single blocking download attempt over the given I/O callbacks.
+    /// Callbacks are passed by value and copied to locals so libdc_download_run
+    /// can take mutable pointers to them.
+    private func runOnce(
+        session: OpaquePointer,
+        device: DiscoveredDevice,
+        transportValue: UInt32,
+        ioCallbacks: libdc_io_callbacks_t,
+        fingerprint: [UInt8]?,
+        downloadCallbacks: libdc_download_callbacks_t,
+        syncClock: Bool
+    ) -> RunResult {
+        var io = ioCallbacks
+        var dl = downloadCallbacks
         var serial: UInt32 = 0
         var firmware: UInt32 = 0
+        var clockSync = LIBDC_CLOCK_SYNC_NOT_REQUESTED
         var errorBuf = [CChar](repeating: 0, count: 256)
+        let syncFlag: Int32 = syncClock ? 1 : 0
         let result: Int32
-        if let fp = fingerprintBytes, !fp.isEmpty {
+        if let fp = fingerprint, !fp.isEmpty {
             result = fp.withUnsafeBufferPointer { buf in
                 libdc_download_run(
                     session,
                     device.vendor, device.product, UInt32(device.model),
                     transportValue,
-                    &ioCallbacks,
+                    &io,
                     buf.baseAddress, UInt32(buf.count),
-                    &downloadCallbacks,
-                    &serial,
-                    &firmware,
+                    syncFlag,
+                    &dl,
+                    &serial, &firmware, &clockSync,
                     &errorBuf, errorBuf.count
                 )
             }
@@ -271,64 +343,381 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                 session,
                 device.vendor, device.product, UInt32(device.model),
                 transportValue,
-                &ioCallbacks,
+                &io,
                 nil, 0,
-                &downloadCallbacks,
-                &serial,
-                &firmware,
+                syncFlag,
+                &dl,
+                &serial, &firmware, &clockSync,
                 &errorBuf, errorBuf.count
             )
         }
+        // The model the device named about itself (issue #422).
+        var reportedBuf = [CChar](repeating: 0, count: 64)
+        var reportedModel: UInt32 = 0
+        let hasReported = libdc_download_session_reported_device(
+            session, &reportedBuf, reportedBuf.count, &reportedModel) != 0
+        return RunResult(
+            rc: result, serial: serial, firmware: firmware,
+            clockSyncStatus: String(cString: libdc_clock_sync_status_name(clockSync)),
+            errorMessage: String(cString: errorBuf),
+            reportedProduct: hasReported ? String(cString: reportedBuf) : nil,
+            reportedModel: hasReported ? Int64(reportedModel) : nil)
+    }
 
-        // Format device info as strings for Dart.
-        let serialStr: String? = serial > 0 ? String(serial) : nil
-        let firmwareStr: String? = firmware > 0 ? String(firmware) : nil
-        NativeLogger.i("DiveComputerHost", category: "LDC", "Device info: serial=\(serial), firmware=\(firmware)")
+    /// Reports the final outcome of a download attempt to Flutter
+    /// (success/cancelled -> onDownloadComplete, otherwise download_error).
+    private func reportDownloadResult(_ result: RunResult) {
+        let serialStr: String? = result.serial > 0 ? String(result.serial) : nil
+        let firmwareStr: String? = result.firmware > 0 ? String(result.firmware) : nil
+        // Null means "nothing was asked", so the Dart side shows no line.
+        let clockSyncStr: String? =
+            result.clockSyncStatus == "not_requested" ? nil : result.clockSyncStatus
+        NativeLogger.i("DiveComputerHost", category: "LDC",
+            "Clock sync: \(result.clockSyncStatus)")
+        NativeLogger.i("DiveComputerHost", category: "LDC",
+            "Device info: serial=\(result.serial), firmware=\(result.firmware),"
+                + " reported=\(result.reportedProduct ?? "none")")
+        NativeLogger.d("DiveComputerHost", category: "LDC",
+            "libdc_download_run returned result=\(result.rc)")
 
-        // Report completion or error.
-        NativeLogger.d("DiveComputerHost", category: "LDC", "libdc_download_run returned result=\(result)")
-        if result == 0 {
+        if result.rc == 0 {
             NativeLogger.i("DiveComputerHost", category: "LDC", "Download succeeded, sending onDownloadComplete")
             DispatchQueue.main.async { [weak self] in
                 self?.flutterApi.onDownloadComplete(
-                    totalDives: 0,
-                    serialNumber: serialStr,
-                    firmwareVersion: firmwareStr
-                ) { _ in }
+                    totalDives: 0, serialNumber: serialStr, firmwareVersion: firmwareStr,
+                    clockSyncStatus: clockSyncStr,
+                    reportedProduct: result.reportedProduct,
+                    reportedModel: result.reportedModel) { _ in }
             }
-        } else if result == Int32(LIBDC_STATUS_CANCELLED) {
+        } else if result.rc == Int32(LIBDC_STATUS_CANCELLED) {
             NativeLogger.i("DiveComputerHost", category: "LDC", "Download cancelled, sending onDownloadComplete")
             // Still send completion so the Dart side can import any dives
             // that were downloaded before cancellation.
             DispatchQueue.main.async { [weak self] in
                 self?.flutterApi.onDownloadComplete(
-                    totalDives: 0,
-                    serialNumber: serialStr,
-                    firmwareVersion: firmwareStr
-                ) { _ in }
+                    totalDives: 0, serialNumber: serialStr, firmwareVersion: firmwareStr,
+                    clockSyncStatus: clockSyncStr,
+                    reportedProduct: result.reportedProduct,
+                    reportedModel: result.reportedModel) { _ in }
             }
         } else {
-            let errorMsg = String(cString: errorBuf)
-            NativeLogger.e("DiveComputerHost", category: "LDC", "Download error (result=\(result)): \(errorMsg)")
-            reportError(code: "download_error", message: errorMsg)
+            NativeLogger.e("DiveComputerHost", category: "LDC",
+                "Download error (result=\(result.rc)): \(result.errorMessage)")
+            reportError(code: "download_error", message: result.errorMessage)
+        }
+    }
+
+    /// BLE download: resolve/connect the peripheral, then run once.
+    private func performBleDownload(
+        device: DiscoveredDevice, session: OpaquePointer,
+        downloadCallbacks: libdc_download_callbacks_t, fingerprint: [UInt8]?,
+        syncClock: Bool
+    ) {
+        guard let ioCallbacks = connectBle(device: device) else { return }
+        let result = runOnce(
+            session: session, device: device,
+            transportValue: UInt32(LIBDC_TRANSPORT_BLE),
+            ioCallbacks: ioCallbacks, fingerprint: fingerprint,
+            downloadCallbacks: downloadCallbacks, syncClock: syncClock)
+        reportDownloadResult(result)
+    }
+
+    /// One thing worth trying as the byte pipe for a serial-transport download.
+    ///
+    /// Serial ports come first because they are what works today. Raw-USB
+    /// cables are the fallback for hardware the operating system never
+    /// published as a serial port at all: the Aeris/Oceanic cable is an FTDI
+    /// chip with a custom product ID that Apple's driver does not claim, so no
+    /// /dev/cu.* node exists for it (issue #732).
+    private enum DownloadCandidate {
+        case serialPort(String)
+        case ftdiUsb(UsbFtdiDevice)
+        case usbHid(UsbHidDevice)
+
+        /// Label for logs and the probe report shown to the user.
+        var label: String {
+            switch self {
+            case .serialPort(let path): return path
+            case .ftdiUsb(let device): return "\(device.displayName) (USB)"
+            case .usbHid(let device): return "\(device.displayName) (USB HID)"
+            }
         }
 
-        // Cleanup.
-        libdc_download_session_free(session)
-        self.downloadSession = nil
-        self.activeBleStream = nil
-        self.activeSerialStream = nil
+        /// Log category for lines about this candidate.
+        ///
+        /// Tagging a raw-USB probe as SER would make a debug log read as though
+        /// a serial port were involved, which is exactly the distinction
+        /// someone diagnosing issue #732 needs to draw: whether the cable was
+        /// reached through a device node or directly over USB.
+        var logCategory: String {
+            switch self {
+            case .serialPort: return "SER"
+            case .ftdiUsb: return "USB"
+            case .usbHid: return "HID"
+            }
+        }
+
+        /// The libdivecomputer transport this candidate speaks.
+        ///
+        /// Per-candidate rather than per-download because the drivers branch on
+        /// it. An FTDI cable is a serial line whatever bus it hangs off, so it
+        /// shares SERIAL with a /dev node.
+        var transportValue: UInt32 {
+            switch self {
+            case .serialPort, .ftdiUsb: return UInt32(LIBDC_TRANSPORT_SERIAL)
+            case .usbHid: return UInt32(LIBDC_TRANSPORT_USBHID)
+            }
+        }
+    }
+
+    /// Opens a candidate. Returns the stream plus its callbacks on success, or
+    /// nil with `lastCandidateFailure` set to the reason it could not be opened.
+    ///
+    /// The stream is returned as AnyObject only so the caller can keep it
+    /// alive for the duration of the run; the callback userdata pointer is
+    /// unretained.
+    private func openCandidate(
+        _ candidate: DownloadCandidate
+    ) -> (stream: AnyObject, callbacks: libdc_io_callbacks_t, close: () -> Void)? {
+        switch candidate {
+        case .serialPort(let path):
+            let stream = SerialIoStream()
+            if let failure = stream.open(path: path) {
+                NativeLogger.e(
+                    "DiveComputerHost", category: candidate.logCategory,
+                    "Failed to open \(path) (errno=\(failure.errnoValue)): \(failure.reason)")
+                lastCandidateFailure = failure.reason
+                return nil
+            }
+            NativeLogger.i(
+                "DiveComputerHost", category: candidate.logCategory,
+                "Opened serial port: \(path)")
+            return (stream, stream.makeCallbacks(), stream.close)
+        case .ftdiUsb(let device):
+            let stream = FtdiUsbIoStream()
+            if let reason = stream.open(device: device) {
+                NativeLogger.e(
+                    "DiveComputerHost", category: candidate.logCategory,
+                    "Failed to open \(device.displayName): \(reason)")
+                lastCandidateFailure = reason
+                return nil
+            }
+            return (stream, stream.makeCallbacks(), stream.close)
+        case .usbHid(let device):
+            let stream = UsbHidIoStream()
+            if let reason = stream.open(device: device) {
+                NativeLogger.e(
+                    "DiveComputerHost", category: candidate.logCategory,
+                    "Failed to open \(device.displayName): \(reason)")
+                lastCandidateFailure = reason
+                return nil
+            }
+            NativeLogger.i(
+                "DiveComputerHost", category: candidate.logCategory,
+                "Opened USB HID device: \(device.displayName)")
+            return (stream, stream.makeCallbacks(), stream.close)
+        }
+    }
+
+    /// The attached USB HID devices that the selected model claims.
+    ///
+    /// Which HID device belongs to which computer is libdivecomputer's
+    /// knowledge, so the vendor and product ids are put to `libdc_usbhid_match`
+    /// rather than compared against a table kept here. Callers check the
+    /// descriptor's USB HID bit first, so this walks the HID bus only for a
+    /// model that could plausibly be on it.
+    private func usbHidCandidates(for device: DiscoveredDevice) -> [DownloadCandidate] {
+        let found = UsbHidDeviceEnumerator.enumerateMatching(
+            log: { message in
+                NativeLogger.i("DiveComputerHost", category: "HID", message)
+            },
+            isMatch: { vendorId, productId in
+                libdc_usbhid_match(
+                    device.vendor, device.product, UInt32(device.model),
+                    vendorId, productId) != 0
+            })
+        return found.map { DownloadCandidate.usbHid($0) }
+    }
+
+    /// USB and serial download with auto-probe, mirroring the Linux/Windows
+    /// backends.
+    ///
+    /// Candidates, in the order they are tried:
+    ///
+    /// 1. USB HID devices the selected model claims (issue #1271: the Scubapro
+    ///    G2 family and the Suunto EON Steel family speak HID, not serial).
+    /// 2. The USB serial ports the operating system published.
+    /// 3. Any dive-computer USB cable it left unclaimed (issue #732: the
+    ///    Aeris/Oceanic cable is an FTDI chip with a custom product ID that
+    ///    Apple's driver does not match, so it never becomes a /dev/cu.* node).
+    ///
+    /// A single candidate is opened and run directly so the real failure is
+    /// reported. Multiple candidates are each tried with a full download,
+    /// buffering dives so a wrong candidate cannot leak phantom dives.
+    private func performSerialDownload(
+        device: DiscoveredDevice, session: OpaquePointer,
+        downloadCallbacks: libdc_download_callbacks_t, fingerprint: [UInt8]?,
+        syncClock: Bool
+    ) {
+        let transports = libdc_descriptor_transports(
+            device.vendor, device.product, UInt32(device.model))
+        let hidCapable = transports & UInt32(LIBDC_TRANSPORT_USBHID) != 0
+        // Hardware whose only wired transport is HID. Probing serial ports for
+        // it would write dive-computer handshake bytes at unrelated hardware
+        // and could only ever fail, so the list stops at the HID candidates.
+        let hidOnly = hidCapable
+            && transports
+                & UInt32(LIBDC_TRANSPORT_SERIAL | LIBDC_TRANSPORT_USB) == 0
+
+        var candidates = hidCapable ? usbHidCandidates(for: device) : []
+
+        if !hidOnly {
+            let available = SerialPortEnumerator.enumerateUsbSerialPaths()
+            candidates += SerialPortEnumerator.candidatePorts(
+                address: device.address, available: available)
+                .map { DownloadCandidate.serialPort($0) }
+
+            // Cables the operating system never published as a serial port.
+            // Tried after the serial ports so nothing that works today
+            // changes: a real /dev node is always the better path when one
+            // exists. An explicit /dev address means the user picked a
+            // specific port, so raw USB is not second-guessed into the list.
+            if !device.address.hasPrefix("/dev/") {
+                // The log closure is how the enumerator reports what it saw; it
+                // takes one rather than calling NativeLogger itself so the file
+                // stays compilable outside the CocoaPods build. Every USB device
+                // is reported, matched or not, so a user's debug log
+                // distinguishes a cable that is not enumerating from one the
+                // allowlist rejected.
+                let found = UsbFtdiDeviceEnumerator.enumerateDiveCables { message in
+                    NativeLogger.i("DiveComputerHost", category: "USB", message)
+                }
+                candidates.append(
+                    contentsOf: found.map { DownloadCandidate.ftdiUsb($0) })
+            }
+        }
+
+        if candidates.isEmpty {
+            // A HID-only model has no serial port to go looking for, so the
+            // serial wording would send the user hunting for the wrong thing.
+            if hidCapable {
+                reportError(
+                    code: "no_usb_device",
+                    message: "No \(device.product) found over USB. "
+                        + "Is it connected to this computer and powered on?")
+            } else {
+                reportError(
+                    code: "no_serial_ports",
+                    message: "No USB serial ports found. Is the dive computer connected and powered on?")
+            }
+            return
+        }
+
+        // Single candidate: open directly and report the real outcome (an open
+        // failure is a clear connect error; a comms failure is download_error).
+        if candidates.count == 1 {
+            let candidate = candidates[0]
+            guard let opened = openCandidate(candidate) else {
+                reportError(
+                    code: "connect_failed",
+                    message: "Failed to open \(candidate.label): \(lastCandidateFailure)")
+                return
+            }
+            self.activeSerialStream = opened.stream
+            let result = runOnce(
+                session: session, device: device,
+                transportValue: candidate.transportValue,
+                ioCallbacks: opened.callbacks, fingerprint: fingerprint,
+                downloadCallbacks: downloadCallbacks, syncClock: syncClock)
+            opened.close()
+            self.activeSerialStream = nil
+            reportDownloadResult(result)
+            return
+        }
+
+        // Multi-candidate probe: buffer dives until a port succeeds.
+        diveBufferLock.lock()
+        isBufferingDives = true
+        bufferedDives.removeAll()
+        diveBufferLock.unlock()
+
+        var probeLog = ""
+        var anyOpened = false
+        var lastResult = RunResult(
+            rc: Int32(LIBDC_STATUS_IO), serial: 0, firmware: 0,
+            clockSyncStatus: "not_requested", errorMessage: "")
+
+        for candidate in candidates {
+            diveBufferLock.lock()
+            bufferedDives.removeAll()
+            diveBufferLock.unlock()
+
+            guard let opened = openCandidate(candidate) else {
+                probeLog += "  \(candidate.label): \(lastCandidateFailure)\n"
+                continue
+            }
+            anyOpened = true
+            NativeLogger.i(
+                "DiveComputerHost", category: candidate.logCategory,
+                "Probing \(candidate.label)")
+            self.activeSerialStream = opened.stream
+            let result = runOnce(
+                session: session, device: device,
+                transportValue: candidate.transportValue,
+                ioCallbacks: opened.callbacks, fingerprint: fingerprint,
+                downloadCallbacks: downloadCallbacks, syncClock: syncClock)
+            lastResult = result
+            opened.close()
+            self.activeSerialStream = nil
+
+            if result.rc == 0 || result.rc == Int32(LIBDC_STATUS_CANCELLED) {
+                break
+            }
+            probeLog += "  \(candidate.label): download failed (rc=\(result.rc))\n"
+            NativeLogger.w(
+                "DiveComputerHost", category: candidate.logCategory,
+                "Probe failed on \(candidate.label) rc=\(result.rc)")
+        }
+
+        // Flush buffered dives on success OR cancellation (a cancel still sends
+        // onDownloadComplete so the Dart side can import dives downloaded before
+        // the cancel); discard only on real failure. Safe because a wrong port
+        // fails to handshake and emits no dives, and the buffer is cleared per
+        // attempt, so it only ever holds the actively-downloading port's dives.
+        let succeeded = lastResult.rc == 0 || lastResult.rc == Int32(LIBDC_STATUS_CANCELLED)
+        diveBufferLock.lock()
+        let divesToFlush = succeeded ? bufferedDives : []
+        bufferedDives.removeAll()
+        isBufferingDives = false
+        diveBufferLock.unlock()
+        for dive in divesToFlush {
+            DispatchQueue.main.async { [weak self] in
+                self?.flutterApi.onDiveDownloaded(dive: dive) { _ in }
+            }
+        }
+
+        if !anyOpened {
+            reportError(
+                code: "connect_failed",
+                message: "No dive computer found. Ports tried:\n\(probeLog)")
+            return
+        }
+        if lastResult.rc != 0 && lastResult.rc != Int32(LIBDC_STATUS_CANCELLED) {
+            reportError(
+                code: "connect_failed",
+                message: "No dive computer found. Ports tried:\n\(probeLog)")
+            return
+        }
+        reportDownloadResult(lastResult)
     }
 
     // MARK: - Transport Connection
 
     private func connectBle(
-        device: DiscoveredDevice, session: OpaquePointer
+        device: DiscoveredDevice
     ) -> libdc_io_callbacks_t? {
         guard let uuid = UUID(uuidString: device.address) else {
             reportError(code: "invalid_address", message: "Invalid device address")
-            libdc_download_session_free(session)
-            self.downloadSession = nil
             return nil
         }
 
@@ -346,6 +735,9 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             ("scan-only", false, 20),
         ]
         var connectedStream: BleIoStream?
+        // Remembered across attempts so the error the user sees describes the
+        // reason the attempts failed, not just that they did.
+        var lastFailure: BleConnectFailure = .other
 
         for (index, plan) in resolvePlans.enumerated() {
             NativeLogger.d("DiveComputerHost", category: "BLE",
@@ -373,49 +765,57 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                 self?.flutterApi.onPinCodeRequired(deviceAddress: address) { _ in }
             }
             self.activeBleStream = stream
-            if stream.connectAndDiscover() {
+            guard let failure = stream.connectAndDiscover() else {
                 connectedStream = stream
                 break
             }
+            lastFailure = failure
 
             NativeLogger.w("DiveComputerHost", category: "BLE",
                 "connectAndDiscover failed on attempt \(index + 1) for \(peripheral.identifier.uuidString)")
             if peripheral.state != .disconnected {
                 centralMgr.cancelPeripheralConnection(peripheral)
             }
+
+            // A pairing record the peer has disowned cannot be repaired from
+            // here -- CoreBluetooth offers no unpair API -- so a second attempt
+            // only delays the instruction that does fix it (issue #865).
+            if failure.isTerminal {
+                NativeLogger.w("DiveComputerHost", category: "BLE",
+                    "Not retrying: \(failure.errorCode) needs the user to clear the pairing")
+                break
+            }
         }
 
         guard let bleStream = connectedStream else {
-            reportError(code: "connect_failed", message: "Failed to connect to device")
-            libdc_download_session_free(session)
-            self.downloadSession = nil
+            reportError(
+                code: lastFailure.errorCode,
+                message: Self.connectFailureMessage(for: lastFailure))
             self.activeBleStream = nil
             return nil
         }
         return bleStream.makeCallbacks()
     }
 
-    private func connectSerial(
-        device: DiscoveredDevice, session: OpaquePointer
-    ) -> libdc_io_callbacks_t? {
-        // macOS does not have auto-probe logic (unlike Linux/Windows) because
-        // serial devices are always discovered via SerialScanner first, which
-        // provides the exact /dev/cu.* path. Manual model selection on macOS
-        // also goes through the scanner, so the address is always a valid
-        // device path by the time we reach here.
-        let serialStream = SerialIoStream()
-        guard serialStream.open(path: device.address) else {
-            reportError(
-                code: "connect_failed",
-                message: "Failed to open serial port: \(device.address)"
-            )
-            libdc_download_session_free(session)
-            self.downloadSession = nil
-            return nil
+    /// Fallback text for a failed BLE connect.
+    ///
+    /// The Dart layer localises the known codes and only falls back to this
+    /// string for `connect_failed`, but the native message is what lands in the
+    /// debug logs users attach to bug reports, so it spells the diagnosis out.
+    private static func connectFailureMessage(for failure: BleConnectFailure) -> String {
+        switch failure {
+        case .stalePairing:
+            return "The Bluetooth pairing for this dive computer is out of date."
+                + " Forget the dive computer in your device's Bluetooth settings,"
+                + " then try again."
+        case .discoveryStalled:
+            return "Connected to the dive computer, but it stopped responding"
+                + " before the download could start. This is usually an out-of-date"
+                + " Bluetooth pairing: forget the dive computer in your device's"
+                + " Bluetooth settings, then try again."
+        case .other:
+            return "Failed to connect to device"
         }
-        NativeLogger.i("DiveComputerHost", category: "SER", "Opened serial port: \(device.address)")
-        self.activeSerialStream = serialStream
-        return serialStream.makeCallbacks()
     }
 
     // MARK: - Dive Conversion
@@ -445,7 +845,9 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                     temperatureCelsius: s.temperature.isNaN ? nil : s.temperature,
                     pressureBar: s.pressure.isNaN ? nil : s.pressure,
                     tankIndex: s.tank == UInt32.max ? nil : Int64(s.tank),
+                    tankPressuresBar: tankPressures(of: s),
                     heartRate: s.heartbeat == UInt32.max ? nil : Int64(s.heartbeat),
+                    heading: s.heading == UInt32.max ? nil : Double(s.heading),
                     setpoint: s.setpoint.isNaN ? nil : s.setpoint,
                     ppo2: s.ppo2.isNaN ? nil : s.ppo2,
                     cns: s.cns.isNaN ? nil : s.cns,
@@ -453,7 +855,26 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                     decoType: s.deco_type == UInt32.max ? nil : Int64(s.deco_type),
                     decoTime: s.deco_time == UInt32.max ? nil : Int64(s.deco_time),
                     decoDepth: s.deco_depth.isNaN ? nil : s.deco_depth,
-                    tts: s.deco_tts == UInt32.max || s.deco_tts == 0 ? nil : Int64(s.deco_tts)
+                    tts: s.deco_tts == UInt32.max || s.deco_tts == 0 ? nil : Int64(s.deco_tts),
+                    // C `double o2_sensor[6]` imports as a 6-tuple.
+                    o2Sensor1: s.o2_sensor.0.isNaN ? nil : s.o2_sensor.0,
+                    o2Sensor2: s.o2_sensor.1.isNaN ? nil : s.o2_sensor.1,
+                    o2Sensor3: s.o2_sensor.2.isNaN ? nil : s.o2_sensor.2,
+                    o2Sensor4: s.o2_sensor.3.isNaN ? nil : s.o2_sensor.3,
+                    o2Sensor5: s.o2_sensor.4.isNaN ? nil : s.o2_sensor.4,
+                    o2Sensor6: s.o2_sensor.5.isNaN ? nil : s.o2_sensor.5,
+                    // C `unsigned int o2_sensor_mv[6]` imports as a 6-tuple.
+                    o2SensorMv1: s.o2_sensor_mv.0 == UInt32.max ? nil : Int64(s.o2_sensor_mv.0),
+                    o2SensorMv2: s.o2_sensor_mv.1 == UInt32.max ? nil : Int64(s.o2_sensor_mv.1),
+                    o2SensorMv3: s.o2_sensor_mv.2 == UInt32.max ? nil : Int64(s.o2_sensor_mv.2),
+                    o2SensorMv4: s.o2_sensor_mv.3 == UInt32.max ? nil : Int64(s.o2_sensor_mv.3),
+                    o2SensorMv5: s.o2_sensor_mv.4 == UInt32.max ? nil : Int64(s.o2_sensor_mv.4),
+                    o2SensorMv6: s.o2_sensor_mv.5 == UInt32.max ? nil : Int64(s.o2_sensor_mv.5),
+                    // Shearwater Avelo mode (issue #4664).
+                    aveloBuoyancy: s.avelo_buoyancy.isNaN ? nil : s.avelo_buoyancy,
+                    aveloGasRemaining: s.gas_remaining == UInt32.max ? nil : Int64(s.gas_remaining),
+                    computerRmv: s.computer_rmv.isNaN ? nil : s.computer_rmv,
+                    gasMixIndex: s.gasmix == UInt32.max ? nil : Int64(s.gasmix)
                 ))
             }
         }
@@ -467,7 +888,8 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                 gasMixes.append(GasMix(
                     index: Int64(i),
                     o2Percent: gm.oxygen * 100.0,
-                    hePercent: gm.helium * 100.0
+                    hePercent: gm.helium * 100.0,
+                    usage: gm.usage == 0 ? nil : Int64(gm.usage)
                 ))
             }
         }
@@ -483,7 +905,9 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                     gasMixIndex: Int64(tk.gasmix),
                     volumeLiters: tk.volume > 0 ? tk.volume : nil,
                     startPressureBar: tk.beginpressure > 0 ? tk.beginpressure : nil,
-                    endPressureBar: tk.endpressure > 0 ? tk.endpressure : nil
+                    endPressureBar: tk.endpressure > 0 ? tk.endpressure : nil,
+                    usage: tk.usage == 0 ? nil : Int64(tk.usage),
+                    transmitterSerial: tk.serial == 0 ? nil : Int64(tk.serial)
                 ))
             }
         }
@@ -505,7 +929,9 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             for i in 0..<Int(dive.event_count) {
                 let e = eventsPtr[i]
                 guard e.type != 0 else { continue }  // skip SAMPLE_EVENT_NONE
-                let typeName = Self.mapEventType(e.type)
+                // One shared table for every platform; see
+                // libdc_event_type_name in libdc_wrapper.h.
+                let typeName = String(cString: libdc_event_type_name(e.type))
                 let data: [String: String] = [
                     "flags": String(e.flags),
                     "value": String(e.value),
@@ -571,39 +997,13 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             // Cannot distinguish these without a C layer change.
             decoConservatism: dive.deco_conservatism == 0 ? nil : Int64(dive.deco_conservatism),
             rawData: rawData,
-            rawFingerprint: rawFingerprint
+            rawFingerprint: rawFingerprint,
+            entryLatitude: dive.entry_latitude.isNaN ? nil : dive.entry_latitude,
+            entryLongitude: dive.entry_longitude.isNaN ? nil : dive.entry_longitude,
+            exitLatitude: dive.exit_latitude.isNaN ? nil : dive.exit_latitude,
+            exitLongitude: dive.exit_longitude.isNaN ? nil : dive.exit_longitude,
+            surfacePressureBar: dive.surface_pressure.isNaN ? nil : dive.surface_pressure
         )
-    }
-
-    private static func mapEventType(_ type: UInt32) -> String {
-        switch type {
-        case 0: return "none"
-        case 1: return "deco"
-        case 2: return "ascent"
-        case 3: return "ceiling"
-        case 4: return "workload"
-        case 5: return "transmitter"
-        case 6: return "violation"
-        case 7: return "bookmark"
-        case 8: return "surface"
-        case 9: return "safetystop"
-        case 10: return "gaschange"
-        case 11: return "safetystop_voluntary"
-        case 12: return "safetystop_mandatory"
-        case 13: return "deepstop"
-        case 14: return "ceiling_safetystop"
-        case 15: return "floor"
-        case 16: return "divetime"
-        case 17: return "maxdepth"
-        case 18: return "OLF"
-        case 19: return "PO2"
-        case 20: return "airtime"
-        case 21: return "rgbm"
-        case 22: return "heading"
-        case 23: return "tissuelevel"
-        case 24: return "gaschange2"
-        default: return "unknown_\(type)"
-        }
     }
 
     // MARK: - Parse Raw Dive Data
@@ -678,6 +1078,25 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
     }
 }
 
+/// Every tank's pressure at one sample, indexed by tank index, NAN unpacked to
+/// nil. Trailing nils are trimmed and an all-nil sample returns nil, so the
+/// common single-transmitter dive marshals a one-element list per sample rather
+/// than a full LIBDC_MAX_TANKS one. See issue #1223: a sample can carry a
+/// reading per air-integrated transmitter, and `pressure`/`tank` hold only the
+/// last of them.
+private func tankPressures(of sample: libdc_sample_t) -> [Double?]? {
+    let capacity = Int(LIBDC_MAX_TANKS)
+    var values = withUnsafePointer(to: sample.tank_pressure) { tuplePtr in
+        tuplePtr.withMemoryRebound(to: Double.self, capacity: capacity) { buffer in
+            (0..<capacity).map { buffer[$0].isNaN ? nil : buffer[$0] }
+        }
+    }
+    while let last = values.last, last == nil {
+        values.removeLast()
+    }
+    return values.isEmpty ? nil : values
+}
+
 private final class BlePeripheralResolver: NSObject, CBCentralManagerDelegate {
     let targetIdentifier: UUID
     let queue: DispatchQueue
@@ -718,7 +1137,7 @@ private final class BlePeripheralResolver: NSObject, CBCentralManagerDelegate {
 
         switch central.state {
         case .poweredOn:
-            NativeLogger.d("DiveComputerHost", category: "BLE", "Central powered on, resolving \(targetIdentifier.uuidString)")
+            NativeLogger.d("DiveComputerHost", category: "BLE", "Central powered on, resolving \(self.targetIdentifier.uuidString)")
             attemptResolveIfReady()
         case .poweredOff, .unauthorized, .unsupported:
             NativeLogger.w("DiveComputerHost", category: "BLE", "Central unavailable (state=\(central.state.rawValue))")
@@ -745,14 +1164,14 @@ private final class BlePeripheralResolver: NSObject, CBCentralManagerDelegate {
 
         if allowCachedPeripherals {
             if let cached = central.retrievePeripherals(withIdentifiers: [targetIdentifier]).first {
-                NativeLogger.d("DiveComputerHost", category: "BLE", "Found cached peripheral \(targetIdentifier.uuidString)")
+                NativeLogger.d("DiveComputerHost", category: "BLE", "Found cached peripheral \(self.targetIdentifier.uuidString)")
                 finish(peripheral: cached)
                 return
             }
         }
 
         if !isScanning {
-            NativeLogger.d("DiveComputerHost", category: "BLE", "Scanning for \(targetIdentifier.uuidString)")
+            NativeLogger.d("DiveComputerHost", category: "BLE", "Scanning for \(self.targetIdentifier.uuidString)")
             central.scanForPeripherals(
                 withServices: nil,
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]

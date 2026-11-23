@@ -1,0 +1,68 @@
+import 'package:submersion/core/deco/buhlmann_algorithm.dart';
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/deco_model.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
+import 'package:submersion/core/deco/entities/tissue_compartment.dart';
+
+/// Builds the [TissueState] a plan should start from when it follows a
+/// logged dive: the dive's end-of-dive [compartments], off-gassed at the
+/// surface (breathing air) for [surfaceInterval].
+///
+/// Mirrors the residual-tissue lookback the dive details page performs in
+/// profile_analysis_provider so a plan seeded from a dive agrees with the
+/// log's own repetitive-dive math. The GF-low ceiling anchor is re-derived
+/// from the off-gassed loading, as a fresh dive would.
+///
+/// [environment] is the plan's. [followedEnvironment] is the one
+/// [compartments] ended in, when known: the interval runs at the surface
+/// [DiveEnvironment.surfaceIntervalBetween] picks for the two, and the anchor,
+/// which is a depth, in the plan's own environment.
+///
+/// Returns null when [compartments] is null (nothing to seed).
+TissueState? seededTissueState({
+  required List<TissueCompartment>? compartments,
+  required Duration? surfaceInterval,
+  required double gfLow,
+  required double gfHigh,
+  DiveEnvironment environment = DiveEnvironment.standard,
+  DiveEnvironment? followedEnvironment,
+}) {
+  if (compartments == null || compartments.isEmpty) return null;
+
+  final atSurface = BuhlmannAlgorithm(
+    environment: followedEnvironment == null
+        ? environment
+        : DiveEnvironment.surfaceIntervalBetween(
+            followedEnvironment,
+            environment,
+          ),
+  );
+  atSurface.restoreState(compartments);
+
+  final intervalSeconds = surfaceInterval?.inSeconds ?? 0;
+  if (intervalSeconds > 0) {
+    atSurface.calculateSegment(
+      depthMeters: 0,
+      durationSeconds: intervalSeconds,
+      fN2: airN2Fraction,
+      fHe: 0.0,
+    );
+  }
+
+  // Anchor the plan to the loading it actually starts from, post-interval.
+  // restoreState, not setCompartments, so only that loading sets the anchor:
+  // the prior dive's deepest ceiling, a running maximum, would leave every
+  // repetitive plan less conservative than an identical fresh one.
+  final algorithm = BuhlmannAlgorithm(
+    gfLow: gfLow,
+    gfHigh: gfHigh,
+    environment: environment,
+  );
+  algorithm.restoreState(atSurface.compartments);
+  algorithm.deriveGfAnchorFromLoading();
+
+  return BuhlmannState(
+    compartments: algorithm.compartments,
+    gfLowCeilingAnchor: algorithm.gfLowCeilingAnchor,
+  );
+}

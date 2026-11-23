@@ -1,13 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
+import 'package:submersion/features/tags/presentation/tag_scope_labels.dart';
+import 'package:submersion/features/tags/presentation/tag_usage_messages.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_color_picker.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_create_dialog.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_dialog_save.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_merge_sheet.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_scope_checklist.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/bulk_action.dart';
+import 'package:submersion/shared/selection/selectable_list_scope.dart';
+import 'package:submersion/shared/selection/selection_app_bar.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/selection/selection_leading.dart';
+import 'package:submersion/shared/selection/selection_state.dart';
+import 'package:submersion/shared/widgets/fab_clearance.dart';
 
 class TagManagePage extends ConsumerStatefulWidget {
   const TagManagePage({super.key});
@@ -18,51 +33,89 @@ class TagManagePage extends ConsumerStatefulWidget {
 
 class _TagManagePageState extends ConsumerState<TagManagePage> {
   String _searchQuery = '';
-  bool _isSelectionMode = false;
-  final Set<String> _selectedIds = {};
   final TextEditingController _searchController = TextEditingController();
 
-  static const _uuid = Uuid();
+  /// Owns the bulk-selection state machine for this page.
+  final SelectionController _selection = SelectionController();
+
+  /// Convenience mirrors of the controller, so the widget tree reads clearly.
+  bool get _isSelectionMode => _selection.value.isActive;
+  Set<String> get _selectedIds => _selection.value.checkedIds;
 
   @override
   void dispose() {
     _searchController.dispose();
+    _selection.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final statsAsync = ref.watch(tagStatisticsProvider);
+    final visibleIds = _visibleStats(
+      statsAsync.value ?? const [],
+    ).map((s) => s.tag.id).toList();
 
-    return Scaffold(
-      appBar: _isSelectionMode
-          ? _buildSelectionAppBar()
-          : AppBar(
-              title: Text(context.l10n.tags_manage_title),
-              leading: IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => Navigator.of(context).pop(),
+    // Drop checked tags that the search query hid, so a bulk delete can never
+    // reach a tag that is not on screen. pruneToSettled is a no-op when
+    // nothing changed, which keeps this off a rebuild loop.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          statsAsync,
+          (rows) => _visibleStats(rows).map((s) => s.tag.id),
+        );
+      }
+    });
+
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) => Scaffold(
+          appBar: selection.isActive
+              ? _buildSelectionAppBar(statsAsync.value ?? const [])
+              : AppBar(
+                  title: Text(context.l10n.tags_manage_title),
+                  leading: IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                  actions: [
+                    IconButton(
+                      key: const ValueKey('enter_selection'),
+                      icon: const Icon(Icons.checklist),
+                      tooltip: context.l10n.common_selection_enterTooltip,
+                      onPressed: _selection.enterExplicit,
+                    ),
+                  ],
+                ),
+          floatingActionButton: selection.isActive
+              ? null
+              : FloatingActionButton.extended(
+                  onPressed: () => showTagCreateDialog(context),
+                  tooltip: context.l10n.tags_manage_createTitle,
+                  icon: const Icon(Icons.add),
+                  label: Text(context.l10n.tags_manage_createTitle),
+                ),
+          body: Column(
+            children: [
+              // Search stays visible during selection: narrowing the list
+              // mid-selection is a supported move, and the selection prunes
+              // to whatever remains.
+              _buildSearchBar(),
+              Expanded(
+                child: statsAsync.when(
+                  loading: () =>
+                      const Center(child: CircularProgressIndicator()),
+                  error: (e, st) => Center(child: Text('Error: $e')),
+                  data: (stats) => _buildTagList(stats),
+                ),
               ),
-            ),
-      floatingActionButton: _isSelectionMode
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: () => _showCreateDialog(),
-              tooltip: context.l10n.tags_manage_createTitle,
-              icon: const Icon(Icons.add),
-              label: Text(context.l10n.tags_manage_createTitle),
-            ),
-      body: Column(
-        children: [
-          if (!_isSelectionMode) _buildSearchBar(),
-          Expanded(
-            child: statsAsync.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, st) => Center(child: Text('Error: $e')),
-              data: (stats) => _buildTagList(stats),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -92,13 +145,20 @@ class _TagManagePageState extends ConsumerState<TagManagePage> {
     );
   }
 
+  /// Tags matching the current search query.
+  ///
+  /// Shared by the list and by the pruning in [build], so the selection can
+  /// never hold a tag the query has hidden.
+  List<TagStatistic> _visibleStats(List<TagStatistic> stats) {
+    if (_searchQuery.isEmpty) return stats;
+    final query = foldForSearch(_searchQuery);
+    return stats
+        .where((stat) => foldForSearch(stat.tag.name).contains(query))
+        .toList();
+  }
+
   Widget _buildTagList(List<TagStatistic> stats) {
-    final filtered = _searchQuery.isEmpty
-        ? stats
-        : stats.where((stat) {
-            final query = _searchQuery.toLowerCase();
-            return stat.tag.name.toLowerCase().contains(query);
-          }).toList();
+    final filtered = _visibleStats(stats);
 
     if (filtered.isEmpty) {
       return Center(
@@ -112,6 +172,7 @@ class _TagManagePageState extends ConsumerState<TagManagePage> {
     }
 
     return ListView.builder(
+      padding: kFabListPadding,
       itemCount: filtered.length,
       itemBuilder: (context, index) {
         final stat = filtered[index];
@@ -125,220 +186,316 @@ class _TagManagePageState extends ConsumerState<TagManagePage> {
     final isSelected = _selectedIds.contains(tag.id);
 
     return ListTile(
-      leading: _isSelectionMode
-          ? Checkbox(
-              value: isSelected,
-              onChanged: (_) => _toggleSelection(tag.id),
-            )
-          : CircleAvatar(radius: 16, backgroundColor: tag.color),
-      title: Text(tag.name),
-      trailing: Text(
-        context.l10n.tags_manage_diveCount(stat.diveCount),
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
+      // Nothing but the checkbox column: the tag itself is the title, since
+      // a chip carries the name and the colour together (issue #2269). A
+      // solid dot here was the last place in the app still claiming the
+      // stored hex was what a tag looks like.
+      leading: SelectionLeading(
+        isSelectionMode: _isSelectionMode,
+        isChecked: isSelected,
+        onChanged: (_) => _toggleSelection(tag.id),
+        child: const SizedBox.shrink(),
       ),
+      minLeadingWidth: 0,
+      horizontalTitleGap: 0,
+      title: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: TagChip(tag: tag),
+      ),
+      // Where the tag is offered (issues #1765, #1942), then how often it is
+      // used, each on its own labelled line. Both used to share the title
+      // line with the chip, and the usage text squeezed the name down to an
+      // ellipsis; the two lines also read as one run-on phrase (#3746).
+      isThreeLine: true,
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            context.l10n.tags_manage_rowScopes(
+              tagScopeNames(context.l10n, tag),
+            ),
+          ),
+          Text(
+            context.l10n.tags_manage_rowUsage(
+              tagUsageCounts(
+                context.l10n,
+                stat.counts,
+                offered: stat.tag.scopes,
+              ),
+            ),
+          ),
+        ],
+      ),
+      // The one way to edit a tag. Hidden while selecting, where a row tap
+      // toggles the row and a second target inside it would be a trap.
+      trailing: _isSelectionMode
+          ? null
+          : IconButton(
+              key: ValueKey('tag_edit_${tag.id}'),
+              icon: const Icon(Icons.edit_outlined),
+              tooltip: context.l10n.tags_manage_editTitle,
+              onPressed: () => _showEditDialog(stat),
+            ),
       selected: isSelected,
-      onTap: _isSelectionMode
-          ? () => _toggleSelection(tag.id)
-          : () => _showEditDialog(tag),
-      onLongPress: _isSelectionMode ? null : () => _enterSelectionMode(tag.id),
+      // Outside selection the row is inert, whatever the tag's scope: this is
+      // a settings page, and a tap here must not leave it. The edit button is
+      // the row's only action.
+      onTap: _isSelectionMode ? () => _toggleSelection(tag.id) : null,
     );
   }
 
-  void _showCreateDialog() {
-    final controller = TextEditingController();
-    String selectedColor = TagColors.predefined.first;
-
-    showDialog(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Text(context.l10n.tags_manage_createTitle),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: controller,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: context.l10n.tags_manage_nameLabel,
-                  border: const OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(context.l10n.tags_manage_colorLabel),
-              const SizedBox(height: 8),
-              TagColorPicker(
-                selectedColor: selectedColor,
-                onColorSelected: (color) =>
-                    setDialogState(() => selectedColor = color),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: Text(context.l10n.common_action_cancel),
-            ),
-            TextButton(
-              onPressed: () {
-                final name = controller.text.trim();
-                if (name.isNotEmpty) {
-                  final newTag = Tag.create(
-                    id: _uuid.v4(),
-                    name: name,
-                    colorHex: selectedColor,
-                  );
-                  ref.read(tagListNotifierProvider.notifier).addTag(newTag);
-                  Navigator.pop(dialogContext);
-                }
-              },
-              child: Text(context.l10n.common_action_save),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showEditDialog(Tag tag) {
+  void _showEditDialog(TagStatistic stat) {
+    final tag = stat.tag;
     final controller = TextEditingController(text: tag.name);
-    String selectedColor = tag.colorHex ?? TagColors.predefined.first;
+    // The stored value, untouched: a tag an import created has none, and
+    // saving without touching the colour must leave it with none (#4384).
+    String? selectedColor = tag.colorHex;
+    Set<TagScope> scopes = tag.scopes;
+    bool saving = false;
+    bool failed = false;
 
     showDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Text(context.l10n.tags_manage_editTitle),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: controller,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: context.l10n.tags_manage_nameLabel,
-                  border: const OutlineInputBorder(),
-                ),
+        builder: (dialogContext, setDialogState) => PopScope(
+          // No dismissal while a save is in flight, so a failure still has its dialog.
+          canPop: !saving,
+          child: AlertDialog(
+            title: Text(context.l10n.tags_manage_editTitle),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: context.l10n.tags_manage_nameLabel,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(context.l10n.tags_manage_colorLabel),
+                  const SizedBox(height: 8),
+                  TagColorPicker(
+                    selectedColor: selectedColor,
+                    // Each swatch previews this tag by name, so the colour
+                    // being chosen is the colour that will be seen.
+                    nameController: controller,
+                    onColorSelected: (color) =>
+                        setDialogState(() => selectedColor = color),
+                  ),
+                  const SizedBox(height: 8),
+                  TagScopeChecklist(
+                    scopes: scopes,
+                    // Applied to the dialog's current set, never replaced
+                    // in place, so a Save already under way keeps its own.
+                    onToggle: (scope, on) => setDialogState(
+                      () => scopes = on
+                          ? scopes.union({scope})
+                          : scopes.difference({scope}),
+                    ),
+                  ),
+                  if (failed) const TagSaveErrorLine(),
+                ],
               ),
-              const SizedBox(height: 16),
-              Text(context.l10n.tags_manage_colorLabel),
-              const SizedBox(height: 8),
-              TagColorPicker(
-                selectedColor: selectedColor,
-                onColorSelected: (color) =>
-                    setDialogState(() => selectedColor = color),
+            ),
+            // Delete sits apart on the leading edge, away from Save (#1889).
+            // Before this it was reachable only through selection mode.
+            actionsAlignment: MainAxisAlignment.spaceBetween,
+            actions: [
+              TextButton(
+                key: const ValueKey('tag_edit_delete'),
+                // Disabled with Cancel while a save is in flight. Otherwise
+                // onPressed cannot await, so the flow carries its own
+                // listener, as the selection bar's dispatch does.
+                onPressed: saving
+                    ? null
+                    : () => logFailure(
+                        _deleteFromEditor(dialogContext, stat),
+                        TagManagePage,
+                        'delete a tag from its edit dialog',
+                      ),
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: Text(context.l10n.common_action_delete),
+              ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: saving
+                        ? null
+                        : () => Navigator.pop(dialogContext),
+                    child: Text(context.l10n.common_action_cancel),
+                  ),
+                  TextButton(
+                    onPressed: saving
+                        ? null
+                        : () {
+                            // A second tap in the same frame still reaches here.
+                            if (saving) return;
+                            // Taken now, so the write matches what the narrowing
+                            // confirmation described even if the controls change
+                            // while the usage read is in flight.
+                            final name = controller.text.trim();
+                            final color = selectedColor;
+                            // The editor replaces the set on every tick and
+                            // never modifies it, so this reference is safe.
+                            final chosen = scopes;
+                            if (name.isEmpty || chosen.isEmpty) return;
+                            saveFromTagDialog(
+                              dialogContext,
+                              setSaving: (v) =>
+                                  setDialogState(() => saving = v),
+                              setFailed: (v) =>
+                                  setDialogState(() => failed = v),
+                              save: () async {
+                                final confirmed = await _confirmNarrowing(
+                                  tag,
+                                  scopes: chosen,
+                                );
+                                if (!confirmed) return false;
+                                await ref
+                                    .read(tagListNotifierProvider.notifier)
+                                    .updateTag(
+                                      tag.copyWith(
+                                        name: name,
+                                        colorHex: color,
+                                        updatedAt: DateTime.now(),
+                                        scopes: chosen,
+                                      ),
+                                    );
+                                // Site cards and the site filter read tags too.
+                                ref.invalidate(sitesWithCountsProvider);
+                                return true;
+                              },
+                            );
+                          },
+                    child: Text(context.l10n.common_action_save),
+                  ),
+                ],
               ),
             ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: Text(context.l10n.common_action_cancel),
-            ),
-            TextButton(
-              onPressed: () {
-                final name = controller.text.trim();
-                if (name.isNotEmpty) {
-                  ref
-                      .read(tagListNotifierProvider.notifier)
-                      .updateTag(
-                        tag.copyWith(
-                          name: name,
-                          colorHex: selectedColor,
-                          updatedAt: DateTime.now(),
-                        ),
-                      );
-                  Navigator.pop(dialogContext);
-                }
-              },
-              child: Text(context.l10n.common_action_save),
-            ),
-          ],
         ),
       ),
     );
+  }
+
+  /// Deletes [stat]'s tag from its edit dialog, once the diver confirms.
+  ///
+  /// The confirmation stacks over the editor, so cancelling it returns there
+  /// with any unsaved edits intact.
+  Future<void> _deleteFromEditor(
+    BuildContext dialogContext,
+    TagStatistic stat,
+  ) async {
+    if (!await _confirmDeleteTag(dialogContext, stat)) return;
+    if (!dialogContext.mounted) return;
+    Navigator.pop(dialogContext);
+    await ref.read(tagListNotifierProvider.notifier).deleteTag(stat.tag.id);
+  }
+
+  /// Turning off a scope removes the tag from every item of that scope
+  /// carrying it (the repository does that so a link always implies its
+  /// scope). Asks first when that would remove anything; true to go ahead.
+  Future<bool> _confirmNarrowing(
+    Tag tag, {
+    required Set<TagScope> scopes,
+  }) async {
+    final dropping = [
+      for (final scope in TagScope.values)
+        if (tag.appliesTo(scope) && !scopes.contains(scope)) scope,
+    ];
+    if (dropping.isEmpty) return true;
+
+    final l10n = context.l10n;
+    final usage = await ref.read(tagRepositoryProvider).getTagUsage(tag.id);
+    final messages = [
+      for (final scope in dropping)
+        if ((usage[scope] ?? 0) > 0)
+          tagScopeNarrowLine(l10n, scope, usage[scope]!),
+    ];
+    if (messages.isEmpty || !mounted) return true;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(dialogContext.l10n.tags_manage_narrowDialog_title),
+        content: Text(messages.join('\n\n')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(dialogContext.l10n.common_action_cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(dialogContext.l10n.tags_manage_narrowDialog_confirm),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   // -- Selection mode --
 
-  AppBar _buildSelectionAppBar() {
-    return AppBar(
-      leading: IconButton(
-        icon: const Icon(Icons.close),
-        onPressed: _exitSelectionMode,
+  /// Tag-specific extras. Select-all, deselect-all and delete are supplied by
+  /// SelectionAppBar -- this page had neither select-all nor deselect-all
+  /// before, and gains both from the shared bar.
+  List<BulkAction> _bulkActions(List<TagStatistic> stats) {
+    return [
+      BulkAction(
+        id: 'merge',
+        // Canonical merge glyph. This page used Icons.merge while sites and
+        // buddies used Icons.merge_type for the same concept.
+        icon: Icons.merge_type,
+        label: context.l10n.tags_manage_mergeAction,
+        minCount: 2,
+        onInvoke: () => _showMergeSheet(context),
       ),
-      title: Text(context.l10n.tags_manage_selectedCount(_selectedIds.length)),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.merge),
-          onPressed: _selectedIds.length >= 2
-              ? () => _showMergeSheet(context)
-              : null,
-          tooltip: context.l10n.tags_manage_mergeAction,
-        ),
-        IconButton(
-          icon: const Icon(Icons.delete),
-          onPressed: _selectedIds.isNotEmpty
-              ? () => _confirmDelete(context)
-              : null,
-          tooltip: context.l10n.common_action_delete,
-        ),
-      ],
+    ];
+  }
+
+  SelectionAppBar _buildSelectionAppBar(List<TagStatistic> stats) {
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: _visibleStats(stats).map((s) => s.tag.id).toList(),
+      actions: _bulkActions(stats),
+      shell: SelectionBarShell.appBar,
+      onDelete: () => _confirmDelete(context),
     );
   }
 
-  Future<void> _confirmDelete(BuildContext context) async {
+  Future<BulkActionOutcome> _confirmDelete(BuildContext context) async {
     final repository = ref.read(tagRepositoryProvider);
     final statsAsync = ref.read(tagStatisticsProvider);
-    final stats = statsAsync.valueOrNull ?? [];
+    final stats = statsAsync.value ?? [];
 
     if (_selectedIds.length == 1) {
       final tagId = _selectedIds.first;
       final stat = stats.firstWhere((s) => s.tag.id == tagId);
-      final count = stat.diveCount;
 
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(ctx.l10n.tags_manage_deleteTitle),
-          content: Text(
-            ctx.l10n.tags_manage_deleteMessage(stat.tag.name, count),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(ctx.l10n.common_action_cancel),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
-              child: Text(ctx.l10n.common_action_delete),
-            ),
-          ],
-        ),
-      );
-
-      if (confirmed == true) {
-        await ref.read(tagListNotifierProvider.notifier).deleteTag(tagId);
-        _exitSelectionMode();
+      if (!await _confirmDeleteTag(context, stat)) {
+        return BulkActionOutcome.cancelled;
       }
+      await ref.read(tagListNotifierProvider.notifier).deleteTag(tagId);
+      return BulkActionOutcome.completed;
     } else {
-      final totalDives = await repository.getMergedDiveCount(
-        _selectedIds.toList(),
-      );
+      // A union across the selection, sites included (#1902): an item
+      // carrying two of the tags loses both but counts once.
+      final usage = await repository.getMergedUsage(_selectedIds.toList());
 
-      if (!context.mounted) return;
+      if (!context.mounted) return BulkActionOutcome.cancelled;
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           title: Text(
             ctx.l10n.tags_manage_bulkDeleteTitle(_selectedIds.length),
           ),
-          content: Text(ctx.l10n.tags_manage_bulkDeleteMessage(totalDives)),
+          content: Text(tagsBulkDeleteMessage(ctx.l10n, usage)),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -353,62 +510,64 @@ class _TagManagePageState extends ConsumerState<TagManagePage> {
         ),
       );
 
-      if (confirmed == true) {
-        await ref
-            .read(tagListNotifierProvider.notifier)
-            .deleteTags(_selectedIds.toList());
-        _exitSelectionMode();
-      }
+      if (confirmed != true) return BulkActionOutcome.cancelled;
+      await ref
+          .read(tagListNotifierProvider.notifier)
+          .deleteTags(_selectedIds.toList());
+      return BulkActionOutcome.completed;
     }
   }
 
-  Future<void> _showMergeSheet(BuildContext context) async {
+  /// Asks before deleting one tag, naming it and the dives and sites it will
+  /// leave (#1902).
+  ///
+  /// Shared by the selection bar and the edit dialog so the two delete paths
+  /// cannot drift apart.
+  Future<bool> _confirmDeleteTag(
+    BuildContext context,
+    TagStatistic stat,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(ctx.l10n.tags_manage_deleteTitle),
+        content: Text(tagDeleteMessage(ctx.l10n, stat.tag.name, stat.counts)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(ctx.l10n.common_action_cancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: Text(ctx.l10n.common_action_delete),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  Future<BulkActionOutcome> _showMergeSheet(BuildContext context) async {
     final statsAsync = ref.read(tagStatisticsProvider);
-    final stats = statsAsync.valueOrNull ?? [];
+    final stats = statsAsync.value ?? [];
     final selectedStats = stats
         .where((s) => _selectedIds.contains(s.tag.id))
         .toList();
 
-    if (selectedStats.length < 2) return;
+    if (selectedStats.length < 2) return BulkActionOutcome.cancelled;
 
     final merged = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => TagMergeSheet(selectedStats: selectedStats),
     );
 
-    if (merged == true) {
-      _exitSelectionMode();
-    }
+    return merged == true
+        ? BulkActionOutcome.completed
+        : BulkActionOutcome.cancelled;
   }
 
-  void _enterSelectionMode(String? initialId) {
-    setState(() {
-      _isSelectionMode = true;
-      _selectedIds.clear();
-      if (initialId != null) {
-        _selectedIds.add(initialId);
-      }
-    });
-  }
-
-  void _exitSelectionMode() {
-    setState(() {
-      _isSelectionMode = false;
-      _selectedIds.clear();
-    });
-  }
-
-  void _toggleSelection(String id) {
-    setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
-        if (_selectedIds.isEmpty) {
-          _isSelectionMode = false;
-        }
-      } else {
-        _selectedIds.add(id);
-      }
-    });
-  }
+  void _toggleSelection(String id) => _selection.toggle(id);
 }

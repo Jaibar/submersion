@@ -1,0 +1,735 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/providers/location_service_provider.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/location_service.dart';
+import 'package:submersion/core/text/fuzzy_match.dart';
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/core/utils/geo_math.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/models/new_site_seed.dart';
+import 'package:submersion/features/dive_sites/domain/models/site_area_anchor.dart';
+import 'package:submersion/features/dive_sites/domain/utils/site_grouping.dart';
+import 'package:submersion/features/dive_sites/domain/utils/site_search.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/similar_value_hint.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/grouped_site_list_view.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/site_picker_built_in.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/site_picker_site_tile.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/core/platform/desktop_target_platform.dart';
+
+/// Identifies the picker's scrolling list, for tests.
+const sitePickerListKey = Key('site-picker-list');
+
+/// What the site picker resolved to. Dismissing the sheet resolves to null.
+sealed class SitePickerResult {
+  const SitePickerResult();
+}
+
+/// The diver picked [site].
+final class SitePicked extends SitePickerResult {
+  const SitePicked(this.site);
+
+  final DiveSite site;
+}
+
+/// The diver chose "All sites" (filter use only).
+final class SitePickerCleared extends SitePickerResult {
+  const SitePickerCleared();
+}
+
+/// The diver tapped "New Dive Site". [query] is the search field's trimmed
+/// text, empty when nothing was searched; it names the new site (#1501).
+final class SitePickerCreateRequested extends SitePickerResult {
+  const SitePickerCreateRequested(this.query);
+
+  final String query;
+}
+
+/// Opens [SitePickerSheet] in a draggable bottom sheet.
+///
+/// [allowCreate] adds the "New Dive Site" button, [allowClear] the leading
+/// "All sites" row a filter needs. [useDeviceLocation] lets the sheet ask for
+/// a GPS fix when the caller gave no location; a filter or a media review
+/// passes false so opening it never prompts for location.
+///
+/// [showBuiltIn] also offers sites from the built-in catalogue, near the
+/// dive and when searching. Picking one creates a site of the diver's, so
+/// it is for callers whose pick may create a site, never a filter.
+/// [areaAnchor] is where a dive with no GPS probably was, taken from the
+/// dives around it; "near here" is then measured from it.
+Future<SitePickerResult?> showSitePicker(
+  BuildContext context, {
+  String? selectedSiteId,
+  LocationResult? currentLocation,
+  GeoPoint? diveLocation,
+  SiteAreaAnchor? areaAnchor,
+  bool allowCreate = false,
+  bool allowClear = false,
+  bool useDeviceLocation = true,
+  bool showBuiltIn = false,
+}) {
+  return showModalBottomSheet<SitePickerResult>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) => DraggableScrollableSheet(
+      initialChildSize: 0.7,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (sheetContext, scrollController) => SitePickerSheet(
+        scrollController: scrollController,
+        selectedSiteId: selectedSiteId,
+        currentLocation: currentLocation,
+        diveLocation: diveLocation,
+        areaAnchor: areaAnchor,
+        useDeviceLocation: useDeviceLocation,
+        showBuiltIn: showBuiltIn,
+        onSiteSelected: (site) =>
+            Navigator.of(sheetContext).pop(SitePicked(site)),
+        onCreateNewSite: allowCreate
+            ? (query) => Navigator.of(
+                sheetContext,
+              ).pop(SitePickerCreateRequested(query))
+            : null,
+        onClear: allowClear
+            ? () => Navigator.of(sheetContext).pop(const SitePickerCleared())
+            : null,
+      ),
+    ),
+  );
+}
+
+/// Opens the site picker and, on "New Dive Site", pushes the new-site form
+/// seeded with [newSiteSeedLocation] and the text the diver searched for
+/// (#1501), and resolves once the site is saved.
+///
+/// Returns the picked or newly created [DiveSite], or null if the sheet was
+/// dismissed or the new-site form was cancelled.
+///
+/// With [allowCreate] false the sheet offers no "New Dive Site" button, for
+/// callers that cannot open the new-site form mid-flow. Built-in catalogue
+/// sites follow the same switch: picking one creates a site too.
+Future<DiveSite?> pickOrCreateSite(
+  BuildContext context,
+  WidgetRef ref, {
+  required String? selectedSiteId,
+  LocationResult? currentLocation,
+  GeoPoint? diveLocation,
+  SiteAreaAnchor? areaAnchor,
+  GeoPoint? newSiteSeedLocation,
+  bool allowCreate = true,
+}) async {
+  final result = await showSitePicker(
+    context,
+    selectedSiteId: selectedSiteId,
+    currentLocation: currentLocation,
+    diveLocation: diveLocation,
+    areaAnchor: areaAnchor,
+    allowCreate: allowCreate,
+    showBuiltIn: allowCreate,
+  );
+  switch (result) {
+    case SitePicked(:final site):
+      return site;
+    case SitePickerCreateRequested(:final query):
+      if (!context.mounted) return null;
+      final newSiteId = await context.push<String>(
+        '/sites/new',
+        extra: NewSiteSeed(
+          location: newSiteSeedLocation,
+          name: query.isEmpty ? null : query,
+        ),
+      );
+      if (newSiteId == null || !context.mounted) return null;
+      return ref.read(siteProvider(newSiteId).future);
+    case SitePickerCleared() || null:
+      return null;
+  }
+}
+
+/// Whether the search field takes focus when the sheet opens (#4307).
+///
+/// Only on desktop, where a hardware keyboard is the norm and typing a site
+/// name is the quickest way in. On phones and tablets focus would raise the
+/// on-screen keyboard over the list, hiding the Nearby section that matters
+/// most for a dive with GPS, so there the diver taps the field to search.
+bool get _autofocusSearch => isDesktopTargetPlatform(defaultTargetPlatform);
+
+/// The site picker: a search field over every location field, a Nearby
+/// section when a location is known, and the sites grouped by country and
+/// region in collapsible sections (#1080).
+class SitePickerSheet extends ConsumerStatefulWidget {
+  final ScrollController scrollController;
+  final String? selectedSiteId;
+  final LocationResult? currentLocation;
+  final GeoPoint? diveLocation;
+
+  /// Where the dive probably was, inferred from the dives around it. Used
+  /// when the dive has no GPS of its own, ahead of the device's location.
+  final SiteAreaAnchor? areaAnchor;
+  final void Function(DiveSite) onSiteSelected;
+
+  /// Called by the "New Dive Site" buttons with the search field's trimmed
+  /// text, empty when nothing was searched. Null hides those buttons.
+  final void Function(String query)? onCreateNewSite;
+
+  /// Shows a leading "All sites" row when set, for filters.
+  final VoidCallback? onClear;
+
+  /// Whether the sheet may ask for a device fix when the caller supplied
+  /// neither a dive nor a device location.
+  final bool useDeviceLocation;
+
+  /// Whether sites from the built-in catalogue are offered. Picking one
+  /// creates a site of the diver's, then selects it.
+  final bool showBuiltIn;
+
+  const SitePickerSheet({
+    super.key,
+    required this.scrollController,
+    required this.selectedSiteId,
+    this.currentLocation,
+    this.diveLocation,
+    this.areaAnchor,
+    required this.onSiteSelected,
+    this.onCreateNewSite,
+    this.onClear,
+    this.useDeviceLocation = true,
+    this.showBuiltIn = false,
+  });
+
+  @override
+  ConsumerState<SitePickerSheet> createState() => _SitePickerSheetState();
+}
+
+class _SitePickerSheetState extends ConsumerState<SitePickerSheet>
+    with SitePickerBuiltIn {
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  /// Device fix resolved by the sheet itself, used only when the caller
+  /// supplied neither a dive nor a device location.
+  LocationResult? _deviceLocation;
+  bool _isLocating = false;
+
+  /// Countries the diver opened or closed by hand; null until the first
+  /// build with data, which seeds it from [initialExpandedGroups].
+  Set<String>? _manualExpanded;
+
+  /// Countries the diver closed while the current query is active. Cleared
+  /// whenever the query changes, since a new query opens every match again.
+  Set<String> _searchCollapsed = const {};
+
+  /// Each site's normalized search text, rebuilt only when the site list
+  /// itself changes, so a keystroke costs one substring test per site.
+  List<DiveSite>? _indexedSites;
+  Map<String, String> _searchIndex = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    // Callers that already know where the dive is (or where the device is)
+    // cost nothing here. The rest (editing an imported dive, bulk edit)
+    // would otherwise get no Nearby section at all (#965).
+    // A dive placed by the dives around it needs no fix either: the
+    // device may be at home, far from where the dive was.
+    if (widget.useDeviceLocation &&
+        widget.diveLocation == null &&
+        widget.areaAnchor == null &&
+        widget.currentLocation == null) {
+      unawaited(_resolveDeviceLocation());
+    }
+    initBuiltIn();
+  }
+
+  @override
+  void dispose() {
+    disposeBuiltIn();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// Resolve a device fix in the background. Runs once, from [initState]:
+  /// `build` re-runs on every keystroke in the search field, so resolving
+  /// there would fire a GPS request per character.
+  Future<void> _resolveDeviceLocation() async {
+    setState(() => _isLocating = true);
+    try {
+      final location = await ref
+          .read(locationServiceProvider)
+          .getCurrentLocation(
+            // Coordinates are all the distance sort needs; skip geocoding.
+            includeGeocoding: false,
+            timeout: const Duration(seconds: 10),
+          );
+      if (mounted && location != null) {
+        setState(() => _deviceLocation = location);
+        // The anchor just appeared: the built-in sites around it can load,
+        // and a search typed while the fix was out is run again so its
+        // matches in this area come first.
+        refreshBuiltIn();
+      }
+    } catch (_) {
+      // Proximity sorting is a convenience; the list stays usable without it.
+    } finally {
+      if (mounted) {
+        setState(() => _isLocating = false);
+      }
+    }
+  }
+
+  /// The point distances are measured from: the dive's GPS if present, then
+  /// the area inferred from the dives around it, then a device location
+  /// supplied by the caller, then one this sheet resolved.
+  GeoPoint? get _anchor {
+    if (widget.diveLocation != null) return widget.diveLocation;
+    if (widget.areaAnchor != null) return widget.areaAnchor!.point;
+    final cl = widget.currentLocation ?? _deviceLocation;
+    return cl == null ? null : GeoPoint(cl.latitude, cl.longitude);
+  }
+
+  /// Whether [_anchor] is the inferred area rather than a measured point.
+  /// Lists then go by name, with no distances: distance from a neighbouring
+  /// dive's site says little about this dive.
+  bool get _anchorIsInferred =>
+      widget.diveLocation == null && widget.areaAnchor != null;
+
+  @override
+  GeoPoint? get builtInAnchor => _anchor;
+
+  @override
+  bool get builtInAnchorIsInferred => _anchorIsInferred;
+
+  @override
+  String? get builtInPlaceLabel => widget.areaAnchor?.placeLabel;
+
+  @override
+  String get builtInQuery => _searchQuery.trim();
+
+  @override
+  String formatBuiltInDistance(double meters) =>
+      _formatDistance(context, ref.read(unitFormatterProvider), meters);
+
+  /// Distance from the resolved anchor to a site, in meters.
+  double? _distanceToSite(DiveSite site) {
+    final anchor = _anchor;
+    if (anchor == null || site.location == null) return null;
+    return distanceMeters(anchor, site.location!);
+  }
+
+  /// Format a site distance (meters) for display, unit-aware.
+  String _formatDistance(BuildContext context, UnitFormatter units, double m) {
+    return context.l10n.diveLog_sitePicker_distanceAway(
+      units.formatGeoDistance(m),
+    );
+  }
+
+  Map<String, String> _searchIndexFor(List<DiveSite> sites) {
+    if (!identical(sites, _indexedSites)) {
+      _indexedSites = sites;
+      _searchIndex = {
+        for (final site in sites) site.id: normalizedSiteSearchText(site),
+      };
+    }
+    return _searchIndex;
+  }
+
+  /// Picks one of the diver's own sites, unless a built-in site is being
+  /// adopted: that site would then be made but not chosen.
+  void _selectOwn(DiveSite site) {
+    if (isAdoptingBuiltIn) return;
+    widget.onSiteSelected(site);
+  }
+
+  /// The "New Dive Site" buttons' handler, or null to disable them.
+  VoidCallback? get _createNewSite {
+    final onCreateNewSite = widget.onCreateNewSite;
+    if (onCreateNewSite == null) return null;
+    return () => onCreateNewSite(_searchQuery.trim());
+  }
+
+  void _onQueryChanged(String value) {
+    setState(() {
+      _searchQuery = value;
+      _searchCollapsed = const {};
+    });
+    onBuiltInQueryChanged();
+  }
+
+  void _toggleCountry(String key, {required bool searching}) {
+    setState(() {
+      if (searching) {
+        _searchCollapsed = toggleGroupKey(_searchCollapsed, key);
+      } else {
+        _manualExpanded = toggleGroupKey(_manualExpanded ?? const {}, key);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sitesAsync = ref.watch(sitesProvider);
+    final units = ref.watch(unitFormatterProvider);
+    final colorScheme = Theme.of(context).colorScheme;
+    final query = SiteQuery(_searchQuery);
+    final sites = sitesAsync.value ?? const <DiveSite>[];
+    final index = _searchIndexFor(sites);
+    bool matches(DiveSite site) => query.matches(index[site.id]!);
+    // One filter pass and one distance per site per build, shared by the
+    // caption, the hint and the list.
+    final visible = query.isEmpty ? sites : sites.where(matches).toList();
+    final nearby =
+        [
+          for (final site in visible)
+            if (_distanceToSite(site) case final distance?
+                when distance < sitePickerNearbyRadiusMeters)
+              (site: site, distance: distance),
+        ]..sort(
+          _anchorIsInferred
+              ? (a, b) => compareTextForSort(a.site.name, b.site.name)
+              : (a, b) => a.distance.compareTo(b.distance),
+        );
+    // Only the Nearby and built-in sections are ordered around the anchor,
+    // so the caption that says so shows only when one of them has sites in
+    // it after the search.
+    final offered = offeredBuiltIn(sites);
+    final hasNearby = nearby.isNotEmpty || showsBuiltInNearby(offered);
+    final builtIn = builtInRows(offered, sites);
+
+    return Column(
+      children: [
+        _buildHeader(context, colorScheme, hasNearby: hasNearby),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: TextField(
+            controller: _searchController,
+            autofocus: _autofocusSearch,
+            decoration: InputDecoration(
+              hintText: context.l10n.diveSites_list_search_placeholder,
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _searchQuery.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      tooltip:
+                          context.l10n.diveLog_listPage_tooltip_clearSearch,
+                      onPressed: () {
+                        _searchController.clear();
+                        _onQueryChanged('');
+                      },
+                    )
+                  : null,
+              border: const OutlineInputBorder(),
+            ),
+            onChanged: _onQueryChanged,
+          ),
+        ),
+        if (!query.isEmpty)
+          Builder(
+            builder: (context) {
+              final hidden = sites.where((s) => !matches(s)).toList();
+              final match = findSimilar(
+                _searchQuery,
+                hidden.map((s) => s.name),
+              );
+              if (match == null) return const SizedBox.shrink();
+              final site = hidden.firstWhere((s) => s.name == match);
+              return SimilarValueHint(
+                query: _searchQuery,
+                candidates: [match],
+                onAccept: (_) => widget.onSiteSelected(site),
+              );
+            },
+          ),
+        const Divider(height: 1),
+        Expanded(
+          child: sitesAsync.when(
+            data: (sites) => sites.isEmpty && builtIn.isEmpty
+                ? Column(
+                    children: [
+                      // A filter on a since-deleted site must stay
+                      // clearable even when no sites are left.
+                      if (widget.onClear != null)
+                        _buildClearRow(context, colorScheme),
+                      Expanded(child: _buildEmptyState(context, colorScheme)),
+                    ],
+                  )
+                : _buildList(
+                    context,
+                    sites: sites,
+                    visible: visible,
+                    nearby: nearby,
+                    builtIn: builtIn,
+                    searching: !query.isEmpty,
+                    units: units,
+                    colorScheme: colorScheme,
+                  ),
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (error, _) => Center(
+              child: Text(
+                context.l10n.diveLog_sitePicker_errorLoading(error.toString()),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHeader(
+    BuildContext context,
+    ColorScheme colorScheme, {
+    required bool hasNearby,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  context.l10n.diveLog_sitePicker_title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                if (hasNearby)
+                  Row(
+                    children: [
+                      Icon(
+                        widget.diveLocation != null
+                            ? Icons.place
+                            : _anchorIsInferred
+                            ? Icons.travel_explore
+                            : Icons.my_location,
+                        size: 14,
+                        color: colorScheme.primary,
+                      ),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          widget.diveLocation != null
+                              ? context
+                                    .l10n
+                                    .diveLog_sitePicker_sortedByDiveDistance
+                              : _anchorIsInferred
+                              ? context.l10n.diveLog_sitePicker_sortedByArea
+                              : context
+                                    .l10n
+                                    .diveLog_sitePicker_sortedByDistance,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.primary),
+                        ),
+                      ),
+                    ],
+                  )
+                else if (_isLocating)
+                  Row(
+                    children: [
+                      // Deliberately a static icon, not a spinner: an
+                      // indeterminate indicator schedules frames forever,
+                      // so it hangs pumpAndSettle in every consumer test
+                      // that opens this sheet. Reusing the resolved-state
+                      // icon also avoids a swap when the fix lands.
+                      Icon(
+                        Icons.my_location,
+                        size: 14,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          context.l10n.diveLog_edit_gettingLocation,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          if (widget.onCreateNewSite != null)
+            TextButton.icon(
+              onPressed: _createNewSite,
+              icon: const Icon(Icons.add),
+              label: Text(context.l10n.diveLog_sitePicker_newDiveSite),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The filter's leading "All sites" row, which clears the selection.
+  Widget _buildClearRow(BuildContext context, ColorScheme colorScheme) {
+    return ListTile(
+      leading: const CircleAvatar(child: Icon(Icons.public)),
+      title: Text(context.l10n.diveLog_filter_allSites),
+      trailing: widget.selectedSiteId == null
+          ? Icon(Icons.check_circle, color: colorScheme.primary)
+          : null,
+      onTap: widget.onClear,
+    );
+  }
+
+  Widget _buildEmptyState(BuildContext context, ColorScheme colorScheme) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.location_off,
+            size: 48,
+            color: colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 16),
+          Text(
+            context.l10n.diveLog_sitePicker_noSites,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          if (widget.onCreateNewSite != null) ...[
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: _createNewSite,
+              icon: const Icon(Icons.add),
+              label: Text(context.l10n.diveLog_sitePicker_addDiveSite),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildList(
+    BuildContext context, {
+    required List<DiveSite> sites,
+    required List<DiveSite> visible,
+    required List<({DiveSite site, double distance})> nearby,
+    required List<Widget Function()> builtIn,
+    required bool searching,
+    required UnitFormatter units,
+    required ColorScheme colorScheme,
+  }) {
+    // None of the diver's own sites to show (they have none, or the search
+    // matched none), but the built-in catalogue has some.
+    if (visible.isEmpty && builtIn.isNotEmpty) {
+      final rows = [
+        if (widget.onClear != null) () => _buildClearRow(context, colorScheme),
+        ...builtIn,
+      ];
+      return ListView.builder(
+        key: sitePickerListKey,
+        controller: widget.scrollController,
+        itemCount: rows.length,
+        itemBuilder: (context, i) => rows[i](),
+      );
+    }
+    if (visible.isEmpty) {
+      return Column(
+        children: [
+          // A filter stays clearable while a search matches nothing.
+          if (widget.onClear != null) _buildClearRow(context, colorScheme),
+          Expanded(
+            child: Center(
+              child: Text(
+                context.l10n.diveSites_list_search_noResults(
+                  _searchQuery.trim(),
+                ),
+                style: Theme.of(context).textTheme.titleMedium,
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // Always country & region: the picker has no Group by control of its
+    // own, so it never reaches the water-based modes #3270 added for the
+    // Dive Sites list. Nothing stops wiring one in later with the same
+    // groupSitesFor/outerKeyOfMode dispatch SiteListContent uses.
+    final groups = groupSitesByLocation(visible, (site) => site);
+    final manual = _manualExpanded ??= initialExpandedGroups(
+      searching ? groupSitesByLocation(sites, (site) => site) : groups,
+      outerKeyOf: siteCountryKey,
+      selected: sites
+          .where((site) => site.id == widget.selectedSiteId)
+          .firstOrNull,
+    );
+    // Regions never collapse here, unlike on the Dive Sites list (#3270):
+    // the picker has no per-region tap target, so their expansion keys are
+    // unioned in rather than tracked in _manualExpanded/_searchCollapsed.
+    final expanded =
+        (searching ? allGroupKeys(groups).difference(_searchCollapsed) : manual)
+            .union(allSubGroupKeys(groups));
+
+    final rows = <Widget Function()>[
+      if (widget.onClear != null) () => _buildClearRow(context, colorScheme),
+      if (nearby.isNotEmpty) ...[
+        () => SiteSectionLabel(context.l10n.diveSites_picker_nearby),
+        for (final entry in nearby)
+          () => SitePickerSiteTile(
+            site: entry.site,
+            isSelected: entry.site.id == widget.selectedSiteId,
+            isNearby: true,
+            subtitle: entry.site.locationString.isEmpty
+                ? null
+                : entry.site.locationString,
+            distanceText: _anchorIsInferred
+                ? null
+                : _formatDistance(context, units, entry.distance),
+            onTap: () => _selectOwn(entry.site),
+          ),
+      ],
+      // Around an anchor the built-in sites follow the diver's nearby
+      // ones. In a search they go last: the diver's own matches, nearby or
+      // not, always come before the catalogue's.
+      if (!searching) ...builtIn,
+      for (final row in flattenSiteGroups(groups, expanded: expanded))
+        switch (row) {
+          OuterHeaderRow(:final group, :final isExpanded) =>
+            () => SiteGroupHeader(
+              label: siteOuterGroupLabel(
+                context.l10n.diveSites_group_noCountry,
+                group,
+              ),
+              siteCount: group.siteCount,
+              isExpanded: isExpanded,
+              onTap: () => _toggleCountry(group.key, searching: searching),
+            ),
+          SubHeaderRow(:final subgroup) => () => SiteSectionLabel(
+            // Region (the picker's only axis) never bundles an unlabeled
+            // subgroup, so the fallback is never actually shown -- going
+            // through siteSubGroupLabel anyway keeps this correct if that
+            // ever changes (#3270), rather than reading subgroup.label
+            // (blank for an ungrouped subgroup) directly.
+            siteSubGroupLabel('', subgroup),
+            indent: 56,
+          ),
+          SiteRow(:final item) => () => SitePickerSiteTile(
+            site: item,
+            isSelected: item.id == widget.selectedSiteId,
+            isNearby: false,
+            subtitle: siteGroupedSubtitle(item),
+            onTap: () => _selectOwn(item),
+          ),
+        },
+      if (searching) ...builtIn,
+    ];
+
+    return ListView.builder(
+      key: sitePickerListKey,
+      controller: widget.scrollController,
+      itemCount: rows.length,
+      itemBuilder: (context, i) => rows[i](),
+    );
+  }
+}

@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/deco/buhlmann_algorithm.dart';
 import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/entities/profile_gas_segment.dart';
 import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
 
@@ -157,6 +158,247 @@ void main() {
         ),
       );
     });
+
+    test('CCR: measured loop ppO2 drives CNS', () {
+      // Deep CCR dive on a 50% diluent. The measured loop ppO2 (~1.2 bar from
+      // the O2 cells) must drive CNS, never the OC depth x FO2 of the diluent
+      // (which would inflate ppO2 to ~2.5 bar at 40m).
+      final depths = <double>[];
+      final timestamps = <int>[];
+      for (int t = 0; t <= 40 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(40.0);
+      }
+      final measuredPpO2 = List<double>.filled(depths.length, 1.2);
+
+      final withCells = service.analyze(
+        diveId: 'ccr-with-cells',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.5,
+        diveMode: DiveMode.ccr,
+        rebreatherPpO2Curve: measuredPpO2,
+      );
+
+      // ppO2 comes from the measured curve, not depth x FO2 (which is 2.5).
+      expect(withCells.ppO2Curve.last, closeTo(1.2, 1e-9));
+      // 40 min at ppO2 1.2 bar -> ~210-min NOAA limit -> ~19% CNS.
+      expect(withCells.o2Exposure.cnsEnd, closeTo(40 / 210 * 100, 1.0));
+      expect(
+        withCells.cnsCurve!.last,
+        closeTo(withCells.o2Exposure.cnsEnd, 1e-6),
+      );
+    });
+
+    test('CCR: no loop ppO2 data never falls back to OC depth x FO2', () {
+      // No cells, no measured ppO2, no setpoint. The CCR ppO2 must not be
+      // computed as depth x diluent-FO2 (that would read 2.5 bar at 40m and
+      // fabricate a large CNS); it stays unknown (zero) instead.
+      final depths = <double>[];
+      final timestamps = <int>[];
+      for (int t = 0; t <= 40 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(40.0);
+      }
+
+      final result = service.analyze(
+        diveId: 'ccr-no-ppo2',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.5,
+        diveMode: DiveMode.ccr,
+      );
+
+      expect(result.ppO2Curve.every((v) => v == 0.0), isTrue);
+      expect(result.o2Exposure.cnsEnd, 0.0);
+    });
+
+    test('CCR: only-low setpoint is used as a constant ppO2', () {
+      final depths = <double>[];
+      final timestamps = <int>[];
+      for (int t = 0; t <= 40 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(40.0);
+      }
+
+      final result = service.analyze(
+        diveId: 'ccr-low-sp-only',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.5,
+        diveMode: DiveMode.ccr,
+        setpointLow: 0.7,
+      );
+
+      // Constant 0.7 bar everywhere (no depth-phased switch without a high sp),
+      // never the OC 2.5 bar.
+      expect(result.ppO2Curve.every((v) => v == 0.7), isTrue);
+    });
+
+    test('single gas segment matches single-gas analysis', () {
+      final depths = <double>[];
+      final timestamps = <int>[];
+      for (int t = 0; t <= 20 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(24.0);
+      }
+
+      final legacy = service.analyze(
+        diveId: 'legacy-single-gas',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.21,
+      );
+
+      final segmented = service.analyze(
+        diveId: 'segmented-single-gas',
+        depths: depths,
+        timestamps: timestamps,
+        gasSegments: const [
+          ProfileGasSegment(startTimestamp: 0, fN2: airN2Fraction, fHe: 0.0),
+        ],
+      );
+
+      expect(segmented.ndlCurve.length, equals(legacy.ndlCurve.length));
+      for (int i = 0; i < legacy.ndlCurve.length; i++) {
+        expect(
+          segmented.ndlCurve[i],
+          closeTo(legacy.ndlCurve[i], 1),
+          reason: 'Single-gas segmented analysis should match legacy path',
+        );
+        expect(
+          segmented.ceilingCurve[i],
+          closeTo(legacy.ceilingCurve[i], 0.001),
+        );
+        expect(segmented.ttsCurve![i], closeTo(legacy.ttsCurve![i], 1));
+      }
+    });
+
+    test('switching to EAN32 reduces decompression burden versus all air', () {
+      final depths = <double>[];
+      final timestamps = <int>[];
+
+      for (int t = 0; t <= 15 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(30.0);
+      }
+      for (int t = 16 * 60; t <= 25 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(6.0);
+      }
+
+      final allAir = service.analyze(
+        diveId: 'all-air',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.21,
+      );
+
+      final switched = service.analyze(
+        diveId: 'air-to-ean32',
+        depths: depths,
+        timestamps: timestamps,
+        gasSegments: const [
+          ProfileGasSegment(startTimestamp: 0, fN2: airN2Fraction, fHe: 0.0),
+          ProfileGasSegment(startTimestamp: 16 * 60, fN2: 0.68, fHe: 0.0),
+        ],
+      );
+
+      expect(
+        switched.decoStatuses.last.compartments.first.currentPN2,
+        lessThan(allAir.decoStatuses.last.compartments.first.currentPN2),
+      );
+      expect(
+        switched.ceilingCurve.last,
+        lessThanOrEqualTo(allAir.ceilingCurve.last),
+      );
+      expect(switched.ttsCurve!.last, lessThanOrEqualTo(allAir.ttsCurve!.last));
+      expect(
+        switched.ndlCurve.last,
+        greaterThanOrEqualTo(allAir.ndlCurve.last),
+      );
+    });
+
+    test('gas switches also affect ppO2 and CNS for OC dives', () {
+      final depths = <double>[];
+      final timestamps = <int>[];
+
+      for (int t = 0; t <= 15 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(30.0);
+      }
+      for (int t = 16 * 60; t <= 25 * 60; t += 60) {
+        timestamps.add(t);
+        depths.add(6.0);
+      }
+
+      final allAir = service.analyze(
+        diveId: 'all-air-o2',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.21,
+      );
+
+      final switched = service.analyze(
+        diveId: 'air-to-ean32-o2',
+        depths: depths,
+        timestamps: timestamps,
+        gasSegments: const [
+          ProfileGasSegment(startTimestamp: 0, fN2: airN2Fraction, fHe: 0.0),
+          ProfileGasSegment(startTimestamp: 16 * 60, fN2: 0.68, fHe: 0.0),
+        ],
+      );
+
+      expect(
+        switched.ppO2Curve[10],
+        closeTo(allAir.ppO2Curve[10], 0.001),
+        reason: 'Pre-switch ppO2 should match',
+      );
+      expect(
+        switched.ppO2Curve.last,
+        greaterThan(allAir.ppO2Curve.last),
+        reason: 'EAN32 stop gas should raise ppO2 at 6m',
+      );
+      expect(
+        switched.cnsCurve!.last,
+        greaterThan(allAir.cnsCurve!.last),
+        reason: 'Higher-O2 stop gas should accumulate more CNS',
+      );
+    });
+
+    test(
+      'switch inside a sparse interval changes ppO2 and CNS at the correct timestamp',
+      () {
+        final sparse = service.analyze(
+          diveId: 'sparse-gas-switch',
+          depths: const [0.0, 30.0, 30.0],
+          timestamps: const [0, 120, 1320],
+          gasSegments: const [
+            ProfileGasSegment(startTimestamp: 0, fN2: airN2Fraction, fHe: 0.0),
+            ProfileGasSegment(startTimestamp: 720, fN2: 0.68, fHe: 0.0),
+          ],
+        );
+
+        final explicitBoundary = service.analyze(
+          diveId: 'explicit-gas-switch',
+          depths: const [0.0, 30.0, 30.0, 30.0],
+          timestamps: const [0, 120, 720, 1320],
+          gasSegments: const [
+            ProfileGasSegment(startTimestamp: 0, fN2: airN2Fraction, fHe: 0.0),
+            ProfileGasSegment(startTimestamp: 720, fN2: 0.68, fHe: 0.0),
+          ],
+        );
+
+        expect(
+          sparse.o2Exposure.cnsEnd,
+          closeTo(explicitBoundary.o2Exposure.cnsEnd, 0.001),
+        );
+        expect(
+          sparse.otuCurve!.last,
+          closeTo(explicitBoundary.otuCurve!.last, 0.001),
+        );
+      },
+    );
   });
 
   group('Safety stop detection', () {
@@ -443,12 +685,19 @@ void main() {
         return (depths: depths, timestamps: timestamps);
       }
 
-      test('two stops separated by 10s gap are merged into one', () {
+      test('in-band drift (7m / 2m) keeps a single stop', () {
+        // Small drifts just outside the 3-6m band are buoyancy wobble, not a
+        // new stop: hysteresis keeps the segment open through them, so the
+        // stop never splits. (Under the previous 30s consolidation window,
+        // these 31s/45s excursions each broke the stop in two.)
         final profile = buildDiveWithGaps(
-          gaps: [(durationSeconds: 10, depth: 7.0)],
+          gaps: [
+            (durationSeconds: 31, depth: 7.0),
+            (durationSeconds: 45, depth: 2.0),
+          ],
         );
         final result = service.analyze(
-          diveId: 'merge-short-gap',
+          diveId: 'in-band-drift',
           depths: profile.depths,
           timestamps: profile.timestamps,
         );
@@ -458,33 +707,34 @@ void main() {
         expect(stops[1].eventType, ProfileEventType.safetyStopEnd);
       });
 
-      test('two stops separated by 31s gap remain separate', () {
+      test('brief clear departure below the band is bridged into one', () {
+        // A short re-descent past the hysteresis band (>8m) still consolidates
+        // when the gap is within maxConsolidationGap.
         final profile = buildDiveWithGaps(
-          gaps: [(durationSeconds: 31, depth: 7.0)],
+          gaps: [(durationSeconds: 60, depth: 10.0)],
         );
         final result = service.analyze(
-          diveId: 'keep-long-gap',
+          diveId: 'merge-brief-departure',
+          depths: profile.depths,
+          timestamps: profile.timestamps,
+        );
+        final stops = safetyStopEvents(result);
+        expect(stops.length, equals(2)); // merged into one
+      });
+
+      test('long clear departure splits into separate stops', () {
+        // A sustained re-descent past the hysteresis band, beyond the
+        // consolidation window, is genuinely two separate stops.
+        final profile = buildDiveWithGaps(
+          gaps: [(durationSeconds: 150, depth: 10.0)],
+        );
+        final result = service.analyze(
+          diveId: 'split-long-departure',
           depths: profile.depths,
           timestamps: profile.timestamps,
         );
         final stops = safetyStopEvents(result);
         expect(stops.length, equals(4)); // two starts + two ends
-      });
-
-      test('three consecutive stops with short gaps merge into one', () {
-        final profile = buildDiveWithGaps(
-          gaps: [
-            (durationSeconds: 10, depth: 7.0),
-            (durationSeconds: 15, depth: 2.0),
-          ],
-        );
-        final result = service.analyze(
-          diveId: 'merge-three',
-          depths: profile.depths,
-          timestamps: profile.timestamps,
-        );
-        final stops = safetyStopEvents(result);
-        expect(stops.length, equals(2)); // all merged into one
       });
 
       test('single stop with no neighbors is unchanged', () {
@@ -545,6 +795,324 @@ void main() {
               'safety stop detection (max depth gate: < 10m)',
         );
       });
+
+      test('long wavy shallow phase after a deep dive is one stop', () {
+        // Reproduces the reported issue: after a proper deep phase the diver
+        // spends a long shallow stretch gently oscillating across the 3m and
+        // 6m band edges. This must read as a single safety stop, not a string
+        // of spurious start/end pairs.
+        final depths = <double>[];
+        final timestamps = <int>[];
+        var t = 0;
+
+        // Descent to 20m: 1 minute
+        for (var s = 0; s <= 60; s++) {
+          timestamps.add(t);
+          depths.add(20.0 * s / 60.0);
+          t++;
+        }
+        // Bottom at 20m: 5 minutes
+        for (var s = 0; s < 300; s++) {
+          timestamps.add(t);
+          depths.add(20.0);
+          t++;
+        }
+        // Ascent to ~4.5m: 1 minute
+        for (var s = 0; s <= 60; s++) {
+          timestamps.add(t);
+          depths.add(20.0 - 15.5 * s / 60.0);
+          t++;
+        }
+        // 15 minutes oscillating 2.5m..6.5m (crossing both band edges)
+        for (var s = 0; s < 15 * 60; s++) {
+          timestamps.add(t);
+          final phase = (s % 120) / 120.0; // 2-minute period
+          final tri = phase < 0.5 ? phase * 2 : 2 - phase * 2; // 0..1..0
+          depths.add(2.5 + 4.0 * tri); // 2.5m .. 6.5m
+          t++;
+        }
+        // Surface: 30 seconds
+        for (var s = 0; s <= 30; s++) {
+          timestamps.add(t);
+          depths.add(2.5 * (1 - s / 30.0));
+          t++;
+        }
+
+        final result = service.analyze(
+          diveId: 'wavy-shallow',
+          depths: depths,
+          timestamps: timestamps,
+        );
+        final stops = safetyStopEvents(result);
+        expect(
+          stops.length,
+          equals(2),
+          reason: 'an oscillating shallow phase should be a single safety stop',
+        );
+      });
+    });
+  });
+
+  group('gauge dive mode', () {
+    test(
+      'gauge returns profile-only analysis: no deco/ppO2/tox, keeps ascent',
+      () {
+        final service = ProfileAnalysisService();
+        // 40 m for 30 min then a fast ascent -- on air this would show deco.
+        final depths = <double>[0, 20, 40, 40, 40, 40, 40, 20, 0];
+        final timestamps = <int>[0, 60, 120, 600, 1200, 1800, 1810, 1850, 1900];
+
+        final gauge = service.analyze(
+          diveId: 'g1',
+          depths: depths,
+          timestamps: timestamps,
+          diveMode: DiveMode.gauge,
+        );
+
+        // No decompression / O2 toxicity / gas curves.
+        expect(gauge.ceilingCurve, isEmpty);
+        expect(gauge.ndlCurve, isEmpty);
+        expect(gauge.decoStatuses, isEmpty);
+        expect(gauge.ppO2Curve, isEmpty);
+        expect(gauge.hasCnsData, isFalse);
+        expect(gauge.hasModData, isFalse);
+        expect(gauge.hasDensityData, isFalse);
+        expect(gauge.o2Exposure.cnsEnd, 0.0);
+        // Still surfaces depth/time-derived data for the profile chart.
+        expect(gauge.maxDepth, 40);
+        expect(gauge.ascentRates, isNotEmpty);
+      },
+    );
+  });
+
+  group('CCR gas segments drive deco (issue #455)', () {
+    // 44 m for ~40 min on an air-diluent loop at setpoint 1.3, first tank EAN40.
+    // Effective loop fN2 at 44 m is ~0.76 vs EAN40's 0.60, so the loop loads
+    // MORE nitrogen than the legacy open-circuit first-tank model.
+    const depths = [0.0, 44.0, 44.0, 44.0, 44.0, 0.0];
+    const timestamps = [0, 180, 900, 1800, 2400, 2700];
+
+    test('setpoint segments change deco output vs legacy first-tank model', () {
+      final service = ProfileAnalysisService(gfLow: 0.45, gfHigh: 0.75);
+
+      // The bug's model, spelled out: open circuit on the first tank, EAN40.
+      // A CCR dive with no loop schedule no longer falls back to it; its
+      // tissue loading is withheld instead (issue #2593).
+      final legacy = service.analyze(
+        diveId: 'ccr-legacy',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.40,
+      );
+      final loop = service.analyze(
+        diveId: 'ccr-loop',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: 0.40,
+        diveMode: DiveMode.ccr,
+        setpointHigh: 1.3,
+        gasSegments: const [
+          ProfileGasSegment(startTimestamp: 0, fN2: 0.79, setpoint: 1.3),
+        ],
+      );
+
+      // In deco at the last bottom sample under both models.
+      expect(loop.ndlCurve[4], -1);
+      // The loop loads more inert gas at 44 m than OC EAN40, so the obligation
+      // is LARGER than the legacy understated value.
+      expect(loop.ttsCurve![4], greaterThan(legacy.ttsCurve![4]));
+      // And the curves genuinely came from the segment path.
+      expect(loop.ttsCurve, isNot(equals(legacy.ttsCurve)));
+    });
+
+    test(
+      'CCR CNS/OTU still come from the resolved ppO2 curve, not OC metrics',
+      () {
+        final service = ProfileAnalysisService(gfLow: 0.45, gfHigh: 0.75);
+        final ppO2Curve = List<double>.filled(depths.length, 1.3);
+        final analysis = service.analyze(
+          diveId: 'ccr-cns',
+          depths: depths,
+          timestamps: timestamps,
+          o2Fraction: 0.40,
+          diveMode: DiveMode.ccr,
+          setpointHigh: 1.3,
+          gasSegments: const [
+            ProfileGasSegment(startTimestamp: 0, fN2: 0.79, setpoint: 1.3),
+          ],
+          rebreatherPpO2Curve: ppO2Curve,
+        );
+        expect(analysis.ppO2Curve, ppO2Curve);
+        expect(analysis.o2Exposure.maxPpO2, closeTo(1.3, 0.001));
+      },
+    );
+  });
+
+  group('CCR display curves come from the loop (issue #579)', () {
+    // Same dive as #455: 44 m on an air-diluent loop at setpoint 1.3 with an
+    // EAN40 first tank. At 44 m (5.4 bar) the loop's inspired inert gas is
+    // 5.4 - 1.3 = 4.1 bar, all nitrogen for an air diluent.
+    const depths = [0.0, 44.0, 44.0, 44.0, 44.0, 0.0];
+    const timestamps = [0, 180, 900, 1800, 2400, 2700];
+    const airDiluent = [
+      ProfileGasSegment(startTimestamp: 0, fN2: 0.79, setpoint: 1.3),
+    ];
+
+    ProfileAnalysis analyzeLoop({
+      List<ProfileGasSegment>? gasSegments = airDiluent,
+      List<double>? ppO2Curve,
+      double o2Fraction = 0.40,
+      double heFraction = 0.0,
+    }) {
+      return ProfileAnalysisService(gfLow: 0.45, gfHigh: 0.75).analyze(
+        diveId: 'ccr-display',
+        depths: depths,
+        timestamps: timestamps,
+        o2Fraction: o2Fraction,
+        heFraction: heFraction,
+        diveMode: DiveMode.ccr,
+        setpointHigh: 1.3,
+        gasSegments: gasSegments,
+        rebreatherPpO2Curve: ppO2Curve,
+      );
+    }
+
+    test('ppN2 is ambient minus loop ppO2, not first-tank fN2 x ambient', () {
+      final analysis = analyzeLoop(
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      // Loop: 5.4 - 1.3 = 4.1 bar. First-tank EAN40 would give 5.4 x 0.60.
+      expect(analysis.ppN2Curve![2], closeTo(4.1, 0.001));
+    });
+
+    test('ppN2 follows the measured loop ppO2, not the segment setpoint', () {
+      final analysis = analyzeLoop(
+        ppO2Curve: List<double>.filled(depths.length, 1.1),
+      );
+      expect(analysis.ppN2Curve![2], closeTo(4.3, 0.001));
+    });
+
+    test('ppN2 uses the setpoint when no loop ppO2 was measured', () {
+      final analysis = analyzeLoop();
+      expect(analysis.ppN2Curve![2], closeTo(4.1, 0.001));
+    });
+
+    test('ppN2 is zero at the surface when the setpoint exceeds ambient', () {
+      final analysis = analyzeLoop(
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      // The loop cannot hold 1.3 bar at 1.0 bar ambient: ppO2 clamps to
+      // ambient and no inert gas is inspired.
+      expect(analysis.ppN2Curve![0], closeTo(0.0, 0.001));
+    });
+
+    test('gas density weighs the loop partial pressures', () {
+      final analysis = analyzeLoop(
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      // (1.3 x 32 + 4.1 x 28) / 24.04 g/L at 44 m.
+      expect(analysis.densityCurve![2], closeTo(6.506, 0.001));
+      // Pure O2 loop at the surface: 32 / 24.04.
+      expect(analysis.densityCurve![0], closeTo(1.331, 0.001));
+    });
+
+    test('MOD is the diluent MOD, not the first tank MOD', () {
+      final analysis = analyzeLoop(
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      // Air diluent at ppO2 1.4: (1.4 / 0.21 - 1) x 10. EAN40 would be 25 m.
+      expect(analysis.modCurve![2], closeTo(56.667, 0.01));
+      expect(analysis.modCurve![0], closeTo(56.667, 0.01));
+    });
+
+    test('trimix diluent splits the inert gas by its He:N2 ratio', () {
+      final analysis = analyzeLoop(
+        gasSegments: const [
+          ProfileGasSegment(
+            startTimestamp: 0,
+            fN2: 0.37,
+            fHe: 0.45,
+            setpoint: 1.3,
+          ),
+        ],
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+        o2Fraction: 0.18,
+        heFraction: 0.45,
+      );
+      // 4.1 bar inert split 0.37:0.45.
+      expect(analysis.ppN2Curve![2], closeTo(1.85, 0.001));
+      expect(analysis.ppHeCurve![2], closeTo(2.25, 0.001));
+      // (1.3 x 32 + 1.85 x 28 + 2.25 x 4) / 24.04 g/L.
+      expect(analysis.densityCurve![2], closeTo(4.260, 0.001));
+      // Diluent 18/45 MOD at ppO2 1.4.
+      expect(analysis.modCurve![2], closeTo(67.778, 0.01));
+    });
+
+    test('a diluent switch moves the MOD and inert split at the switch', () {
+      final analysis = analyzeLoop(
+        gasSegments: const [
+          ProfileGasSegment(startTimestamp: 0, fN2: 0.79, setpoint: 1.3),
+          ProfileGasSegment(
+            startTimestamp: 1800,
+            fN2: 0.37,
+            fHe: 0.45,
+            setpoint: 1.3,
+          ),
+        ],
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      expect(analysis.ppN2Curve![2], closeTo(4.1, 0.001));
+      expect(analysis.ppHeCurve![2], closeTo(0.0, 0.001));
+      expect(analysis.modCurve![2], closeTo(56.667, 0.01));
+      expect(analysis.ppN2Curve![3], closeTo(1.85, 0.001));
+      expect(analysis.ppHeCurve![3], closeTo(2.25, 0.001));
+      expect(analysis.modCurve![3], closeTo(67.778, 0.01));
+    });
+
+    test('an over-full diluent is renormalized, keeping its He:N2 ratio', () {
+      // Import noise can hand us inert fractions summing past 1. The split
+      // must still follow the recorded He:N2 ratio (0.8:0.4) rather than the
+      // clipped one, and the diluent has no O2 left for a MOD.
+      final analysis = analyzeLoop(
+        gasSegments: const [
+          ProfileGasSegment(
+            startTimestamp: 0,
+            fN2: 0.8,
+            fHe: 0.4,
+            setpoint: 1.3,
+          ),
+        ],
+        ppO2Curve: List<double>.filled(depths.length, 1.3),
+      );
+      // 4.1 bar inert split 2:1.
+      expect(analysis.ppN2Curve![2], closeTo(4.1 * 2 / 3, 0.001));
+      expect(analysis.ppHeCurve![2], closeTo(4.1 / 3, 0.001));
+      expect(analysis.modCurve![2], 0.0);
+    });
+
+    test('a sample with no loop ppO2 breathes the diluent open-circuit', () {
+      // A zero in the resolved curve means the loop ppO2 is unknown at that
+      // sample. Treating it as a real 0 bar would report a hypoxic loop with
+      // all of ambient as inert gas; instead the sample falls back to the
+      // diluent's open-circuit fractions.
+      final ppO2Curve = List<double>.filled(depths.length, 1.3)..[2] = 0.0;
+      final analysis = analyzeLoop(ppO2Curve: ppO2Curve);
+      // Air diluent at 44 m: 5.4 x 0.79.
+      expect(analysis.ppN2Curve![2], closeTo(5.4 * 0.79, 0.001));
+      // The neighbouring samples still follow the loop.
+      expect(analysis.ppN2Curve![3], closeTo(4.1, 0.001));
+    });
+
+    test('no loop information withholds the inert-gas curves', () {
+      final analysis = analyzeLoop(gasSegments: null);
+      // No setpoint segments and no measured ppO2: the loop cannot be
+      // modeled. The first tank's open-circuit fractions are not the loop's,
+      // so ppN2 and density are withheld rather than drawn from them (issue
+      // #2593). MOD is a property of the recorded gas and stays.
+      expect(analysis.tissueLoadingWithheld, isTrue);
+      expect(analysis.hasPpN2Data, isFalse);
+      expect(analysis.hasDensityData, isFalse);
+      expect(analysis.modCurve![2], closeTo(25.0, 0.01));
     });
   });
 }

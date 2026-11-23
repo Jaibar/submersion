@@ -1,60 +1,77 @@
-import 'dart:math' as math;
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
-
+import 'package:submersion/core/router/list_return_scope.dart';
+import 'package:submersion/core/router/pushed_route.dart';
+import 'package:submersion/core/router/section_navigation.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/search/dive_search_action.dart';
 import 'package:submersion/core/constants/card_color.dart';
+import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/map_style.dart';
 import 'package:submersion/core/constants/map_tile_config.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/app_colors.dart';
+import 'package:submersion/core/utils/slippy_tiles.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
-import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
-import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
-import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
-import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/features/tags/domain/entities/tag.dart';
-import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
-import 'package:submersion/core/constants/dive_field.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_prefill.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/unfilled_dive_chip.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/safety_finding_badge.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/domain/services/estimated_profile.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/dive_type_label_resolver.dart';
+import 'package:submersion/features/data_quality/presentation/providers/data_quality_providers.dart';
+import 'package:submersion/features/dive_log/presentation/navigation/open_dive_list.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_create_builder.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
+import 'package:submersion/features/dive_log/presentation/providers/card_photo_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_list_count_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_profile_batcher.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_scrubber_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/weather/presentation/providers/weather_providers.dart';
+import 'package:submersion/features/weather/presentation/widgets/fetch_conditions_flow.dart';
+import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/add_dive_bottom_sheet.dart';
-import 'package:submersion/shared/widgets/debounced_search_results.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_list_add_fab.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_list_content.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_map_content.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_numbering_dialog.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/estimated_profile_chart.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_panel.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_summary_widget.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/dive_numbering_dialog.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_card_photo_background.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_card_stat_row.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/table_column_picker.dart';
-import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_edit_page.dart';
-import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
-import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
+import 'package:submersion/features/media/presentation/providers/lightroom_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/selection_inset.dart';
+import 'package:submersion/shared/selection/selection_leading.dart';
+import 'package:submersion/shared/selection/table_selection_owner.dart';
+import 'package:submersion/shared/utils/ink_centered_text_style.dart';
+import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
+import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
+import 'package:submersion/shared/widgets/record_list_card.dart';
+import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
-/// Compute a single map tile URL for the given lat/lng at [zoom].
-///
-/// Converts WGS-84 coordinates to slippy map tile x/y using the standard
-/// Web Mercator projection formula, then returns the tile URL for the
-/// requested [style] (Street, Topo, or Satellite).
+/// Compute a single map tile URL for the given lat/lng at [zoom], via the
+/// shared slippy-map conversion.
 String _tileUrl(double lat, double lng, int zoom, MapStyle style) {
-  final n = 1 << zoom; // 2^zoom
-  final x = ((lng + 180.0) / 360.0 * n).floor();
-  final latRad = lat * math.pi / 180.0;
-  final y =
-      ((1.0 - math.log(math.tan(latRad) + 1.0 / math.cos(latRad)) / math.pi) /
-              2.0 *
-              n)
-          .floor();
-  return MapTileConfig.tileUrl(style, zoom, x, y);
+  final tile = slippyTileOf(lat, lng, zoom);
+  return MapTileConfig.tileUrl(style, zoom, tile.x, tile.y);
 }
 
 /// Main dive list page with master-detail layout on desktop.
@@ -62,15 +79,31 @@ String _tileUrl(double lat, double lng, int zoom, MapStyle style) {
 /// On desktop (>=800px): Shows a split view with list on left, detail/summary on right.
 /// On narrower screens (<800px): Shows the list with navigation to detail pages.
 class DiveListPage extends ConsumerStatefulWidget {
-  const DiveListPage({super.key});
+  const DiveListPage({super.key, this.returnTo});
+
+  /// Set when this list was pushed by `openDiveList`: what to put back when
+  /// it goes away. Null for the Dives tab itself.
+  final DiveListReturn? returnTo;
 
   @override
   ConsumerState<DiveListPage> createState() => _DiveListPageState();
 }
 
-class _DiveListPageState extends ConsumerState<DiveListPage> {
+class _DiveListPageState extends ConsumerState<DiveListPage>
+    with TableSelectionOwner {
   /// Tracks the selected dive ID for mobile map view info card
   String? _mobileMapSelectedDiveId;
+
+  @override
+  void initState() {
+    super.initState();
+    // Home-tab startup hook for the Lightroom auto-poll: the provider
+    // itself gates on account, toggle, and a 6-hour interval, and catches
+    // every failure, so this read is fire-and-forget.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(lightroomAutoPollProvider);
+    });
+  }
 
   bool get _isMapView {
     final state = GoRouterState.of(context);
@@ -78,6 +111,7 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
   }
 
   void _showAddDiveSheet(BuildContext context) {
+    if (ref.read(diveListScrubbingProvider)) return;
     final isDesktop = ResponsiveBreakpoints.isMasterDetail(context);
     final viewMode = ref.read(diveListViewModeProvider);
     showAddDiveBottomSheet(
@@ -87,16 +121,29 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
         if (isDesktop && viewMode != ListViewMode.table) {
           final state = GoRouterState.of(context);
           final currentPath = state.uri.path;
-          context.go('$currentPath?mode=new');
+          context.goInPlaceGuarded('$currentPath?mode=new');
         } else {
           context.push('/dives/new');
         }
       },
+      onPlanDive: () =>
+          context.push('/dives/new', extra: const DivePrefill(isPlanned: true)),
+    );
+  }
+
+  /// Backfills missing conditions across the logbook. The list refreshes on
+  /// its own: the fill writes through Drift, so the dive streams tick.
+  Future<void> _fetchAllConditions() async {
+    final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
+    if (!mounted) return;
+    await showFetchConditionsFlow(
+      context: context,
+      service: ref.read(bulkConditionsServiceProvider),
+      diverId: diverId,
     );
   }
 
   void _toggleMapView() {
-    final router = GoRouter.of(context);
     final state = GoRouterState.of(context);
     final currentPath = state.uri.path;
     final selectedId = state.uri.queryParameters['selected'];
@@ -104,22 +151,26 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
     if (_isMapView) {
       // Switch back to detail view
       if (selectedId != null) {
-        router.go('$currentPath?selected=$selectedId');
+        context.goInPlaceGuarded('$currentPath?selected=$selectedId');
       } else {
-        router.go(currentPath);
+        context.goInPlaceGuarded(currentPath);
       }
     } else {
-      // Switch to map view
+      // Switch to map view, which replaces the pane's dive: a sitting
+      // there is asked about first (issue #4527).
       if (selectedId != null) {
-        router.go('$currentPath?selected=$selectedId&view=map');
+        context.goInPlaceGuarded('$currentPath?selected=$selectedId&view=map');
       } else {
-        router.go('$currentPath?view=map');
+        context.goInPlaceGuarded('$currentPath?view=map');
       }
     }
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ListReturnScope(returnTo: widget.returnTo, child: _buildPage(context));
+
+  Widget _buildPage(BuildContext context) {
     // Clear mobile map selection when filters change to avoid stale state
     ref.listen<DiveFilterState>(diveFilterProvider, (previous, next) {
       if (_mobileMapSelectedDiveId != null) {
@@ -130,12 +181,9 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
     // Use desktop breakpoint (800px) to show master-detail when NavigationRail appears
     final showMasterDetail = ResponsiveBreakpoints.isMasterDetail(context);
 
-    final fab = FloatingActionButton.extended(
-      onPressed: () => _showAddDiveSheet(context),
-      tooltip: context.l10n.diveLog_listPage_fab_logDive,
-      icon: const Icon(Icons.add),
-      label: Text(context.l10n.diveLog_listPage_fab_logDive),
-    );
+    final fab = DiveListAddFab(onPressed: () => _showAddDiveSheet(context));
+
+    resetTableSelectionOffTable(diveListViewModeProvider);
 
     // Table mode: use shared TableModeLayout for full-width table with
     // optional detail pane, map, and profile panel.
@@ -145,25 +193,52 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
 
       return TableModeLayout(
         sectionKey: 'dives',
+        // The table holds every dive the filter selects, so the dive is
+        // looked up there rather than paged for.
+        rememberedSelectedId: rememberedListedId(
+          items: ref.watch(allDivesForTableProvider),
+          rememberedId: ref.watch(highlightedDiveIdProvider),
+          idOf: (dive) => dive.id,
+        ),
         appBarTitle: context.l10n.nav_dives,
-        tableContent: const DiveListContent(showAppBar: false),
-        detailBuilder: (context, id) => DiveDetailPage(
-          diveId: id,
-          embedded: true,
-          onDeleted: () {
-            final state = GoRouterState.of(context);
-            context.go(state.uri.path);
-          },
+        appBarSubtitle: diveCountSubtitle(
+          context,
+          ref.watch(diveTableCountProvider),
         ),
+        tableContent: DiveListContent(
+          showAppBar: false,
+          selectionController: tableSelection,
+        ),
+        detailBuilder: (context, id) {
+          final state = GoRouterState.of(context);
+          final rawSiteId = state.uri.queryParameters['site'];
+          final siteId = (rawSiteId == null || rawSiteId.isEmpty)
+              ? null
+              : rawSiteId;
+          return DiveDetailPage(
+            diveId: id,
+            embedded: true,
+            embeddedSiteId: siteId,
+            onCloseEmbeddedSite: () {
+              final state = GoRouterState.of(context);
+              final params = Map<String, String>.from(
+                state.uri.queryParameters,
+              );
+              params.remove('site');
+              context.goInPlace(
+                Uri(path: state.uri.path, queryParameters: params).toString(),
+              );
+            },
+            onDeleted: () {
+              final state = GoRouterState.of(context);
+              context.goInPlace(state.uri.path);
+            },
+          );
+        },
         summaryBuilder: (context) => const DiveSummaryWidget(),
-        editBuilder: (context, id, onSaved, onCancel) => DiveEditPage(
-          diveId: id,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
-        createBuilder: (context, onSaved, onCancel) =>
-            DiveEditPage(embedded: true, onSaved: onSaved, onCancel: onCancel),
+        editBuilder: (context, id, onSaved, onCancel) =>
+            unlockedDivePane(context, id, onCancel),
+        createBuilder: newDivePaneBuilder(),
         mapContent: DiveMapContent(
           selectedId: ref.watch(highlightedDiveIdProvider),
           onItemSelected: (diveId) {
@@ -188,48 +263,37 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
         onMapViewToggle: _toggleMapView,
         columnSettingsAction: IconButton(
           icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
+          tooltip: context.l10n.columnConfig_tooltip_columnSettings,
           onPressed: () => showTableColumnPicker(context),
         ),
         appBarActions: [
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
-            tooltip: 'Search dives',
-            onPressed: () {
-              showSearch(context: context, delegate: DiveSearchDelegate(ref));
-            },
-          ),
-          IconButton(
-            icon: Badge(
-              isLabelVisible: ref.watch(diveFilterProvider).hasActiveFilters,
-              child: const Icon(Icons.filter_list, size: 20),
-            ),
-            tooltip: 'Filter dives',
-            onPressed: () {
-              showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                builder: (_) => DiveFilterSheet(ref: ref),
-              );
-            },
-          ),
+          const DiveSearchAction(iconSize: 20),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, size: 20),
             onSelected: (value) {
-              if (value == 'advanced_search') {
-                context.push('/dives/search');
+              if (value == 'match_sites') {
+                context.push('/dives/match-sites');
               } else if (value == 'numbering') {
                 showDiveNumberingDialog(context);
+              } else if (value == 'data_quality') {
+                context.push('/dives/quality');
+              } else if (value == 'fetch_conditions') {
+                logFailure(
+                  _fetchAllConditions(),
+                  _DiveListPageState,
+                  'fetch conditions for all dives',
+                );
               } else if (value.startsWith('view_')) {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(diveListViewModeProvider.notifier).state = mode;
+                ref.read(settingsProvider.notifier).setDiveListViewMode(mode);
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(diveListViewModeProvider);
               return [
+                ...tableSelectItemsEntries(context),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -241,22 +305,66 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
                 ),
                 const PopupMenuDivider(),
                 PopupMenuItem(
-                  value: 'advanced_search',
-                  child: Row(
-                    children: [
-                      const Icon(Icons.manage_search, size: 20),
-                      const SizedBox(width: 12),
-                      Text(context.l10n.diveLog_listPage_menuAdvancedSearch),
-                    ],
-                  ),
-                ),
-                PopupMenuItem(
                   value: 'numbering',
                   child: Row(
                     children: [
                       const Icon(Icons.format_list_numbered, size: 20),
                       const SizedBox(width: 12),
                       Text(context.l10n.diveLog_listPage_menuDiveNumbering),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'match_sites',
+                  child: Row(
+                    children: [
+                      const Icon(Icons.add_location_alt_outlined, size: 20),
+                      const SizedBox(width: 12),
+                      Flexible(
+                        child: Text(
+                          context.l10n.diveLog_listPage_menuMatchSites,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'fetch_conditions',
+                  child: Row(
+                    children: [
+                      const Icon(Icons.cloud_download_outlined, size: 20),
+                      const SizedBox(width: 12),
+                      Flexible(
+                        child: Text(
+                          context.l10n.diveLog_listPage_menuFetchConditions,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'data_quality',
+                  child: Row(
+                    children: [
+                      const Icon(Icons.rule, size: 20),
+                      const SizedBox(width: 12),
+                      Flexible(
+                        child: Text(context.l10n.dataQuality_badge_tooltip),
+                      ),
+                      Builder(
+                        builder: (context) {
+                          final count =
+                              ref
+                                  .watch(openQualityFindingsCountProvider)
+                                  .value ??
+                              0;
+                          if (count == 0) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Badge(label: Text('$count')),
+                          );
+                        },
+                      ),
                     ],
                   ),
                 ),
@@ -271,24 +379,43 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
     if (showMasterDetail) {
       // Desktop: Use master-detail layout
       return MasterDetailScaffold(
-        sectionId: 'dives',
+        sectionId: RecordListSection.dives,
+        rememberedSelectedId: ref.watch(rememberedDiveIdProvider),
         masterBuilder: (context, onItemSelected, selectedId) => DiveListContent(
           onItemSelected: onItemSelected,
           selectedId: selectedId,
           showAppBar: false,
+          showBackButton: isPushedRoute(context),
           isMapViewActive: _isMapView,
           onMapViewToggle: _toggleMapView,
         ),
-        detailBuilder: (context, diveId) => DiveDetailPage(
-          diveId: diveId,
-          embedded: true,
-          onDeleted: () {
-            // Clear selection when dive is deleted
-            final router = GoRouter.of(context);
-            final state = GoRouterState.of(context);
-            router.go(state.uri.path);
-          },
-        ),
+        detailBuilder: (context, diveId) {
+          final state = GoRouterState.of(context);
+          final rawSiteId = state.uri.queryParameters['site'];
+          final siteId = (rawSiteId == null || rawSiteId.isEmpty)
+              ? null
+              : rawSiteId;
+          return DiveDetailPage(
+            diveId: diveId,
+            embedded: true,
+            embeddedSiteId: siteId,
+            onCloseEmbeddedSite: () {
+              final state = GoRouterState.of(context);
+              final params = Map<String, String>.from(
+                state.uri.queryParameters,
+              );
+              params.remove('site');
+              context.goInPlace(
+                Uri(path: state.uri.path, queryParameters: params).toString(),
+              );
+            },
+            onDeleted: () {
+              // Clear selection when dive is deleted
+              final state = GoRouterState.of(context);
+              context.goInPlace(state.uri.path);
+            },
+          );
+        },
         summaryBuilder: (context) => const DiveSummaryWidget(),
         mapBuilder: (context, selectedId, onItemSelected) => DiveMapContent(
           selectedId: selectedId,
@@ -297,17 +424,40 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
             // Exit map view and show detail pane for the selected dive
             final state = GoRouterState.of(context);
             final currentPath = state.uri.path;
-            context.go('$currentPath?selected=$diveId');
+            context.goInPlaceGuarded('$currentPath?selected=$diveId');
           },
         ),
-        editBuilder: (context, diveId, onSaved, onCancel) => DiveEditPage(
-          diveId: diveId,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
-        createBuilder: (context, onSaved, onCancel) =>
-            DiveEditPage(embedded: true, onSaved: onSaved, onCancel: onCancel),
+        editBuilder: (context, id, onSaved, onCancel) {
+          final state = GoRouterState.of(context);
+          final siteId = state.uri.queryParameters['site'];
+          if (siteId != null && siteId.isNotEmpty) {
+            /// [state]'s address with [drop] taken out of its query.
+            void replaceWithout(Set<String> drop) {
+              final params = {
+                for (final entry in state.uri.queryParameters.entries)
+                  if (!drop.contains(entry.key)) entry.key: entry.value,
+              };
+              context.replace(
+                Uri(path: state.uri.path, queryParameters: params).toString(),
+              );
+            }
+
+            // 'selected' stays the dive (passed as 'id' here): the site is
+            // shown in its place, and leaving the site returns to it.
+            return siteInDivesPane(
+              context,
+              siteId,
+              // Back to the site in view mode, its id kept.
+              onCancel: () => replaceWithout({'mode'}),
+              // Back to the dive the site was opened from.
+              onClose: () => replaceWithout({'mode', 'site'}),
+              // The site is gone, so return to the dive it was opened from.
+              onDeleted: () => replaceWithout({'mode', 'site'}),
+            );
+          }
+          return unlockedDivePane(context, id, onCancel);
+        },
+        createBuilder: newDivePaneBuilder(),
         floatingActionButton: fab,
         onFabPressed: () => _showAddDiveSheet(context),
       );
@@ -315,13 +465,18 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
 
     // Mobile: Check if map view is requested
     if (_isMapView) {
+      // A pushed map (a trip's "View on map") returns where it came from,
+      // labelled as a plain Back; the Dives tab's own map returns to its list.
+      final pushed = isPushedRoute(context);
       return Scaffold(
         appBar: AppBar(
           title: Text(context.l10n.diveLog_listPage_appBar_diveMap),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            tooltip: context.l10n.diveLog_listPage_tooltip_backToDiveList,
-            onPressed: () => context.go('/dives'),
+            tooltip: pushed
+                ? MaterialLocalizations.of(context).backButtonTooltip
+                : context.l10n.diveLog_listPage_tooltip_backToDiveList,
+            onPressed: () => pushed ? context.pop() : context.go('/dives'),
           ),
           actions: [
             IconButton(
@@ -347,153 +502,15 @@ class _DiveListPageState extends ConsumerState<DiveListPage> {
   }
 }
 
-/// Search delegate for diving through dive logs
-class DiveSearchDelegate extends SearchDelegate<Dive?> {
-  final WidgetRef ref;
-
-  DiveSearchDelegate(this.ref);
-
-  // TODO: l10n - needs context (SearchDelegate.searchFieldLabel has no BuildContext)
-  @override
-  String get searchFieldLabel => 'Search dives...';
-
-  @override
-  List<Widget> buildActions(BuildContext context) {
-    return [
-      if (query.isNotEmpty)
-        IconButton(
-          icon: const Icon(Icons.clear),
-          tooltip: context.l10n.diveLog_listPage_tooltip_clearSearch,
-          onPressed: () => query = '',
-        ),
-    ];
-  }
-
-  @override
-  Widget buildLeading(BuildContext context) {
-    return IconButton(
-      icon: const Icon(Icons.arrow_back),
-      tooltip: context.l10n.diveLog_listPage_tooltip_back,
-      onPressed: () => close(context, null),
-    );
-  }
-
-  @override
-  Widget buildResults(BuildContext context) {
-    return _buildSearchResults(context);
-  }
-
-  @override
-  Widget buildSuggestions(BuildContext context) {
-    if (query.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ExcludeSemantics(
-              child: Icon(
-                Icons.search,
-                size: 64,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              context.l10n.diveLog_listPage_searchSuggestion,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return _buildSearchResults(context);
-  }
-
-  Widget _buildSearchResults(BuildContext context) {
-    return DebouncedSearchResults<Dive>(
-      query: query,
-      watchProvider: (ref, q) => ref.watch(diveSearchProvider(q)),
-      emptyBuilder: (context, q) => Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ExcludeSemantics(
-              child: Icon(
-                Icons.search_off,
-                size: 64,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              context.l10n.diveLog_listPage_searchNoResults(q),
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      ),
-      dataBuilder: (context, dives) {
-        final colorAttribute = ref.read(settingsProvider).cardColorAttribute;
-        final colorValues = dives
-            .map((d) => getCardColorValueFromDive(d, colorAttribute))
-            .whereType<double>();
-        final minValue = colorValues.isNotEmpty
-            ? colorValues.reduce((a, b) => a < b ? a : b)
-            : null;
-        final maxValue = colorValues.isNotEmpty
-            ? colorValues.reduce((a, b) => a > b ? a : b)
-            : null;
-
-        return ListView.builder(
-          itemCount: dives.length,
-          itemBuilder: (context, index) {
-            final dive = dives[index];
-            return DiveListTile(
-              diveId: dive.id,
-              diveNumber: dive.diveNumber ?? index + 1,
-              dateTime: dive.dateTime,
-              siteName: dive.site?.name,
-              siteLocation: dive.site?.locationString,
-              maxDepth: dive.maxDepth,
-              duration: dive.bottomTime,
-              waterTemp: dive.waterTemp,
-              rating: dive.rating,
-              isFavorite: dive.isFavorite,
-              tags: dive.tags,
-              colorValue: getCardColorValueFromDive(dive, colorAttribute),
-              minValueInList: minValue,
-              maxValueInList: maxValue,
-              siteLatitude: dive.site?.location?.latitude,
-              siteLongitude: dive.site?.location?.longitude,
-              onTap: () {
-                close(context, dive);
-                context.go('/dives/${dive.id}');
-              },
-            );
-          },
-        );
-      },
-      errorBuilder: (context, error) => Center(
-        child: Text(
-          context.l10n.diveLog_listPage_errorLoading(error.toString()),
-        ),
-      ),
-    );
-  }
-}
-
 /// List item widget for displaying a dive summary
 class DiveListTile extends ConsumerWidget {
   final String diveId;
   final int diveNumber;
+
+  /// The dive is planned and therefore unnumbered (issue #2002). Callers
+  /// that pass a [summary] may leave this false: the summary's own flag is
+  /// honoured too.
+  final bool isPlanned;
   final DateTime dateTime;
   final String? siteName;
   final String? siteLocation;
@@ -504,11 +521,15 @@ class DiveListTile extends ConsumerWidget {
   final bool isFavorite;
   final List<Tag> tags;
   final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
   final VoidCallback? onDoubleTap;
+
+  /// Currently open in the detail pane. Renders as a leading edge stripe.
   final bool isHighlighted;
   final bool isSelectionMode;
-  final bool isSelected;
+
+  /// In the current bulk selection. Renders as a fill tint plus the leading
+  /// checkbox. Independent of [isHighlighted]: a row can be both.
+  final bool isChecked;
 
   /// The dive's value for the active color attribute
   final double? colorValue;
@@ -543,10 +564,28 @@ class DiveListTile extends ConsumerWidget {
   /// slots and extra fields, giving access to all fields.
   final Dive? fullDive;
 
+  /// Resolves a dive-type slug to its localized label (issue #643).
+  ///
+  /// Built once per list by [watchDiveTypeLabelResolver] and threaded down, so
+  /// the card neither watches `diveTypesProvider` nor rebuilds a lookup map per
+  /// row. When omitted, a Dive Type slot or extra field falls back to the
+  /// English slug capitalization, matching the locale-independent export path.
+  final DiveTypeLabelResolver? diveTypeLabelResolver;
+
+  /// Resolves a dive-type slug to its short-form abbreviation, for the badge
+  /// row on the stat line (mirrors the dive detail header's type badges).
+  /// When omitted, badges fall back to the slug's capitalization.
+  final DiveTypeLabelResolver? diveTypeShortLabelResolver;
+
+  /// Whether a dive-type slug's badge should appear in the badge row
+  /// (issue #1269 follow-up). When omitted, every type is shown.
+  final DiveTypeListVisibilityPredicate? diveTypeListVisibilityPredicate;
+
   const DiveListTile({
     super.key,
     required this.diveId,
     required this.diveNumber,
+    this.isPlanned = false,
     required this.dateTime,
     this.siteName,
     this.siteLocation,
@@ -557,11 +596,10 @@ class DiveListTile extends ConsumerWidget {
     this.isFavorite = false,
     this.tags = const [],
     this.onTap,
-    this.onLongPress,
     this.onDoubleTap,
     this.isHighlighted = false,
     this.isSelectionMode = false,
-    this.isSelected = false,
+    this.isChecked = false,
     this.colorValue,
     this.minValueInList,
     this.maxValueInList,
@@ -572,6 +610,9 @@ class DiveListTile extends ConsumerWidget {
     this.margin,
     this.summary,
     this.fullDive,
+    this.diveTypeLabelResolver,
+    this.diveTypeShortLabelResolver,
+    this.diveTypeListVisibilityPredicate,
   });
 
   /// Calculate background color based on the active color attribute
@@ -585,56 +626,105 @@ class DiveListTile extends ConsumerWidget {
     );
   }
 
-  /// Determine if text should be light or dark based on background color
-  bool _shouldUseLightText(Color backgroundColor) {
-    // Use luminance to determine if background is dark
-    // Luminance < 0.5 means dark background, needs light text
-    return backgroundColor.computeLuminance() < 0.5;
-  }
-
   /// Check if map background should be shown
   bool get _hasLocation => siteLatitude != null && siteLongitude != null;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
-    final profileCache = ref.watch(batchProfileCacheProvider);
-    final profile = profileCache[diveId] ?? const [];
+    final units = ref.watch(unitFormatterProvider);
+    // This dive's entry only: every page load writes the cache once, and
+    // watching the whole map re-rendered every card on screen for it (#3506).
+    // The merge keeps existing entries' lists, so an unchanged entry selects
+    // the identical list and the card stays put.
+    final cached = ref.watch(
+      batchProfileCacheProvider.select((cache) => cache[diveId]),
+    );
+    if (cached == null) ref.read(diveProfileBatcherProvider).request(diveId);
+    final profile = cached ?? const <DiveProfilePoint>[];
+    // A faded outline for a dive known to have no samples (#4112); not while
+    // they load, or a recorded dive would flash an estimate first.
+    final estimate = cached != null && cached.isEmpty
+        ? EstimatedProfile.estimate(
+            maxDepth: summary?.maxDepth,
+            runtime: summary?.runtime,
+            bottomTime: summary?.bottomTime,
+          )
+        : null;
 
     // Check if attribute-colored cards are enabled
     final colorAttribute = ref.watch(cardColorAttributeProvider);
     final showCardColors = colorAttribute != CardColorAttribute.none;
     // Check if map background is enabled
     final showMapBackground = ref.watch(showMapBackgroundOnDiveCardsProvider);
+    final showPhotoBackground = ref.watch(
+      showPhotoBackgroundOnDiveCardsProvider,
+    );
 
-    // Determine if we should show the map (setting enabled + location available)
-    final shouldShowMap = showMapBackground && _hasLocation && !isSelected;
+    // A dive awaiting its computer data, a plan (issue #2002) or a draft
+    // (issue #637): no number of its own, so the badge and the screen-reader
+    // label leave the number out.
+    final unfilledState = unfilledDiveStateOf(
+      isPlanned: isPlanned || summary?.isPlanned == true,
+      isDraft: summary?.isDraft == true,
+      isOpenDraft: summary?.isOpenDraft == true,
+    );
+    // The chip follows the summary alone, as the planned chip did.
+    final chipState = unfilledDiveStateOf(
+      isPlanned: summary?.isPlanned == true,
+      isDraft: summary?.isDraft == true,
+      isOpenDraft: summary?.isOpenDraft == true,
+    );
 
-    // Determine card background: selection takes priority, then attribute coloring
-    // When map is shown, we don't use attribute coloring on the card itself
-    final attributeColor = (showCardColors && !shouldShowMap)
+    // The active row carries a fill tint: checked in the bulk selection, or --
+    // outside selection mode -- open in the detail pane. Inside selection mode
+    // the fill belongs to the checked channel alone, so a highlighted but
+    // unchecked row stays plain instead of reading as selected.
+    final showsSelectionFill = isChecked || (isHighlighted && !isSelectionMode);
+
+    // A photo of the dive comes first (setting enabled + the dive has one),
+    // then the map (setting enabled + location available). Only watched with
+    // the setting on, so a log that never uses it never reads its photos.
+    final cardPhoto = showPhotoBackground && !showsSelectionFill
+        ? ref.watch(cardPhotoForDiveProvider(diveId))
+        : null;
+    final shouldShowPhoto = cardPhoto != null;
+    final shouldShowMap =
+        !shouldShowPhoto &&
+        showMapBackground &&
+        _hasLocation &&
+        !showsSelectionFill;
+
+    // Determine card background: selection takes priority, then attribute
+    // coloring. Under a photo or a map the card itself is not coloured.
+    final attributeColor =
+        (showCardColors && !shouldShowMap && !shouldShowPhoto)
         ? _getAttributeBackgroundColor()
         : null;
-    final cardColor = isSelected
-        ? colorScheme.primaryContainer.withValues(alpha: 0.5)
-        : isHighlighted
-        ? colorScheme.primaryContainer.withValues(alpha: 0.15)
+    final cardColor = showsSelectionFill
+        ? recordCardSelectionFill(colorScheme)
         : attributeColor;
 
-    // Determine text colors based on background luminance
-    // When map is shown, use light text since the gradient overlay makes the background dark
-    final effectiveBackground = shouldShowMap
-        ? const Color(0xFF1A1A2E) // Dark background for map overlay
-        : (cardColor ?? colorScheme.surfaceContainerHighest);
-    final useLightText = _shouldUseLightText(effectiveBackground);
-    final primaryTextColor = useLightText ? Colors.white : Colors.black87;
-    final secondaryTextColor = useLightText ? Colors.white70 : Colors.black54;
-    // Use contrasting accent colors: light cyan on dark backgrounds, dark teal on light backgrounds
-    final accentColor = useLightText
-        ? Colors.cyan.shade200
-        : Colors.teal.shade800;
+    // Text colours follow the background the text sits on; under a map that
+    // is the dark gradient overlay, under a photo the theme's overlay, not
+    // the card.
+    final textColors = RecordCardColors.forFill(
+      colorScheme,
+      shouldShowPhoto
+          ? DiveCardPhotoScrim.textBase(Theme.of(context).brightness)
+          : shouldShowMap
+          ? const Color(0xFF1A1A2E)
+          : cardColor,
+    );
+    final primaryTextColor = textColors.primaryText;
+    // Over a photo on the light theme the faded secondary colour washes into
+    // the picture, so the details take the title's colour there.
+    final photoOnLight =
+        shouldShowPhoto && Theme.of(context).brightness == Brightness.light;
+    final secondaryTextColor = photoOnLight
+        ? textColors.primaryText
+        : textColors.secondaryText;
+    final accentColor = textColors.accent;
 
     // Detailed card config: slots + extra fields
     final detailedConfig = ref.watch(detailedCardConfigProvider);
@@ -650,6 +740,39 @@ class DiveListTile extends ConsumerWidget {
 
     final stat1Field = slotField('stat1', DiveField.maxDepth);
     final stat2Field = slotField('stat2', DiveField.runtime);
+    final titleField = slotField('title', DiveField.siteName);
+    final dateField = slotField('date', DiveField.dateTime);
+
+    final diveTypeLabels = [
+      for (final id in summary?.diveTypeIds ?? const <String>[])
+        if (diveTypeListVisibilityPredicate?.call(id) ?? true)
+          (diveTypeShortLabelResolver ?? Dive.diveTypeDisplayName)(id),
+    ];
+
+    // Resolve the title and date lines from their slot assignments, keeping
+    // the legacy rendering when the slot holds its default field (mirrors
+    // CompactDiveListTile).
+    String buildTitleText() {
+      if (summary != null && titleField != DiveField.siteName) {
+        final value = titleField.extractFromSummary(
+          summary!,
+          diveTypeLabel: diveTypeLabelResolver,
+        );
+        return titleField.formatValue(value, units);
+      }
+      return siteName ?? context.l10n.diveLog_listPage_unknownSite;
+    }
+
+    String buildDateText() {
+      if (summary != null && dateField != DiveField.dateTime) {
+        final value = dateField.extractFromSummary(
+          summary!,
+          diveTypeLabel: diveTypeLabelResolver,
+        );
+        return dateField.formatValue(value, units);
+      }
+      return units.formatDateTime(dateTime, l10n: context.l10n);
+    }
 
     // Build the content widget (used in both map and non-map variants)
     Widget buildContent() {
@@ -662,323 +785,388 @@ class DiveListTile extends ConsumerWidget {
           final chartWidth = availableWidth < 400
               ? (availableWidth * 0.25).clamp(60.0, 120.0)
               : (availableWidth * 0.20).clamp(80.0, 120.0);
+          final titleStyle = Theme.of(context).textTheme.titleMedium;
 
+          // The chevron takes a column of its own at the card's end, centred
+          // on the whole card, so every line ends at one edge (#4639).
           return Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Top row: avatar/checkbox, text info, chart, chevron
-                Row(
-                  children: [
-                    // Selection checkbox or dive number badge
-                    SizedBox(
-                      width: 40,
-                      height: 40,
-                      child: isSelectionMode
-                          ? Center(
-                              child: Checkbox(
-                                value: isSelected,
-                                onChanged: (_) => onTap?.call(),
-                                materialTapTargetSize:
-                                    MaterialTapTargetSize.shrinkWrap,
-                                visualDensity: VisualDensity.compact,
-                              ),
-                            )
-                          : CircleAvatar(
-                              backgroundColor: colorScheme.primaryContainer,
-                              child: Text(
-                                '#$diveNumber',
-                                style: TextStyle(
-                                  color: colorScheme.onPrimaryContainer,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                    ),
-                    const SizedBox(width: 12),
-                    // Main text content (site, location, date)
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Site name with favorite and rating
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  siteName ??
-                                      context.l10n.diveLog_listPage_unknownSite,
-                                  style: Theme.of(context).textTheme.titleMedium
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.w600,
-                                        color: primaryTextColor,
-                                      ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              if (isFavorite) ...[
-                                const SizedBox(width: 4),
-                                ExcludeSemantics(
-                                  child: Icon(
-                                    Icons.favorite,
-                                    size: 18,
-                                    color: Colors.red.shade400,
-                                  ),
-                                ),
-                              ],
-                              if (rating != null) ...[
-                                const SizedBox(width: 8),
-                                ExcludeSemantics(
-                                  child: Icon(
-                                    Icons.star,
-                                    size: 16,
-                                    color: Colors.amber.shade600,
-                                  ),
-                                ),
-                                const SizedBox(width: 2),
-                                Text(
-                                  '$rating',
-                                  style: Theme.of(context).textTheme.bodySmall
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.w500,
-                                        color: primaryTextColor,
-                                      ),
-                                ),
-                              ],
-                            ],
-                          ),
-                          // Site location (country/region)
-                          if (siteLocation != null &&
-                              siteLocation!.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              siteLocation!,
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: secondaryTextColor),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                          const SizedBox(height: 4),
-                          // Date and time
-                          Text(
-                            units.formatDateTime(dateTime, l10n: context.l10n),
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(color: secondaryTextColor),
-                          ),
-                        ],
-                      ),
-                    ),
-                    // Dive profile mini chart (right side)
-                    if (profile.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsetsDirectional.only(start: 8),
+            padding: const EdgeInsets.all(kRecordCardDetailedPadding),
+            child: RecordListChevronRow(
+              chevronColor: secondaryTextColor,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Top row: avatar/checkbox, text info, chart
+                  Row(
+                    children: [
+                      // Dive number badge, with the selection checkbox ahead
+                      // of it in selection mode (never in place of it).
+                      SelectionLeading(
+                        isSelectionMode: isSelectionMode,
+                        isChecked: isChecked,
+                        onChanged: (_) => onTap?.call(),
                         child: SizedBox(
-                          width: chartWidth,
-                          height: 50,
-                          child: DiveProfileMiniChart(
-                            profile: profile,
-                            height: 50,
-                            color: accentColor,
+                          width: 40,
+                          height: 40,
+                          child: CircleAvatar(
+                            backgroundColor: colorScheme.primaryContainer,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                              ),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                // A planned dive holds no number, and the list
+                                // passes its position as a fallback, so the
+                                // badge would show a number that belongs to
+                                // another dive (issue #2002).
+                                child: unfilledState != null
+                                    ? Icon(
+                                        unfilledDiveIcon(unfilledState),
+                                        size: 18,
+                                        color: colorScheme.onPrimaryContainer,
+                                      )
+                                    : Text(
+                                        '#$diveNumber',
+                                        maxLines: 1,
+                                        style: TextStyle(
+                                          color: colorScheme.onPrimaryContainer,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                              ),
+                            ),
                           ),
                         ),
                       ),
-                    // Chevron
-                    ExcludeSemantics(
-                      child: Icon(
-                        Icons.chevron_right,
-                        color: secondaryTextColor,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                // Stats row: configurable via slot assignments
-                Padding(
-                  padding: const EdgeInsetsDirectional.only(start: 52),
-                  child: Row(
-                    children: [
-                      _buildStatWidget(
-                        stat1Field,
-                        summary,
-                        units,
-                        context,
-                        accentColor,
-                        secondaryTextColor,
-                      ),
-                      const SizedBox(width: 16),
-                      _buildStatWidget(
-                        stat2Field,
-                        summary,
-                        units,
-                        context,
-                        accentColor,
-                        secondaryTextColor,
-                      ),
-                    ],
-                  ),
-                ),
-                // Tags
-                if (tags.isNotEmpty && detailedConfig.showTags) ...[
-                  const SizedBox(height: 6),
-                  Padding(
-                    padding: const EdgeInsetsDirectional.only(start: 52),
-                    child: TagChips(tags: tags, maxTags: 3),
-                  ),
-                ],
-                // Extra configurable fields area
-                if (extraFields.isNotEmpty &&
-                    (fullDive != null || summary != null)) ...[
-                  const SizedBox(height: 4),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 52),
-                    child: LayoutBuilder(
-                      builder: (context, innerConstraints) {
-                        final useOneColumn = innerConstraints.maxWidth < 250;
-                        return Wrap(
-                          spacing: 16,
-                          runSpacing: 4,
-                          children: extraFields.map((field) {
-                            final value = fullDive != null
-                                ? field.extractFromDive(fullDive!)
-                                : (field.extractFromSummary(summary!) ??
-                                      _fallbackValue(field));
-                            final formatted = field.formatValue(value, units);
-                            return SizedBox(
-                              width: useOneColumn
-                                  ? innerConstraints.maxWidth
-                                  : (innerConstraints.maxWidth - 16) / 2,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    '${field.shortLabel}: ',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: secondaryTextColor,
-                                      fontWeight: FontWeight.w500,
-                                    ),
+                      const SizedBox(width: 12),
+                      // Main text content (site, location, date)
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Site name with favorite and rating
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    buildTitleText(),
+                                    // Same ink-centering fix as DiveModeBadge
+                                    // and the header's rating number, but
+                                    // without shrinking the space this line
+                                    // occupies: strutStyle pins the reserved
+                                    // line height to titleMedium's own natural
+                                    // value (so the date line below doesn't
+                                    // shift up) while textHeightBehavior only
+                                    // repositions the ink within that space.
+                                    // No ellipsis: a long title wraps, like the
+                                    // trip and equipment cards, so the full
+                                    // name is always visible.
+                                    style: titleStyle
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                          color: primaryTextColor,
+                                        )
+                                        .inkCentered,
+                                    textHeightBehavior:
+                                        inkCenteredTextHeightBehavior,
+                                    strutStyle: titleStyle?.preservingStrut,
                                   ),
-                                  Flexible(
-                                    child: Text(
-                                      formatted,
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: primaryTextColor,
-                                      ),
-                                      overflow: TextOverflow.ellipsis,
+                                ),
+                                // A plan or draft awaiting its computer data
+                                // (issues #2002 and #637).
+                                if (chipState != null) ...[
+                                  const SizedBox(width: 6),
+                                  UnfilledDiveChip(state: chipState),
+                                ],
+                                if (isFavorite) ...[
+                                  const SizedBox(width: 4),
+                                  const ExcludeSemantics(
+                                    child: Icon(
+                                      Icons.favorite,
+                                      size: 18,
+                                      color: AppColors.favorite,
                                     ),
                                   ),
                                 ],
+                                // Statistics exclusion (#526 / #1272). Explains
+                                // why this dive is missing from the totals
+                                // without the diver having to open it.
+                                if (summary?.excludedFromStats == true ||
+                                    summary?.excludedFromGasStats == true) ...[
+                                  const SizedBox(width: 6),
+                                  Tooltip(
+                                    key: const Key('dive-excluded-badge'),
+                                    message: summary!.excludedFromStats
+                                        ? context
+                                              .l10n
+                                              .diveLog_badge_excludedFromStats
+                                        : context
+                                              .l10n
+                                              .diveLog_badge_excludedFromGasStats,
+                                    child: Icon(
+                                      summary!.excludedFromStats
+                                          ? Icons.bar_chart_outlined
+                                          : Icons.local_gas_station_outlined,
+                                      size: 16,
+                                      color: colorScheme.outline,
+                                    ),
+                                  ),
+                                ],
+                                if ((summary?.safetyFindingCount ?? 0) > 0 &&
+                                    ref.watch(safetyReviewEnabledProvider)) ...[
+                                  const SizedBox(width: 6),
+                                  SafetyFindingBadge(
+                                    count: summary!.safetyFindingCount,
+                                    color: colorScheme.onSurfaceVariant,
+                                  ),
+                                ],
+                                if (rating != null) ...[
+                                  const SizedBox(width: 8),
+                                  ExcludeSemantics(
+                                    child: Icon(
+                                      Icons.star,
+                                      size: 16,
+                                      color: Colors.amber.shade600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    '$rating',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.w500,
+                                          color: primaryTextColor,
+                                        ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            // Site location (country/region)
+                            if (siteLocation != null &&
+                                siteLocation!.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                siteLocation!,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: secondaryTextColor),
+                                overflow: TextOverflow.ellipsis,
                               ),
-                            );
-                          }).toList(),
-                        );
-                      },
+                            ],
+                            const SizedBox(height: 4),
+                            // Date/subtitle line (configurable via 'date' slot)
+                            Text(
+                              buildDateText(),
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: secondaryTextColor),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Dive profile mini chart (right side)
+                      if (profile.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsetsDirectional.only(start: 8),
+                          child: SizedBox(
+                            width: chartWidth,
+                            height: 50,
+                            child: DiveProfileMiniChart(
+                              profile: profile,
+                              height: 50,
+                              color: accentColor,
+                            ),
+                          ),
+                        )
+                      else if (estimate != null)
+                        Padding(
+                          padding: const EdgeInsetsDirectional.only(start: 8),
+                          child: SizedBox(
+                            width: chartWidth,
+                            height: 50,
+                            child: EstimatedProfileMiniChart(
+                              profile: estimate,
+                              height: 50,
+                              color: accentColor,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  // Stat row plus the dive-type badges and the dive mode badge,
+                  // right-aligned on the same line with the mode last.
+                  // DiveCardStatRow reserves the badges' narrowest width first
+                  // (types collapsed to "+N", mode at full width), so at a narrow
+                  // pane the stats ellipsize instead of overflowing. Tags get
+                  // their own line below.
+                  SelectionInset(
+                    isSelectionMode: isSelectionMode,
+                    start: 52,
+                    child: DiveCardStatRow(
+                      stats: [
+                        for (final field in [stat1Field, stat2Field])
+                          _buildStat(
+                            field,
+                            summary,
+                            units,
+                            context,
+                            accentColor,
+                            secondaryTextColor,
+                          ),
+                      ],
+                      diveTypeLabels: diveTypeLabels,
+                      diveMode: summary?.diveMode ?? DiveMode.oc,
                     ),
                   ),
+                  // Tags, on their own line so a long tag name never competes
+                  // with the stat row or the type badges for width (each chip
+                  // is itself capped with an ellipsis as a defensive backstop).
+                  if (tags.isNotEmpty && detailedConfig.showTags) ...[
+                    const SizedBox(height: 4),
+                    SelectionInset(
+                      isSelectionMode: isSelectionMode,
+                      start: 52,
+                      child: TagChips(tags: tags, maxTags: 3),
+                    ),
+                  ],
+                  // Extra configurable fields area
+                  if (extraFields.isNotEmpty &&
+                      (fullDive != null || summary != null)) ...[
+                    const SizedBox(height: 4),
+                    SelectionInset(
+                      isSelectionMode: isSelectionMode,
+                      start: 52,
+                      child: LayoutBuilder(
+                        builder: (context, innerConstraints) {
+                          final useOneColumn = innerConstraints.maxWidth < 250;
+                          return Wrap(
+                            spacing: 16,
+                            runSpacing: 4,
+                            children: extraFields.map((field) {
+                              final value = _slotValue(field, summary, units);
+                              final formatted = field.formatValue(value, units);
+                              return SizedBox(
+                                width: useOneColumn
+                                    ? innerConstraints.maxWidth
+                                    : (innerConstraints.maxWidth - 16) / 2,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '${field.localizedShortLabel(context.l10n)}: ',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: secondaryTextColor,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    Flexible(
+                                      child: Text(
+                                        formatted,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: primaryTextColor,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           );
         },
       );
     }
 
-    // Build the card with or without map background
-    if (shouldShowMap) {
+    // The map layer, when the card shows one: a cached static tile under a
+    // gradient that keeps the text readable.
+    Widget withMapBackground(Widget content) {
       final tileUrl = _tileUrl(
         siteLatitude!,
         siteLongitude!,
         13,
         ref.watch(settingsProvider.select((s) => s.mapStyle)),
       );
-      return Card(
-        margin:
-            margin ?? const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        clipBehavior: Clip.antiAlias,
-        child: Semantics(
-          button: true,
-          label: 'Dive $diveNumber at ${siteName ?? 'Unknown Site'}',
-          child: InkWell(
-            onTap: onTap,
-            onDoubleTap: onDoubleTap,
-            onLongPress: onLongPress,
-            child: Stack(
-              children: [
-                // Static map tile background (cached)
-                Positioned.fill(
-                  child: CachedNetworkImage(
-                    imageUrl: tileUrl,
-                    httpHeaders: const {
-                      'User-Agent': 'Submersion Dive Log App (app.submersion)',
-                    },
-                    fit: BoxFit.cover,
-                    fadeInDuration: Duration.zero,
-                    placeholder: (_, _) =>
-                        Container(color: const Color(0xFF1A1A2E)),
-                    errorWidget: (_, _, _) =>
-                        Container(color: const Color(0xFF1A1A2E)),
-                  ),
-                ),
-                // Gradient overlay for text readability
-                Positioned.fill(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        stops: const [0.0, 0.3, 0.7, 1.0],
-                        colors: [
-                          Colors.black.withValues(alpha: 0.4),
-                          Colors.black.withValues(alpha: 0.5),
-                          Colors.black.withValues(alpha: 0.7),
-                          Colors.black.withValues(alpha: 0.85),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                // Content layer
-                buildContent(),
-              ],
+      return Stack(
+        children: [
+          // Static map tile background (cached)
+          Positioned.fill(
+            child: CachedNetworkImage(
+              imageUrl: tileUrl,
+              httpHeaders: const {
+                'User-Agent': 'Submersion Dive Log App (app.submersion)',
+              },
+              fit: BoxFit.cover,
+              fadeInDuration: Duration.zero,
+              placeholder: (_, _) => Container(color: const Color(0xFF1A1A2E)),
+              errorWidget: (_, _, _) =>
+                  Container(color: const Color(0xFF1A1A2E)),
             ),
           ),
-        ),
+          // Gradient overlay for text readability
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  stops: const [0.0, 0.3, 0.7, 1.0],
+                  colors: [
+                    Colors.black.withValues(alpha: 0.4),
+                    Colors.black.withValues(alpha: 0.5),
+                    Colors.black.withValues(alpha: 0.7),
+                    Colors.black.withValues(alpha: 0.85),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Content layer
+          content,
+        ],
       );
     }
 
-    // Standard card without map
-    return Container(
-      margin: margin ?? const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      decoration: isHighlighted
-          ? BoxDecoration(
-              border: Border(
-                left: BorderSide(color: colorScheme.primary, width: 3),
-              ),
-              borderRadius: BorderRadius.circular(12),
-            )
-          : null,
-      child: Card(
-        margin: EdgeInsets.zero,
-        color: cardColor,
-        child: Semantics(
-          button: true,
-          label: 'Dive $diveNumber at ${siteName ?? 'Unknown Site'}',
-          child: InkWell(
-            onTap: onTap,
-            onDoubleTap: onDoubleTap,
-            onLongPress: onLongPress,
-            borderRadius: BorderRadius.circular(12),
-            child: buildContent(),
-          ),
-        ),
+    // A tap highlights the dive in the same frame its ink splash starts, and
+    // the highlight drops the map for the selection fill. RecordListCard
+    // keeps everything down to its InkWell unchanged across that (issue
+    // #3474); what differs between the looks sits in the child. The
+    // highlight is the fill, not an edge stripe; the key only marks the row
+    // for tests.
+    return RecordListCard(
+      margin: margin,
+      color: cardColor,
+      clipBehavior: (shouldShowMap || shouldShowPhoto) ? Clip.antiAlias : null,
+      semanticsLabel: diveTileSemanticsLabel(
+        context,
+        unfilledState,
+        diveNumber,
+        siteName,
+      ),
+      onTap: onTap,
+      onDoubleTap: onDoubleTap,
+      child: Container(
+        key: isHighlighted ? const ValueKey('dive_row_highlight') : null,
+        child: shouldShowPhoto
+            ? DiveCardPhotoBackground(photo: cardPhoto, child: buildContent())
+            : shouldShowMap
+            ? withMapBackground(buildContent())
+            : buildContent(),
       ),
     );
   }
 
-  Widget _buildStatWidget(
+  DiveCardStat _buildStat(
     DiveField field,
     DiveSummary? summary,
     UnitFormatter units,
@@ -986,32 +1174,43 @@ class DiveListTile extends ConsumerWidget {
     Color accentColor,
     Color secondaryTextColor,
   ) {
-    // Use full Dive when available (has all fields), otherwise try summary
-    dynamic value = fullDive != null
-        ? field.extractFromDive(fullDive!)
-        : summary != null
-        ? field.extractFromSummary(summary)
-        : null;
-    value ??= _fallbackValue(field);
+    final value = _slotValue(field, summary, units);
     final formatted = field.formatValue(value, units);
-    final hasValue = value != null;
-    final color = hasValue ? accentColor : secondaryTextColor;
-    final style = Theme.of(
-      context,
-    ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600, color: color);
+    final color = value != null ? accentColor : secondaryTextColor;
     final icon = field.icon;
 
-    if (icon != null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ExcludeSemantics(child: Icon(icon, size: 14, color: color)),
-          const SizedBox(width: 4),
-          Text(formatted, style: style),
-        ],
+    return DiveCardStat(
+      icon: icon,
+      text: icon != null
+          ? formatted
+          : '${field.localizedShortLabel(context.l10n)}: $formatted',
+      color: color,
+    );
+  }
+
+  /// The value of [field] for a stat slot or an extra field.
+  ///
+  /// Uses the full Dive when available (it has all fields), otherwise the
+  /// summary. The constructor params stand in only with neither: [duration]
+  /// is either of runtime and bottom time, so it would fill one slot with the
+  /// other (issue #3304).
+  dynamic _slotValue(
+    DiveField field,
+    DiveSummary? summary,
+    UnitFormatter units,
+  ) {
+    if (fullDive case final dive?) {
+      return field.extractFromDive(
+        dive,
+        gasModel: units.settings.gasModel,
+        diveTypeLabel: diveTypeLabelResolver,
       );
     }
-    return Text('${field.shortLabel}: $formatted', style: style);
+    if (summary == null) return _fallbackValue(field);
+    return field.extractFromSummary(
+      summary,
+      diveTypeLabel: diveTypeLabelResolver,
+    );
   }
 
   /// Returns the value from the tile's constructor params for known fields.
@@ -1028,643 +1227,5 @@ class DiveListTile extends ConsumerWidget {
       DiveField.dateTime => dateTime,
       _ => null,
     };
-  }
-}
-
-/// Filter sheet for dive list
-class DiveFilterSheet extends ConsumerStatefulWidget {
-  final WidgetRef ref;
-
-  const DiveFilterSheet({super.key, required this.ref});
-
-  @override
-  ConsumerState<DiveFilterSheet> createState() => _DiveFilterSheetState();
-}
-
-class _DiveFilterSheetState extends ConsumerState<DiveFilterSheet> {
-  late DateTime? _startDate;
-  late DateTime? _endDate;
-  late String? _diveTypeId;
-  late String? _siteId;
-  late double? _minDepth;
-  late double? _maxDepth;
-  late bool _favoritesOnly;
-  late List<String> _selectedTagIds;
-
-  // v1.5 filters
-  late String? _buddyNameFilter;
-  late double? _minO2Percent;
-  late double? _maxO2Percent;
-  late int? _minRating;
-  late int? _minDurationMinutes;
-  late int? _maxDurationMinutes;
-  late String? _computerSerial;
-
-  final _minDepthController = TextEditingController();
-  final _maxDepthController = TextEditingController();
-  final _buddyNameController = TextEditingController();
-  final _minDurationController = TextEditingController();
-  final _maxDurationController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    final filter = widget.ref.read(diveFilterProvider);
-    _startDate = filter.startDate;
-    _endDate = filter.endDate;
-    _diveTypeId = filter.diveTypeId;
-    _siteId = filter.siteId;
-    _minDepth = filter.minDepth;
-    _maxDepth = filter.maxDepth;
-    _favoritesOnly = filter.favoritesOnly ?? false;
-    _selectedTagIds = List.from(filter.tagIds);
-    _minDepthController.text = _minDepth?.toStringAsFixed(0) ?? '';
-    _maxDepthController.text = _maxDepth?.toStringAsFixed(0) ?? '';
-
-    // v1.5 filters
-    _buddyNameFilter = filter.buddyNameFilter;
-    _buddyNameController.text = _buddyNameFilter ?? '';
-    _minO2Percent = filter.minO2Percent;
-    _maxO2Percent = filter.maxO2Percent;
-    _minRating = filter.minRating;
-    _minDurationMinutes = filter.minBottomTimeMinutes;
-    _maxDurationMinutes = filter.maxBottomTimeMinutes;
-    _computerSerial = filter.computerSerial;
-    _minDurationController.text = _minDurationMinutes?.toString() ?? '';
-    _maxDurationController.text = _maxDurationMinutes?.toString() ?? '';
-  }
-
-  @override
-  void dispose() {
-    _minDepthController.dispose();
-    _maxDepthController.dispose();
-    _buddyNameController.dispose();
-    _minDurationController.dispose();
-    _maxDurationController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final sites = ref.watch(sitesProvider);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
-
-    return DraggableScrollableSheet(
-      initialChildSize: 0.7,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (context, scrollController) {
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom,
-          ),
-          child: ListView(
-            controller: scrollController,
-            padding: const EdgeInsets.all(16),
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Filter Dives',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close),
-                    tooltip: 'Close filter',
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // Link to advanced search
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: TextButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    context.go('/dives/search');
-                  },
-                  icon: const Icon(Icons.manage_search, size: 18),
-                  label: const Text('Advanced Search'),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Date Range Section
-              Text(
-                'Date Range',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _selectDate(context, isStart: true),
-                      icon: const Icon(Icons.calendar_today, size: 18),
-                      label: Text(
-                        _startDate != null
-                            ? units.formatDate(_startDate)
-                            : 'Start Date',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  const Text('to'),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _selectDate(context, isStart: false),
-                      icon: const Icon(Icons.calendar_today, size: 18),
-                      label: Text(
-                        _endDate != null
-                            ? units.formatDate(_endDate)
-                            : 'End Date',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              if (_startDate != null || _endDate != null)
-                Align(
-                  alignment: AlignmentDirectional.centerEnd,
-                  child: TextButton(
-                    onPressed: () {
-                      setState(() {
-                        _startDate = null;
-                        _endDate = null;
-                      });
-                    },
-                    child: const Text('Clear dates'),
-                  ),
-                ),
-              const SizedBox(height: 24),
-
-              // Dive Type Section
-              Text('Dive Type', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              Consumer(
-                builder: (context, ref, child) {
-                  final diveTypesAsync = ref.watch(diveTypesProvider);
-                  return diveTypesAsync.when(
-                    loading: () => const LinearProgressIndicator(),
-                    error: (e, st) => Text('Error: $e'),
-                    data: (diveTypes) => DropdownButtonFormField<String?>(
-                      initialValue: _diveTypeId,
-                      decoration: const InputDecoration(
-                        hintText: 'All types',
-                        prefixIcon: Icon(Icons.category),
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: null,
-                          child: Text('All types'),
-                        ),
-                        ...diveTypes.map((type) {
-                          return DropdownMenuItem(
-                            value: type.id,
-                            child: Text(type.name),
-                          );
-                        }),
-                      ],
-                      onChanged: (value) {
-                        setState(() => _diveTypeId = value);
-                      },
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-
-              // Site Section
-              Text('Dive Site', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              sites.when(
-                data: (siteList) => DropdownButtonFormField<String?>(
-                  initialValue: _siteId,
-                  decoration: const InputDecoration(
-                    hintText: 'All sites',
-                    prefixIcon: Icon(Icons.location_on),
-                  ),
-                  items: [
-                    const DropdownMenuItem(
-                      value: null,
-                      child: Text('All sites'),
-                    ),
-                    ...siteList.map((site) {
-                      return DropdownMenuItem(
-                        value: site.id,
-                        child: Text(site.name),
-                      );
-                    }),
-                  ],
-                  onChanged: (value) {
-                    setState(() => _siteId = value);
-                  },
-                ),
-                loading: () => const LinearProgressIndicator(),
-                error: (_, _) => const Text('Error loading sites'),
-              ),
-              const SizedBox(height: 24),
-
-              // Dive Computer Section
-              Text(
-                'Dive Computer',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Consumer(
-                builder: (context, ref, child) {
-                  final computersAsync = ref.watch(allDiveComputersProvider);
-                  return computersAsync.when(
-                    loading: () => const LinearProgressIndicator(),
-                    error: (_, _) => const Text('Error loading computers'),
-                    data: (computers) {
-                      // Only include computers with serial numbers,
-                      // deduplicated by serial.
-                      final seen = <String>{};
-                      final filterable = computers
-                          .where(
-                            (c) =>
-                                c.serialNumber != null &&
-                                seen.add(c.serialNumber!),
-                          )
-                          .toList();
-                      if (filterable.isEmpty) {
-                        return Text(
-                          'No dive computers registered',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        );
-                      }
-                      // Reset to null if the saved serial is not in the list.
-                      final validSerial =
-                          filterable.any(
-                            (c) => c.serialNumber == _computerSerial,
-                          )
-                          ? _computerSerial
-                          : null;
-                      if (validSerial != _computerSerial) {
-                        _computerSerial = validSerial;
-                      }
-                      return DropdownButtonFormField<String?>(
-                        initialValue: validSerial,
-                        decoration: const InputDecoration(
-                          hintText: 'All computers',
-                          prefixIcon: Icon(Icons.watch),
-                        ),
-                        items: [
-                          const DropdownMenuItem(
-                            value: null,
-                            child: Text('All computers'),
-                          ),
-                          ...filterable.map(
-                            (c) => DropdownMenuItem(
-                              value: c.serialNumber,
-                              child: Text(c.displayName),
-                            ),
-                          ),
-                        ],
-                        onChanged: (value) {
-                          setState(() => _computerSerial = value);
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-
-              // Depth Range Section
-              Text(
-                'Depth Range (meters)',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _minDepthController,
-                      decoration: const InputDecoration(
-                        labelText: 'Min',
-                        prefixIcon: Icon(Icons.arrow_downward),
-                        suffixText: 'm',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onChanged: (value) {
-                        _minDepth = double.tryParse(value);
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: TextField(
-                      controller: _maxDepthController,
-                      decoration: const InputDecoration(
-                        labelText: 'Max',
-                        prefixIcon: Icon(Icons.arrow_downward),
-                        suffixText: 'm',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onChanged: (value) {
-                        _maxDepth = double.tryParse(value);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-
-              // Favorites Section
-              SwitchListTile(
-                title: const Text('Favorites Only'),
-                subtitle: const Text('Show only favorite dives'),
-                secondary: Icon(
-                  Icons.favorite,
-                  color: _favoritesOnly ? Colors.red : null,
-                ),
-                value: _favoritesOnly,
-                onChanged: (value) {
-                  setState(() => _favoritesOnly = value);
-                },
-              ),
-              const SizedBox(height: 24),
-
-              // Tags Section
-              Text('Tags', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              ref
-                  .watch(tagListNotifierProvider)
-                  .when(
-                    data: (allTags) {
-                      if (allTags.isEmpty) {
-                        return const Text(
-                          'No tags created yet',
-                          style: TextStyle(fontStyle: FontStyle.italic),
-                        );
-                      }
-                      return Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: allTags.map((tag) {
-                          final isSelected = _selectedTagIds.contains(tag.id);
-                          return FilterChip(
-                            label: Text(tag.name),
-                            selected: isSelected,
-                            selectedColor: tag.color.withValues(alpha: 0.3),
-                            checkmarkColor: tag.color,
-                            side: BorderSide(
-                              color: isSelected
-                                  ? tag.color
-                                  : Colors.grey.shade300,
-                            ),
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _selectedTagIds.add(tag.id);
-                                } else {
-                                  _selectedTagIds.remove(tag.id);
-                                }
-                              });
-                            },
-                          );
-                        }).toList(),
-                      );
-                    },
-                    loading: () => const CircularProgressIndicator(),
-                    error: (_, _) => const Text('Error loading tags'),
-                  ),
-              const SizedBox(height: 24),
-
-              // Buddy Name Filter Section
-              Text('Buddy', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _buddyNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Buddy Name',
-                  hintText: 'Search by buddy name',
-                  prefixIcon: Icon(Icons.person),
-                ),
-                onChanged: (value) {
-                  _buddyNameFilter = value.isEmpty ? null : value;
-                },
-              ),
-              const SizedBox(height: 24),
-
-              // Gas Mix (O2%) Filter Section
-              Text(
-                'Gas Mix (O₂%)',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  ChoiceChip(
-                    label: const Text('All'),
-                    selected: _minO2Percent == null && _maxO2Percent == null,
-                    onSelected: (selected) {
-                      if (selected) {
-                        setState(() {
-                          _minO2Percent = null;
-                          _maxO2Percent = null;
-                        });
-                      }
-                    },
-                  ),
-                  ChoiceChip(
-                    label: const Text('Air (21%)'),
-                    selected: _minO2Percent == 20 && _maxO2Percent == 22,
-                    onSelected: (selected) {
-                      if (selected) {
-                        setState(() {
-                          _minO2Percent = 20;
-                          _maxO2Percent = 22;
-                        });
-                      }
-                    },
-                  ),
-                  ChoiceChip(
-                    label: const Text('Nitrox (>21%)'),
-                    selected: _minO2Percent == 22 && _maxO2Percent == null,
-                    onSelected: (selected) {
-                      if (selected) {
-                        setState(() {
-                          _minO2Percent = 22;
-                          _maxO2Percent = null;
-                        });
-                      }
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-
-              // Rating Filter Section
-              Text(
-                'Minimum Rating',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: List.generate(5, (index) {
-                  final rating = index + 1;
-                  final isSelected =
-                      _minRating != null && rating <= _minRating!;
-                  return IconButton(
-                    icon: Icon(
-                      isSelected ? Icons.star : Icons.star_border,
-                      color: isSelected ? Colors.amber : null,
-                      size: 32,
-                    ),
-                    tooltip: '$rating star${rating > 1 ? 's' : ''}',
-                    onPressed: () {
-                      setState(() {
-                        if (_minRating == rating) {
-                          _minRating = null; // Tap same star to clear
-                        } else {
-                          _minRating = rating;
-                        }
-                      });
-                    },
-                  );
-                }),
-              ),
-              if (_minRating != null)
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: TextButton(
-                    onPressed: () => setState(() => _minRating = null),
-                    child: const Text('Clear rating filter'),
-                  ),
-                ),
-              const SizedBox(height: 24),
-
-              // Duration Range Filter Section
-              Text(
-                'Duration (minutes)',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _minDurationController,
-                      decoration: const InputDecoration(
-                        labelText: 'Min',
-                        prefixIcon: Icon(Icons.timer),
-                        suffixText: 'min',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onChanged: (value) {
-                        _minDurationMinutes = int.tryParse(value);
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: TextField(
-                      controller: _maxDurationController,
-                      decoration: const InputDecoration(
-                        labelText: 'Max',
-                        prefixIcon: Icon(Icons.timer),
-                        suffixText: 'min',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onChanged: (value) {
-                        _maxDurationMinutes = int.tryParse(value);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 32),
-
-              // Action Buttons
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () {
-                        widget.ref.read(diveFilterProvider.notifier).state =
-                            const DiveFilterState();
-                        Navigator.of(context).pop();
-                      },
-                      child: const Text('Clear All'),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: _applyFilters,
-                      child: const Text('Apply Filters'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _selectDate(
-    BuildContext context, {
-    required bool isStart,
-  }) async {
-    final initialDate = isStart ? _startDate : _endDate;
-    final firstDate = DateTime(1950);
-    final lastDate = DateTime.now().add(const Duration(days: 365));
-
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initialDate ?? DateTime.now(),
-      firstDate: firstDate,
-      lastDate: lastDate,
-    );
-
-    if (picked != null) {
-      setState(() {
-        if (isStart) {
-          _startDate = picked;
-        } else {
-          _endDate = picked;
-        }
-      });
-    }
-  }
-
-  void _applyFilters() {
-    widget.ref.read(diveFilterProvider.notifier).state = DiveFilterState(
-      startDate: _startDate,
-      endDate: _endDate,
-      diveTypeId: _diveTypeId,
-      siteId: _siteId,
-      minDepth: _minDepth,
-      maxDepth: _maxDepth,
-      favoritesOnly: _favoritesOnly ? true : null,
-      tagIds: _selectedTagIds,
-      // v1.5 filters
-      buddyNameFilter: _buddyNameFilter,
-      minO2Percent: _minO2Percent,
-      maxO2Percent: _maxO2Percent,
-      minRating: _minRating,
-      minBottomTimeMinutes: _minDurationMinutes,
-      maxBottomTimeMinutes: _maxDurationMinutes,
-      computerSerial: _computerSerial,
-    );
-    Navigator.of(context).pop();
   }
 }

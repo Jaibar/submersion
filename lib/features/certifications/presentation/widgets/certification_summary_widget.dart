@@ -4,6 +4,11 @@ import 'package:go_router/go_router.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/certification_title_l10n.dart';
+import 'package:submersion/features/certification_agencies/presentation/certification_entry_display.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 
 /// Summary widget shown when no certification is selected.
 class CertificationSummaryWidget extends ConsumerWidget {
@@ -11,6 +16,7 @@ class CertificationSummaryWidget extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(certificationCatalogSyncProvider);
     final certificationsAsync = ref.watch(certificationListNotifierProvider);
 
     return Scaffold(
@@ -67,7 +73,7 @@ class CertificationSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildOverview(BuildContext context, List certs) {
+  Widget _buildOverview(BuildContext context, List<Certification> certs) {
     int expiredCount = 0;
     int expiringSoonCount = 0;
     int validCount = 0;
@@ -185,7 +191,10 @@ class CertificationSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildCertListPreview(BuildContext context, List certs) {
+  Widget _buildCertListPreview(
+    BuildContext context,
+    List<Certification> certs,
+  ) {
     final previewCerts = certs.take(3).toList();
 
     return Column(
@@ -211,7 +220,11 @@ class CertificationSummaryWidget extends ConsumerWidget {
                   ),
                   child: Center(
                     child: Text(
-                      _abbreviateAgency(cert.agency.displayName),
+                      _abbreviateAgency(
+                        context.certificationCatalog
+                            .agency(cert.agency)
+                            .localizedName(context.l10n),
+                      ),
                       style: TextStyle(
                         color: Theme.of(context).colorScheme.onPrimaryContainer,
                         fontWeight: FontWeight.bold,
@@ -220,8 +233,20 @@ class CertificationSummaryWidget extends ConsumerWidget {
                     ),
                   ),
                 ),
-                title: Text(cert.name),
-                subtitle: Text(cert.agency.displayName),
+                title: Text(
+                  certificationTitleL10n(
+                    cert,
+                    context.l10n,
+                    catalog: context.certificationCatalog,
+                  ),
+                ),
+                subtitle: Text(
+                  certificationAgencyAndLevelL10n(
+                    cert,
+                    context.l10n,
+                    catalog: context.certificationCatalog,
+                  ),
+                ),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
                   final state = GoRouterState.of(context);

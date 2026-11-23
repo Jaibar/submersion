@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
 
 /// Transfer section data model.
 class TransferSection {
@@ -42,10 +45,39 @@ final transferSections = [
         context.l10n.transfer_section_computersSubtitle,
     color: Colors.indigo,
   ),
+  TransferSection(
+    id: 'cloud',
+    icon: Icons.cloud_download,
+    titleBuilder: (context) => context.l10n.transfer_section_cloudTitle,
+    subtitleBuilder: (context) => context.l10n.transfer_section_cloudSubtitle,
+    color: Colors.teal,
+  ),
 ];
 
+/// The small heading over a group of cards in a Transfer section.
+Widget transferSectionHeader(BuildContext context, String title) {
+  return Text(
+    title,
+    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+      color: Theme.of(context).colorScheme.primary,
+      fontWeight: FontWeight.bold,
+    ),
+  );
+}
+
+/// The sections this device offers: every one natively, and no dive
+/// computers in a browser, which has no Bluetooth or USB to reach them.
+final transferSectionsProvider = Provider<List<TransferSection>>((ref) {
+  final caps = ref.watch(deviceCapabilitiesProvider);
+  if (caps.diveComputerDownload) return transferSections;
+  return [
+    for (final section in transferSections)
+      if (section.id != 'computers') section,
+  ];
+});
+
 /// Content widget for the transfer section list, used in master-detail layout.
-class TransferListContent extends StatelessWidget {
+class TransferListContent extends ConsumerWidget {
   final void Function(String?)? onItemSelected;
   final String? selectedId;
   final bool showAppBar;
@@ -58,25 +90,40 @@ class TransferListContent extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final listContent = ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: transferSections.length,
-      separatorBuilder: (context, index) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final section = transferSections[index];
-        final isSelected = selectedId == section.id;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final transferSections = ref.watch(transferSectionsProvider);
+    final listContent = KeyboardListNavigator(
+      keys: [for (final s in transferSections) s.id],
+      currentKey: selectedId,
+      onMove: (id) => moveListCursor(
+        context,
+        canOpen: onItemSelected != null,
+        open: () => onItemSelected!(id),
+        highlight: () {},
+      ),
+      onActivate: (id) => onItemSelected?.call(id),
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        itemCount: transferSections.length,
+        separatorBuilder: (context, index) => const Divider(height: 1),
+        itemBuilder: (context, index) {
+          final section = transferSections[index];
+          final isSelected = selectedId == section.id;
 
-        return _TransferSectionTile(
-          section: section,
-          isSelected: isSelected,
-          onTap: () {
-            if (onItemSelected != null) {
-              onItemSelected!(section.id);
-            }
-          },
-        );
-      },
+          return KeyboardListItem(
+            navigationKey: section.id,
+            child: _TransferSectionTile(
+              section: section,
+              isSelected: isSelected,
+              onTap: () {
+                if (onItemSelected != null) {
+                  onItemSelected!(section.id);
+                }
+              },
+            ),
+          );
+        },
+      ),
     );
 
     if (!showAppBar) {

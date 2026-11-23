@@ -129,7 +129,8 @@ void main() {
 
     test('reorderColumn handles moving to same position', () {
       final before = notifier.state.columns.map((c) => c.field).toList();
-      notifier.reorderColumn(0, 1);
+      // onReorderItem contract: dropping in place reports newIndex == oldIndex.
+      notifier.reorderColumn(0, 0);
       final after = notifier.state.columns.map((c) => c.field).toList();
       expect(after, equals(before));
     });
@@ -170,8 +171,9 @@ void main() {
       notifier.applyPreset(standard);
 
       final config = notifier.state;
-      expect(config.columns.length, equals(22));
-      expect(config.columns.any((c) => c.field == DiveField.sacRate), isTrue);
+      expect(config.columns.length, equals(24));
+      expect(config.columns.any((c) => c.field == DiveField.sac), isTrue);
+      expect(config.columns.any((c) => c.field == DiveField.rmv), isTrue);
       expect(config.columns.any((c) => c.field == DiveField.waterTemp), isTrue);
     });
 
@@ -388,7 +390,8 @@ void main() {
     test('reorderColumn moves first to last', () {
       final cols = notifier.state.columns;
       final firstField = cols.first.field;
-      notifier.reorderColumn(0, cols.length);
+      // onReorderItem reports the final index (length - 1) for a move to the end.
+      notifier.reorderColumn(0, cols.length - 1);
       expect(notifier.state.columns.last.field, equals(firstField));
     });
 
@@ -712,6 +715,33 @@ void main() {
       final notifier = CardViewConfigNotifier.withMode(ListViewMode.table);
       addTearDown(notifier.dispose);
       expect(notifier.state.mode, equals(ListViewMode.detailed));
+    });
+  });
+
+  group('TableViewConfigNotifier.hideColumn (#2984)', () {
+    late TableViewConfigNotifier notifier;
+    setUp(() => notifier = TableViewConfigNotifier());
+    tearDown(() => notifier.dispose());
+
+    test('removes a column, pinned or not', () {
+      notifier.hideColumn(DiveField.siteName); // pinned by default
+      expect(
+        notifier.state.columns.map((c) => c.field),
+        isNot(contains(DiveField.siteName)),
+      );
+    });
+
+    test('never removes the last column', () {
+      for (final c in [...notifier.state.columns]) {
+        notifier.hideColumn(c.field);
+      }
+      expect(notifier.state.columns, hasLength(1));
+    });
+
+    test('clears the sort when the sorted column goes', () {
+      notifier.setSortField(DiveField.maxDepth);
+      notifier.hideColumn(DiveField.maxDepth);
+      expect(notifier.state.sortField, isNull);
     });
   });
 }

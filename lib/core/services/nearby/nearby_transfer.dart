@@ -1,0 +1,278 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:meta/meta.dart';
+import 'package:path/path.dart' as p;
+
+import 'package:submersion/core/platform/zlib/platform_zlib.dart';
+import 'package:submersion/core/utils/off_isolate.dart';
+
+/// How long a sender keeps a full copy, and a receiver keeps its partial
+/// one, for a resume after a dropped link.
+const nearbyResumeWindow = Duration(hours: 24);
+
+/// One gzipped payload going out in numbered parts.
+class NearbyOutgoing {
+  const NearbyOutgoing({
+    required this.id,
+    required this.kind,
+    required this.file,
+    required this.byteLength,
+  });
+
+  final String id;
+
+  /// `delta` (a JSON payload) or `full` (a streamed base).
+  final String kind;
+  final File file;
+  final int byteLength;
+
+  int partCount(int partSize) =>
+      byteLength == 0 ? 0 : (byteLength + partSize - 1) ~/ partSize;
+
+  Future<Uint8List> readPart(int index, int partSize) async {
+    final raf = await file.open();
+    try {
+      final start = index * partSize;
+      await raf.setPosition(start);
+      final end = start + partSize > byteLength ? byteLength : start + partSize;
+      return await raf.read(end - start);
+    } finally {
+      await raf.close();
+    }
+  }
+}
+
+/// Temp files for nearby transfers, one directory per device.
+class NearbyTransferFiles {
+  NearbyTransferFiles(
+    this.dir, {
+    required DateTime Function() now,
+    @visibleForTesting OffIsolateRunner offIsolateRunner = isolateRun,
+  }) : _now = now,
+       _offIsolateRunner = offIsolateRunner;
+
+  final Directory dir;
+  final DateTime Function() _now;
+  final OffIsolateRunner _offIsolateRunner;
+
+  /// Whether [value] (a transfer id or device id, both sent by the peer)
+  /// is safe inside a file name: letters, digits, `-` and `_` only, so it
+  /// can never name a path outside [dir].
+  static bool isSafeName(String value) => _safeName.hasMatch(value);
+
+  static final _safeName = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
+
+  File _file(String prefix, List<String> parts, String suffix) {
+    for (final part in parts) {
+      if (!isSafeName(part)) {
+        throw ArgumentError.value(part, 'name', 'not a safe transfer name');
+      }
+    }
+    return File(p.join(dir.path, '$prefix-${parts.join('-')}$suffix'));
+  }
+
+  File _sidecar(String peerId) => _file('nearby-out', [peerId], '.json');
+
+  File incoming(String peerId, String id) =>
+      _file('nearby-in', [peerId, id], '.gz');
+
+  /// The full copy last offered to [peerId], when still inside the resume
+  /// window and on disk.
+  Future<NearbyOutgoing?> reusableFull(String peerId) async {
+    final sidecar = _sidecar(peerId);
+    if (!await sidecar.exists()) return null;
+    try {
+      final json = jsonDecode(await sidecar.readAsString()) as Map;
+      final createdAt = DateTime.fromMillisecondsSinceEpoch(
+        json['createdAt'] as int,
+      );
+      final file = File(json['path'] as String);
+      if (_now().difference(createdAt) > nearbyResumeWindow ||
+          !await file.exists()) {
+        await discardOutgoing(peerId);
+        return null;
+      }
+      return NearbyOutgoing(
+        id: json['id'] as String,
+        kind: 'full',
+        file: file,
+        byteLength: await file.length(),
+      );
+    } on Object {
+      await discardOutgoing(peerId);
+      return null;
+    }
+  }
+
+  /// Moves [gzFile], a full copy the export already gzipped, into place as
+  /// the outgoing copy for [peerId], remembered for resumes. It is renamed,
+  /// not rewritten, so no second copy is staged beside it (issue #4256).
+  Future<NearbyOutgoing> prepareFull(
+    String peerId,
+    String id,
+    File gzFile,
+  ) async {
+    await discardOutgoing(peerId);
+    final out = _file('nearby-out', [peerId, id], '.gz');
+    await _move(gzFile, out);
+    final sidecar = _sidecar(peerId);
+    try {
+      await sidecar.writeAsString(
+        jsonEncode({
+          'id': id,
+          'path': out.path,
+          'createdAt': _now().millisecondsSinceEpoch,
+        }),
+      );
+      return NearbyOutgoing(
+        id: id,
+        kind: 'full',
+        file: out,
+        byteLength: await out.length(),
+      );
+    } on Object {
+      // Moved in but not remembered (a full disk fails the small record
+      // too): nothing would find the copy again before the stale sweep.
+      await _deleteQuietly(out);
+      await _deleteQuietly(sidecar);
+      rethrow;
+    }
+  }
+
+  /// Removes [file] if it is there, keeping the error being handled.
+  static Future<void> _deleteQuietly(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } on FileSystemException {
+      // The stale sweep reaps it.
+    }
+  }
+
+  /// The export and this directory share a volume (this one sits inside
+  /// the sync temp directory), so a rename is all it takes. A copy is the
+  /// fallback for a platform that keeps them apart.
+  static Future<void> _move(File from, File to) async {
+    try {
+      await from.rename(to.path);
+    } on FileSystemException {
+      try {
+        await from.copy(to.path);
+      } on Object {
+        // A copy cut short (a full disk) must not stay beside the export.
+        if (await to.exists()) await to.delete();
+        rethrow;
+      }
+      try {
+        await from.delete();
+      } on FileSystemException {
+        // The copy is complete and is what goes out; a source held open
+        // (a scanner on Windows) is left to the ssv1_ temp sweep.
+      }
+    }
+  }
+
+  Future<NearbyOutgoing> prepareDelta(
+    String peerId,
+    String id,
+    Uint8List json,
+  ) async {
+    final out = _file('nearby-delta', [peerId, id], '.gz');
+    await out.writeAsBytes(await _gzipped(json, _offIsolateRunner));
+    return NearbyOutgoing(
+      id: id,
+      kind: 'delta',
+      file: out,
+      byteLength: await out.length(),
+    );
+  }
+
+  /// Static so that the closure holds [bytes] alone, not this object's [_now].
+  static Future<List<int>> _gzipped(Uint8List bytes, OffIsolateRunner runner) =>
+      runOffIsolate(
+        () => PlatformZlib.gzip(bytes),
+        bytes: bytes.length,
+        runner: runner,
+      );
+
+  /// Removes the remembered full copy for [peerId], if any.
+  Future<void> discardOutgoing(String peerId) async {
+    final sidecar = _sidecar(peerId);
+    if (!await sidecar.exists()) return;
+    try {
+      final json = jsonDecode(await sidecar.readAsString()) as Map;
+      final file = File(json['path'] as String);
+      if (await file.exists()) await file.delete();
+    } on Object {
+      // A sidecar this code cannot read names nothing worth keeping.
+    }
+    await sidecar.delete();
+  }
+
+  /// Drops everything kept for [peerId] (an unpairing): the full copy
+  /// offered to it, and every copy from it or to it still on disk.
+  Future<void> discardPeer(String peerId) async {
+    if (!isSafeName(peerId)) return;
+    await discardOutgoing(peerId);
+    await _deleteWhere(
+      (name) => [
+        'nearby-out-$peerId-',
+        'nearby-in-$peerId-',
+        'nearby-delta-$peerId-',
+      ].any(name.startsWith),
+    );
+  }
+
+  /// Drops [peerId]'s partial copies of any offer other than [keep]: a
+  /// new offer replaces an old one for good.
+  Future<void> discardOtherIncoming(String peerId, {required String keep}) =>
+      _deleteWhere((name) {
+        final prefix = 'nearby-in-$peerId-';
+        return name.startsWith(prefix) && !name.startsWith('$prefix$keep.');
+      });
+
+  /// Drops every transfer file past the resume window, whoever it was for:
+  /// copies for peers that never came back, and leftovers of a crash.
+  Future<void> sweepStale() async {
+    final cutoff = _now().subtract(nearbyResumeWindow);
+    await _deleteWhere((name) => name.startsWith('nearby-'), olderThan: cutoff);
+  }
+
+  Future<void> _deleteWhere(
+    bool Function(String name) matches, {
+    DateTime? olderThan,
+  }) async {
+    if (!await dir.exists()) return;
+    await for (final entity in dir.list()) {
+      if (entity is! File || !matches(p.basename(entity.path))) continue;
+      try {
+        if (olderThan != null &&
+            (await entity.lastModified()).isAfter(olderThan)) {
+          continue;
+        }
+        await entity.delete();
+      } on FileSystemException {
+        // Gone already, or in use; the next sweep tries again.
+      }
+    }
+  }
+
+  /// Gunzips a received delta to a JSON file beside it. A transfer that is
+  /// not valid gzip throws and leaves no output behind. A full copy is never
+  /// unpacked like this: it is applied straight from the gzip.
+  Future<File> gunzip(File gz) async {
+    final out = File('${gz.path}.json');
+    final sink = out.openWrite();
+    try {
+      await sink.addStream(gz.openRead().transform(gzip.decoder));
+      await sink.close();
+    } on Object {
+      // Closed before the delete: Windows cannot remove an open file.
+      await sink.close().catchError((Object _) {});
+      if (await out.exists()) await out.delete();
+      rethrow;
+    }
+    return out;
+  }
+}

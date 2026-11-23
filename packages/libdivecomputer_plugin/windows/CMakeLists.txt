@@ -63,7 +63,7 @@ set(LIBDC_SOURCES
     ${LIBDC_DIR}/src/ihex.c
     ${LIBDC_DIR}/src/hw_ostc.c
     ${LIBDC_DIR}/src/hw_ostc_parser.c
-    ${LIBDC_DIR}/src/hw_frog.c
+    # hw_frog.c was merged into hw_ostc3.c upstream (frog/ostc3 integration).
     ${LIBDC_DIR}/src/hw_ostc3.c
     ${LIBDC_DIR}/src/aes.c
     ${LIBDC_DIR}/src/cressi_edy.c
@@ -148,10 +148,21 @@ add_library(${PLUGIN_NAME} SHARED
     dive_computer_host_api_impl.cc
     dive_converter.cc
     ble_scanner.cc
+    ble_connect_failure.cc
     ble_io_stream.cc
+    ble_read_poll.cc
+    bluetooth_classic_io_stream.cc
+    bluetooth_connect.cc
+    bluetooth_route_policy.cc
+    native_logger.cc
     serial_scanner.cc
     serial_io_stream.cc
+    usbhid_enumerator.cc
+    usbhid_io_stream.cc
     dive_computer_api.g.cc
+    garmin_mtp_api.g.cc
+    garmin_mtp_host_api_impl.cc
+    wpd_reader.cc
     ${WRAPPER_DIR}/libdc_wrapper.c
     ${WRAPPER_DIR}/libdc_download.c
 )
@@ -181,7 +192,15 @@ target_include_directories(${PLUGIN_NAME} PRIVATE
     ${WRAPPER_DIR}
 )
 
+# hid.lib is the Win32 HID API (HidD_*, HidP_*) behind the USB HID transport
+# for the Scubapro G2 and Suunto EON Steel families (issue #1271). It ships in
+# the Windows SDK, so it needs no package. Ws2_32.lib is Winsock, behind
+# libdivecomputer's Bluetooth Classic RFCOMM socket (issue #4094).
+# PortableDeviceGuids.lib holds the Windows Portable Devices CLSIDs and
+# property keys behind the Garmin MTP reader (issue #4223); OleAut32.lib
+# converts the dates it reports. Both ship in the Windows SDK too.
 target_link_libraries(${PLUGIN_NAME} PRIVATE
     flutter flutter_wrapper_plugin divecomputer
-    WindowsApp.lib SetupAPI.lib
+    WindowsApp.lib SetupAPI.lib hid.lib Ws2_32.lib
+    PortableDeviceGuids.lib Ole32.lib OleAut32.lib
 )

@@ -8,11 +8,13 @@ import 'package:submersion/features/dive_log/presentation/providers/dive_provide
 import 'package:submersion/features/import_wizard/domain/adapters/import_source_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_cancellation_token.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_phase.dart';
 import 'package:submersion/features/import_wizard/domain/models/unified_import_result.dart';
-import 'package:submersion/features/import_wizard/domain/models/wizard_step_def.dart';
+import 'package:submersion/shared/widgets/wizard/wizard_step_def.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/entity_review_list.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_source_card.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/review_step.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -47,6 +49,10 @@ class _FakeAdapter implements ImportSourceAdapter {
   Set<DuplicateAction> get supportedDuplicateActions => actions;
 
   @override
+  Set<DuplicateAction> duplicateActionsFor(ImportEntityType type) =>
+      supportedDuplicateActions;
+
+  @override
   Future<ImportBundle> buildBundle() => throw UnimplementedError();
 
   @override
@@ -60,6 +66,7 @@ class _FakeAdapter implements ImportSourceAdapter {
     Map<ImportEntityType, Map<int, DuplicateAction>> duplicateActions, {
     bool retainSourceDiveNumbers = false,
     ImportProgressCallback? onProgress,
+    ImportCancellationToken? cancelToken,
   }) => throw UnimplementedError();
 }
 
@@ -70,6 +77,7 @@ class _FakeAdapter implements ImportSourceAdapter {
 ImportBundle _buildBundle({
   List<EntityItem>? diveItems,
   List<EntityItem>? siteItems,
+  List<EntityItem>? fillItems,
   Set<int>? diveDuplicateIndices,
   Map<int, DiveMatchResult>? diveMatchResults,
 }) {
@@ -87,6 +95,12 @@ ImportBundle _buildBundle({
       duplicateIndices: const {},
     );
   }
+  if (fillItems != null) {
+    groups[ImportEntityType.fills] = EntityGroup(
+      items: fillItems,
+      duplicateIndices: const {},
+    );
+  }
   return ImportBundle(
     source: const ImportSourceInfo(
       type: ImportSourceType.uddf,
@@ -98,11 +112,12 @@ ImportBundle _buildBundle({
 
 EntityItem _item(String title) => EntityItem(title: title, subtitle: '');
 
-EntityItem _diveItem(String title, DateTime startTime) => EntityItem(
-  title: title,
-  subtitle: '',
-  diveData: IncomingDiveData(startTime: startTime),
-);
+EntityItem _diveItem(String title, DateTime startTime, {int? diveNumber}) =>
+    EntityItem(
+      title: title,
+      subtitle: '',
+      diveData: IncomingDiveData(startTime: startTime, diveNumber: diveNumber),
+    );
 
 Widget _buildReviewStep({
   required ImportBundle bundle,
@@ -118,6 +133,11 @@ Widget _buildReviewStep({
   return ProviderScope(
     overrides: [importWizardNotifierProvider.overrideWith((_) => notifier)],
     child: MaterialApp(
+      // flutter_test resolves against the HOST machine's locale list, so an
+      // unpinned MaterialApp renders translated on a non-English machine and
+      // every English literal this file matches on stops matching (issue
+      // #998 follow-up).
+      locale: const Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(body: ReviewStep(onImport: onImport ?? () {})),
@@ -140,6 +160,11 @@ Widget _buildReviewStepWithProviders({
       tagsProvider.overrideWith((_) async => const []),
     ],
     child: MaterialApp(
+      // flutter_test resolves against the HOST machine's locale list, so an
+      // unpinned MaterialApp renders translated on a non-English machine and
+      // every English literal this file matches on stops matching (issue
+      // #998 follow-up).
+      locale: const Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(body: ReviewStep(onImport: onImport ?? () {})),
@@ -165,6 +190,58 @@ void main() {
       await tester.pump();
 
       expect(find.byType(TabBar), findsOneWidget);
+    });
+
+    testWidgets('names the import source above the tabs (#161)', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(800, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final bundle = ImportBundle(
+        source: const ImportSourceInfo(
+          type: ImportSourceType.universal,
+          displayName: 'File Import',
+          details: ImportSourceDetails(
+            title: 'logbook.uddf',
+            formats: ['UDDF'],
+          ),
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [_item('Dive 1')],
+            duplicateIndices: const {},
+          ),
+        },
+      );
+
+      await tester.pumpWidget(_buildReviewStep(bundle: bundle));
+      await tester.pump();
+
+      expect(find.byType(ImportSourceCard), findsOneWidget);
+      expect(find.text('logbook.uddf'), findsOneWidget);
+      expect(
+        tester.getBottomLeft(find.byType(ImportSourceCard)).dy,
+        lessThanOrEqualTo(tester.getTopLeft(find.byType(TabBar)).dy),
+      );
+    });
+
+    testWidgets('leaves the source card out when the step is too short', (
+      tester,
+    ) async {
+      // A landscape phone leaves the step about this much height; the card
+      // would push the column past it (#161 review).
+      await tester.binding.setSurfaceSize(const Size(800, 250));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final bundle = _buildBundle(diveItems: [_item('Dive 1')]);
+
+      await tester.pumpWidget(_buildReviewStep(bundle: bundle));
+      await tester.pump();
+
+      expect(find.byType(ImportSourceCard), findsNothing);
+      expect(find.byType(TabBar), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('EntityReviewList is rendered for single type', (tester) async {
@@ -277,6 +354,22 @@ void main() {
       // Dives tab: "Dives (2)", Sites tab: "Sites (1)"
       expect(find.text('Dives (2)'), findsOneWidget);
       expect(find.text('Sites (1)'), findsOneWidget);
+    });
+
+    testWidgets('a fills CSV gets its own Fills tab (cylinder passports '
+        'phase 5)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final bundle = _buildBundle(
+        siteItems: [_item('Blue Hole')],
+        fillItems: [_item('EAN32'), _item('Air'), _item('EAN36')],
+      );
+
+      await tester.pumpWidget(_buildReviewStep(bundle: bundle));
+      await tester.pump();
+
+      expect(find.text('Fills (3)'), findsOneWidget);
     });
 
     testWidgets('bottom bar is shown in multi-type layout', (tester) async {
@@ -733,6 +826,84 @@ void main() {
       },
     );
 
+    group('retaining source dive numbers (issue #1832)', () {
+      testWidgets('shows the number each dive carries from its source', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(800, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final bundle = _buildBundle(
+          diveItems: [
+            _diveItem('Dive A', DateTime(2026, 1, 1), diveNumber: 412),
+            _diveItem('Dive B', DateTime(2026, 1, 2), diveNumber: 413),
+          ],
+        );
+        final notifier = ImportWizardNotifier(_FakeAdapter())
+          ..setBundle(bundle)
+          ..setRetainSourceDiveNumbers(true);
+
+        await tester.pumpWidget(
+          _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 10),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('#412'), findsOneWidget);
+        expect(find.text('#413'), findsOneWidget);
+        expect(find.text('#10'), findsNothing);
+        expect(find.text('#11'), findsNothing);
+      });
+
+      testWidgets('projects no number for a dive its source left unnumbered', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(800, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final bundle = _buildBundle(
+          diveItems: [
+            _diveItem('Dive A', DateTime(2026, 1, 1), diveNumber: 412),
+            _diveItem('Dive B', DateTime(2026, 1, 2)),
+          ],
+        );
+        final notifier = ImportWizardNotifier(_FakeAdapter())
+          ..setBundle(bundle)
+          ..setRetainSourceDiveNumbers(true);
+
+        await tester.pumpWidget(
+          _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 10),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('#412'), findsOneWidget);
+        expect(find.text('#10'), findsNothing);
+        expect(find.text('#11'), findsNothing);
+      });
+
+      testWidgets('keeps auto-numbering when the option is off', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(800, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final bundle = _buildBundle(
+          diveItems: [
+            _diveItem('Dive A', DateTime(2026, 1, 1), diveNumber: 412),
+          ],
+        );
+        final notifier = ImportWizardNotifier(_FakeAdapter())
+          ..setBundle(bundle);
+
+        await tester.pumpWidget(
+          _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 10),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('#10'), findsOneWidget);
+        expect(find.text('#412'), findsNothing);
+      });
+    });
+
     testWidgets('no dive number badges when nextDiveNumber is unavailable', (
       tester,
     ) async {
@@ -919,7 +1090,40 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Retain source dive numbers'), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsOneWidget);
+      // Plus the auto-tag-this-import switch (issue #998 follow-up).
+      expect(find.byType(SwitchListTile), findsNWidgets(2));
+    });
+
+    testWidgets('retain switch is disabled and says why when no dive in the '
+        'source carries a number (issue #1832)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final bundle = _buildBundle(
+        diveItems: [_diveItem('Dive 1', DateTime(2026, 1, 1))],
+      );
+      final notifier = ImportWizardNotifier(_FakeAdapter())..setBundle(bundle);
+
+      await tester.pumpWidget(
+        _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 1),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Options'));
+      await tester.pumpAndSettle();
+
+      final retainTile = tester.widget<SwitchListTile>(
+        find.widgetWithText(SwitchListTile, 'Retain source dive numbers'),
+      );
+      expect(retainTile.onChanged, isNull);
+      expect(retainTile.value, isFalse);
+      expect(
+        find.text(
+          'This source does not provide dive numbers, so dives are '
+          'numbered automatically',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('toggling retain-dive-numbers switch updates notifier state', (
@@ -928,7 +1132,9 @@ void main() {
       await tester.binding.setSurfaceSize(const Size(800, 600));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
-      final bundle = _buildBundle(diveItems: [_item('Dive 1')]);
+      final bundle = _buildBundle(
+        diveItems: [_diveItem('Dive 1', DateTime(2026, 1, 1), diveNumber: 7)],
+      );
 
       final adapter = _FakeAdapter();
       final notifier = ImportWizardNotifier(adapter)..setBundle(bundle);
@@ -944,12 +1150,106 @@ void main() {
 
       expect(notifier.state.retainSourceDiveNumbers, isFalse);
 
-      // Toggle the switch on.
-      await tester.tap(find.byType(Switch));
+      // Toggle the switch on. It's listed first in the sheet, ahead of the
+      // auto-tag-this-import switch (issue #998 follow-up).
+      await tester.tap(find.byType(Switch).first);
       await tester.pumpAndSettle();
 
       expect(notifier.state.retainSourceDiveNumbers, isTrue);
     });
+
+    testWidgets('Import Options sheet auto-tag-this-import switch reflects the '
+        'default tag being present', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final bundle = _buildBundle(diveItems: [_item('Dive 1')]);
+
+      final adapter = _FakeAdapter();
+      final notifier = ImportWizardNotifier(adapter)
+        ..setBundle(bundle)
+        ..initializeDefaultTag(autoTagImports: true);
+
+      await tester.pumpWidget(
+        _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 1),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Options'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Tag this import automatically'), findsOneWidget);
+      final switchTile = tester.widget<SwitchListTile>(
+        find.byType(SwitchListTile).last,
+      );
+      expect(switchTile.value, isTrue);
+    });
+
+    testWidgets(
+      'toggling the auto-tag-this-import switch off removes the default '
+      'tag, without touching the setting',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(800, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final bundle = _buildBundle(diveItems: [_item('Dive 1')]);
+
+        final adapter = _FakeAdapter();
+        final notifier = ImportWizardNotifier(adapter)
+          ..setBundle(bundle)
+          ..initializeDefaultTag(autoTagImports: true);
+
+        await tester.pumpWidget(
+          _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 1),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Options'));
+        await tester.pumpAndSettle();
+
+        expect(notifier.state.importTags, isNotEmpty);
+
+        // The auto-tag-this-import switch is listed after retain-dive-numbers.
+        await tester.tap(find.byType(Switch).last);
+        await tester.pumpAndSettle();
+
+        expect(notifier.state.importTags, isEmpty);
+      },
+    );
+
+    testWidgets(
+      'toggling the auto-tag-this-import switch on re-adds the default tag',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(800, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final bundle = _buildBundle(diveItems: [_item('Dive 1')]);
+
+        final adapter = _FakeAdapter();
+        // Not initialized with the default tag -- simulates the setting
+        // being off when this import session started.
+        final notifier = ImportWizardNotifier(adapter)..setBundle(bundle);
+
+        await tester.pumpWidget(
+          _buildReviewStepWithProviders(notifier: notifier, nextDiveNumber: 1),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Options'));
+        await tester.pumpAndSettle();
+
+        expect(notifier.state.importTags, isEmpty);
+
+        await tester.tap(find.byType(Switch).last);
+        await tester.pumpAndSettle();
+
+        expect(notifier.state.importTags.length, equals(1));
+        expect(
+          notifier.state.importTags.first.name,
+          equals(adapter.defaultTagName),
+        );
+      },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -1139,6 +1439,64 @@ void main() {
         expect(called, isFalse);
       },
     );
+  });
+
+  group('computeProjectedDiveNumbers per profile (#1893)', () {
+    EntityItem dive(DateTime start, {ImportTarget? target}) => EntityItem(
+      title: '',
+      subtitle: '',
+      diveData: IncomingDiveData(startTime: start),
+      target: target,
+    );
+    const me = ImportTarget(key: 'diver:me', name: 'Me', isNew: false);
+    const bo = ImportTarget(key: 'new:bo', name: 'Bo Ray', isNew: true);
+
+    Map<int, int>? project(ImportBundle bundle, {int? next}) =>
+        ReviewStep.computeProjectedDiveNumbers(
+          bundle: bundle,
+          nextDiveNumber: next,
+          retainSource: false,
+          selections: {0, 1, 2},
+          duplicateActions: const {},
+          duplicateIndices: const {},
+          nextDiveNumberByTarget: bundle.nextDiveNumberByTarget,
+        );
+
+    test('numbers each profile from its own next number', () {
+      final bundle = ImportBundle(
+        source: const ImportSourceInfo(
+          type: ImportSourceType.universal,
+          displayName: 'MacDive',
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [
+              dive(DateTime(2024, 1, 2), target: me),
+              dive(DateTime(2024, 1, 1), target: bo),
+              dive(DateTime(2024, 1, 1), target: me),
+            ],
+          ),
+        },
+        nextDiveNumberByTarget: const {'diver:me': 40, 'new:bo': 1},
+      );
+      expect(project(bundle, next: 40), {0: 41, 1: 1, 2: 40});
+    });
+
+    test('a single target without labels uses its own base', () {
+      final bundle = ImportBundle(
+        source: const ImportSourceInfo(
+          type: ImportSourceType.universal,
+          displayName: 'MacDive',
+        ),
+        groups: {
+          ImportEntityType.dives: EntityGroup(
+            items: [dive(DateTime(2024, 1, 1))],
+          ),
+        },
+        nextDiveNumberByTarget: const {'new:bo': 1},
+      );
+      expect(project(bundle, next: 40), {0: 1});
+    });
   });
 }
 

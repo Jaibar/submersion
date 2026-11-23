@@ -1,0 +1,1113 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart' as db;
+import 'package:submersion/core/deco/schedule_policy.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/features/planner/data/repositories/dive_plan_mission_store.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/planner/domain/entities/segment_phase.dart';
+import 'package:submersion/features/planner/domain/services/segment_chain.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+
+/// What [DivePlanRepository.linkPlanToDive] changed besides the link it set.
+class PlanLinkResult {
+  /// The dive this plan named before, if any.
+  final String? previousDiveId;
+
+  /// Plans that named the dive and lost their link to it.
+  final List<String> displacedPlanIds;
+
+  const PlanLinkResult({this.previousDiveId, this.displacedPlanIds = const []});
+}
+
+/// Denormalized summary numbers written on save so the saved-plans list
+/// renders without running the engine per row.
+class PlanSummaryData {
+  final double maxDepth;
+  final int runtimeSeconds;
+  final int? ttsSeconds;
+
+  const PlanSummaryData({
+    required this.maxDepth,
+    required this.runtimeSeconds,
+    this.ttsSeconds,
+  });
+}
+
+/// Persistence for saved dive plans (plan + tanks + segments), with full
+/// sync participation: every write marks records pending with a fresh HLC,
+/// every delete writes a per-row tombstone.
+class DivePlanRepository {
+  db.AppDatabase get _db => DatabaseService.instance.database;
+  final SyncRepository _syncRepository = SyncRepository();
+  final _uuid = const Uuid();
+  final _log = LoggerService.forClass(DivePlanRepository);
+  final _missions = const DivePlanMissionStore();
+
+  /// Fires on any change to the plan tables.
+  Stream<void> watchPlanChanges() => _db.tableUpdates(
+    TableUpdateQuery.onAllTables([
+      _db.divePlans,
+      _db.divePlanTanks,
+      _db.divePlanSegments,
+      _db.divePlanEquipment,
+      _db.divePlanMissions,
+      _db.divePlanMissionLegs,
+      _db.divePlanMissionMembers,
+    ]),
+  );
+
+  /// Fires on any change the saved plans list shows: the plan tables, and the
+  /// dives a plan's link badge describes, which a fill changes on its own.
+  Stream<void> watchPlanSummaryChanges() => _db.tableUpdates(
+    TableUpdateQuery.onAllTables([_db.divePlans, _db.dives]),
+  );
+
+  /// Upserts the plan and its children; children removed since the last save
+  /// are deleted WITH per-row tombstones (parent-surviving child deletes
+  /// must tombstone individually or other devices resurrect them).
+  ///
+  /// Returns the plan as it was stored, which is not always the plan passed
+  /// in: a [domain.DivePlan.siteId], [domain.DivePlan.sourceDiveId] or
+  /// [domain.DivePlan.linkedDiveId] that no longer names a row is dropped (a
+  /// dropped source dive taking [domain.DivePlan.surfaceInterval] with it),
+  /// and [domain.DivePlan.updatedAt] carries the stamp this save wrote rather
+  /// than the one submitted. Callers holding the plan in memory should adopt
+  /// the returned value.
+  Future<domain.DivePlan> savePlan(
+    domain.DivePlan plan, {
+    PlanSummaryData? summary,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // The plan actually written, once its references have been resolved.
+    // Assigned inside the transaction and read after it commits.
+    var stored = plan;
+    final removedTankIds = <String>[];
+    final removedSegmentIds = <String>[];
+    final addedEquipmentIds = <String>[];
+    final changedEquipmentIds = <String>[];
+    final removedEquipmentIds = <String>[];
+    var missionWritten = MissionRowIds.none;
+    var missionRemoved = MissionRowIds.none;
+
+    try {
+      await _db.transaction(() async {
+        // Keep the existing rows so their original createdAt survives an edit
+        // (only updatedAt should move); other synced child tables do the same.
+        final existingTankRows = await (_db.select(
+          _db.divePlanTanks,
+        )..where((t) => t.planId.equals(plan.id))).get();
+        final existingSegmentRows = await (_db.select(
+          _db.divePlanSegments,
+        )..where((t) => t.planId.equals(plan.id))).get();
+        final existingTankIds = existingTankRows.map((r) => r.id).toSet();
+        final existingSegmentIds = existingSegmentRows.map((r) => r.id).toSet();
+        final tankCreatedAt = {
+          for (final r in existingTankRows) r.id: r.createdAt,
+        };
+        final segmentCreatedAt = {
+          for (final r in existingSegmentRows) r.id: r.createdAt,
+        };
+
+        // The planner holds the site and dive ids in memory, so they go
+        // stale when the row one names is deleted while a plan that names it
+        // is still being edited, re-saved by the plan-deleted snackbar's
+        // Undo, or duplicated. `dive_plans.site_id` references `dive_sites`
+        // and `source_dive_id` and `linked_dive_id` reference `dives`, all
+        // three with no ON DELETE action under `PRAGMA foreign_keys = ON`, so
+        // writing a dead id fails the whole save with SqliteException(787)
+        // and the diver loses the plan rather than just the reference
+        // (issues #1985 and #2006). Resolve them here, at the write, because
+        // that is the one point every caller passes through; a row deleted
+        // between this check and the insert is impossible while both run in
+        // the same transaction.
+        // `updatedAt` too: the row is stamped with this save's own clock
+        // (_planCompanion writes `now`), so a returned plan still carrying
+        // the submitted timestamp would not be the plan as stored, and a
+        // caller comparing it against the row would silently disagree. The
+        // millisecond round-trip matches what getPlan reads back.
+        // The tanks and segments too: an id another plan's row holds is
+        // re-minted (see _withOwnChildIds), and the caller must see the id it
+        // can save again.
+        stored = (await _withOwnChildIds(
+          await _withResolvedReferences(plan),
+        )).copyWith(updatedAt: DateTime.fromMillisecondsSinceEpoch(now));
+
+        await _db
+            .into(_db.divePlans)
+            .insertOnConflictUpdate(_planCompanion(stored, now, summary));
+
+        for (var i = 0; i < stored.tanks.length; i++) {
+          await _db
+              .into(_db.divePlanTanks)
+              .insertOnConflictUpdate(
+                _tankCompanion(
+                  stored.tanks[i],
+                  plan.id,
+                  i,
+                  now,
+                  createdAt: tankCreatedAt[stored.tanks[i].id],
+                ),
+              );
+        }
+        // Resolved so the retired geometry columns can still be written with
+        // true values; see _segmentCompanion.
+        final legs = const SegmentChain().resolve(stored.segments);
+        for (var i = 0; i < legs.length; i++) {
+          await _db
+              .into(_db.divePlanSegments)
+              .insertOnConflictUpdate(
+                _segmentCompanion(
+                  legs[i],
+                  plan.id,
+                  i,
+                  now,
+                  createdAt: segmentCreatedAt[legs[i].segment.id],
+                ),
+              );
+        }
+
+        final keptTankIds = stored.tanks.map((t) => t.id).toSet();
+        final keptSegmentIds = stored.segments.map((s) => s.id).toSet();
+        removedSegmentIds.addAll(existingSegmentIds.difference(keptSegmentIds));
+        removedTankIds.addAll(existingTankIds.difference(keptTankIds));
+
+        // Segments before tanks: segments FK-reference tanks.
+        for (final id in removedSegmentIds) {
+          await (_db.delete(
+            _db.divePlanSegments,
+          )..where((t) => t.id.equals(id))).go();
+        }
+        for (final id in removedTankIds) {
+          await (_db.delete(
+            _db.divePlanTanks,
+          )..where((t) => t.id.equals(id))).go();
+        }
+
+        // Equipment junction: diff-based upsert/delete (composite PK, no
+        // per-row timestamps to preserve). A row whose provenance changed
+        // is rewritten in place (issue #1487).
+        final existingEqRows = await (_db.select(
+          _db.divePlanEquipment,
+        )..where((e) => e.planId.equals(plan.id))).get();
+        final existingEqById = {
+          for (final r in existingEqRows) r.equipmentId: r,
+        };
+        final provenanceById = {
+          for (final p in plan.gearProvenance) p.equipmentId: p,
+        };
+        final keptEqIds = plan.equipmentIds.toSet();
+        removedEquipmentIds.addAll(
+          existingEqById.keys.toSet().difference(keptEqIds),
+        );
+        for (final id in keptEqIds) {
+          final p = provenanceById[id];
+          final current = existingEqById[id];
+          if (current == null) {
+            addedEquipmentIds.add(id);
+          } else if (current.viaEquipmentId == p?.viaEquipmentId &&
+              current.viaSetId == p?.viaSetId) {
+            continue;
+          } else {
+            changedEquipmentIds.add(id);
+          }
+          await _db
+              .into(_db.divePlanEquipment)
+              .insertOnConflictUpdate(
+                db.DivePlanEquipmentCompanion(
+                  planId: Value(plan.id),
+                  equipmentId: Value(id),
+                  viaEquipmentId: Value(p?.viaEquipmentId),
+                  viaSetId: Value(p?.viaSetId),
+                ),
+              );
+        }
+        for (final id in removedEquipmentIds) {
+          await (_db.delete(_db.divePlanEquipment)..where(
+                (e) => e.planId.equals(plan.id) & e.equipmentId.equals(id),
+              ))
+              .go();
+        }
+        final missionWrite = await _missions.write(
+          _db,
+          plan.id,
+          plan.mission,
+          now,
+          _uuid.v4,
+        );
+        missionWritten = missionWrite.written;
+        missionRemoved = missionWrite.removed;
+        // The mission as stored: a leg or member id another plan held was
+        // re-minted, and the caller must see the id it can save again.
+        if (missionWrite.mission != null) {
+          stored = stored.copyWith(mission: missionWrite.mission);
+        }
+      });
+
+      // Sync bookkeeping AFTER the transaction commits so a rollback leaves
+      // no stray pending markers or tombstones.
+      await _syncRepository.markRecordPending(
+        entityType: 'divePlans',
+        recordId: plan.id,
+        localUpdatedAt: now,
+      );
+      for (final tank in stored.tanks) {
+        await _syncRepository.markRecordPending(
+          entityType: 'divePlanTanks',
+          recordId: tank.id,
+          localUpdatedAt: now,
+        );
+      }
+      for (final segment in stored.segments) {
+        await _syncRepository.markRecordPending(
+          entityType: 'divePlanSegments',
+          recordId: segment.id,
+          localUpdatedAt: now,
+        );
+      }
+      for (final id in removedSegmentIds) {
+        await _syncRepository.logDeletion(
+          entityType: 'divePlanSegments',
+          recordId: id,
+        );
+      }
+      for (final id in removedTankIds) {
+        await _syncRepository.logDeletion(
+          entityType: 'divePlanTanks',
+          recordId: id,
+        );
+      }
+      for (final id in [...addedEquipmentIds, ...changedEquipmentIds]) {
+        await _syncRepository.markRecordPending(
+          entityType: 'divePlanEquipment',
+          recordId: '${plan.id}|$id',
+          localUpdatedAt: now,
+        );
+      }
+      for (final id in removedEquipmentIds) {
+        await _syncRepository.logDeletion(
+          entityType: 'divePlanEquipment',
+          recordId: '${plan.id}|$id',
+        );
+      }
+      await _missions.recordWrite(
+        _syncRepository,
+        plan.id,
+        missionWritten,
+        missionRemoved,
+        now,
+      );
+      SyncEventBus.notifyLocalChange();
+      return stored;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to save plan ${plan.id}',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// [plan] with a fresh id on every tank and segment whose id a row of
+  /// another plan already holds, each segment's tank reference following its
+  /// tank to the new id, and [plan] itself when none is held elsewhere.
+  ///
+  /// Row ids are global but the upserts in [savePlan] match on the id alone,
+  /// so writing another plan's id would move that row to this plan: the plan
+  /// that owned it would lose it with no tombstone and no pending marker, and
+  /// its segments could be left naming a tank this plan now holds (issue
+  /// #2548). Every path that makes a plan today mints fresh ids, as
+  /// [duplicatePlan] does; this is the backstop for one that forgets, as
+  /// DivePlanMissionStore is for mission rows.
+  Future<domain.DivePlan> _withOwnChildIds(domain.DivePlan plan) async {
+    final tankIds = [for (final t in plan.tanks) t.id];
+    final segmentIds = [for (final s in plan.segments) s.id];
+    final takenTanks = tankIds.isEmpty
+        ? const <String>{}
+        : {
+            for (final r
+                in await (_db.select(_db.divePlanTanks)..where(
+                      (t) => t.id.isIn(tankIds) & t.planId.isNotValue(plan.id),
+                    ))
+                    .get())
+              r.id,
+          };
+    final takenSegments = segmentIds.isEmpty
+        ? const <String>{}
+        : {
+            for (final r
+                in await (_db.select(_db.divePlanSegments)..where(
+                      (t) =>
+                          t.id.isIn(segmentIds) & t.planId.isNotValue(plan.id),
+                    ))
+                    .get())
+              r.id,
+          };
+    if (takenTanks.isEmpty && takenSegments.isEmpty) return plan;
+
+    _log.warning(
+      'Plan ${plan.id} reuses ${takenTanks.length} tank and '
+      '${takenSegments.length} segment ids another plan holds; '
+      'saving them under new ids',
+    );
+    final tankIdMap = {for (final id in takenTanks) id: _uuid.v4()};
+    return plan.copyWith(
+      tanks: [
+        for (final t in plan.tanks)
+          tankIdMap.containsKey(t.id) ? t.copyWith(id: tankIdMap[t.id]) : t,
+      ],
+      segments: [
+        for (final s in plan.segments)
+          s.copyWith(
+            id: takenSegments.contains(s.id) ? _uuid.v4() : null,
+            tankId: tankIdMap[s.tankId],
+          ),
+      ],
+    );
+  }
+
+  /// Returns [plan] with each of its outbound references that no longer names
+  /// a row cleared, and [plan] itself when they all still resolve.
+  ///
+  /// The plan keeps everything else: a deleted site or dive costs the plan
+  /// that one reference, never the save. Deleting a site already clears
+  /// `site_id` on plans that are stored (issue #1952) and deleting a dive
+  /// already clears both dive links (issue #1948); this is the same outcome
+  /// for a plan whose id was still only in memory when the row went.
+  ///
+  /// The references are independent, so a plan can lose one and keep another.
+  /// The one exception is the surface interval, which only means something as
+  /// the gap after the source dive: it goes with that dive, as unfollowing the
+  /// dive in the planner does, so the plan is stored as a plain first dive
+  /// rather than a repetitive one with nothing to repeat.
+  Future<domain.DivePlan> _withResolvedReferences(domain.DivePlan plan) async {
+    final siteGone = await _isDangling(
+      plan.siteId,
+      _siteExists,
+      'dive site',
+      plan.id,
+    );
+    final sourceDiveGone = await _isDangling(
+      plan.sourceDiveId,
+      _diveExists,
+      'source dive',
+      plan.id,
+    );
+    final linkedDiveGone = await _isDangling(
+      plan.linkedDiveId,
+      _diveExists,
+      'linked dive',
+      plan.id,
+    );
+    if (!siteGone && !sourceDiveGone && !linkedDiveGone) return plan;
+    return plan.copyWith(
+      clearSiteId: siteGone,
+      clearSourceDiveId: sourceDiveGone,
+      clearSurfaceInterval: sourceDiveGone,
+      clearLinkedDiveId: linkedDiveGone,
+    );
+  }
+
+  /// Whether [id] is set but [exists] no longer finds it, logging the loss so
+  /// a reference the diver chose does not disappear silently. [label] and
+  /// [planId] only name the reference in that log line.
+  Future<bool> _isDangling(
+    String? id,
+    Future<bool> Function(String id) exists,
+    String label,
+    String planId,
+  ) async {
+    if (id == null) return false;
+    if (await exists(id)) return false;
+    _log.warning(
+      'Plan $planId names $label $id, which no longer exists; '
+      'saving the plan without it',
+    );
+    return true;
+  }
+
+  Future<bool> _siteExists(String id) async =>
+      await (_db.select(
+        _db.diveSites,
+      )..where((t) => t.id.equals(id))).getSingleOrNull() !=
+      null;
+
+  Future<bool> _diveExists(String id) async =>
+      await (_db.select(
+        _db.dives,
+      )..where((t) => t.id.equals(id))).getSingleOrNull() !=
+      null;
+
+  Future<domain.DivePlan?> getPlan(String id) async {
+    try {
+      final row = await (_db.select(
+        _db.divePlans,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      if (row == null) return null;
+
+      final tankRows =
+          await (_db.select(_db.divePlanTanks)
+                ..where((t) => t.planId.equals(id))
+                ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+              .get();
+      final segmentRows =
+          await (_db.select(_db.divePlanSegments)
+                ..where((t) => t.planId.equals(id))
+                ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+              .get();
+      final equipmentRows = await (_db.select(
+        _db.divePlanEquipment,
+      )..where((e) => e.planId.equals(id))).get();
+
+      final plan = _mapPlan(
+        row,
+        tankRows,
+        segmentRows,
+        equipmentIds: equipmentRows.map((r) => r.equipmentId).toList(),
+        gearProvenance: [
+          for (final r in equipmentRows)
+            GearProvenance(
+              equipmentId: r.equipmentId,
+              viaEquipmentId: r.viaEquipmentId,
+              viaSetId: r.viaSetId,
+            ),
+        ],
+      );
+      final mission = await _missions.read(_db, id);
+      return mission == null ? plan : plan.copyWith(mission: mission);
+    } catch (e, stackTrace) {
+      _log.error('Failed to load plan $id', error: e, stackTrace: stackTrace);
+      rethrow;
+    }
+  }
+
+  /// The plan linked to [diveId], by convert-to-dive or by hand, or null.
+  /// Backs the plan-vs-actual overlay on the dive detail chart and Compare.
+  Future<domain.DivePlan?> getPlanByLinkedDiveId(String diveId) async {
+    try {
+      // Newest first: two devices linking while apart can share the link;
+      // take the latest.
+      final rows =
+          await (_db.select(_db.divePlans)
+                ..where((t) => t.linkedDiveId.equals(diveId))
+                ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
+                ..limit(1))
+              .get();
+      if (rows.isEmpty) return null;
+      return await getPlan(rows.first.id);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to load plan linked to dive $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Links [planId] to [diveId] by hand (issue #4003). One dive has one plan,
+  /// so any other plan naming the dive loses its link here, or unlinking this
+  /// one later would bring the older plan back to the dive.
+  ///
+  /// Writes the two columns directly: [savePlan] rewrites the plan's children
+  /// and its summary numbers. Throws [ArgumentError] when either row is gone.
+  Future<PlanLinkResult> linkPlanToDive(String planId, String diveId) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final result = await _db.transaction(() async {
+        final plan = await (_db.select(
+          _db.divePlans,
+        )..where((t) => t.id.equals(planId))).getSingleOrNull();
+        if (plan == null) {
+          throw ArgumentError.value(planId, 'planId', 'No such plan');
+        }
+        if (!await _diveExists(diveId)) {
+          throw ArgumentError.value(diveId, 'diveId', 'No such dive');
+        }
+        final displaced =
+            await (_db.select(_db.divePlans)..where(
+                  (t) =>
+                      t.linkedDiveId.equals(diveId) & t.id.equals(planId).not(),
+                ))
+                .get();
+        for (final other in displaced) {
+          await (_db.update(
+            _db.divePlans,
+          )..where((t) => t.id.equals(other.id))).write(
+            db.DivePlansCompanion(
+              linkedDiveId: const Value(null),
+              updatedAt: Value(now),
+            ),
+          );
+        }
+        await (_db.update(
+          _db.divePlans,
+        )..where((t) => t.id.equals(planId))).write(
+          db.DivePlansCompanion(
+            linkedDiveId: Value(diveId),
+            updatedAt: Value(now),
+          ),
+        );
+        return PlanLinkResult(
+          previousDiveId: plan.linkedDiveId,
+          displacedPlanIds: [for (final other in displaced) other.id],
+        );
+      });
+      for (final id in [...result.displacedPlanIds, planId]) {
+        await _syncRepository.markRecordPending(
+          entityType: 'divePlans',
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+      SyncEventBus.notifyLocalChange();
+      return result;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to link plan $planId to dive $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Clears [planId]'s link, and any other plan's link to the same dive, so a
+  /// duplicate two devices made while apart does not come back to the dive as
+  /// its plan. Returns the plans that changed. Neither a plan nor the dive
+  /// goes anywhere.
+  Future<List<String>> unlinkPlan(String planId) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final cleared = await _db.transaction(() async {
+        final plan = await (_db.select(
+          _db.divePlans,
+        )..where((t) => t.id.equals(planId))).getSingleOrNull();
+        final diveId = plan?.linkedDiveId;
+        if (diveId == null) return const <String>[];
+        final holders = await (_db.select(
+          _db.divePlans,
+        )..where((t) => t.linkedDiveId.equals(diveId))).get();
+        await (_db.update(
+          _db.divePlans,
+        )..where((t) => t.linkedDiveId.equals(diveId))).write(
+          db.DivePlansCompanion(
+            linkedDiveId: const Value(null),
+            updatedAt: Value(now),
+          ),
+        );
+        return [for (final holder in holders) holder.id];
+      });
+      for (final id in cleared) {
+        await _syncRepository.markRecordPending(
+          entityType: 'divePlans',
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+      if (cleared.isNotEmpty) SyncEventBus.notifyLocalChange();
+      return cleared;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to unlink plan $planId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// The persisted summary numbers for [id], or null if the plan does not
+  /// exist or has no computed summary. Reads the stored row (like
+  /// [duplicatePlan]) rather than any in-memory edit state, so callers can
+  /// restore the saved-plans list numbers consistently with the persisted plan.
+  Future<PlanSummaryData?> getPlanSummary(String id) async {
+    final row = await (_db.select(
+      _db.divePlans,
+    )..where((t) => t.id.equals(id))).getSingleOrNull();
+    if (row?.summaryMaxDepth == null) return null;
+    return PlanSummaryData(
+      maxDepth: row!.summaryMaxDepth!,
+      runtimeSeconds: row.summaryRuntimeSeconds ?? 0,
+      ttsSeconds: row.summaryTtsSeconds,
+    );
+  }
+
+  /// Every saved plan's summary, newest first, or only those of [ids] and
+  /// the rest of each one's saved series when named (Global Search's few
+  /// rows, issue #4247): a series shows as one row holding all its dives.
+  Future<List<domain.DivePlanSummary>> getAllPlanSummaries({
+    List<String>? ids,
+  }) async {
+    if (ids != null && ids.isEmpty) return const [];
+    final dives = _db.dives;
+    // Whether the linked dive is still in the log. Read as an expression:
+    // the joined row's own `id` column would be ambiguous with the plan's.
+    final linkedDiveFound = dives.id.isNotNull();
+    final query =
+        _db.select(_db.divePlans).join([
+            leftOuterJoin(
+              dives,
+              dives.id.equalsExp(_db.divePlans.linkedDiveId),
+              useColumns: false,
+            ),
+          ])
+          ..addColumns([
+            linkedDiveFound,
+            dives.diveNumber,
+            dives.isPlanned,
+            dives.entryTime,
+            dives.diveDateTime,
+          ])
+          ..orderBy([OrderingTerm.desc(_db.divePlans.updatedAt)]);
+    if (ids != null) {
+      // The shown plans' series, asked in the same statement.
+      final shownSeries = _db.selectOnly(_db.divePlans)
+        ..addColumns([_db.divePlans.seriesId])
+        ..where(
+          _db.divePlans.id.isIn(ids) & _db.divePlans.seriesId.isNotNull(),
+        );
+      query.where(
+        _db.divePlans.id.isIn(ids) |
+            _db.divePlans.seriesId.isInQuery(shownSeries),
+      );
+    }
+    final rows = await query.get();
+    return rows.map((row) {
+      final r = row.readTable(_db.divePlans);
+      final diveMillis =
+          row.read(dives.entryTime) ?? row.read(dives.diveDateTime);
+      return domain.DivePlanSummary(
+        id: r.id,
+        name: r.name,
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(r.updatedAt),
+        maxDepth: r.summaryMaxDepth,
+        runtimeSeconds: r.summaryRuntimeSeconds,
+        ttsSeconds: r.summaryTtsSeconds,
+        mode: domain.PlanMode.values.byName(r.mode),
+        linkedDiveId: r.linkedDiveId,
+        linkedDiveNumber: row.read(dives.diveNumber),
+        linkedDiveIsPlanned: row.read(dives.isPlanned) ?? false,
+        linkedDiveExists:
+            r.linkedDiveId == null || (row.read(linkedDiveFound) ?? false),
+        // Dive times are the wall clock flagged UTC.
+        linkedDiveDate: diveMillis == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(diveMillis, isUtc: true),
+        seriesId: r.seriesId,
+        seriesIndex: r.seriesIndex,
+        diveName: r.diveName,
+      );
+    }).toList();
+  }
+
+  Future<void> deletePlan(String id) async {
+    try {
+      final tankIds = (await (_db.select(
+        _db.divePlanTanks,
+      )..where((t) => t.planId.equals(id))).get()).map((r) => r.id).toList();
+      final segmentIds = (await (_db.select(
+        _db.divePlanSegments,
+      )..where((t) => t.planId.equals(id))).get()).map((r) => r.id).toList();
+      final missionIds = await _missions.idsFor(_db, id);
+
+      await _db.transaction(() async {
+        await _missions.deleteAll(_db, id);
+        await (_db.delete(
+          _db.divePlanSegments,
+        )..where((t) => t.planId.equals(id))).go();
+        await (_db.delete(
+          _db.divePlanTanks,
+        )..where((t) => t.planId.equals(id))).go();
+        await (_db.delete(_db.divePlans)..where((t) => t.id.equals(id))).go();
+      });
+
+      await _missions.recordDeletion(_syncRepository, id, missionIds);
+      for (final segmentId in segmentIds) {
+        await _syncRepository.logDeletion(
+          entityType: 'divePlanSegments',
+          recordId: segmentId,
+        );
+      }
+      for (final tankId in tankIds) {
+        await _syncRepository.logDeletion(
+          entityType: 'divePlanTanks',
+          recordId: tankId,
+        );
+      }
+      await _syncRepository.logDeletion(entityType: 'divePlans', recordId: id);
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error('Failed to delete plan $id', error: e, stackTrace: stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Copies a plan (new ids everywhere, segments' tank references remapped to
+  /// the new tank ids, name suffixed). Returns the new plan, or null when the
+  /// source does not exist.
+  Future<domain.DivePlan?> duplicatePlan(String id) async {
+    final source = await getPlan(id);
+    if (source == null) return null;
+
+    final now = DateTime.now();
+    final tankIdMap = {for (final t in source.tanks) t.id: _uuid.v4()};
+    final newTanks = source.tanks
+        .map((t) => t.copyWith(id: tankIdMap[t.id]))
+        .toList();
+    final newSegments = source.segments
+        .map(
+          (s) => s.copyWith(
+            id: _uuid.v4(),
+            tankId: tankIdMap[s.tankId] ?? s.tankId,
+          ),
+        )
+        .toList();
+
+    final copy = source.copyWith(
+      id: _uuid.v4(),
+      name: '${source.name} (copy)',
+      createdAt: now,
+      updatedAt: now,
+      tanks: newTanks,
+      segments: newSegments,
+      mission: source.mission == null
+          ? null
+          : _missions.remint(source.mission!, _uuid.v4),
+      clearLinkedDiveId: true,
+    );
+    final sourceRow = await (_db.select(
+      _db.divePlans,
+    )..where((t) => t.id.equals(id))).getSingleOrNull();
+    // The stored copy, not `copy`: a source plan set at a since-deleted site,
+    // or built from a since-deleted dive, is duplicated without that
+    // reference, and the caller must see that.
+    return savePlan(
+      copy,
+      summary: sourceRow?.summaryMaxDepth != null
+          ? PlanSummaryData(
+              maxDepth: sourceRow!.summaryMaxDepth!,
+              runtimeSeconds: sourceRow.summaryRuntimeSeconds ?? 0,
+              ttsSeconds: sourceRow.summaryTtsSeconds,
+            )
+          : null,
+    );
+  }
+
+  // ---- mapping ----
+
+  db.DivePlansCompanion _planCompanion(
+    domain.DivePlan plan,
+    int now,
+    PlanSummaryData? summary,
+  ) {
+    return db.DivePlansCompanion(
+      id: Value(plan.id),
+      name: Value(plan.name),
+      notes: Value(plan.notes),
+      mode: Value(plan.mode.name),
+      siteId: Value(plan.siteId),
+      sourceDiveId: Value(plan.sourceDiveId),
+      linkedDiveId: Value(plan.linkedDiveId),
+      altitude: Value(plan.altitude),
+      startDateTime: Value(
+        plan.startDateTime != null
+            ? plan.startDateTime!.millisecondsSinceEpoch ~/ 1000
+            : null,
+      ),
+      waterType: Value(plan.waterType?.name),
+      salinityPpt: Value(plan.salinityPpt),
+      gfLow: Value(plan.gfLow),
+      gfHigh: Value(plan.gfHigh),
+      descentRate: Value(plan.descentRate),
+      ascentRate: Value(plan.ascentRate),
+      intermediateAscentRate: Value(plan.intermediateAscentRate),
+      shallowAscentRate: Value(plan.shallowAscentRate),
+      finalAscentRate: Value(plan.finalAscentRate),
+      lastStopDepth: Value(plan.lastStopDepth),
+      gasSwitchStopSeconds: Value(plan.gasSwitchStopSeconds),
+      airBreakO2Seconds: Value(plan.airBreaks?.o2Seconds),
+      airBreakBreakSeconds: Value(plan.airBreaks?.breakSeconds),
+      airBreaksExplicitlyOff: Value(plan.airBreaksExplicitlyOff),
+      sacBottom: Value(plan.sacBottom),
+      sacDeco: Value(plan.sacDeco),
+      sacStressed: Value(plan.sacStressed),
+      reservePressure: Value(plan.reservePressure),
+      surfaceIntervalSeconds: Value(plan.surfaceInterval?.inSeconds),
+      setpointLow: Value(plan.setpointLow),
+      setpointHigh: Value(plan.setpointHigh),
+      setpointSwitchDepth: Value(plan.setpointSwitchDepth),
+      scrInjectionRate: Value(plan.scrInjectionRate),
+      scrVo2: Value(plan.scrVo2),
+      pscrVo2: Value(plan.pscrVo2),
+      deviationDepthDelta: Value(plan.deviationDepthDelta),
+      deviationTimeMinutes: Value(plan.deviationTimeMinutes),
+      turnPressureRule: Value(plan.turnPressureRule?.name),
+      turnPressureFraction: Value(plan.turnPressureFraction),
+      plannedWeightKg: Value(plan.plannedWeightKg),
+      plannedWeightPlacement: Value(
+        plan.plannedWeightPlacement != null
+            ? jsonEncode(plan.plannedWeightPlacement)
+            : null,
+      ),
+      stopMinimumsJson: Value(
+        plan.stopMinimums.isNotEmpty
+            ? jsonEncode(
+                plan.stopMinimums.map(
+                  (depth, seconds) => MapEntry(depth.toString(), seconds),
+                ),
+              )
+            : null,
+      ),
+      sacFactor: Value(plan.sacFactor),
+      problemSolvingMinutes: Value(plan.problemSolvingMinutes),
+      ppO2Bottom: Value(plan.ppO2Bottom),
+      ppO2Deco: Value(plan.ppO2Deco),
+      ppO2DecoBand1: Value(plan.ppO2DecoBand1),
+      ppO2DecoBand2: Value(plan.ppO2DecoBand2),
+      ppO2DecoBand3: Value(plan.ppO2DecoBand3),
+      ppO2DecoBandsExplicitlyOff: Value(plan.ppO2DecoBandsExplicitlyOff),
+      maxO2DepthMeters: Value(plan.maxO2DepthMeters),
+      maxO2DepthExplicitlyOff: Value(plan.maxO2DepthExplicitlyOff),
+      hypercapniaAmv: Value(plan.hypercapniaAmv),
+      hypercapniaMinutes: Value(plan.hypercapniaMinutes),
+      hypercapniaExplicitlyOff: Value(plan.hypercapniaExplicitlyOff),
+      bestMixEndMeters: Value(plan.bestMixEndMeters),
+      o2Narcotic: Value(plan.o2Narcotic),
+      summaryMaxDepth: summary != null
+          ? Value(summary.maxDepth)
+          : const Value.absent(),
+      summaryRuntimeSeconds: summary != null
+          ? Value(summary.runtimeSeconds)
+          : const Value.absent(),
+      summaryTtsSeconds: summary != null
+          ? Value(summary.ttsSeconds)
+          : const Value.absent(),
+      createdAt: Value(plan.createdAt.millisecondsSinceEpoch),
+      updatedAt: Value(now),
+    );
+  }
+
+  db.DivePlanTanksCompanion _tankCompanion(
+    DiveTank tank,
+    String planId,
+    int sortOrder,
+    int now, {
+    int? createdAt,
+  }) {
+    return db.DivePlanTanksCompanion(
+      id: Value(tank.id),
+      planId: Value(planId),
+      name: Value(tank.name),
+      volume: Value(tank.volume),
+      workingPressure: Value(tank.workingPressure),
+      startPressure: Value(tank.startPressure),
+      gasO2: Value(tank.gasMix.o2),
+      gasHe: Value(tank.gasMix.he),
+      role: Value(tank.role.name),
+      material: Value(tank.material?.name),
+      presetName: Value(tank.presetName),
+      decoSwitchDepth: Value(tank.decoSwitchDepth),
+      isTravelGas: Value(tank.isTravelGas),
+      sortOrder: Value(sortOrder),
+      createdAt: Value(createdAt ?? now),
+      updatedAt: Value(now),
+    );
+  }
+
+  /// The `SegmentType` name an older build would have stored for [phase].
+  ///
+  /// `level` was `bottom` and `stop` was `decoStop`; `safetyStop` and
+  /// `gasSwitch` are never produced, since neither was ever distinguishable
+  /// from the geometry.
+  static String _legacyTypeName(SegmentPhase phase) => switch (phase) {
+    SegmentPhase.descent => 'descent',
+    SegmentPhase.level => 'bottom',
+    SegmentPhase.stop => 'decoStop',
+    SegmentPhase.ascent => 'ascent',
+  };
+
+  db.DivePlanSegmentsCompanion _segmentCompanion(
+    ResolvedLeg leg,
+    String planId,
+    int sortOrder,
+    int now, {
+    int? createdAt,
+  }) {
+    final segment = leg.segment;
+    // `end_depth` carries the target depth, which is what it always meant.
+    //
+    // `type`, `start_depth` and `rate` are no longer *read* back - the phase,
+    // the start depth and the rate are all derived from the chain on load -
+    // but they are still written, from the resolved leg. Two reasons: they
+    // are NOT NULL columns with no default, so a destructive table rebuild
+    // would be needed to stop writing them; and filling them from the chain
+    // keeps them true, so an older build (or a sync peer) reading this row
+    // still sees the profile the diver authored rather than a placeholder.
+    return db.DivePlanSegmentsCompanion(
+      id: Value(segment.id),
+      planId: Value(planId),
+      type: Value(_legacyTypeName(leg.phase)),
+      startDepth: Value(leg.startDepth),
+      endDepth: Value(segment.targetDepth),
+      durationSeconds: Value(segment.durationSeconds),
+      tankId: Value(segment.tankId),
+      gasO2: Value(segment.gasMix.o2),
+      gasHe: Value(segment.gasMix.he),
+      rate: Value(leg.rate),
+      setpointBar: Value(segment.setpointBar),
+      diveModeOverride: Value(segment.diveModeOverride?.name),
+      splitAtConfiguredRate: Value(segment.splitAtConfiguredRate),
+      sortOrder: Value(sortOrder),
+      createdAt: Value(createdAt ?? now),
+      updatedAt: Value(now),
+    );
+  }
+
+  domain.DivePlan _mapPlan(
+    db.DivePlan row,
+    List<db.DivePlanTank> tankRows,
+    List<db.DivePlanSegment> segmentRows, {
+    List<String> equipmentIds = const [],
+    List<GearProvenance> gearProvenance = const [],
+  }) {
+    return domain.DivePlan(
+      id: row.id,
+      name: row.name,
+      notes: row.notes,
+      siteId: row.siteId,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      mode: domain.PlanMode.values.byName(row.mode),
+      altitude: row.altitude,
+      // Clock digits stamped UTC, like the dive log's times.
+      startDateTime: row.startDateTime != null
+          ? wallClockUtcFromMillis(row.startDateTime! * 1000)
+          : null,
+      waterType: row.waterType != null
+          ? WaterType.values.byName(row.waterType!)
+          : null,
+      salinityPpt: row.salinityPpt,
+      gfLow: row.gfLow,
+      gfHigh: row.gfHigh,
+      descentRate: row.descentRate,
+      ascentRate: row.ascentRate,
+      intermediateAscentRate: row.intermediateAscentRate,
+      shallowAscentRate: row.shallowAscentRate,
+      finalAscentRate: row.finalAscentRate,
+      lastStopDepth: row.lastStopDepth,
+      gasSwitchStopSeconds: row.gasSwitchStopSeconds,
+      airBreaks:
+          row.airBreakO2Seconds != null && row.airBreakBreakSeconds != null
+          ? AirBreakPolicy(
+              o2Seconds: row.airBreakO2Seconds!,
+              breakSeconds: row.airBreakBreakSeconds!,
+            )
+          : null,
+      airBreaksExplicitlyOff: row.airBreaksExplicitlyOff,
+      sacBottom: row.sacBottom,
+      sacDeco: row.sacDeco,
+      sacStressed: row.sacStressed,
+      reservePressure: row.reservePressure,
+      surfaceInterval: row.surfaceIntervalSeconds != null
+          ? Duration(seconds: row.surfaceIntervalSeconds!)
+          : null,
+      sourceDiveId: row.sourceDiveId,
+      linkedDiveId: row.linkedDiveId,
+      setpointLow: row.setpointLow,
+      setpointHigh: row.setpointHigh,
+      setpointSwitchDepth: row.setpointSwitchDepth,
+      scrInjectionRate: row.scrInjectionRate,
+      scrVo2: row.scrVo2,
+      pscrVo2: row.pscrVo2,
+      deviationDepthDelta: row.deviationDepthDelta,
+      deviationTimeMinutes: row.deviationTimeMinutes,
+      turnPressureRule: row.turnPressureRule != null
+          ? domain.TurnPressureRule.values.byName(row.turnPressureRule!)
+          : null,
+      turnPressureFraction: row.turnPressureFraction,
+      sacFactor: row.sacFactor,
+      problemSolvingMinutes: row.problemSolvingMinutes,
+      ppO2Bottom: row.ppO2Bottom,
+      ppO2Deco: row.ppO2Deco,
+      ppO2DecoBand1: row.ppO2DecoBand1,
+      ppO2DecoBand2: row.ppO2DecoBand2,
+      ppO2DecoBand3: row.ppO2DecoBand3,
+      ppO2DecoBandsExplicitlyOff: row.ppO2DecoBandsExplicitlyOff,
+      maxO2DepthMeters: row.maxO2DepthMeters,
+      maxO2DepthExplicitlyOff: row.maxO2DepthExplicitlyOff,
+      hypercapniaAmv: row.hypercapniaAmv,
+      hypercapniaMinutes: row.hypercapniaMinutes,
+      hypercapniaExplicitlyOff: row.hypercapniaExplicitlyOff,
+      bestMixEndMeters: row.bestMixEndMeters,
+      o2Narcotic: row.o2Narcotic,
+      equipmentIds: equipmentIds,
+      gearProvenance: gearProvenance,
+      plannedWeightKg: row.plannedWeightKg,
+      plannedWeightPlacement: row.plannedWeightPlacement != null
+          ? (jsonDecode(row.plannedWeightPlacement!) as Map<String, dynamic>)
+                .map((k, v) => MapEntry(k, (v as num).toDouble()))
+          : null,
+      stopMinimums: row.stopMinimumsJson != null
+          ? (jsonDecode(row.stopMinimumsJson!) as Map<String, dynamic>).map(
+              (k, v) => MapEntry(int.parse(k), (v as num).toInt()),
+            )
+          : const {},
+      tanks: tankRows
+          .map(
+            (t) => DiveTank(
+              id: t.id,
+              name: t.name,
+              volume: t.volume,
+              workingPressure: t.workingPressure,
+              startPressure: t.startPressure,
+              gasMix: GasMix(o2: t.gasO2, he: t.gasHe),
+              // Tolerant: a role a later build adds must not crash a
+              // synced plan's load (issue #4243).
+              role: TankRole.fromName(t.role),
+              material: t.material != null
+                  ? TankMaterial.values.byName(t.material!)
+                  : null,
+              order: t.sortOrder,
+              presetName: t.presetName,
+              decoSwitchDepth: t.decoSwitchDepth,
+              isTravelGas: t.isTravelGas,
+            ),
+          )
+          .toList(),
+      segments: segmentRows
+          .map(
+            // Reads `end_depth` as the target and ignores the retired
+            // columns. The old `SegmentType.values.byName(s.type)` threw on an
+            // unrecognised name, so a row written by a newer build could crash
+            // the load; there is nothing left here to throw.
+            (s) => PlanSegment(
+              id: s.id,
+              targetDepth: s.endDepth,
+              durationSeconds: s.durationSeconds,
+              tankId: s.tankId,
+              gasMix: GasMix(o2: s.gasO2, he: s.gasHe),
+              setpointBar: s.setpointBar,
+              diveModeOverride: s.diveModeOverride != null
+                  ? domain.PlanMode.values.byName(s.diveModeOverride!)
+                  : null,
+              splitAtConfiguredRate: s.splitAtConfiguredRate,
+              order: s.sortOrder,
+            ),
+          )
+          .toList(),
+    );
+  }
+}

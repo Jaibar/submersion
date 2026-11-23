@@ -1,23 +1,66 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+        Cloud sync, media upload, and the GitHub update check (#1258).
+        Release builds already carry this permission: the manifest merger
+        unions it in from a library manifest, and apkanalyzer confirms it in
+        the shipped v1.7.5.6772 APK. Declared here so it stops depending on
+        which plugins happen to be in the tree, since the only pub package
+        supplying it is google_sign_in_android, a transitive dependency.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Biometric unlock for App Lock (local_auth) -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Photo library access for attaching dive photos -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14+ "Select photos": without this, a partial grant lasts one
+         session and reads as full access, so earlier links look missing. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <!-- For accessing photo location metadata -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 
-    <!-- Bluetooth permissions for dive computer connectivity -->
+    <!-- Address book access for importing dive buddies and their photos.
+         flutter_contacts ships an Android manifest with no uses-permission
+         elements, so the merger contributes nothing and this is the only
+         declaration. Without it Android denies the runtime request with no
+         dialog, and the permission never appears in system settings, so the
+         feature cannot run and the user cannot grant it (#2191). -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <!-- Bluetooth permissions for dive computers and nearby sync -->
     <!-- Android 12+ (API 31+) permissions -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Nearby sync advertises this device to the diver's other devices
+         (issue #3731). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <!-- Legacy Bluetooth permissions for Android 11 and below -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <!-- Location permission required for BLE scanning on Android 6-11 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- Location permissions: BLE scanning on Android 6-11, dive site
+         coordinates, and GPS surface track logging (foreground service
+         keeps recording while the screen is locked on a dive boat) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Declare Bluetooth feature as optional (app works without dive computer) -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <!-- Camera for scanning cylinder passport labels (issue #2335). Scanning
+         is optional; devices without a camera must still install the app. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <!-- NFC tags on cylinders (issue #2336). Optional: devices without NFC
+         must still install the app. NFC is a normal permission. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <!-- Buddy card tag emulation (issue #3728); optional like NFC itself. -->
+    <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
     <!-- Notification permissions for gear maintenance reminders -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -27,11 +70,22 @@
     <application
         android:label="Submersion"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
+        <!-- singleTask (issue #4843): a share, "Open with" or link sent from
+             another app while Submersion runs reaches the running instance
+             through onNewIntent, which receive_sharing_intent and app_links
+             both listen to. singleTop reused only an instance on top of the
+             SENDER's task, so each such intent started a second activity,
+             a second Flutter engine and a second sync on the same database,
+             and one sync then took the other's uploads for a cloned install.
+             taskAffinity stays empty, as flutter_web_auth_2 asks; the
+             running task is still found by its root activity. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
@@ -45,25 +99,42 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- app_links delivers passport links; Flutter's own deep linking
+                 would push the same link to the router a second time. -->
+            <meta-data android:name="flutter_deeplinking_enabled" android:value="false" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- Handle files shared via the Share sheet (single file) -->
+            <!-- Handle files shared via the Share sheet (single file). JSON
+                 covers a dive shared from the Suunto app (#3670). -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:mimeType="text/*"/>
                 <data android:mimeType="application/octet-stream"/>
                 <data android:mimeType="application/xml"/>
+                <data android:mimeType="application/json"/>
+                <data android:mimeType="application/vnd.ant.fit"/>
+                <data android:mimeType="application/fit"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/x-zip-compressed"/>
             </intent-filter>
-            <!-- Handle multi-file shares (only the first file is used) -->
+            <!-- Handle multi-file shares (imported together as one batch).
+                 FIT and ZIP types cover dives exported from Garmin Connect,
+                 which may be labelled with the FIT type or wrapped in a ZIP
+                 rather than sent as octet-stream (#1635). -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:mimeType="text/*"/>
                 <data android:mimeType="application/octet-stream"/>
                 <data android:mimeType="application/xml"/>
+                <data android:mimeType="application/json"/>
+                <data android:mimeType="application/vnd.ant.fit"/>
+                <data android:mimeType="application/fit"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/x-zip-compressed"/>
             </intent-filter>
             <!-- Handle "Open with" for dive log files -->
             <intent-filter>
@@ -73,11 +144,69 @@
                 <data android:scheme="content" android:mimeType="text/*"/>
                 <data android:scheme="content" android:mimeType="application/octet-stream"/>
                 <data android:scheme="content" android:mimeType="application/xml"/>
+                <data android:scheme="content" android:mimeType="application/json"/>
                 <data android:scheme="file" android:mimeType="text/*"/>
                 <data android:scheme="file" android:mimeType="application/octet-stream"/>
                 <data android:scheme="file" android:mimeType="application/xml"/>
+                <data android:scheme="file" android:mimeType="application/json"/>
+                <data android:scheme="content" android:mimeType="application/vnd.ant.fit"/>
+                <data android:scheme="content" android:mimeType="application/fit"/>
+                <data android:scheme="content" android:mimeType="application/zip"/>
+                <data android:scheme="content" android:mimeType="application/x-zip-compressed"/>
+                <data android:scheme="file" android:mimeType="application/vnd.ant.fit"/>
+                <data android:scheme="file" android:mimeType="application/fit"/>
+                <data android:scheme="file" android:mimeType="application/zip"/>
+                <data android:scheme="file" android:mimeType="application/x-zip-compressed"/>
+            </intent-filter>
+            <!-- Cylinder passport tags (/c, issue #2335) and gear tags (/g, issue
+                 #2652), printed or written as https links. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="submersion.app" android:path="/c"/>
+                <data android:scheme="https" android:host="submersion.app" android:path="/g"/>
+                <!-- Buddy cards (issue #3728): the card is in the fragment. -->
+                <data android:scheme="https" android:host="submersion.app" android:path="/b"/>
+            </intent-filter>
+            <!-- The accepted custom-scheme forms, submersion://c?<payload> and
+                 submersion://g?<payload>. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="submersion" android:host="c"/>
+                <data android:scheme="submersion" android:host="g"/>
+            </intent-filter>
+            <!-- A tapped cylinder or gear tag opens the app directly (spec 13.3).
+                 NFC dispatch needs only NDEF_DISCOVERED and DEFAULT. VIEW,
+                 BROWSABLE and autoVerify are there for Play Console, which
+                 treats any https filter as a web link and otherwise reports
+                 https://submersion.app/c as "Link not working". -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="submersion.app" android:path="/c"/>
+                <data android:scheme="https" android:host="submersion.app" android:path="/g"/>
+                <!-- Buddy cards (issue #3728): the card is in the fragment. -->
+                <data android:scheme="https" android:host="submersion.app" android:path="/b"/>
             </intent-filter>
         </activity>
+        <!-- Buddy card swap (issue #3728): while the swap screen is open the
+             phone presents the diver's card as an NFC tag (Type 4 NDEF). -->
+        <service
+            android:name=".CardEmulationService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apduservice"/>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -91,6 +220,19 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- flutter_web_auth_2 OAuth callback for the Lightroom (Adobe IMS)
+             custom-scheme redirect. -->
+        <activity
+            android:name="com.linusu.flutter_web_auth_2.CallbackActivity"
+            android:exported="true"
+            android:taskAffinity="">
+            <intent-filter android:label="flutter_web_auth_2">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="adobe+66776bfb6c08aeff345bb6435bf88a06f406d90d" />
+            </intent-filter>
+        </activity>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -101,6 +243,17 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Lets url_launcher resolve browsers for web links on Android 11+
+             (package visibility); without this canLaunchUrl and launchUrl
+             cannot see any app that handles http/https. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="http"/>
         </intent>
     </queries>
 </manifest>

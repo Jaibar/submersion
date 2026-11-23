@@ -1,0 +1,170 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/features/gas_calculators/domain/mod_limit_overrides.dart';
+
+const _profile = ModProfileLimits(
+  workingPpO2: 1.4,
+  decoPpO2: 1.6,
+  flushPpO2: 1.6,
+  setpointBar: 1.3,
+  endLimitMeters: 30,
+  o2Narcotic: true,
+);
+
+void main() {
+  group('ModProfileLimits equality', () {
+    // The limits providers select this value, so a field left out of props
+    // would keep serving the old limit after that setting changes.
+    ModProfileLimits copy({
+      double workingPpO2 = 1.4,
+      double decoPpO2 = 1.6,
+      double flushPpO2 = 1.6,
+      double setpointBar = 1.3,
+      double endLimitMeters = 30,
+      bool o2Narcotic = true,
+    }) => ModProfileLimits(
+      workingPpO2: workingPpO2,
+      decoPpO2: decoPpO2,
+      flushPpO2: flushPpO2,
+      setpointBar: setpointBar,
+      endLimitMeters: endLimitMeters,
+      o2Narcotic: o2Narcotic,
+    );
+
+    test('two limits with the same values are equal', () {
+      expect(copy(), _profile);
+    });
+
+    test('a change to any field makes them differ', () {
+      expect(copy(workingPpO2: 1.2), isNot(_profile));
+      expect(copy(decoPpO2: 1.5), isNot(_profile));
+      expect(copy(flushPpO2: 1.5), isNot(_profile));
+      expect(copy(setpointBar: 1.2), isNot(_profile));
+      expect(copy(endLimitMeters: 40), isNot(_profile));
+      expect(copy(o2Narcotic: false), isNot(_profile));
+    });
+  });
+
+  group('resolveModLimits', () {
+    test('no overrides follow the profile and are not marked', () {
+      final r = resolveModLimits(ModLimitOverrides.none, _profile);
+      expect(r.workingPpO2, 1.4);
+      expect(r.decoPpO2, 1.6);
+      expect(r.flushPpO2, 1.6);
+      expect(r.setpointBar, 1.3);
+      expect(r.workingOverridden, isFalse);
+      expect(r.decoOverridden, isFalse);
+      expect(r.flushOverridden, isFalse);
+      expect(r.setpointOverridden, isFalse);
+    });
+
+    test('an override is marked only while it differs from the profile', () {
+      const overrides = ModLimitOverrides(workingPpO2: 1.3, flushPpO2: 1.1);
+      final differs = resolveModLimits(overrides, _profile);
+      expect(differs.workingPpO2, 1.3);
+      expect(differs.workingOverridden, isTrue);
+      expect(differs.flushOverridden, isTrue);
+
+      // The profile later moves onto the override: no longer "differs".
+      final caughtUp = resolveModLimits(
+        overrides,
+        const ModProfileLimits(
+          workingPpO2: 1.3,
+          decoPpO2: 1.6,
+          flushPpO2: 1.1,
+          setpointBar: 1.3,
+          endLimitMeters: 30,
+          o2Narcotic: true,
+        ),
+      );
+      expect(caughtUp.workingOverridden, isFalse);
+      expect(caughtUp.flushOverridden, isFalse);
+    });
+
+    test('deco is never computed below working', () {
+      // A profile change can leave an old deco override under the working
+      // limit; the deco MOD must still not be shallower than the working MOD.
+      final r = resolveModLimits(
+        const ModLimitOverrides(decoPpO2: 1.3),
+        _profile,
+      );
+      expect(r.workingPpO2, 1.4);
+      expect(r.decoPpO2, 1.4);
+    });
+
+    test('END limit and O2-narcotic follow the profile when unset', () {
+      final r = resolveModLimits(ModLimitOverrides.none, _profile);
+      expect(r.endLimitMeters, 30);
+      expect(r.o2Narcotic, isTrue);
+      expect(r.endLimitOverridden, isFalse);
+      expect(r.o2NarcoticOverridden, isFalse);
+    });
+
+    test('an END limit or O2-narcotic override is marked while it differs', () {
+      final r = resolveModLimits(
+        const ModLimitOverrides(endLimitMeters: 24, o2Narcotic: false),
+        _profile,
+      );
+      expect(r.endLimitMeters, 24);
+      expect(r.o2Narcotic, isFalse);
+      expect(r.endLimitOverridden, isTrue);
+      expect(r.o2NarcoticOverridden, isTrue);
+    });
+  });
+
+  group('ModLimitOverrides', () {
+    test('an override equal to the profile is stored as none', () {
+      final o = ModLimitOverrides.none.withLimits(
+        workingPpO2: 1.4,
+        decoPpO2: 1.5,
+        profile: _profile,
+      );
+      expect(o.workingPpO2, isNull);
+      expect(o.decoPpO2, 1.5);
+    });
+
+    test('round-trips through JSON and snaps to the slider grids', () {
+      const o = ModLimitOverrides(
+        workingPpO2: 1.3,
+        decoPpO2: 1.5,
+        flushPpO2: 1.1,
+        setpointBar: 1.2,
+        endLimitMeters: 25,
+        o2Narcotic: false,
+      );
+      expect(ModLimitOverrides.fromJson(o.toJson()), o);
+      final snapped = ModLimitOverrides.fromJson({
+        'workingPpO2': 1.33,
+        'flushPpO2': 1.45,
+        'setpointBar': 1.26,
+        'decoPpO2': 9.9,
+        'endLimitMeters': 90,
+        'o2Narcotic': 'not a bool',
+      });
+      expect(snapped.workingPpO2, 1.35);
+      expect(snapped.flushPpO2, 1.5);
+      expect(snapped.setpointBar, 1.3);
+      expect(snapped.decoPpO2, isNull);
+      expect(snapped.endLimitMeters, isNull, reason: '90 m is out of range');
+      expect(snapped.o2Narcotic, isNull);
+    });
+
+    test('withEndLimit and withO2Narcotic follow the profile when equal', () {
+      final endLimit = ModLimitOverrides.none.withEndLimit(30, _profile);
+      expect(endLimit.endLimitMeters, isNull);
+      final differentEndLimit = ModLimitOverrides.none.withEndLimit(
+        24,
+        _profile,
+      );
+      expect(differentEndLimit.endLimitMeters, 24);
+
+      final narcotic = ModLimitOverrides.none.withO2Narcotic(true, _profile);
+      expect(narcotic.o2Narcotic, isNull);
+      final differentNarcotic = ModLimitOverrides.none.withO2Narcotic(
+        false,
+        _profile,
+      );
+      expect(differentNarcotic.o2Narcotic, isFalse);
+    });
+  });
+}

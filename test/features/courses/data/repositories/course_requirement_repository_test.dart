@@ -1,0 +1,940 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/dive_course_links_schema.dart';
+import 'package:submersion/core/constants/course_templates.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/courses/data/repositories/course_repository.dart';
+import 'package:submersion/features/courses/data/repositories/course_requirement_repository.dart';
+import 'package:submersion/features/courses/domain/entities/course_progress.dart';
+import 'package:submersion/features/courses/domain/entities/course_requirement.dart';
+
+import '../../../../helpers/test_database.dart';
+
+/// A course date as the app stores it: a local timestamp.
+int _courseDate(int day, [int hour = 0]) =>
+    DateTime(2020, 1, day, hour).millisecondsSinceEpoch;
+
+/// A dive time as the app stores it: wall-clock digits flagged as UTC.
+int _diveTime(int day, [int hour = 0]) =>
+    DateTime.utc(2020, 1, day, hour).millisecondsSinceEpoch;
+
+Future<void> _seedDiverAndCourse({
+  int startDate = 5000,
+  int? completionDate,
+}) async {
+  final db = DatabaseService.instance.database;
+  await db.customStatement(
+    "INSERT INTO divers (id, name, created_at, updated_at) "
+    "VALUES ('diver-1', 'Test Diver', 1000, 1000)",
+  );
+  await db.customStatement(
+    "INSERT INTO courses (id, diver_id, name, agency, start_date, "
+    "completion_date, created_at, updated_at) "
+    "VALUES ('course-1', 'diver-1', 'AOW', 'padi', $startDate, "
+    "${completionDate ?? 'NULL'}, 1000, 1000)",
+  );
+}
+
+Future<void> _seedDive(
+  String id, {
+  int dateTime = 9000,
+  String diverId = 'diver-1',
+  String? courseId,
+  String? siteId,
+}) async {
+  final db = DatabaseService.instance.database;
+  final courseCol = courseId != null ? "'$courseId'" : 'NULL';
+  final siteCol = siteId != null ? "'$siteId'" : 'NULL';
+  await db.customStatement(
+    "INSERT INTO dives (id, diver_id, dive_date_time, course_id, site_id, "
+    "created_at, updated_at) "
+    "VALUES ('$id', '$diverId', $dateTime, $courseCol, $siteCol, 1000, 1000)",
+  );
+  // The app keeps every course link in dive_courses (#2515); the seed is
+  // what an open or a sync apply runs for a representative-only row.
+  if (courseId != null) await seedDiveCourseLinks(db);
+}
+
+void main() {
+  late CourseRequirementRepository repository;
+
+  setUp(() async {
+    await setUpTestDatabase();
+    repository = CourseRequirementRepository();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  group('requirement CRUD', () {
+    test('create assigns uuid, sortOrder increments per course', () async {
+      await _seedDiverAndCourse();
+      final first = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      final second = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      expect(first.id.length, 36);
+      expect(second.sortOrder, greaterThan(first.sortOrder));
+
+      final progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.length, 2);
+      expect(
+        progress.requirements.first.requirement.name,
+        'Deep adventure dive',
+      );
+    });
+
+    test('setChecklistComplete sets and clears completedAt', () async {
+      await _seedDiverAndCourse();
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      await repository.setChecklistComplete(req.id, true);
+      var progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.single.isSatisfied, isTrue);
+
+      await repository.setChecklistComplete(req.id, false);
+      progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.single.isSatisfied, isFalse);
+    });
+
+    test('switching a checked checklist requirement to dive clears '
+        'completedAt', () async {
+      await _seedDiverAndCourse();
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      await repository.setChecklistComplete(req.id, true);
+      var progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.single.requirement.completedAt, isNotNull);
+
+      await repository.updateRequirement(
+        progress.requirements.single.requirement.copyWith(
+          kind: RequirementKind.dive,
+        ),
+      );
+
+      progress = await repository.getCourseProgress('course-1');
+      final updated = progress.requirements.single.requirement;
+      expect(updated.kind, RequirementKind.dive);
+      expect(updated.completedAt, isNull);
+    });
+
+    test('editing a checklist requirement preserves completedAt', () async {
+      await _seedDiverAndCourse();
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      await repository.setChecklistComplete(req.id, true);
+      var progress = await repository.getCourseProgress('course-1');
+      final completedAt = progress.requirements.single.requirement.completedAt;
+      expect(completedAt, isNotNull);
+
+      await repository.updateRequirement(
+        progress.requirements.single.requirement.copyWith(name: 'Renamed'),
+      );
+
+      progress = await repository.getCourseProgress('course-1');
+      final updated = progress.requirements.single.requirement;
+      expect(updated.name, 'Renamed');
+      expect(updated.completedAt, completedAt);
+    });
+
+    test(
+      'deleteRequirement removes row and logs tombstones for links',
+      () async {
+        await _seedDiverAndCourse();
+        await _seedDive('dive-1');
+        final req = await repository.createRequirement(
+          courseId: 'course-1',
+          name: 'Deep adventure dive',
+          kind: RequirementKind.dive,
+        );
+        await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+        await repository.deleteRequirement(req.id);
+
+        final progress = await repository.getCourseProgress('course-1');
+        expect(progress.requirements, isEmpty);
+
+        final db = DatabaseService.instance.database;
+        final tombstones = await db
+            .customSelect(
+              "SELECT entity_type, record_id FROM deletion_log "
+              "ORDER BY entity_type",
+            )
+            .get();
+        final types = tombstones
+            .map((r) => r.data['entity_type'] as String)
+            .toList();
+        expect(types, contains('courseRequirements'));
+        expect(types, contains('courseRequirementDives'));
+      },
+    );
+  });
+
+  group('applyTemplate', () {
+    test('copies all rows in order and appends on second apply', () async {
+      await _seedDiverAndCourse();
+      final aow = CourseTemplateCatalog.templates.firstWhere(
+        (t) => t.id == 'advanced-open-water',
+      );
+      await repository.applyTemplate('course-1', aow);
+      var progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.length, aow.requirements.length);
+      expect(
+        progress.requirements.first.requirement.name,
+        aow.requirements.first.name,
+      );
+
+      await repository.applyTemplate('course-1', aow);
+      progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.length, aow.requirements.length * 2);
+    });
+  });
+
+  group('linkDive / unlinkDive', () {
+    test(
+      'link credits dive with deterministic id; relink is a no-op',
+      () async {
+        await _seedDiverAndCourse();
+        await _seedDive('dive-1');
+        final req = await repository.createRequirement(
+          courseId: 'course-1',
+          name: 'Elective adventure dives',
+          kind: RequirementKind.dive,
+          targetCount: 3,
+        );
+        await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+
+        // A duplicate link must be a TRUE no-op: no parent updatedAt/hlc
+        // bump, no sync churn (PR #601 review).
+        final db = DatabaseService.instance.database;
+        await db.customStatement(
+          "UPDATE course_requirements SET updated_at = 1 "
+          "WHERE id = '${req.id}'",
+        );
+        await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+        final row = await db
+            .customSelect(
+              "SELECT updated_at FROM course_requirements "
+              "WHERE id = '${req.id}'",
+            )
+            .getSingle();
+        expect(row.data['updated_at'], 1);
+
+        final progress = await repository.getCourseProgress('course-1');
+        final reqProgress = progress.requirements.single;
+        expect(reqProgress.creditCount, 1);
+        expect(
+          reqProgress.linkedDives.single.linkId,
+          CourseRequirementRepository.linkIdFor(req.id, 'dive-1'),
+        );
+        expect(reqProgress.isSatisfied, isFalse);
+      },
+    );
+
+    test('unlink removes credit and logs junction tombstone', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+      await repository.unlinkDive(requirementId: req.id, diveId: 'dive-1');
+
+      final progress = await repository.getCourseProgress('course-1');
+      expect(progress.requirements.single.creditCount, 0);
+
+      final db = DatabaseService.instance.database;
+      final tombstones = await db
+          .customSelect(
+            "SELECT record_id FROM deletion_log "
+            "WHERE entity_type = 'courseRequirementDives'",
+          )
+          .get();
+      expect(
+        tombstones.single.data['record_id'],
+        CourseRequirementRepository.linkIdFor(req.id, 'dive-1'),
+      );
+    });
+
+    test('a dive credits at most one requirement per course, but may '
+        'credit requirements of a different course', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final db = DatabaseService.instance.database;
+      await db.customStatement(
+        "INSERT INTO courses (id, diver_id, name, agency, start_date, "
+        "created_at, updated_at) "
+        "VALUES ('course-2', 'diver-1', 'Deep', 'padi', 1000, 1000, 1000)",
+      );
+
+      final deep = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      final elective = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Elective adventure dives',
+        kind: RequirementKind.dive,
+        targetCount: 3,
+      );
+      final otherCourse = await repository.createRequirement(
+        courseId: 'course-2',
+        name: 'Deep training dives',
+        kind: RequirementKind.dive,
+        targetCount: 4,
+      );
+
+      await repository.linkDive(requirementId: deep.id, diveId: 'dive-1');
+      // Same course, different requirement: blocked (once per course).
+      await repository.linkDive(requirementId: elective.id, diveId: 'dive-1');
+      // Different course: allowed (deliberate, agencies differ).
+      await repository.linkDive(
+        requirementId: otherCourse.id,
+        diveId: 'dive-1',
+      );
+
+      final course1 = await repository.getCourseProgress('course-1');
+      final byId = {for (final p in course1.requirements) p.requirement.id: p};
+      expect(byId[deep.id]!.creditCount, 1);
+      expect(byId[elective.id]!.creditCount, 0);
+
+      final course2 = await repository.getCourseProgress('course-2');
+      expect(course2.requirements.single.creditCount, 1);
+    });
+
+    test('concurrent links of one dive to two requirements credit only '
+        'one (once-per-course is atomic)', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final deep = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      final elective = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Elective adventure dives',
+        kind: RequirementKind.dive,
+        targetCount: 3,
+      );
+
+      // Two rapid taps before providers refresh: both begin before either
+      // commits. The transaction in linkDive must serialize them so the
+      // dive is credited to exactly one requirement of the course.
+      await Future.wait([
+        repository.linkDive(requirementId: deep.id, diveId: 'dive-1'),
+        repository.linkDive(requirementId: elective.id, diveId: 'dive-1'),
+      ]);
+
+      final progress = await repository.getCourseProgress('course-1');
+      final total = progress.requirements.fold<int>(
+        0,
+        (sum, p) => sum + p.creditCount,
+      );
+      expect(total, 1);
+    });
+
+    test('linking bumps the parent requirement updatedAt (sync gate)', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      final db = DatabaseService.instance.database;
+      await db.customStatement(
+        "UPDATE course_requirements SET updated_at = 1 WHERE id = '${req.id}'",
+      );
+      await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+      final row = await db
+          .customSelect(
+            "SELECT updated_at FROM course_requirements "
+            "WHERE id = '${req.id}'",
+          )
+          .getSingle();
+      expect(row.data['updated_at'] as int, greaterThan(1));
+    });
+  });
+
+  group('getSuggestedDives', () {
+    test('suggests course-assigned and post-start dives, excludes linked '
+        'and other-diver dives, newest first, capped at 10', () async {
+      await _seedDiverAndCourse(startDate: _courseDate(50));
+
+      final db = DatabaseService.instance.database;
+      await db.customStatement(
+        "INSERT INTO divers (id, name, created_at, updated_at) "
+        "VALUES ('diver-2', 'Other', 1000, 1000)",
+      );
+
+      await _seedDive('before-start', dateTime: _diveTime(49));
+      await _seedDive('after-start', dateTime: _diveTime(51));
+      await _seedDive(
+        'assigned-old',
+        dateTime: _diveTime(48),
+        courseId: 'course-1',
+      );
+      await _seedDive(
+        'other-diver',
+        dateTime: _diveTime(52),
+        diverId: 'diver-2',
+      );
+      await _seedDive('linked', dateTime: _diveTime(53));
+
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      await repository.linkDive(requirementId: req.id, diveId: 'linked');
+
+      final suggested = await repository.getSuggestedDives('course-1');
+      final ids = suggested.map((s) => s.diveId).toList();
+      expect(ids, ['after-start', 'assigned-old']);
+      expect(ids, isNot(contains('before-start')));
+      expect(ids, isNot(contains('other-diver')));
+      expect(ids, isNot(contains('linked')));
+      expect(suggested.first.linkId, isNull);
+    });
+
+    // The course dates are what a diver remembers an old course by, so a
+    // completed course ranks on them rather than on how recent a dive is.
+    test('a completed course ranks dives by distance from its dates, '
+        'before and after', () async {
+      await _seedDiverAndCourse(
+        startDate: _courseDate(50),
+        completionDate: _courseDate(52),
+      );
+
+      await _seedDive('in-course', dateTime: _diveTime(51));
+      await _seedDive('just-after', dateTime: _diveTime(54));
+      await _seedDive('just-before', dateTime: _diveTime(48));
+      await _seedDive('months-before', dateTime: _diveTime(10));
+      await _seedDive('years-after', dateTime: _diveTime(900));
+
+      final suggested = await repository.getSuggestedDives('course-1');
+
+      expect(suggested.map((s) => s.diveId).toList(), [
+        'in-course',
+        'just-after',
+        'just-before',
+        'months-before',
+        'years-after',
+      ]);
+    });
+
+    test('a completed course is not crowded out by later dives', () async {
+      await _seedDiverAndCourse(
+        startDate: _courseDate(50),
+        completionDate: _courseDate(52),
+      );
+
+      await _seedDive('in-course', dateTime: _diveTime(51));
+      for (var i = 0; i < 12; i++) {
+        await _seedDive('later-$i', dateTime: _diveTime(500 + i));
+      }
+
+      final suggested = await repository.getSuggestedDives('course-1');
+
+      expect(suggested, hasLength(10));
+      expect(suggested.first.diveId, 'in-course');
+    });
+
+    // Every comparison is by whole wall-clock day: a course date is a local
+    // timestamp, and Mark as Completed records the moment it was tapped.
+    test('the whole completion day counts as inside the course', () async {
+      await _seedDiverAndCourse(
+        startDate: _courseDate(50),
+        completionDate: _courseDate(52),
+      );
+
+      await _seedDive('last-day-evening', dateTime: _diveTime(52, 23));
+      await _seedDive('hour-before-start', dateTime: _diveTime(49, 23));
+
+      final suggested = await repository.getSuggestedDives('course-1');
+
+      expect(suggested.map((s) => s.diveId).toList(), [
+        'last-day-evening',
+        'hour-before-start',
+      ]);
+    });
+
+    test('a course completed late in the day ends with that day', () async {
+      await _seedDiverAndCourse(
+        startDate: _courseDate(50),
+        completionDate: _courseDate(52, 17),
+      );
+
+      await _seedDive('morning-after', dateTime: _diveTime(53, 8));
+      await _seedDive('last-day', dateTime: _diveTime(52, 9));
+      await _seedDive('first-day', dateTime: _diveTime(50, 9));
+
+      final suggested = await repository.getSuggestedDives('course-1');
+
+      expect(suggested.map((s) => s.diveId).toList(), [
+        'last-day',
+        'first-day',
+        'morning-after',
+      ]);
+    });
+
+    test(
+      'a course in progress suggests a dive early on its start day',
+      () async {
+        await _seedDiverAndCourse(startDate: _courseDate(50, 17));
+
+        await _seedDive('start-morning', dateTime: _diveTime(50, 1));
+        await _seedDive('day-before', dateTime: _diveTime(49, 22));
+
+        final suggested = await repository.getSuggestedDives('course-1');
+
+        expect(suggested.map((s) => s.diveId).toList(), ['start-morning']);
+      },
+    );
+
+    test('a completed course lists dives assigned to it first', () async {
+      await _seedDiverAndCourse(
+        startDate: _courseDate(50),
+        completionDate: _courseDate(52),
+      );
+
+      await _seedDive('near', dateTime: _diveTime(53));
+      await _seedDive(
+        'assigned-far',
+        dateTime: _diveTime(900),
+        courseId: 'course-1',
+      );
+
+      final suggested = await repository.getSuggestedDives('course-1');
+
+      expect(suggested.map((s) => s.diveId).toList(), ['assigned-far', 'near']);
+    });
+  });
+
+  group('getCreditableDives', () {
+    test('lists every uncredited dive of the diver, newest first', () async {
+      await _seedDiverAndCourse(startDate: 5000);
+
+      final db = DatabaseService.instance.database;
+      await db.customStatement(
+        "INSERT INTO divers (id, name, created_at, updated_at) "
+        "VALUES ('diver-2', 'Other', 1000, 1000)",
+      );
+
+      await _seedDive('before-start', dateTime: 4000);
+      await _seedDive('after-start', dateTime: 6000);
+      await _seedDive('other-diver', dateTime: 7000, diverId: 'diver-2');
+      await _seedDive('linked', dateTime: 8000);
+
+      final req = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Deep adventure dive',
+        kind: RequirementKind.dive,
+      );
+      await repository.linkDive(requirementId: req.id, diveId: 'linked');
+
+      final creditable = await repository.getCreditableDives('course-1');
+
+      expect(creditable.map((s) => s.diveId).toList(), [
+        'after-start',
+        'before-start',
+      ]);
+    });
+
+    test('is not capped the way suggestions are', () async {
+      await _seedDiverAndCourse();
+      for (var i = 0; i < 12; i++) {
+        await _seedDive('dive-$i', dateTime: 9000 + i);
+      }
+
+      final creditable = await repository.getCreditableDives('course-1');
+
+      expect(creditable, hasLength(12));
+    });
+
+    test('is empty for a course that no longer exists', () async {
+      expect(await repository.getCreditableDives('missing'), isEmpty);
+    });
+  });
+
+  group('deleteCourse tombstones', () {
+    test(
+      'deleting a course logs tombstones for requirements and links',
+      () async {
+        await _seedDiverAndCourse();
+        await _seedDive('dive-1');
+        final req = await repository.createRequirement(
+          courseId: 'course-1',
+          name: 'Deep adventure dive',
+          kind: RequirementKind.dive,
+        );
+        await repository.linkDive(requirementId: req.id, diveId: 'dive-1');
+
+        final courseRepository = CourseRepository();
+        await courseRepository.deleteCourse('course-1');
+
+        final db = DatabaseService.instance.database;
+        final tombstones = await db
+            .customSelect('SELECT entity_type FROM deletion_log')
+            .get();
+        final types = tombstones
+            .map((r) => r.data['entity_type'] as String)
+            .toSet();
+        expect(
+          types,
+          containsAll({
+            'courses',
+            'courseRequirements',
+            'courseRequirementDives',
+          }),
+        );
+      },
+    );
+  });
+  group('writeRequirementChanges (issue #4527)', () {
+    RequirementDiveSummary dive(String id) =>
+        RequirementDiveSummary(diveId: id, dateTime: DateTime.utc(2020));
+
+    CourseRequirement requirement(
+      String id, {
+      RequirementKind kind = RequirementKind.dive,
+      int sortOrder = 1,
+      DateTime? completedAt,
+    }) => CourseRequirement(
+      id: id,
+      courseId: 'course-1',
+      name: 'Requirement $id',
+      kind: kind,
+      sortOrder: sortOrder,
+      completedAt: completedAt,
+      createdAt: DateTime(2020),
+      updatedAt: DateTime(2020),
+    );
+
+    Future<List<CourseRequirementProgress>> stored() async =>
+        (await repository.getCourseProgress('course-1')).requirements;
+
+    List<String> creditsOf(List<CourseRequirementProgress> rows, String id) => [
+      for (final d
+          in rows.firstWhere((r) => r.requirement.id == id).linkedDives)
+        d.diveId,
+    ];
+
+    test('new requirements keep their ids and order', () async {
+      await _seedDiverAndCourse();
+
+      final wrote = await repository.writeRequirementChanges(
+        'course-1',
+        loaded: const [],
+        current: [
+          CourseRequirementProgress(
+            requirement: requirement('r-a', sortOrder: 1),
+            linkedDives: const [],
+          ),
+          CourseRequirementProgress(
+            requirement: requirement('r-b', sortOrder: 2),
+            linkedDives: const [],
+          ),
+        ],
+      );
+
+      expect(wrote, isTrue);
+      expect(
+        [for (final r in await stored()) r.requirement.id],
+        ['r-a', 'r-b'],
+      );
+    });
+
+    test('a tick keeps the time it was ticked', () async {
+      await _seedDiverAndCourse();
+      final created = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      final loaded = await stored();
+      final ticked = DateTime(2024, 5, 6, 7, 8);
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: created.copyWith(completedAt: ticked),
+            linkedDives: const [],
+          ),
+        ],
+      );
+
+      expect((await stored()).single.requirement.completedAt, ticked);
+    });
+
+    test('a dive moved between requirements in one write lands', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final b = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'B',
+        kind: RequirementKind.dive,
+      );
+      await repository.linkDive(requirementId: a.id, diveId: 'dive-1');
+      final loaded = await stored();
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(requirement: a, linkedDives: const []),
+          CourseRequirementProgress(
+            requirement: b,
+            linkedDives: [dive('dive-1')],
+          ),
+        ],
+      );
+
+      final after = await stored();
+      expect(creditsOf(after, a.id), isEmpty);
+      expect(creditsOf(after, b.id), ['dive-1']);
+    });
+
+    test('a credit to a requirement gone underneath is skipped', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final loaded = await stored();
+      await repository.deleteRequirement(a.id);
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: a,
+            linkedDives: [dive('dive-1')],
+          ),
+        ],
+      );
+
+      expect(await stored(), isEmpty);
+    });
+
+    test('a credit to a dive another requirement of the course has is '
+        'skipped', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final b = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'B',
+        kind: RequirementKind.dive,
+      );
+      final loaded = await stored();
+      // Another device credits it to B meanwhile.
+      await repository.linkDive(requirementId: b.id, diveId: 'dive-1');
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: a,
+            linkedDives: [dive('dive-1')],
+          ),
+          CourseRequirementProgress(requirement: b, linkedDives: const []),
+        ],
+      );
+
+      final after = await stored();
+      expect(creditsOf(after, a.id), isEmpty);
+      expect(creditsOf(after, b.id), ['dive-1']);
+    });
+
+    test('a removed requirement tombstones its credits', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      await repository.linkDive(requirementId: a.id, diveId: 'dive-1');
+      final loaded = await stored();
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: const [],
+      );
+
+      expect(await stored(), isEmpty);
+      final types =
+          (await DatabaseService.instance.database
+                  .customSelect('SELECT entity_type FROM deletion_log')
+                  .get())
+              .map((r) => r.data['entity_type'] as String)
+              .toSet();
+      expect(
+        types,
+        containsAll({'courseRequirements', 'courseRequirementDives'}),
+      );
+    });
+
+    test('a rename leaves a tick made underneath', () async {
+      await _seedDiverAndCourse();
+      final created = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'Knowledge development',
+        kind: RequirementKind.checklist,
+      );
+      final loaded = await stored();
+      // Another device ticks it meanwhile.
+      await repository.setChecklistComplete(created.id, true);
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: created.copyWith(name: 'Theory'),
+            linkedDives: const [],
+          ),
+        ],
+      );
+
+      final after = (await stored()).single.requirement;
+      expect(after.name, 'Theory');
+      expect(after.completedAt, isNotNull);
+    });
+
+    test('an edit of a requirement gone underneath writes nothing', () async {
+      await _seedDiverAndCourse();
+      final created = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final loaded = await stored();
+      await repository.deleteRequirement(created.id);
+
+      final wrote = await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: created.copyWith(name: 'Renamed'),
+            linkedDives: const [],
+          ),
+        ],
+      );
+
+      expect(wrote, isFalse);
+      expect(await stored(), isEmpty);
+    });
+
+    test('a credit to a dive gone underneath is skipped', () async {
+      await _seedDiverAndCourse();
+      await _seedDive('dive-1');
+      await _seedDive('dive-2');
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+        targetCount: 2,
+      );
+      final loaded = await stored();
+      await DatabaseService.instance.database.customStatement(
+        "DELETE FROM dives WHERE id = 'dive-1'",
+      );
+
+      await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: [
+          CourseRequirementProgress(
+            requirement: a,
+            linkedDives: [dive('dive-1'), dive('dive-2')],
+          ),
+        ],
+      );
+
+      expect(creditsOf(await stored(), a.id), ['dive-2']);
+    });
+
+    test('a removal of a requirement gone underneath logs no second '
+        'tombstone', () async {
+      await _seedDiverAndCourse();
+      final a = await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final loaded = await stored();
+      await repository.deleteRequirement(a.id);
+
+      final wrote = await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: const [],
+      );
+
+      expect(wrote, isFalse);
+      final tombstones = await DatabaseService.instance.database
+          .customSelect(
+            'SELECT 1 FROM deletion_log WHERE record_id = ?',
+            variables: [Variable.withString(a.id)],
+          )
+          .get();
+      expect(tombstones, hasLength(1));
+    });
+
+    test('nothing changed writes nothing', () async {
+      await _seedDiverAndCourse();
+      await repository.createRequirement(
+        courseId: 'course-1',
+        name: 'A',
+        kind: RequirementKind.dive,
+      );
+      final loaded = await stored();
+
+      final wrote = await repository.writeRequirementChanges(
+        'course-1',
+        loaded: loaded,
+        current: loaded,
+      );
+
+      expect(wrote, isFalse);
+    });
+  });
+}

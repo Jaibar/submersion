@@ -1,11 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_trip_providers.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/computer_owner_notice.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/entity_review_list.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_source_card.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/planned_dive_picker_sheet.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/core/providers/async_value_extensions.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/import_tags_field.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
@@ -14,9 +21,10 @@ import 'package:submersion/l10n/l10n_extension.dart';
 
 /// The review step of the import wizard.
 ///
-/// Always renders a [TabBar] with one tab per entity type, each with a count
-/// badge. A bottom bar shows aggregate counts and an "Import Selected" button
-/// that calls [onImport].
+/// An [ImportSourceCard] at the top names where the import came from (issue
+/// #161). Below it, always renders a [TabBar] with one tab per entity type,
+/// each with a count badge. A bottom bar shows aggregate counts and an
+/// "Import Selected" button that calls [onImport].
 class ReviewStep extends ConsumerWidget {
   /// Fired when the user taps "Import Selected".
   final VoidCallback onImport;
@@ -37,20 +45,30 @@ class ReviewStep extends ConsumerWidget {
     }
 
     final types = bundle.availableTypes;
-    final availableActions = notifier.supportedDuplicateActions;
     final counts = _AggregateCounts.compute(state);
 
     // Compute projected dive numbers for the review list.
-    final nextDiveNumber = ref.watch(nextDiveNumberProvider).whenData((v) => v);
-    final projectedDiveNumbers = _computeProjectedDiveNumbers(
+    // A download sent to another profile (issue #2050) continues that
+    // profile's numbering.
+    final chosenDiverId = bundle.targetChoice?.chosenDiverId;
+    final nextDiveNumber = ref
+        .watch(
+          chosenDiverId == null
+              ? nextDiveNumberProvider
+              : nextDiveNumberForDiverProvider(chosenDiverId),
+        )
+        .whenData((v) => v);
+    final projectedDiveNumbers = computeProjectedDiveNumbers(
       bundle: bundle,
       nextDiveNumber: nextDiveNumber.value,
-      retainSource: state.retainSourceDiveNumbers,
+      retainSource:
+          state.retainSourceDiveNumbers && bundle.hasSourceDiveNumbers,
       selections: state.selections[ImportEntityType.dives] ?? const {},
       duplicateActions:
           state.duplicateActions[ImportEntityType.dives] ?? const {},
       duplicateIndices:
           bundle.groups[ImportEntityType.dives]?.duplicateIndices ?? const {},
+      nextDiveNumberByTarget: bundle.nextDiveNumberByTarget,
     );
 
     final existingTags = ref.watch(tagsProvider).valueOrNull ?? const <Tag>[];
@@ -60,7 +78,6 @@ class ReviewStep extends ConsumerWidget {
       bundle: bundle,
       state: state,
       notifier: notifier,
-      availableActions: availableActions,
       counts: counts,
       projectedDiveNumbers: projectedDiveNumbers,
       existingTags: existingTags,
@@ -74,16 +91,23 @@ class ReviewStep extends ConsumerWidget {
   /// Only assigns numbers to dives that will actually be imported as new
   /// (selected non-duplicates + duplicates with "Import as New" action).
   /// Skipped and consolidated dives are excluded.
-  static Map<int, int>? _computeProjectedDiveNumbers({
+  ///
+  /// With [retainSource] on, each dive shows the number its source recorded.
+  /// A dive whose source recorded none gets no projected number: what it
+  /// ends up with depends on the source, so the preview does not guess
+  /// (issue #1832).
+  @visibleForTesting
+  static Map<int, int>? computeProjectedDiveNumbers({
     required ImportBundle bundle,
     required int? nextDiveNumber,
     required bool retainSource,
     required Set<int> selections,
     required Map<int, DuplicateAction> duplicateActions,
     required Set<int> duplicateIndices,
+    Map<String, int> nextDiveNumberByTarget = const {},
   }) {
     final group = bundle.groups[ImportEntityType.dives];
-    if (group == null || nextDiveNumber == null) return null;
+    if (group == null) return null;
 
     final items = group.items;
 
@@ -101,19 +125,41 @@ class ReviewStep extends ConsumerWidget {
       }
     }
 
-    // Build (index, startTime) pairs for sorting.
-    final indexed = <(int, DateTime)>[];
-    for (final i in importIndices) {
-      final time = items[i].diveData?.startTime ?? DateTime(0);
-      indexed.add((i, time));
+    if (retainSource) {
+      return {for (final i in importIndices) i: ?items[i].diveData?.diveNumber};
     }
-    indexed.sort((a, b) => a.$2.compareTo(b.$2));
+    if (nextDiveNumber == null && nextDiveNumberByTarget.isEmpty) return null;
 
-    // Assign numbers oldest-first.
+    // Each profile numbers its own dives (issue #1893). A dive without a
+    // target label belongs to the import's only profile when there is one,
+    // otherwise to the active profile.
+    int? baseFor(String? targetKey) {
+      if (targetKey != null) {
+        return nextDiveNumberByTarget[targetKey] ?? nextDiveNumber;
+      }
+      return nextDiveNumberByTarget.length == 1
+          ? nextDiveNumberByTarget.values.single
+          : nextDiveNumber;
+    }
+
+    // Build (index, startTime) pairs per profile for sorting.
+    final byTarget = <String?, List<(int, DateTime)>>{};
+    for (final i in importIndices) {
+      (byTarget[items[i].target?.key] ??= []).add((
+        i,
+        items[i].diveData?.startTime ?? DateTime(0),
+      ));
+    }
+
+    // Assign numbers oldest-first within each profile.
     final result = <int, int>{};
-    for (var n = 0; n < indexed.length; n++) {
-      final itemIndex = indexed[n].$1;
-      result[itemIndex] = nextDiveNumber + n;
+    for (final MapEntry(key: target, value: indexed) in byTarget.entries) {
+      final base = baseFor(target);
+      if (base == null) continue;
+      indexed.sort((a, b) => a.$2.compareTo(b.$2));
+      for (var n = 0; n < indexed.length; n++) {
+        result[indexed[n].$1] = base + n;
+      }
     }
     return result;
   }
@@ -128,7 +174,6 @@ class _MultiTypeLayout extends StatefulWidget {
   final ImportBundle bundle;
   final ImportWizardState state;
   final ImportWizardNotifier notifier;
-  final Set<DuplicateAction> availableActions;
   final _AggregateCounts counts;
   final Map<int, int>? projectedDiveNumbers;
   final List<Tag> existingTags;
@@ -140,7 +185,6 @@ class _MultiTypeLayout extends StatefulWidget {
     required this.bundle,
     required this.state,
     required this.notifier,
-    required this.availableActions,
     required this.counts,
     this.projectedDiveNumbers,
     required this.existingTags,
@@ -153,9 +197,73 @@ class _MultiTypeLayout extends StatefulWidget {
 }
 
 class _MultiTypeLayoutState extends State<_MultiTypeLayout> {
+  /// One per tab, so the bar's Review action can bring a tab's decision
+  /// controls back into view (issue #2607).
+  final Map<ImportEntityType, ScrollController> _scrollControllers = {};
+
+  ScrollController _scrollControllerFor(ImportEntityType type) =>
+      _scrollControllers.putIfAbsent(type, ScrollController.new);
+
+  @override
+  void dispose() {
+    for (final controller in _scrollControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  /// Switches to the first tab with an undecided duplicate and scrolls it to
+  /// the top, where its bulk decision row and pending cards are listed.
+  /// Switching tabs alone did nothing visible when that tab was already
+  /// open, which on a single-tab download is always (issue #2607).
+  void _revealPending(BuildContext tabContext) {
+    final loc = widget.notifier.firstPendingLocation();
+    if (loc == null) return;
+    final tabIdx = widget.types.indexOf(loc.type);
+    if (tabIdx < 0) return;
+    final tabs = DefaultTabController.maybeOf(tabContext);
+    if (tabs == null || tabs.index == tabIdx) {
+      _scrollToTop(loc.type);
+      return;
+    }
+    // Another tab's list attaches only as the tab animation brings it in,
+    // so scroll once the change has settled, and only if the diver has not
+    // picked a different tab meanwhile.
+    void onTabSettled() {
+      if (tabs.indexIsChanging) return;
+      tabs.removeListener(onTabSettled);
+      if (tabs.index == tabIdx) _scrollToTop(loc.type);
+    }
+
+    tabs.addListener(onTabSettled);
+    tabs.animateTo(tabIdx);
+  }
+
+  void _scrollToTop(ImportEntityType type) {
+    if (!mounted) return;
+    final controller = _scrollControllers[type];
+    if (controller == null || !controller.hasClients) return;
+    controller.animateTo(
+      0,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
   void _showImportOptions(BuildContext context) {
     showModalBottomSheet(
       context: context,
+      // The sheet covers the review bar and its Import button, so it needs
+      // a visible way out besides tapping the scrim (issue #2607).
+      showDragHandle: true,
+      // Two switches plus a tag field that grows with every chip added can
+      // outgrow the sheet's default ~half-screen cap (issue #998 follow-up
+      // added the second switch). isScrollControlled lets it grow with its
+      // content instead of being squeezed into that fixed fraction; the
+      // sheet's own body still scrolls internally as a second line of
+      // defense once content exceeds even the full screen.
+      isScrollControlled: true,
+      useSafeArea: true,
       builder: (_) => _ImportOptionsSheet(
         notifier: widget.notifier,
         existingTags: widget.existingTags,
@@ -171,130 +279,194 @@ class _MultiTypeLayoutState extends State<_MultiTypeLayout> {
 
     return DefaultTabController(
       length: widget.types.length,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Builder(
-            builder: (context) {
-              final tabController = DefaultTabController.of(context);
-              return ListenableBuilder(
-                listenable: tabController,
-                builder: (context, _) {
-                  final showOptionsButton =
-                      hasDives &&
-                      (widget.types.length == 1 ||
-                          tabController.index ==
-                              widget.types.indexOf(ImportEntityType.dives));
-                  return Row(
-                    children: [
-                      Expanded(
-                        child: TabBar(
-                          labelPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                          ),
-                          indicatorWeight: 3,
-                          indicatorSize: TabBarIndicatorSize.label,
-                          indicatorColor: colorScheme.primary,
-                          labelColor: colorScheme.primary,
-                          unselectedLabelColor: colorScheme.onSurfaceVariant,
-                          labelStyle: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                          unselectedLabelStyle: theme.textTheme.titleSmall
-                              ?.copyWith(fontWeight: FontWeight.w500),
-                          tabs: [
-                            for (final type in widget.types)
-                              Tab(
-                                height: 36,
-                                text: _tabLabel(
-                                  type,
-                                  widget.bundle.groups[type]!.items.length,
+      child: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // The card takes fixed height from the list below it, so a step
+            // too short to spare it (a landscape phone) goes without; the
+            // AppBar still names the source (issue #161).
+            if (constraints.maxHeight >=
+                MediaQuery.textScalerOf(context).scale(_minHeightForSourceCard))
+              ImportSourceCard(source: widget.bundle.source),
+            // Not behind the height guard: it says where the dives go.
+            if (widget.bundle.targetChoice case final choice?)
+              ComputerOwnerNotice(
+                choice: choice,
+                onChanged: widget.notifier.changeTargetDiver,
+                busy: widget.state.isRetargeting,
+              ),
+            Builder(
+              builder: (context) {
+                final tabController = DefaultTabController.of(context);
+                return ListenableBuilder(
+                  listenable: tabController,
+                  builder: (context, _) {
+                    final showOptionsButton =
+                        hasDives &&
+                        (widget.types.length == 1 ||
+                            tabController.index ==
+                                widget.types.indexOf(ImportEntityType.dives));
+                    return Row(
+                      children: [
+                        Expanded(
+                          // Scrollable: a file import can bring seven tabs,
+                          // and fixed tabs gave each a few points on a phone,
+                          // too narrow to read or to see which tab held the
+                          // duplicates keeping Import disabled (#3110).
+                          child: TabBar(
+                            isScrollable: true,
+                            tabAlignment: TabAlignment.start,
+                            labelPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                            ),
+                            indicatorWeight: 3,
+                            indicatorSize: TabBarIndicatorSize.label,
+                            indicatorColor: colorScheme.primary,
+                            labelColor: colorScheme.primary,
+                            unselectedLabelColor: colorScheme.onSurfaceVariant,
+                            labelStyle: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                            unselectedLabelStyle: theme.textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.w500),
+                            tabs: [
+                              for (final type in widget.types)
+                                Tab(
+                                  height: 36,
+                                  child: _TabLabel(
+                                    label: _tabLabel(
+                                      type,
+                                      widget.bundle.groups[type]!.items.length,
+                                    ),
+                                    pendingCount: widget.state
+                                        .pendingFor(type)
+                                        .length,
+                                  ),
                                 ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (showOptionsButton)
-                        TextButton.icon(
-                          icon: const Icon(Icons.tune, size: 18),
-                          label: Text(
-                            context.l10n.universalImport_label_options,
+                            ],
                           ),
-                          onPressed: () => _showImportOptions(context),
                         ),
-                    ],
-                  );
-                },
-              );
-            },
-          ),
-          Expanded(
-            child: TabBarView(
-              children: [
-                for (final type in widget.types)
-                  _EntityTab(
-                    type: type,
-                    bundle: widget.bundle,
-                    state: widget.state,
-                    notifier: widget.notifier,
-                    availableActions: widget.availableActions,
-                    projectedDiveNumbers: type == ImportEntityType.dives
-                        ? widget.projectedDiveNumbers
-                        : null,
-                  ),
-              ],
-            ),
-          ),
-          Builder(
-            builder: (ctx) => _BottomBar(
-              counts: widget.counts,
-              onImport: widget.onImport,
-              onBack: widget.onBack,
-              hasPendingReviews: widget.state.hasPendingReviews,
-              totalPending: widget.state.totalPending,
-              onReviewPending: () {
-                final loc = widget.notifier.firstPendingLocation();
-                if (loc == null) return;
-                final tabIdx = widget.types.indexOf(loc.type);
-                if (tabIdx < 0) return;
-                DefaultTabController.maybeOf(ctx)?.animateTo(tabIdx);
+                        if (showOptionsButton)
+                          TextButton.icon(
+                            icon: const Icon(Icons.tune, size: 18),
+                            label: Text(
+                              context.l10n.universalImport_label_options,
+                            ),
+                            onPressed: () => _showImportOptions(context),
+                          ),
+                      ],
+                    );
+                  },
+                );
               },
             ),
-          ),
-        ],
+            Expanded(
+              child: TabBarView(
+                children: [
+                  for (final type in widget.types)
+                    _EntityTab(
+                      type: type,
+                      scrollController: _scrollControllerFor(type),
+                      bundle: widget.bundle,
+                      state: widget.state,
+                      notifier: widget.notifier,
+                      projectedDiveNumbers: type == ImportEntityType.dives
+                          ? widget.projectedDiveNumbers
+                          : null,
+                    ),
+                ],
+              ),
+            ),
+            Builder(
+              builder: (ctx) => _BottomBar(
+                counts: widget.counts,
+                onImport: widget.onImport,
+                onBack: widget.onBack,
+                hasPendingReviews: widget.state.hasPendingReviews,
+                totalPending: widget.state.totalPending,
+                busy: widget.state.isRetargeting,
+                onReviewPending: () => _revealPending(ctx),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
+
+  /// The Review step height, at 1x text, below which the source card is
+  /// left out. The tab row, bottom bar and card together take about 200 at
+  /// 1x; this keeps room for at least a row of the list beside them.
+  static const _minHeightForSourceCard = 320.0;
 
   String _tabLabel(ImportEntityType type, int count) {
     return '${_typeDisplayName(type)} ($count)';
   }
 
   String _typeDisplayName(ImportEntityType type) {
+    final l10n = context.l10n;
     switch (type) {
       case ImportEntityType.dives:
-        return 'Dives';
+        return l10n.diveImport_uddf_dives;
       case ImportEntityType.sites:
-        return 'Sites';
+        return l10n.diveImport_uddf_sites;
       case ImportEntityType.buddies:
-        return 'Buddies';
+        return l10n.diveImport_uddf_buddies;
       case ImportEntityType.equipment:
-        return 'Equipment';
+        return l10n.diveImport_uddf_equipment;
       case ImportEntityType.trips:
-        return 'Trips';
+        return l10n.diveImport_uddf_trips;
       case ImportEntityType.certifications:
-        return 'Certifications';
+        return l10n.diveImport_uddf_certifications;
       case ImportEntityType.diveCenters:
-        return 'Dive Centers';
+        return l10n.diveImport_uddf_diveCenters;
       case ImportEntityType.tags:
-        return 'Tags';
+        return l10n.diveImport_uddf_tags;
       case ImportEntityType.diveTypes:
-        return 'Dive Types';
+        return l10n.diveImport_uddf_diveTypes;
       case ImportEntityType.equipmentSets:
-        return 'Equipment Sets';
+        return l10n.diveImport_uddf_equipmentSets;
       case ImportEntityType.courses:
-        return 'Courses';
+        return l10n.diveImport_uddf_tabCourses;
+      case ImportEntityType.media:
+        return l10n.diveImport_uddf_media;
+      case ImportEntityType.fills:
+        return l10n.diveImport_uddf_fills;
     }
+  }
+}
+
+/// A review tab's label, marked with how many of its duplicates still need a
+/// decision. Any one of them disables Import, and a diver who has decided
+/// every dive otherwise had no way to tell which other tab was holding it
+/// (#3110).
+class _TabLabel extends StatelessWidget {
+  final String label;
+  final int pendingCount;
+
+  const _TabLabel({required this.label, required this.pendingCount});
+
+  @override
+  Widget build(BuildContext context) {
+    if (pendingCount == 0) return Text(label);
+    final colorScheme = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(label),
+        const SizedBox(width: 6),
+        Semantics(
+          label: context.l10n.universalImport_pending_gateHint(pendingCount),
+          excludeSemantics: true,
+          child: Badge.count(
+            count: pendingCount,
+            backgroundColor: colorScheme.tertiary,
+            textColor: colorScheme.onTertiary,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -302,30 +474,93 @@ class _MultiTypeLayoutState extends State<_MultiTypeLayout> {
 // Single tab content (used by multi-type layout)
 // ---------------------------------------------------------------------------
 
-class _EntityTab extends StatelessWidget {
+class _EntityTab extends ConsumerWidget {
   final ImportEntityType type;
+  final ScrollController scrollController;
   final ImportBundle bundle;
   final ImportWizardState state;
   final ImportWizardNotifier notifier;
-  final Set<DuplicateAction> availableActions;
   final Map<int, int>? projectedDiveNumbers;
 
   const _EntityTab({
     required this.type,
+    required this.scrollController,
     required this.bundle,
     required this.state,
     required this.notifier,
-    required this.availableActions,
     this.projectedDiveNumbers,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final group = bundle.groups[type]!;
     final selectedIndices = state.selections[type] ?? const <int>{};
     final duplicateActions = state.duplicateActions[type] ?? const {};
+    // Per-tab, not per-adapter: an adapter may implement an action for only
+    // some entity types (e.g. Universal supports replaceSource on sites only).
+    final availableActions = notifier.duplicateActionsFor(type);
+
+    // Planned dives a download may fill (issue #2002). Only the dives tab of
+    // an adapter that offers the action needs them; other tabs never read
+    // the provider.
+    final offersFill =
+        type == ImportEntityType.dives &&
+        availableActions.contains(DuplicateAction.fillPlanned);
+    final plannedDives = offersFill
+        ? ref
+                  .watch(
+                    fillCandidatesProvider(
+                      bundle.targetChoice?.chosenDiverId ?? notifier.diverId,
+                    ),
+                  )
+                  .value ??
+              const <Dive>[]
+        : const <Dive>[];
+    final units = ref.watch(unitFormatterProvider);
+    // The trip each new dive will be saved in (issue #3022).
+    final tripNames = type == ImportEntityType.dives
+        ? ref.watch(importReviewTripNamesProvider)
+        : const <int, String>{};
+    String? plannedLabelFor(int index) {
+      final plannedId = group.matchResults?[index]?.fillTarget?.diveId;
+      if (plannedId == null) return null;
+      final dive = plannedDives.where((d) => d.id == plannedId).firstOrNull;
+      if (dive == null) return null;
+      final label = plannedDiveLabel(dive, units, context.l10n);
+      return dive.profile.isNotEmpty
+          ? '$label. ${context.l10n.universalImport_fillPlanned_replacesProfile}'
+          : label;
+    }
+
+    Future<void> changeFillTarget(int index) async {
+      final current = group.matchResults?[index]?.fillTarget?.diveId;
+      // A plan takes one download: the ones other rows of this batch
+      // already fill are not on offer, or the second fill would find its
+      // target promoted and silently import as new instead.
+      final taken = <String>{
+        for (final entry in (group.matchResults ?? const {}).entries)
+          if (entry.key != index) ?entry.value.fillTarget?.diveId,
+      };
+      final picked = await showPlannedDivePicker(
+        context,
+        plannedDives: plannedDives,
+        selectedId: current,
+        unavailableIds: taken,
+        // A download that fits more than one draft (issue #637) lists those
+        // drafts first.
+        leadingIds:
+            group.matchResults?[index]?.fillCandidates ?? const <String>[],
+      );
+      if (picked == null) return;
+      final target = plannedDives.where((d) => d.id == picked).firstOrNull;
+      notifier.setFillTarget(
+        index,
+        target == null ? null : FillTarget.of(target),
+      );
+    }
 
     return SingleChildScrollView(
+      controller: scrollController,
       child: EntityReviewList(
         group: group,
         selectedIndices: selectedIndices,
@@ -333,6 +568,8 @@ class _EntityTab extends StatelessWidget {
         availableActions: availableActions,
         pendingIndices: state.pendingFor(type),
         onToggleSelection: (i) => notifier.toggleSelection(type, i),
+        onSetSelections: (indices, select) =>
+            notifier.setSelections(type, indices, select),
         onDuplicateActionChanged: (i, a) {
           notifier.setDuplicateAction(type, i, a);
           _showActionSnackbar(
@@ -357,6 +594,16 @@ class _EntityTab extends StatelessWidget {
         onDeselectAll: () => notifier.deselectAll(type),
         existingDiveIdForIndex: (i) => group.matchResults?[i]?.diveId ?? '',
         projectedDiveNumbers: projectedDiveNumbers,
+        sortField: type == ImportEntityType.dives ? state.diveSortField : null,
+        sortAscending: state.diveSortAscending,
+        onSortFieldChanged: type == ImportEntityType.dives
+            ? notifier.setDiveSortField
+            : null,
+        plannedDiveLabelForIndex: offersFill ? plannedLabelFor : null,
+        onChangeFillTarget: offersFill ? changeFillTarget : null,
+        tripNameForIndex: type == ImportEntityType.dives
+            ? (i) => tripNames[i]
+            : null,
       ),
     );
   }
@@ -371,6 +618,7 @@ String _actionLabel(
   DuplicateAction.consolidate => context.l10n.universalImport_label_consolidate,
   DuplicateAction.replaceSource =>
     context.l10n.universalImport_label_replaceSource,
+  DuplicateAction.fillPlanned => context.l10n.universalImport_label_fillPlanned,
 };
 
 void _showActionSnackbar(BuildContext context, String message) {
@@ -399,6 +647,10 @@ class _BottomBar extends StatelessWidget {
   final int totalPending;
   final VoidCallback onReviewPending;
 
+  /// The rows are being re-checked (issue #2050): importing now would apply
+  /// the previous profile's choices, so the button waits.
+  final bool busy;
+
   const _BottomBar({
     required this.counts,
     required this.onImport,
@@ -406,26 +658,37 @@ class _BottomBar extends StatelessWidget {
     required this.hasPendingReviews,
     required this.totalPending,
     required this.onReviewPending,
+    this.busy = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = context.l10n;
     final parts = <String>[];
     if (counts.importing > 0) {
-      parts.add('${counts.importing} new');
+      parts.add(l10n.universalImport_counts_new(counts.importing));
     }
     if (counts.consolidating > 0) {
-      parts.add('${counts.consolidating} merging');
+      parts.add(l10n.universalImport_counts_merging(counts.consolidating));
     }
     if (counts.replacing > 0) {
-      parts.add('${counts.replacing} replacing');
+      parts.add(l10n.universalImport_counts_replacing(counts.replacing));
+    }
+    if (counts.filling > 0) {
+      parts.add(l10n.universalImport_counts_filling(counts.filling));
     }
     if (counts.skipping > 0) {
-      parts.add('${counts.skipping} skipped');
+      parts.add(l10n.universalImport_counts_skipped(counts.skipping));
     }
 
-    final countsText = parts.isEmpty ? 'Nothing selected' : parts.join(', ');
+    // While duplicates await a decision the hint above already says so;
+    // "Nothing selected" would point the diver at the wrong control.
+    final countsText = parts.isNotEmpty
+        ? parts.join(', ')
+        : hasPendingReviews
+        ? ''
+        : l10n.universalImport_counts_nothingSelected;
 
     return SafeArea(
       child: Padding(
@@ -468,7 +731,10 @@ class _BottomBar extends StatelessWidget {
             Row(
               children: [
                 if (onBack != null)
-                  TextButton(onPressed: onBack, child: const Text('Back')),
+                  TextButton(
+                    onPressed: onBack,
+                    child: Text(l10n.common_action_back),
+                  ),
                 Expanded(
                   child: Text(
                     countsText,
@@ -479,15 +745,10 @@ class _BottomBar extends StatelessWidget {
                   ),
                 ),
                 FilledButton(
-                  onPressed:
-                      (hasPendingReviews ||
-                          (counts.importing +
-                                  counts.consolidating +
-                                  counts.replacing) ==
-                              0)
+                  onPressed: (busy || hasPendingReviews || counts.writing == 0)
                       ? null
                       : onImport,
-                  child: const Text('Import Selected'),
+                  child: Text(l10n.universalImport_action_importSelected),
                 ),
               ],
             ),
@@ -509,12 +770,20 @@ class _AggregateCounts {
   final int skipping;
   final int replacing;
 
+  /// Duplicates with [DuplicateAction.fillPlanned] (issue #2002).
+  final int filling;
+
   const _AggregateCounts({
     required this.importing,
     required this.consolidating,
     required this.skipping,
     required this.replacing,
+    this.filling = 0,
   });
+
+  /// Rows the import will write: everything but skips. A download whose
+  /// every dive fills a planned dive must still be importable (issue #2607).
+  int get writing => importing + consolidating + replacing + filling;
 
   /// Compute counts from [ImportWizardState].
   ///
@@ -524,6 +793,11 @@ class _AggregateCounts {
   /// - skipping: duplicates with [DuplicateAction.skip] + non-selected
   ///   non-duplicate items
   /// - replacing: duplicates with [DuplicateAction.replaceSource]
+  /// - filling: duplicates with [DuplicateAction.fillPlanned]
+  ///
+  /// A duplicate still pending review counts toward none of these: it is
+  /// not yet decided, and calling it skipped beside the "needs a decision"
+  /// hint contradicted the hint (issue #2607).
   static _AggregateCounts compute(ImportWizardState state) {
     final bundle = state.bundle;
     if (bundle == null) {
@@ -539,6 +813,7 @@ class _AggregateCounts {
     var consolidating = 0;
     var skipping = 0;
     var replacing = 0;
+    var filling = 0;
 
     for (final entry in bundle.groups.entries) {
       final type = entry.key;
@@ -546,6 +821,7 @@ class _AggregateCounts {
       final selectedIndices = state.selections[type] ?? const <int>{};
       final duplicateActions =
           state.duplicateActions[type] ?? const <int, DuplicateAction>{};
+      final pending = state.pendingFor(type);
 
       // Non-duplicate items
       for (int i = 0; i < group.items.length; i++) {
@@ -560,6 +836,7 @@ class _AggregateCounts {
 
       // Duplicate items
       for (final dupIndex in group.duplicateIndices) {
+        if (pending.contains(dupIndex)) continue;
         final action =
             duplicateActions[dupIndex] ?? _defaultAction(group, dupIndex);
         switch (action) {
@@ -571,6 +848,8 @@ class _AggregateCounts {
             skipping++;
           case DuplicateAction.replaceSource:
             replacing++;
+          case DuplicateAction.fillPlanned:
+            filling++;
         }
       }
     }
@@ -580,6 +859,7 @@ class _AggregateCounts {
       consolidating: consolidating,
       skipping: skipping,
       replacing: replacing,
+      filling: filling,
     );
   }
 
@@ -635,39 +915,99 @@ class _ImportOptionsSheetState extends State<_ImportOptionsSheet> {
   Widget build(BuildContext context) {
     final state = _currentState;
     if (state == null) return const SizedBox.shrink();
+    final hasSourceNumbers = state.bundle?.hasSourceDiveNumbers ?? false;
 
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            context.l10n.universalImport_title_importOptions,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            title: Text(context.l10n.universalImport_label_retainDiveNumbers),
-            subtitle: Text(
-              context.l10n.universalImport_label_retainDiveNumbersSubtitle,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: SingleChildScrollView(
+            // Second line of defense: isScrollControlled at the call site
+            // already lets the sheet grow with its content, but a small screen
+            // (or a tag field with several chips) can still exceed even that,
+            // so the body scrolls internally rather than overflowing (issue
+            // #998 follow-up).
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  context.l10n.universalImport_title_importOptions,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Disabled, and saying why, when no dive in this source carries a
+                // number: an enabled switch that changes nothing is what issue
+                // #1832 reported.
+                SwitchListTile(
+                  title: Text(
+                    context.l10n.universalImport_label_retainDiveNumbers,
+                  ),
+                  subtitle: Text(
+                    hasSourceNumbers
+                        ? context
+                              .l10n
+                              .universalImport_label_retainDiveNumbersSubtitle
+                        : context
+                              .l10n
+                              .universalImport_label_retainDiveNumbersUnavailable,
+                  ),
+                  value: hasSourceNumbers && state.retainSourceDiveNumbers,
+                  onChanged: hasSourceNumbers
+                      ? (value) =>
+                            widget.notifier.setRetainSourceDiveNumbers(value)
+                      : null,
+                ),
+                // Session-only override of the diver's saved auto-tag preference
+                // (issue #998 follow-up). Starts from that preference -- whatever
+                // initializeDefaultTag already seeded importTags with -- but
+                // toggling it here never writes back to the setting; it only adds
+                // or removes this one import's default tag.
+                SwitchListTile(
+                  title: Text(
+                    context.l10n.universalImport_label_autoTagThisImport,
+                  ),
+                  subtitle: Text(
+                    context
+                        .l10n
+                        .universalImport_label_autoTagThisImportSubtitle,
+                  ),
+                  value: widget.notifier.isAutoTagForThisImportEnabled,
+                  onChanged: (value) =>
+                      widget.notifier.setAutoTagForThisImport(value),
+                ),
+                const Divider(),
+                ImportTagsField(
+                  tags: state.importTags,
+                  existingTags: widget.existingTags,
+                  onAdd: (tag) => widget.notifier.addImportTag(tag),
+                  onRemove: (index) => widget.notifier.removeImportTag(index),
+                ),
+              ],
             ),
-            value: state.retainSourceDiveNumbers,
-            onChanged: (value) =>
-                widget.notifier.setRetainSourceDiveNumbers(value),
           ),
-          const Divider(),
-          ImportTagsField(
-            tags: state.importTags,
-            existingTags: widget.existingTags,
-            onAdd: (tag) => widget.notifier.addImportTag(tag),
-            onRemove: (index) => widget.notifier.removeImportTag(index),
+        ),
+        // The sheet hides the Import button beneath it; without this the
+        // only way back was tapping the scrim (issue #2607). Kept outside the
+        // scroll view so a long tag list cannot push it below the fold.
+        SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(context.l10n.common_action_done),
+              ),
+            ),
           ),
-          const SizedBox(height: 16),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

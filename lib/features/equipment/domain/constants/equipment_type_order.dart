@@ -1,0 +1,278 @@
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/text/text_sort.dart';
+
+/// How a gear list orders equipment types.
+///
+/// This is the primary key of an `EquipmentArrangement`: it orders the group
+/// headers when the diver groups by type, and acts as the primary sort key
+/// when they do not.
+enum EquipmentTypeOrder {
+  /// Ignore type entirely; the item sort orders the whole flat list.
+  none,
+
+  /// By the type's localized label, so the answer follows the locale.
+  alphabetical,
+
+  /// Roughly how the gear sits on a diver, top down.
+  headToToe,
+
+  /// The order the gear actually goes on.
+  dressingOrder,
+
+  /// Grouped by function: life support, buoyancy, exposure, vision and
+  /// propulsion, instruments, accessories.
+  canonical,
+}
+
+/// Head to toe, following the sequence requested in #1576.
+///
+/// Ordered lists rather than rank maps on purpose: a list can be asserted to
+/// be an exact permutation of [EquipmentType.values], so adding a type breaks
+/// the suite instead of silently ranking the newcomer last.
+const List<EquipmentType> kHeadToToeTypeOrder = [
+  EquipmentType.hood,
+  EquipmentType.mask,
+  EquipmentType.snorkel,
+  EquipmentType.rashGuard,
+  EquipmentType.baselayer,
+  EquipmentType.undersuit,
+  EquipmentType.wetsuit,
+  EquipmentType.drysuit,
+  // The vest (#3108) is the outermost torso layer when worn as an ice vest.
+  EquipmentType.vest,
+  EquipmentType.tank,
+  EquipmentType.rebreather,
+  EquipmentType.regulator,
+  // Assembly parts (#1487) sit beside the item they are part of.
+  EquipmentType.firstStage,
+  EquipmentType.secondStage,
+  EquipmentType.hose,
+  EquipmentType.transmitter,
+  EquipmentType.bcd,
+  EquipmentType.backplate,
+  EquipmentType.wing,
+  EquipmentType.harness,
+  EquipmentType.tankBand,
+  EquipmentType.weightPocket,
+  EquipmentType.gearPocket,
+  EquipmentType.weights,
+  EquipmentType.computer,
+  EquipmentType.instrument,
+  EquipmentType.compass,
+  EquipmentType.light,
+  EquipmentType.camera,
+  // The camera's parts (#1487, #1997) sit beside it, as the regulator's do.
+  EquipmentType.lens,
+  EquipmentType.port,
+  EquipmentType.housing,
+  EquipmentType.trayHandle,
+  EquipmentType.armClamp,
+  EquipmentType.strobe,
+  EquipmentType.videoLight,
+  EquipmentType.floatArm,
+  EquipmentType.smb,
+  EquipmentType.reel,
+  EquipmentType.knife,
+  EquipmentType.tool,
+  EquipmentType.dpv,
+  EquipmentType.gloves,
+  // Socks (#2900) go on inside the boots, so they sit just above them.
+  EquipmentType.socks,
+  EquipmentType.boots,
+  EquipmentType.fins,
+  // A bag (#2952) carries the gear above rather than being worn, so it
+  // follows every worn item instead of being guessed into the sequence.
+  EquipmentType.bag,
+  // Consumable child parts (#1708): they live inside another item and are
+  // never worn or donned on their own, so they have no position in an
+  // anatomical or a dressing sequence. They tail the list beside `other`
+  // rather than being guessed next to a likely host, since a battery serves
+  // computers, lights and transmitters alike.
+  EquipmentType.o2Cell,
+  EquipmentType.battery,
+  EquipmentType.other,
+];
+
+/// The order gear goes on, per #1576.
+///
+/// The issue does not place the hood. It sits after boots and before the
+/// cylinder, which is when a wetsuit diver pulls it on.
+const List<EquipmentType> kDressingTypeOrder = [
+  EquipmentType.rashGuard,
+  EquipmentType.baselayer,
+  EquipmentType.undersuit,
+  // Socks (#2900) go on with the under-layers: a drysuit sock before the
+  // suit's own feet, a neoprene sock before the boots or fin pockets.
+  EquipmentType.socks,
+  EquipmentType.wetsuit,
+  EquipmentType.drysuit,
+  // An ice vest (#3108) goes on over the suit, before the boots and hood.
+  EquipmentType.vest,
+  EquipmentType.boots,
+  EquipmentType.hood,
+  EquipmentType.weights,
+  EquipmentType.tank,
+  EquipmentType.rebreather,
+  EquipmentType.regulator,
+  // Assembly parts (#1487) sit beside the item they are part of.
+  EquipmentType.firstStage,
+  EquipmentType.secondStage,
+  EquipmentType.hose,
+  EquipmentType.transmitter,
+  EquipmentType.bcd,
+  EquipmentType.backplate,
+  EquipmentType.wing,
+  EquipmentType.harness,
+  EquipmentType.tankBand,
+  EquipmentType.weightPocket,
+  EquipmentType.gearPocket,
+  EquipmentType.computer,
+  EquipmentType.instrument,
+  EquipmentType.compass,
+  EquipmentType.light,
+  EquipmentType.camera,
+  // The camera's parts (#1487, #1997) sit beside it, as the regulator's do.
+  EquipmentType.lens,
+  EquipmentType.port,
+  EquipmentType.housing,
+  EquipmentType.trayHandle,
+  EquipmentType.armClamp,
+  EquipmentType.strobe,
+  EquipmentType.videoLight,
+  EquipmentType.floatArm,
+  EquipmentType.smb,
+  EquipmentType.reel,
+  EquipmentType.knife,
+  EquipmentType.tool,
+  EquipmentType.dpv,
+  EquipmentType.fins,
+  EquipmentType.mask,
+  EquipmentType.snorkel,
+  EquipmentType.gloves,
+  // A bag (#2952) carries the gear above rather than being worn, so it
+  // follows every worn item instead of being guessed into the sequence.
+  EquipmentType.bag,
+  // Consumable child parts (#1708): they live inside another item and are
+  // never worn or donned on their own, so they have no position in an
+  // anatomical or a dressing sequence. They tail the list beside `other`
+  // rather than being guessed next to a likely host, since a battery serves
+  // computers, lights and transmitters alike.
+  EquipmentType.o2Cell,
+  EquipmentType.battery,
+  EquipmentType.other,
+];
+
+/// Grouped by function.
+///
+/// This is also the honest replacement for `EquipmentType.index`, whose order
+/// is an artifact of when each type was added rather than a design (see the
+/// #1537 and #1518 comments in `enums.dart`).
+const List<EquipmentType> kCanonicalTypeOrder = [
+  // Life support.
+  EquipmentType.regulator,
+  // Assembly parts (#1487) sit beside the item they are part of.
+  EquipmentType.firstStage,
+  EquipmentType.secondStage,
+  EquipmentType.hose,
+  EquipmentType.rebreather,
+  EquipmentType.tank,
+  EquipmentType.transmitter,
+  // Buoyancy and trim.
+  EquipmentType.bcd,
+  EquipmentType.backplate,
+  EquipmentType.wing,
+  EquipmentType.harness,
+  EquipmentType.tankBand,
+  EquipmentType.weightPocket,
+  EquipmentType.gearPocket,
+  EquipmentType.weights,
+  // Exposure protection.
+  EquipmentType.rashGuard,
+  EquipmentType.baselayer,
+  EquipmentType.undersuit,
+  EquipmentType.wetsuit,
+  EquipmentType.drysuit,
+  EquipmentType.vest,
+  EquipmentType.hood,
+  EquipmentType.gloves,
+  EquipmentType.boots,
+  // After the boots (#2900): the diver figure places items in this order,
+  // so boots claim the feet and socks hidden inside them go to the tray.
+  EquipmentType.socks,
+  // Vision and propulsion.
+  EquipmentType.mask,
+  EquipmentType.snorkel,
+  EquipmentType.fins,
+  EquipmentType.dpv,
+  // Instruments.
+  EquipmentType.computer,
+  EquipmentType.instrument,
+  EquipmentType.compass,
+  // Accessories.
+  EquipmentType.light,
+  EquipmentType.camera,
+  // The camera's parts (#1487, #1997) sit beside it, as the regulator's do.
+  EquipmentType.lens,
+  EquipmentType.port,
+  EquipmentType.housing,
+  EquipmentType.trayHandle,
+  EquipmentType.armClamp,
+  EquipmentType.strobe,
+  EquipmentType.videoLight,
+  EquipmentType.floatArm,
+  EquipmentType.smb,
+  EquipmentType.reel,
+  EquipmentType.knife,
+  EquipmentType.tool,
+  // Transport (#2952): what the gear travels in.
+  EquipmentType.bag,
+  // Consumable child parts (#1708), a family of their own: they live inside
+  // another item rather than being gear a diver wears.
+  EquipmentType.o2Cell,
+  EquipmentType.battery,
+  EquipmentType.other,
+];
+
+/// The rank table for [order], or null when the order needs no table.
+///
+/// [EquipmentTypeOrder.alphabetical] has no table because the correct answer
+/// depends on the locale and is computed from the type's label at call time.
+List<EquipmentType>? equipmentTypeRankTable(EquipmentTypeOrder order) =>
+    switch (order) {
+      EquipmentTypeOrder.none => null,
+      EquipmentTypeOrder.alphabetical => null,
+      EquipmentTypeOrder.headToToe => kHeadToToeTypeOrder,
+      EquipmentTypeOrder.dressingOrder => kDressingTypeOrder,
+      EquipmentTypeOrder.canonical => kCanonicalTypeOrder,
+    };
+
+/// Position of [type] in [table].
+///
+/// A type absent from the table sorts last rather than throwing. The
+/// permutation test makes that unreachable, but a released build should
+/// degrade rather than crash a dive's gear list.
+int equipmentTypeRank(EquipmentType type, List<EquipmentType> table) {
+  final index = table.indexOf(type);
+  return index == -1 ? table.length : index;
+}
+
+/// Orders types alphabetically by the label the reader sees (#2937).
+///
+/// [label] resolves a type to its on-screen string; pass the localized name
+/// so the order follows the active locale. Comparison ignores case and common
+/// accents, so French "Émetteur" files under E rather than after Z, and two
+/// types sharing a key fall back to the enum name so the order is total and
+/// stable. Each key is computed once per comparator, not once per comparison.
+Comparator<EquipmentType> equipmentTypeLabelComparator(
+  String Function(EquipmentType) label,
+) => foldedTextComparator(label, tieBreak: (type) => type.name);
+
+/// [types] as a new list in [equipmentTypeLabelComparator] order.
+///
+/// Every list a diver picks a type from goes through this, rather than
+/// iterating [EquipmentType.values], whose declaration order is an artifact
+/// of when each type was added.
+List<EquipmentType> sortEquipmentTypesByLabel(
+  Iterable<EquipmentType> types,
+  String Function(EquipmentType) label,
+) => List.of(types)..sort(equipmentTypeLabelComparator(label));

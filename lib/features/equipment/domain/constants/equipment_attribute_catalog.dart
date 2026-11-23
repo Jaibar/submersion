@@ -1,0 +1,1085 @@
+import 'package:submersion/core/constants/enums.dart';
+
+/// How an attribute value is entered, stored, and displayed.
+/// Storage contract (equipment_attributes row):
+/// - text:      valueText
+/// - number:    valueNum in canonical metric (see AttributeDimension)
+/// - thickness: valueText holds the designation as written ("5/4/3"),
+///              valueNum holds the parsed primary (thickest) panel in mm
+/// - choice:    valueText holds the stable option key (never a display string)
+/// - flag:      valueNum 0/1
+/// - date:      valueNum unix milliseconds
+/// - url:       valueText holds the link as the diver typed it; [parseWebLink]
+///              is the only thing allowed to turn it into a launchable Uri
+/// - color:     valueText holds `#RRGGBB`, uppercase; `normalizeEquipmentColor`
+///              decides whether a stored value is a colour
+/// - focalLength: valueText holds a prime's figure or a zoom's range as
+///              written ("60", "15-45"), valueNum the wide end in mm; rows
+///              saved before issue #3050 carry valueNum alone
+///              (`focal_length.dart`)
+enum AttributeKind {
+  text,
+  number,
+  thickness,
+  choice,
+  flag,
+  date,
+  url,
+  color,
+  focalLength,
+}
+
+/// Which block of the edit and detail forms an attribute belongs in.
+///
+/// The store does not care -- every group lands in the same
+/// `equipment_attributes` rows -- but a purchase record and a physical spec
+/// answer different questions, so they are not shown side by side.
+enum AttributeGroup {
+  /// What the item physically is: size, thickness, lift, buoyancy. The
+  /// default, rendered with the type-specific fields.
+  spec,
+
+  /// Where the item came from: the receipt trail an insurer asks for after
+  /// lost luggage, theft or fire (issue #1517). Rendered with purchase date
+  /// and price.
+  purchase,
+
+  /// How the item looks: its colour, which tints its artwork on the diver
+  /// figure (issue #2326). Rendered as its own block of the Details editor and
+  /// as its own row on the detail page.
+  appearance,
+
+  /// Written by the app, never by a form: identifiers a feature owns, such
+  /// as a cylinder's passport id (issue #2334). No form section renders this
+  /// group, and the detail page's spec rows skip it, but an item's save
+  /// keeps it because it is in the type's catalog.
+  system,
+}
+
+/// Unit dimension for number attributes; drives UnitFormatter conversion.
+/// thicknessMm always displays in mm (industry convention in every market).
+///
+/// Every dimension stores its canonical metric value, which is also what a
+/// metric diver reads for all of them except these three:
+/// - [speedMps] stores m/s (matching wind speed and GPS track speed) and
+///   displays as m/min or ft/min, the way a DPV's rated speed is quoted.
+/// - [durationH] stores hours and displays as minutes, the way a scooter's
+///   rated run time is quoted.
+/// - [shortLengthM] stores metres and displays as cm or inches, the way a
+///   hose or an SMB is sold (issue #1804): a 15" hose, not a 1.25 ft one.
+enum AttributeDimension {
+  none,
+  thicknessMm,
+  volumeL,
+  pressureBar,
+  massKg,
+  lengthM,
+  shortLengthM,
+  depthM,
+  speedMps,
+  durationH,
+}
+
+/// The `worn_as` choice for a pair of manifolded back cylinders kept as one
+/// gear item, such as a "D12" (issue #4641).
+const String kWornAsTwinSet = 'twin_set';
+
+/// Stable attribute keys referenced from more than one file.
+abstract final class EquipmentAttrKeys {
+  static const size = 'size';
+  static const thicknessMm = 'thickness_mm';
+  static const buoyancyKg = 'buoyancy_kg';
+  static const dryWeightKg = 'dry_weight_kg';
+  static const suitStyle = 'suit_style';
+  static const shellMaterial = 'shell_material';
+  static const bcdStyle = 'bcd_style';
+  static const liftCapacityKg = 'lift_capacity_kg';
+  static const gloveType = 'glove_type';
+  static const sockType = 'sock_type';
+  static const weightStyle = 'weight_style';
+  static const insulationLevel = 'insulation_level';
+  static const fillMaterial = 'fill_material';
+  // Whether a vest has its hood attached (issue #3108), read by the buoyancy
+  // prior and the diver figure.
+  static const hooded = 'hooded';
+
+  // The item's colour (issue #2326), read by the diver figure.
+  static const color = 'color';
+
+  // Where the diver wants the item drawn on the figure (issue #4493), when
+  // the figure's own choice is wrong. Unset means the figure decides.
+  static const figurePosition = 'figure_position';
+
+  // Hose kind (issue #1805): LP regulator, HP gauge/transmitter, LPI inflator.
+  static const hoseType = 'hose_type';
+
+  // Cylinder specs (issue #1365): read by the transmitter registry editor.
+  static const volumeL = 'volume_l';
+  static const workingPressureBar = 'working_pressure_bar';
+  static const tankMaterial = 'tank_material';
+
+  // What a cylinder holds gas for (issue #4243): breathing gas, or a
+  // drysuit's inflation (often argon). Unset means breathing gas. Picking or
+  // linking a suit inflation cylinder sets a dive tank's role to match.
+  static const cylinderUse = 'cylinder_use';
+
+  // How a cylinder is usually carried (issue #4493): on the back, at the
+  // diver's left or right side as a sidemount tank, or clipped on as a
+  // stage. The diver figure draws it there unless a dive tank's role says
+  // otherwise. A twin set (issue #4641) is a pair of manifolded back
+  // cylinders logged as this one item: drawn as doubles, and a dive tank
+  // picked from it defaults to the Twin Set role.
+  static const wornAs = 'worn_as';
+
+  // A cylinder's last visual inspection and hydro test dates. The VIP and
+  // hydro service clocks count from them (issue #3662).
+  static const lastVisualInspection = 'last_visual_inspection';
+  static const lastHydroTest = 'last_hydro_test';
+
+  // The diver's own mark for telling identical items apart (issue #1549).
+  // Cylinders had it first, and the stored key keeps that name: renaming it
+  // would rewrite attribute rows on every sync peer.
+  static const identifier = 'tank_identifier';
+
+  // The physical tag identity of a cylinder (issue #2334): a UUID minted
+  // once, printed as a QR label and written to an NFC tag. System group,
+  // so no form ever shows it as a text field.
+  static const passportId = 'passport_id';
+
+  // Purchase record (issue #1517).
+  static const sku = 'sku';
+  static const retailer = 'retailer';
+  static const productUrl = 'product_url';
+
+  // Child items (o2Cell, battery).
+  static const cellSlot = 'cell_slot';
+  static const installedDate = 'installed_date';
+  static const rechargeable = 'rechargeable';
+
+  // DPV mission planning (issue #2086). The three existing keys are named
+  // here so the planner never spells a raw string; the two tow factors are
+  // new and default when absent (see ScooterSpec).
+  static const dpvSpeedMps = 'speed_mps';
+  static const dpvBurnTimeH = 'burn_time_h';
+  static const dpvBatteryCapacityWh = 'battery_capacity_wh';
+  static const towSpeedFactor = 'tow_speed_factor';
+  static const towBurnFactor = 'tow_burn_factor';
+}
+
+class EquipmentAttributeDef {
+  /// Stable key, never translated ('thickness_mm'). L10n resolves labels via
+  /// `attrLabel_<key>` and choice options via `attrChoice_<key>_<option>`.
+  final String key;
+  final AttributeKind kind;
+  final AttributeDimension dimension;
+  final List<String> choiceKeys;
+
+  /// Which form block renders this attribute; see [AttributeGroup].
+  final AttributeGroup group;
+
+  /// Always read in its canonical metric unit, with no per-item unit picker
+  /// (issue #4534): a rebreather cylinder has no working pressure for cubic
+  /// feet to mean gas capacity at, and is sold by litres everywhere.
+  final bool metricOnly;
+
+  /// A pressure that may be a dual-scale dial, whose picker also offers
+  /// both units at once (issue #4534).
+  final bool dualScale;
+
+  const EquipmentAttributeDef({
+    required this.key,
+    required this.kind,
+    this.dimension = AttributeDimension.none,
+    this.choiceKeys = const [],
+    this.group = AttributeGroup.spec,
+    this.metricOnly = false,
+    this.dualScale = false,
+  });
+}
+
+/// Data-driven per-type attribute schema (CertificationLevelCatalog pattern).
+abstract final class EquipmentAttributeCatalog {
+  /// Present for every equipment type (they replace the v104 columns).
+  static const List<EquipmentAttributeDef> universal = [
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.buoyancyKg,
+      kind: AttributeKind.number,
+      dimension: AttributeDimension.massKg,
+    ),
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.dryWeightKg,
+      kind: AttributeKind.number,
+      dimension: AttributeDimension.massKg,
+    ),
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.identifier,
+      kind: AttributeKind.text,
+    ),
+    // The item's tag identity (issues #2334, #2652). System: never rendered
+    // by a form, exported or imported.
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.passportId,
+      kind: AttributeKind.text,
+      group: AttributeGroup.system,
+    ),
+  ];
+
+  /// The purchase record, present for every equipment type (issue #1517).
+  /// Kept apart from [universal] because these are provenance, not physical
+  /// specification: they answer "what did I buy, from whom, and where is the
+  /// listing" for an insurance claim.
+  static const List<EquipmentAttributeDef> purchase = [
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.sku,
+      kind: AttributeKind.text,
+      group: AttributeGroup.purchase,
+    ),
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.retailer,
+      kind: AttributeKind.text,
+      group: AttributeGroup.purchase,
+    ),
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.productUrl,
+      kind: AttributeKind.url,
+      group: AttributeGroup.purchase,
+    ),
+  ];
+
+  /// The item's look (issue #2326), present for every type except the
+  /// consumables that live inside another item and `other`, which has no
+  /// artwork to tint.
+  static const List<EquipmentAttributeDef> appearance = [
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.color,
+      kind: AttributeKind.color,
+      group: AttributeGroup.appearance,
+    ),
+    // Every spot an item can be moved to on the figure (issue #4493). The
+    // Details editor offers only the ones that draw that item differently
+    // (`pickableFigureZones`); the keys match `figurePositionKeys`.
+    EquipmentAttributeDef(
+      key: EquipmentAttrKeys.figurePosition,
+      kind: AttributeKind.choice,
+      group: AttributeGroup.appearance,
+      choiceKeys: [
+        'mouth',
+        'octo',
+        'chest_left',
+        'chest_right',
+        'console',
+        'wrist_left',
+        'wrist_right',
+        'hand_left',
+        'hand_right',
+        'hip_left',
+        'hip_right',
+        'thigh_left',
+        'thigh_right',
+        'calf_left',
+        'back',
+        'trim_left',
+        'trim_right',
+        'butt_d_ring',
+        'sidemount_left',
+        'sidemount_right',
+        'stage_left',
+        'stage_right',
+      ],
+    ),
+  ];
+
+  static const Set<EquipmentType> _noAppearance = {
+    EquipmentType.o2Cell,
+    EquipmentType.battery,
+    EquipmentType.other,
+  };
+
+  static const _size = EquipmentAttributeDef(
+    key: EquipmentAttrKeys.size,
+    kind: AttributeKind.text,
+  );
+  static const _thickness = EquipmentAttributeDef(
+    key: EquipmentAttrKeys.thicknessMm,
+    kind: AttributeKind.thickness,
+    dimension: AttributeDimension.thicknessMm,
+  );
+
+  /// How a wrist-or-console device is carried. Shared by the dive computer,
+  /// the instrument family and the compass: one key, one set of translations,
+  /// no chance of the three drifting apart per locale.
+  static const _mount = EquipmentAttributeDef(
+    key: 'mount',
+    kind: AttributeKind.choice,
+    choiceKeys: ['wrist', 'console', 'hud'],
+  );
+
+  /// How warm the garment is, in the four steps drysuit makers actually
+  /// print on a label. Undergarments are sold by warmth rating rather than by
+  /// millimetres, so [EquipmentAttrKeys.thicknessMm] would be the wrong
+  /// question: a 400g Thinsulate suit and a fleece of the same loft are not
+  /// the same garment.
+  static const _insulationLevel = EquipmentAttributeDef(
+    key: EquipmentAttrKeys.insulationLevel,
+    kind: AttributeKind.choice,
+    choiceKeys: ['light', 'mid', 'heavy', 'extreme'],
+  );
+
+  /// What the garment is made of. Shared by both layers: the same fibres show
+  /// up in undersuits and in the base layers worn beneath them.
+  static const _fillMaterial = EquipmentAttributeDef(
+    key: EquipmentAttrKeys.fillMaterial,
+    kind: AttributeKind.choice,
+    choiceKeys: [
+      'thinsulate',
+      'primaloft',
+      'hollowfibre',
+      'fleece',
+      'merino',
+      'polypropylene',
+    ],
+  );
+
+  // Shared by a whole and its parts (issue #1487): a first stage has the
+  // regulator's connection, a wing the BCD's lift, a housing the camera's
+  // depth rating.
+  static const _connection = EquipmentAttributeDef(
+    key: 'connection',
+    kind: AttributeKind.choice,
+    choiceKeys: ['din', 'yoke'],
+  );
+  static const _coldWaterRated = EquipmentAttributeDef(
+    key: 'cold_water_rated',
+    kind: AttributeKind.flag,
+  );
+  static const _liftCapacity = EquipmentAttributeDef(
+    key: EquipmentAttrKeys.liftCapacityKg,
+    kind: AttributeKind.number,
+    dimension: AttributeDimension.massKg,
+  );
+  static const _depthRating = EquipmentAttributeDef(
+    key: 'depth_rating_m',
+    kind: AttributeKind.number,
+    dimension: AttributeDimension.depthM,
+  );
+  // A video light (#1997) is specced like a dive light, so it shares the
+  // light's definitions: one key, one label, one filter.
+  static const _lumens = EquipmentAttributeDef(
+    key: 'lumens',
+    kind: AttributeKind.number,
+  );
+  static const _beamType = EquipmentAttributeDef(
+    key: 'beam_type',
+    kind: AttributeKind.choice,
+    choiceKeys: ['spot', 'flood', 'adjustable'],
+  );
+
+  static const Map<EquipmentType, List<EquipmentAttributeDef>> _byType = {
+    EquipmentType.wetsuit: [
+      _size,
+      _thickness,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.suitStyle,
+        kind: AttributeKind.choice,
+        choiceKeys: ['full', 'shorty', 'two_piece', 'semi_dry'],
+      ),
+    ],
+    EquipmentType.drysuit: [
+      _size,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.shellMaterial,
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'trilaminate',
+          'neoprene',
+          'crushed_neoprene',
+          'vulcanized_rubber',
+        ],
+      ),
+      EquipmentAttributeDef(
+        key: 'seal_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['latex', 'silicone', 'neoprene'],
+      ),
+    ],
+    EquipmentType.undersuit: [_size, _insulationLevel, _fillMaterial],
+    EquipmentType.baselayer: [_size, _insulationLevel, _fillMaterial],
+    // Warmth is deliberately absent: that is what `baselayer` is for, and a
+    // second way to say "this one is warm" is how two keys for one idea drift
+    // apart per locale. A rash guard is the sun-and-abrasion garment.
+    EquipmentType.rashGuard: [
+      _size,
+      EquipmentAttributeDef(
+        key: 'sleeve_length',
+        kind: AttributeKind.choice,
+        choiceKeys: ['short', 'long', 'sleeveless'],
+      ),
+      // The rating printed on the garment (UPF 50+ is the common ceiling).
+      // Dimensionless: a UPF number is a ratio, not a measurement.
+      EquipmentAttributeDef(key: 'upf_rating', kind: AttributeKind.number),
+    ],
+    // The ice vest and core warmer (#3108). Thickness is the suit's own
+    // field, so a 7 mm vest reads like a 7 mm suit; the hood is a switch
+    // because it is what tells an ice vest from a core warmer, and it adds
+    // lift.
+    EquipmentType.vest: [
+      _size,
+      _thickness,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.hooded,
+        kind: AttributeKind.flag,
+      ),
+      EquipmentAttributeDef(
+        key: 'vest_layer',
+        kind: AttributeKind.choice,
+        choiceKeys: ['over_suit', 'under_suit'],
+      ),
+      EquipmentAttributeDef(
+        key: 'vest_closure',
+        kind: AttributeKind.choice,
+        choiceKeys: ['front_zip', 'side_zip', 'pullover'],
+      ),
+    ],
+    EquipmentType.tank: [
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.volumeL,
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.volumeL,
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.workingPressureBar,
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.pressureBar,
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.tankMaterial,
+        kind: AttributeKind.choice,
+        choiceKeys: ['aluminum', 'steel', 'carbon_composite'],
+      ),
+      EquipmentAttributeDef(
+        key: 'valve_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['din', 'yoke', 'convertible'],
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.cylinderUse,
+        kind: AttributeKind.choice,
+        choiceKeys: ['breathing_gas', 'suit_inflation'],
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.wornAs,
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'back',
+          kWornAsTwinSet,
+          'sidemount_left',
+          'sidemount_right',
+          'stage',
+        ],
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.lastVisualInspection,
+        kind: AttributeKind.date,
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.lastHydroTest,
+        kind: AttributeKind.date,
+      ),
+    ],
+    EquipmentType.rebreather: [
+      EquipmentAttributeDef(
+        key: 'unit_type',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'eccr',
+          'mccr',
+          'hccr',
+          'scr_cmf',
+          'scr_pascr',
+          'scr_escr',
+        ],
+      ),
+      EquipmentAttributeDef(
+        key: 'mount_configuration',
+        kind: AttributeKind.choice,
+        choiceKeys: ['back', 'chest', 'sidemount'],
+      ),
+      EquipmentAttributeDef(
+        key: 'scrubber_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['axial', 'radial'],
+      ),
+      // Rated scrubber duration in hours. Dimensionless: hours are hours in
+      // every market, so there is nothing for UnitFormatter to convert.
+      EquipmentAttributeDef(
+        key: 'scrubber_duration_h',
+        kind: AttributeKind.number,
+      ),
+      EquipmentAttributeDef(key: 'o2_cell_count', kind: AttributeKind.number),
+      EquipmentAttributeDef(
+        key: 'diluent_cylinder_l',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.volumeL,
+        metricOnly: true,
+      ),
+      EquipmentAttributeDef(
+        key: 'o2_cylinder_l',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.volumeL,
+        metricOnly: true,
+      ),
+      // Shared verbatim with the camera entry: same concept, same dimension,
+      // one label key.
+      EquipmentAttributeDef(
+        key: 'depth_rating_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.depthM,
+      ),
+    ],
+    EquipmentType.regulator: [_connection, _coldWaterRated],
+    EquipmentType.firstStage: [_connection, _coldWaterRated],
+    EquipmentType.secondStage: [_coldWaterRated],
+    EquipmentType.hose: [
+      // LP (low pressure, a regulator hose), HP (high pressure, to an SPG or
+      // transmitter) or LPI (the quick-disconnect inflator hose), issue
+      // #1805. A choice so the equipment and dive filters can match on it.
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.hoseType,
+        kind: AttributeKind.choice,
+        choiceKeys: ['lp', 'hp', 'lpi'],
+      ),
+      // Stored in metres, shown in cm or inches: hoses are sold as 22" or
+      // 56 cm, never as 1.8 ft or 0.56 m (issue #1804).
+      EquipmentAttributeDef(
+        key: 'hose_length_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.shortLengthM,
+      ),
+    ],
+    EquipmentType.bcd: [
+      _size,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.bcdStyle,
+        kind: AttributeKind.choice,
+        choiceKeys: ['jacket', 'back_inflate', 'wing', 'sidemount'],
+      ),
+      _liftCapacity,
+    ],
+    EquipmentType.backplate: [
+      EquipmentAttributeDef(
+        key: 'plate_material',
+        kind: AttributeKind.choice,
+        choiceKeys: ['steel', 'aluminum', 'titanium', 'carbon_fiber'],
+      ),
+    ],
+    EquipmentType.wing: [_liftCapacity],
+    EquipmentType.harness: [_size],
+    // Rig accessories (#1877).
+    EquipmentType.tankBand: [
+      EquipmentAttributeDef(
+        key: 'band_style',
+        kind: AttributeKind.choice,
+        choiceKeys: ['cam_strap', 'stainless_band'],
+      ),
+    ],
+    EquipmentType.weightPocket: [
+      // The Weights type's key and wording, offering the placements a pocket
+      // can have: ankle weights strap on and have no pocket. Kept an in-order
+      // subset of the Weights list, because a lookup by key alone
+      // ([defFor], which the active-filter label orders its options by)
+      // resolves to that list.
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.weightStyle,
+        kind: AttributeKind.choice,
+        choiceKeys: ['belt', 'integrated', 'trim'],
+      ),
+      // What the pocket holds, not what it weighs: `dry_weight_kg` stays the
+      // pouch's own mass.
+      EquipmentAttributeDef(
+        key: 'pocket_capacity_kg',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.massKg,
+      ),
+    ],
+    EquipmentType.gearPocket: [
+      EquipmentAttributeDef(
+        key: 'pocket_mount',
+        kind: AttributeKind.choice,
+        choiceKeys: ['harness', 'waist_belt', 'thigh'],
+      ),
+    ],
+    EquipmentType.bag: [
+      // Lift bags are left out on purpose: they are lift devices, filed
+      // with the SMB, not luggage.
+      EquipmentAttributeDef(
+        key: 'bag_style',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'duffel',
+          'roller',
+          'backpack',
+          'mesh',
+          'dry_bag',
+          'regulator_bag',
+          'catch_bag',
+        ],
+      ),
+      // How bags are sold: litres, or cubic feet for an imperial diver.
+      EquipmentAttributeDef(
+        key: 'capacity_l',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.volumeL,
+      ),
+    ],
+    EquipmentType.fins: [
+      _size,
+      EquipmentAttributeDef(
+        key: 'heel_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['open_heel', 'full_foot'],
+      ),
+      EquipmentAttributeDef(
+        key: 'blade_style',
+        kind: AttributeKind.choice,
+        choiceKeys: ['paddle', 'split', 'vented'],
+      ),
+    ],
+    EquipmentType.computer: [
+      _mount,
+      EquipmentAttributeDef(
+        key: 'connectivity',
+        kind: AttributeKind.choice,
+        choiceKeys: ['ble', 'usb', 'infrared', 'none'],
+      ),
+    ],
+    EquipmentType.instrument: [
+      EquipmentAttributeDef(
+        key: 'instrument_type',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'spg',
+          'depth_gauge',
+          'bottom_timer',
+          'console',
+          'gas_analyzer',
+          'thermometer',
+        ],
+      ),
+      // Full-scale reading of the dial, not a tank's working pressure: a
+      // 300 bar gauge on a 232 bar cylinder is a different object from a
+      // 232 bar one, and the two keys must not be confused.
+      EquipmentAttributeDef(
+        key: 'gauge_max_pressure_bar',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.pressureBar,
+        dualScale: true,
+      ),
+      // Shared verbatim with the camera, rebreather and DPV entries.
+      EquipmentAttributeDef(
+        key: 'depth_rating_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.depthM,
+      ),
+      _mount,
+    ],
+    EquipmentType.compass: [
+      EquipmentAttributeDef(
+        key: 'compass_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['analog', 'digital'],
+      ),
+      // A card is balanced for a magnetic zone; take a northern-balanced
+      // compass south and it drags on the capsule and reads badly. Worth
+      // recording per unit for anyone whose gear travels.
+      EquipmentAttributeDef(
+        key: 'balance_zone',
+        kind: AttributeKind.choice,
+        choiceKeys: ['northern', 'southern', 'global'],
+      ),
+      // Degrees of off-level the card still swings freely at: the headline
+      // spec on every dive compass, and degrees convert nowhere.
+      EquipmentAttributeDef(
+        key: 'tilt_tolerance_deg',
+        kind: AttributeKind.number,
+      ),
+      _mount,
+    ],
+    EquipmentType.mask: [
+      EquipmentAttributeDef(
+        key: 'lens_config',
+        kind: AttributeKind.choice,
+        choiceKeys: ['single', 'twin', 'frameless'],
+      ),
+      EquipmentAttributeDef(key: 'prescription', kind: AttributeKind.flag),
+    ],
+    EquipmentType.snorkel: [
+      EquipmentAttributeDef(
+        key: 'snorkel_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['classic', 'semi_dry', 'dry', 'foldable'],
+      ),
+      EquipmentAttributeDef(key: 'purge_valve', kind: AttributeKind.flag),
+    ],
+    EquipmentType.weights: [
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.weightStyle,
+        kind: AttributeKind.choice,
+        choiceKeys: ['belt', 'integrated', 'trim', 'ankle'],
+      ),
+    ],
+    EquipmentType.light: [_lumens, _beamType],
+    EquipmentType.camera: [_depthRating],
+    // The camera's parts (#1997).
+    EquipmentType.lens: [
+      EquipmentAttributeDef(
+        key: 'lens_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['camera_lens', 'wet_lens', 'diopter'],
+      ),
+      // Quoted in millimetres in every unit system, so not a converted
+      // length. A zoom is written as a range (issue #3050); the key keeps
+      // the name it had as a plain number so synced rows still match.
+      EquipmentAttributeDef(
+        key: 'focal_length_mm',
+        kind: AttributeKind.focalLength,
+      ),
+    ],
+    EquipmentType.port: [
+      EquipmentAttributeDef(
+        key: 'port_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['dome', 'flat', 'macro'],
+      ),
+      _depthRating,
+    ],
+    EquipmentType.housing: [_depthRating],
+    EquipmentType.trayHandle: [
+      EquipmentAttributeDef(
+        key: 'tray_style',
+        kind: AttributeKind.choice,
+        choiceKeys: ['single_handle', 'double_handle', 'pistol_grip'],
+      ),
+    ],
+    // Stored in metres, shown in cm or inches: arms are sold as 8" or 20 cm.
+    EquipmentType.armClamp: [
+      EquipmentAttributeDef(
+        key: 'arm_length_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.shortLengthM,
+      ),
+    ],
+    EquipmentType.strobe: [
+      _depthRating,
+      // The power figure every strobe is compared by: a distance at ISO 100,
+      // quoted in metres (GN 20) or feet (GN 66) for the same strobe, so it
+      // is stored in metres and shown in the diver's length unit.
+      EquipmentAttributeDef(
+        key: 'guide_number_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.lengthM,
+      ),
+    ],
+    EquipmentType.videoLight: [_lumens, _beamType, _depthRating],
+    // What the float lifts. It trims the rig, not the diver, so the buoyancy
+    // model reads it only for a BCD and never for a float.
+    EquipmentType.floatArm: [_liftCapacity],
+    EquipmentType.dpv: [
+      EquipmentAttributeDef(
+        key: 'dpv_style',
+        kind: AttributeKind.choice,
+        choiceKeys: ['tow_behind', 'ride_on', 'handheld'],
+      ),
+      // Rated run time. Stored in hours (hence the key), but shown in minutes
+      // because that is how every scooter's burn time is specced -- "90 min",
+      // not "1.5 h" (issue #1096). The rebreather's scrubber duration keeps
+      // hours: those are quoted as "3 h", not "180 min".
+      EquipmentAttributeDef(
+        key: 'burn_time_h',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.durationH,
+      ),
+      EquipmentAttributeDef(
+        key: 'battery_type',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'lithium_ion',
+          'nimh',
+          'lead_acid',
+          'alkaline',
+          'lithium_primary',
+        ],
+      ),
+      // Watt-hours: the figure printed on the pack and the one airlines ask
+      // about, universal in every market.
+      EquipmentAttributeDef(
+        key: 'battery_capacity_wh',
+        kind: AttributeKind.number,
+      ),
+      EquipmentAttributeDef(
+        key: 'motor_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['brushless', 'brushed'],
+      ),
+      // Stored in m/s, read as m/min or ft/min: a DPV's speed is quoted per
+      // minute on every manufacturer's sheet, never in km/h or knots.
+      EquipmentAttributeDef(
+        key: 'speed_mps',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.speedMps,
+      ),
+      // Towing a dead scooter's diver: the tower's speed as a fraction of
+      // rated, and the burn-rate multiplier. Absent means the planner's
+      // defaults (0.6 and 1.5), so a diver only fills these in to correct
+      // them for a ride-on or an unusually strong scooter.
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.towSpeedFactor,
+        kind: AttributeKind.number,
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.towBurnFactor,
+        kind: AttributeKind.number,
+      ),
+      // Shared verbatim with the camera and rebreather entries.
+      EquipmentAttributeDef(
+        key: 'depth_rating_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.depthM,
+      ),
+    ],
+    EquipmentType.smb: [
+      EquipmentAttributeDef(
+        key: 'smb_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['open', 'closed'],
+      ),
+      // Shown in cm or inches like a hose (issue #1804). A reel's line below
+      // stays in m / ft: 45 m of line is not read as 4500 cm.
+      EquipmentAttributeDef(
+        key: 'length_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.shortLengthM,
+      ),
+    ],
+    EquipmentType.reel: [
+      EquipmentAttributeDef(
+        key: 'reel_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['spool', 'ratchet'],
+      ),
+      EquipmentAttributeDef(
+        key: 'line_length_m',
+        kind: AttributeKind.number,
+        dimension: AttributeDimension.lengthM,
+      ),
+    ],
+    EquipmentType.knife: [
+      EquipmentAttributeDef(
+        key: 'blade_material',
+        kind: AttributeKind.choice,
+        choiceKeys: ['stainless', 'titanium'],
+      ),
+      EquipmentAttributeDef(
+        key: 'tip_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['pointed', 'blunt', 'line_cutter'],
+      ),
+    ],
+    EquipmentType.tool: [
+      EquipmentAttributeDef(
+        key: 'tool_type',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'hand_tool',
+          'o_ring_kit',
+          'save_a_dive_kit',
+          'torque_wrench',
+          'spares_kit',
+        ],
+      ),
+      // Free text because a tool's size is a spanner width, a hex key, or
+      // nothing at all -- there is no closed list to pick from.
+      _size,
+    ],
+    EquipmentType.hood: [_size, _thickness],
+    EquipmentType.gloves: [
+      _size,
+      _thickness,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.gloveType,
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'five_finger',
+          'three_finger',
+          'mitt',
+          'dry',
+          'dry_liner',
+          'utility',
+        ],
+      ),
+    ],
+    EquipmentType.boots: [
+      _size,
+      _thickness,
+      EquipmentAttributeDef(
+        key: 'sole_type',
+        kind: AttributeKind.choice,
+        choiceKeys: ['hard', 'soft'],
+      ),
+    ],
+    // Socks (#2900): neoprene socks are sold by thickness like boots, and
+    // drysuit socks by fibre like the undergarments, so both are recorded
+    // and sock_type says which kind the pair is.
+    EquipmentType.socks: [
+      _size,
+      _thickness,
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.sockType,
+        kind: AttributeKind.choice,
+        choiceKeys: ['neoprene', 'drysuit'],
+      ),
+      _fillMaterial,
+    ],
+    EquipmentType.o2Cell: [
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.cellSlot,
+        kind: AttributeKind.number,
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.installedDate,
+        kind: AttributeKind.date,
+      ),
+    ],
+    EquipmentType.battery: [
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.installedDate,
+        kind: AttributeKind.date,
+      ),
+      EquipmentAttributeDef(
+        key: 'battery_type',
+        kind: AttributeKind.choice,
+        choiceKeys: [
+          'lithium_ion',
+          'nimh',
+          'lead_acid',
+          'alkaline',
+          'lithium_primary',
+        ],
+      ),
+      EquipmentAttributeDef(
+        key: EquipmentAttrKeys.rechargeable,
+        kind: AttributeKind.flag,
+      ),
+    ],
+    EquipmentType.other: [],
+  };
+
+  /// Curated attributes for [type]: type-specific first, then universal,
+  /// then the purchase record, then the item's appearance. Consumers that
+  /// render one block at a time filter on [EquipmentAttributeDef.group].
+  static List<EquipmentAttributeDef> attributesFor(EquipmentType type) => [
+    ...(_byType[type] ?? const []),
+    ...universal,
+    ...purchase,
+    if (!_noAppearance.contains(type)) ...appearance,
+  ];
+
+  /// Whether items of [type] take a colour ([appearance]). A colour that
+  /// reaches a type without one is the diver's own field, not the item's
+  /// colour (issue #2520): see `keepStrayColorAsCustom`.
+  static bool hasColor(EquipmentType type) => !_noAppearance.contains(type);
+
+  static final Map<String, EquipmentAttributeDef> _byKey = {
+    for (final defs in _byType.values)
+      for (final def in defs) def.key: def,
+    for (final def in universal) def.key: def,
+    for (final def in purchase) def.key: def,
+    for (final def in appearance) def.key: def,
+  };
+
+  /// Definition for a curated key, or null for unknown/custom keys.
+  static EquipmentAttributeDef? defFor(String key) => _byKey[key];
+
+  /// The curated keys whose values are dates ([AttributeKind.date], stored
+  /// as unix milliseconds in `value_num`), such as a fitted part's
+  /// `installed_date`.
+  static final Set<String> dateKeys = {
+    for (final def in _byKey.values)
+      if (def.kind == AttributeKind.date) def.key,
+  };
+
+  /// Whether [key] is a curated attribute the app owns ([AttributeGroup.system],
+  /// such as a cylinder's passport id). Such values are identities, never
+  /// data to copy: exports leave them out and imports ignore them.
+  static bool isSystemKey(String key) =>
+      _byKey[key]?.group == AttributeGroup.system;
+}
+
+/// Turns a stored `url`-kind value into a launchable link, or null when it
+/// is not one.
+///
+/// Two jobs, and the second is the important one:
+/// 1. A bare host gets `https://` prepended. Retailers are written down as
+///    "scubashop.com", not with a scheme, and refusing those would make the
+///    field feel broken.
+/// 2. Only `http` and `https` survive. The stored text is handed to
+///    url_launcher, so a `file:`, `mailto:` or `javascript:` value would be
+///    an arbitrary launch performed on the diver's behalf -- and the value
+///    can arrive from a synced device or an import, not just from typing.
+Uri? parseWebLink(String? raw) {
+  final text = raw?.trim() ?? '';
+  if (text.isEmpty || text.contains(RegExp(r'\s'))) return null;
+
+  // Deciding whether a leading "word:" is a scheme or a host with a port.
+  // RFC 3986 allows dots in a scheme, so "shop.example.com:8080/item" parses
+  // as scheme "shop.example.com" -- which would then be rejected below as a
+  // non-web scheme, even though every browser reads it as host:port.
+  //
+  // The discriminator is the dot: real schemes ("mailto", "javascript",
+  // "file", "ftp") do not contain one, hostnames always do. Anything with a
+  // dotted prefix is treated as a host and gets https:// prepended.
+  //
+  // Deliberately NOT "prepend https:// unless it already starts with http(s)":
+  // that turns "mailto:shop@example.com" into
+  // "https://mailto:shop@example.com", which parses as userInfo "mailto:shop"
+  // on host "example.com" -- a launchable website conjured out of a mailto,
+  // exactly the substitution this function exists to prevent.
+  final schemeMatch = RegExp(r'^([A-Za-z][A-Za-z0-9+.\-]*):').firstMatch(text);
+  final hasScheme = schemeMatch != null && !schemeMatch.group(1)!.contains('.');
+  final candidate = hasScheme ? text : 'https://$text';
+
+  final uri = Uri.tryParse(candidate);
+  if (uri == null) return null;
+  if (uri.scheme != 'http' && uri.scheme != 'https') return null;
+  // A host with no dot is a typo or a local name, not a retailer's site.
+  if (!uri.host.contains('.')) return null;
+  // No userInfo. "shop.example.com@evil.com" parses with host evil.com while
+  // the detail row still shows the text as stored, so what the diver reads
+  // and what the tap opens disagree -- the classic phishing shape. Nothing
+  // legitimate about a product listing needs credentials in the URL, and a
+  // url attribute can arrive from a synced device or an import rather than
+  // from this diver's keyboard.
+  if (uri.userInfo.isNotEmpty) return null;
+  return uri;
+}
+
+/// Parses the primary (thickest, written-first) panel from a thickness
+/// designation: "5" -> 5, "5/4" -> 5, "7/5/3" -> 7, "6mm" -> 6, "thin" -> null.
+double? parsePrimaryThickness(String text) {
+  final match = RegExp(r'^\s*(\d+(?:\.\d+)?)').firstMatch(text);
+  if (match == null) return null;
+  return double.parse(match.group(1)!);
+}
+
+/// Whether [text] is an acceptable thickness designation for the Details
+/// editor:
+/// one or more numeric panels separated by `/`, `,` or `-`, each optionally
+/// suffixed with `mm`. Accepts the legacy values the v124 migration preserves
+/// verbatim (e.g. "6mm") and multi-panel forms ("5/4/3"); empty is valid
+/// because the field is optional. Only non-numeric garbage ("thin") fails.
+bool isValidThicknessDesignation(String text) {
+  final t = text.trim();
+  if (t.isEmpty) return true;
+  return RegExp(
+    r'^\d+(?:\.\d+)?\s*(?:mm)?(?:\s*[/,\-]\s*\d+(?:\.\d+)?\s*(?:mm)?)*$',
+  ).hasMatch(t);
+}

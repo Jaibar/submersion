@@ -1,28 +1,96 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:sqlite3/common.dart' as sqlite3;
 
+import 'package:submersion/core/constants/app_directories.dart';
+import 'package:submersion/core/database/background_database_connection.dart';
+import 'package:submersion/core/database/compaction/compact_database_file.dart';
+import 'package:submersion/core/database/compaction/database_compaction_prefs.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/database_connection_setup.dart';
+import 'package:submersion/core/database/database_snapshot.dart';
 import 'package:submersion/core/database/database_version_exception.dart';
+import 'package:submersion/core/database/sqlcipher_setup.dart'
+    as sqlcipher_setup;
+import 'package:submersion/core/platform/browser_origin_storage.dart';
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/platform/sqlite/raw_sqlite.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_location_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/restore_journal.dart';
+import 'package:submersion/core/services/restore_source_missing_exception.dart';
+import 'package:submersion/core/services/security/database_encryption_migrator.dart';
+import 'package:submersion/core/services/security/database_locked_exception.dart';
+import 'package:submersion/core/services/security/database_security_sidecar.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/core/services/web_library_paths.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+
+part 'database_service_browser_restore.dart';
+
+/// Which executor path [DatabaseService] used for the most recent open.
+enum DatabaseOpenMode {
+  /// Straight to the background-isolate executor (no migration pending).
+  background,
+
+  /// A pending upgrade ladder ran on the synchronous main-isolate executor
+  /// first, then the database reopened on the background executor.
+  migrationThenBackground,
+}
+
+/// Default for [DatabaseService._runUpgradeLadder]'s VACUUM ticket: a caller
+/// that hands over no ticket gets the pre-existing behaviour.
+bool _alwaysPending() => true;
+
+void _noop() {}
 
 class DatabaseService {
   DatabaseService._();
 
   static final DatabaseService instance = DatabaseService._();
 
+  final _log = LoggerService.forClass(DatabaseService);
+
   AppDatabase? _database;
+
+  /// The worker isolate behind [_database], when it was opened on one. Held so
+  /// [close] can wait for SQLite to actually finish closing rather than just
+  /// for drift's acknowledgement — see [BackgroundDatabaseConnection].
+  BackgroundDatabaseConnection? _background;
+
   DatabaseLocationService? _locationService;
   String? _currentDatabasePath;
   bool _isMigrating = false;
 
+  /// SQLCipher raw key (64 lowercase hex chars) for the main database, set by
+  /// DatabaseSecurityService BEFORE initialize()/reinitializeAtPath() when
+  /// encryption is enabled. Null = open without a key (plaintext database).
+  String? databaseKeyHex;
+
   /// Whether a database migration is currently in progress
   /// During migration, database access should be avoided
   bool get isMigrating => _isMigrating;
+
+  int _generation = 0;
+  final _generationChanges = StreamController<int>.broadcast(sync: true);
+
+  /// Moves each time a new database instance is installed: at startup, on
+  /// a reopen in place (a storage-location move), a restore, or a test's
+  /// injected database. A listener on one instance's table ticks rebuilds
+  /// on a change, or it keeps following a closed connection.
+  int get generation => _generation;
+
+  /// The new [generation], each time it moves.
+  Stream<int> get generationChanges => _generationChanges.stream;
+
+  void _installed() => _generationChanges.add(++_generation);
 
   AppDatabase get database {
     if (_isMigrating) {
@@ -60,75 +128,576 @@ class DatabaseService {
   /// The current database file path (set after initialization)
   String? get currentPath => _currentDatabasePath;
 
+  /// Whether the last [initialize] reached the database file: an open was
+  /// attempted, even one that failed part way, or a connection is open.
+  ///
+  /// The connection is only recorded once the open fully succeeds, but the
+  /// open touches the file well before that (the background connection, the
+  /// forcing query, the schema ladder). False therefore means the file was
+  /// never reached, as when its folder could not even be created. Scoped to
+  /// one attempt: [initialize] and [close] both clear it.
+  bool get hasReachedFile => _database != null || _openAttempted;
+  bool _openAttempted = false;
+
   /// For testing only: allows injecting a test database
   @visibleForTesting
   void setTestDatabase(AppDatabase db) {
     _database = db;
+    _installed();
+  }
+
+  /// Test seam for the sqlcipher export used by portable backup/restore.
+  @visibleForTesting
+  SqlcipherExporter? debugExporterOverride;
+
+  @visibleForTesting
+  void setCurrentPathForTesting(String path) {
+    _currentDatabasePath = path;
   }
 
   /// For testing only: resets the database instance
   @visibleForTesting
   void resetForTesting() {
     _database = null;
+    _openAttempted = false;
+    _background = null;
     _locationService = null;
     _currentDatabasePath = null;
+    databaseKeyHex = null;
+    debugExporterOverride = null;
+    debugSnapshotterOverride = null;
+    lastOpenMode = null;
+    // The service is a singleton, so a restore seam set by one test would
+    // otherwise leak into the next and fire unexpectedly.
+    debugOnRestoreWindowOpen = null;
+    debugFailDeleteFor = null;
+    debugClock = null;
+    compactFileOverride = null;
   }
 
-  /// Initialize the database with optional location service for custom paths
+  /// Registers [locationService] without opening anything.
+  ///
+  /// [restore] resolves its destination through the location service, but the
+  /// startup failure screen can offer a restore on a launch where [initialize]
+  /// never got far enough to register one. Without this, a restore attempted
+  /// from that screen would target the DEFAULT database path and quietly write
+  /// past a diver's custom database location.
+  ///
+  /// Does not overwrite a service already registered by [initialize].
+  void adoptLocationService(DatabaseLocationService locationService) {
+    _locationService ??= locationService;
+  }
+
+  /// Initialize the database with optional location service for custom paths.
+  ///
+  /// [allowSchemaUpgrade] false makes a pending upgrade a hard stop: no drift
+  /// connection is created and [SchemaUpgradePendingException] is thrown
+  /// instead. The version probe still opens and closes the file to read
+  /// `PRAGMA user_version`, but nothing writes to it. Headless callers pass
+  /// false -- see [SchemaUpgradePendingException] for why the background
+  /// isolate must never run the ladder.
+  ///
+  /// [compaction] lets this open honour a compaction the running app asked
+  /// for (issue #3333); null, the default, never compacts, so only the
+  /// foreground launch, which passes it, can spend time rewriting the file.
+  /// [onCompacting] is told just before that rewrite starts.
+  /// [pathOverride] opens that file instead of the location service's path,
+  /// without changing the location service: demo mode opens its sample
+  /// logbook this way and leaves the user's database location as it was
+  /// (issue #3708).
   Future<void> initialize({
     DatabaseLocationService? locationService,
     void Function(int currentStep, int totalSteps)? onMigrationProgress,
+    bool allowSchemaUpgrade = true,
+    DatabaseCompactionPrefs? compaction,
+    void Function()? onCompacting,
+    String? pathOverride,
   }) async {
     if (_database != null) return;
+    _openAttempted = false;
 
-    _locationService = locationService;
-    final dbPath = await _resolveDatabasePath();
+    // Keep an already-registered service when called without one. [restore]
+    // reopens via a bare `initialize()`, and clearing the location service
+    // there would make the reopen resolve the DEFAULT path, silently
+    // abandoning a custom database location on every restore.
+    _locationService = locationService ?? _locationService;
+    final dbPath = pathOverride ?? await _resolveDatabasePath();
     _currentDatabasePath = dbPath;
 
-    // Ensure directory exists
-    final dbDir = Directory(p.dirname(dbPath));
-    if (!await dbDir.exists()) {
-      await dbDir.create(recursive: true);
+    // Ensure directory exists. A browser has no directory: its database
+    // lives in the origin private file system under drift's name for it.
+    if (!HostPlatform.isWeb) {
+      final dbDir = Directory(p.dirname(dbPath));
+      if (!await dbDir.exists()) {
+        await dbDir.create(recursive: true);
+      }
     }
 
-    // Guard: reject databases created by a newer version of the app
-    _assertSchemaVersionCompatible(dbPath);
-
-    final file = File(dbPath);
-    // Use synchronous NativeDatabase instead of createInBackground to avoid
-    // isolate communication issues during migration. Background isolates can
-    // cause close() to hang indefinitely if called mid-migration.
-    // Progress bar updates still render between migration steps via the
-    // Future.delayed(Duration.zero) yield in reportProgress().
-    _database = AppDatabase(
-      NativeDatabase(file),
+    _openAttempted = true;
+    _database = await _openDatabase(
+      dbPath,
       onMigrationProgress: onMigrationProgress,
+      allowSchemaUpgrade: allowSchemaUpgrade,
+      compaction: compaction,
+      onCompacting: onCompacting,
+    );
+    _installed();
+
+    // No cipher in a browser: encryption at rest is not offered there.
+    if (!HostPlatform.isWeb) await _assertCipherAvailable(_database!);
+  }
+
+  /// Fails loudly if the native library behind the OPEN connection is not
+  /// SQLCipher (e.g. the dynamic linker resolved sqlite3 symbols to a
+  /// system/plugin copy on iOS/macOS). Encrypted databases would be unopenable
+  /// and enabling encryption would corrupt silently, so this must be caught on
+  /// day one.
+  ///
+  /// The first line of defence is now `assertDatabaseEngineAvailable`, which
+  /// checks the same invariant on an in-memory handle BEFORE any user file is
+  /// touched. This stays as the check on the real connection.
+  ///
+  /// Skipped under `flutter test`, where a suite may legitimately be running
+  /// against an injected in-memory database. (The host runner itself does link
+  /// SQLCipher through the sqlite3 build hook; see sqlcipher_setup_test.dart,
+  /// which asserts exactly that.)
+  Future<void> _assertCipherAvailable(AppDatabase db) async {
+    if (HostPlatform.environment.containsKey('FLUTTER_TEST')) return;
+    final rows = await db.customSelect('PRAGMA cipher_version').get();
+    if (rows.isEmpty) {
+      throw StateError(
+        'SQLCipher is not linked: PRAGMA cipher_version returned nothing. '
+        'The app was built against a non-SQLCipher sqlite3 library.',
+      );
+    }
+  }
+
+  /// Which executor path [_openDatabase] took on the most recent open.
+  @visibleForTesting
+  DatabaseOpenMode? lastOpenMode;
+
+  /// Opens [dbPath] with SQLite execution OFF the UI isolate (WS5,
+  /// large-DB performance), while keeping the battle-tested migration
+  /// semantics on the synchronous executor.
+  ///
+  /// Two phases:
+  /// 1. If an upgrade ladder is PENDING, run it to completion on the
+  ///    synchronous main-isolate connection exactly as before —
+  ///    progress callbacks, pre-migration backup close/reopen, and
+  ///    hot-journal recovery are proven there, and closing a background
+  ///    executor MID-migration has historically hung. The close happens
+  ///    strictly after the ladder finishes.
+  /// 2. Open with [BackgroundDatabaseConnection.open] (a
+  ///    `NativeDatabase.createInBackground` equivalent that owns the worker
+  ///    isolate, so [close] can wait for SQLite to actually finish closing):
+  ///    every statement executes on drift's worker isolate. Migration
+  ///    callbacks (onCreate for fresh files, the beforeOpen re-asserts)
+  ///    still run on the main isolate and issue their statements through
+  ///    the remote executor, so their semantics are unchanged.
+  ///
+  /// A single synchronous `PRAGMA user_version` read (via
+  /// [getStoredSchemaVersion]) drives BOTH the newer-than-app guard and
+  /// the migration-pending decision, and is handed on to
+  /// [_runUpgradeLadder] for its one-time VACUUM rather than re-read there,
+  /// so the file is opened synchronously
+  /// on the UI isolate at most once per open — the rest is executor work.
+  Future<AppDatabase> _openDatabase(
+    String dbPath, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+    bool allowSchemaUpgrade = true,
+    DatabaseCompactionPrefs? compaction,
+    void Function()? onCompacting,
+  }) async {
+    if (HostPlatform.isWeb) {
+      return _openWebDatabase(
+        dbPath,
+        onMigrationProgress: onMigrationProgress,
+        allowSchemaUpgrade: allowSchemaUpgrade,
+      );
+    }
+    final file = File(dbPath);
+    final keyHex = databaseKeyHex;
+    final stored = getStoredSchemaVersion(dbPath, keyHex: keyHex);
+
+    // Guard: reject databases created by a newer version of the app.
+    if (stored != null && stored > AppDatabase.currentSchemaVersion) {
+      throw DatabaseVersionMismatchException(
+        storedSchemaVersion: stored,
+        supportedSchemaVersion: AppDatabase.currentSchemaVersion,
+      );
+    }
+
+    final migrationPending =
+        stored != null &&
+        stored > 0 &&
+        stored < AppDatabase.currentSchemaVersion;
+
+    // Refused before any drift connection exists: drift runs the ladder on
+    // the first statement, so a caller barred from upgrading must never be
+    // handed a connection at all.
+    //
+    // The FILE has been opened by this point -- [getStoredSchemaVersion] a
+    // few lines up opens it read-write and closes it again, which is also
+    // what rolls back a hot journal (see StartupPhase.preflight, which
+    // documents the same distinction). What the guard promises is narrower
+    // and is what the tests assert: nothing wrote to it, so the stored
+    // version is exactly as the foreground will find it.
+    //
+    // A missing file is not a pending upgrade -- creation is onCreate, which
+    // a headless first run may legitimately do.
+    if (migrationPending && !allowSchemaUpgrade) {
+      throw SchemaUpgradePendingException(
+        storedSchemaVersion: stored,
+        supportedSchemaVersion: AppDatabase.currentSchemaVersion,
+      );
+    }
+
+    // True once the ladder below has actually rewritten the file. Not the
+    // ticket: a VACUUM that throws has taken the ticket without compacting.
+    var ladderVacuumed = false;
+    if (migrationPending) {
+      // Each retry re-runs the ladder from the top on a brand new connection.
+      // That is safe -- every step is idempotent by contract -- but it does
+      // mean onMigrationProgress can restart at step 1, so a progress bar may
+      // visibly rewind. A rewinding bar beats a bricked launch.
+      // The VACUUM ticket lives out here, not inside the ladder: a busy lock
+      // makes retryWhileDatabaseBusy call the whole thing again from the
+      // top, and rewriting a 769 MB file a second time is exactly the cost
+      // the one-shot design was avoiding. Taken at most once per open.
+      var vacuumTicket = true;
+      await retryWhileDatabaseBusy(
+        () => _runUpgradeLadder(
+          file,
+          keyHex,
+          stored,
+          onMigrationProgress,
+          vacuumPending: () => vacuumTicket,
+          takeVacuumTicket: () => vacuumTicket = false,
+          onVacuumed: () => ladderVacuumed = true,
+        ),
+      );
+      lastOpenMode = DatabaseOpenMode.migrationThenBackground;
+    } else {
+      lastOpenMode = DatabaseOpenMode.background;
+    }
+
+    if (compaction != null) {
+      await _compactAsRequested(dbPath, keyHex, compaction, onCompacting, (
+        alreadyVacuumed: ladderVacuumed,
+      ));
+    }
+
+    return retryWhileDatabaseBusy(
+      () => _openOnBackgroundExecutor(dbPath, keyHex, onMigrationProgress),
     );
   }
 
-  /// Reinitialize the database at a specific path (used during migration)
-  Future<void> reinitializeAtPath(String newPath) async {
-    await close();
+  /// The browser open: no file, no cipher and no upgrade ladder.
+  ///
+  /// The stored version is read through a probe connection with drift's
+  /// migrations off, so the newer-than-app guard and the upgrade refusal
+  /// apply as on native. drift then runs the schema migration itself on the
+  /// first statement, reporting through [onMigrationProgress]; the ladder's
+  /// pre-migration backup and VACUUM have no file to work on here.
+  Future<AppDatabase> _openWebDatabase(
+    String dbPath, {
+    required void Function(int currentStep, int totalSteps)?
+    onMigrationProgress,
+    required bool allowSchemaUpgrade,
+  }) async {
+    final stored = await BackgroundDatabaseConnection.readStoredSchemaVersion(
+      dbPath,
+    );
+    if (stored > AppDatabase.currentSchemaVersion) {
+      throw DatabaseVersionMismatchException(
+        storedSchemaVersion: stored,
+        supportedSchemaVersion: AppDatabase.currentSchemaVersion,
+      );
+    }
+    final migrationPending =
+        stored > 0 && stored < AppDatabase.currentSchemaVersion;
+    if (migrationPending && !allowSchemaUpgrade) {
+      throw SchemaUpgradePendingException(
+        storedSchemaVersion: stored,
+        supportedSchemaVersion: AppDatabase.currentSchemaVersion,
+      );
+    }
+    lastOpenMode = DatabaseOpenMode.background;
+    return _openOnBackgroundExecutor(dbPath, null, onMigrationProgress);
+  }
 
-    _currentDatabasePath = newPath;
+  /// Test seam for the rewrite [_compactAsRequested] runs.
+  @visibleForTesting
+  Future<void> Function(String path, {String? keyHex})? compactFileOverride;
 
-    // Ensure directory exists
-    final dbDir = Directory(p.dirname(newPath));
-    if (!await dbDir.exists()) {
-      await dbDir.create(recursive: true);
+  /// Runs a compaction the app asked for while it ran, before the
+  /// background connection opens the file.
+  ///
+  /// The request is cleared before the attempt: a rewrite the OS kills
+  /// part way leaves a correct database, and the next launch must not walk
+  /// straight back into it. A failure (a busy lock, too little room for the
+  /// rewrite's copy) is logged and holds automatic requests off for a while;
+  /// the database is correct, only larger than it needs to be. Nothing here
+  /// may stop the open: compaction is an optimization, so a preferences
+  /// failure skips it.
+  Future<void> _compactAsRequested(
+    String dbPath,
+    String? keyHex,
+    DatabaseCompactionPrefs compaction,
+    void Function()? onCompacting,
+    ({bool alreadyVacuumed}) ladder,
+  ) async {
+    try {
+      if (!compaction.isRequested) return;
+      await compaction.cancel();
+    } catch (e, stackTrace) {
+      _log.warning(
+        'Could not read the compaction request; not compacting',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return;
+    }
+    // The upgrade ladder's own VACUUM at this open already did the work.
+    if (ladder.alreadyVacuumed) return;
+    onCompacting?.call();
+    try {
+      await (compactFileOverride ?? compactDatabaseFile)(
+        dbPath,
+        keyHex: keyHex,
+      );
+    } catch (e, stackTrace) {
+      try {
+        await compaction.recordFailure();
+      } catch (_) {
+        // Logged below; a missed backoff only means another attempt.
+      }
+      _log.warning(
+        'Requested compaction skipped; the database is correct but keeps '
+        'its free pages',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Runs the pending upgrade ladder to completion on a synchronous
+  /// main-isolate connection, then closes it.
+  ///
+  /// Self-contained so [retryWhileDatabaseBusy] can simply call it again: a
+  /// drift executor caches the error from a failed migration and rethrows it
+  /// on every later use, so a retry has to start from a new connection, and
+  /// the old one's locks have to be gone before the next attempt takes any.
+  Future<void> _runUpgradeLadder(
+    File file,
+    String? keyHex,
+    int? storedBefore,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress, {
+    bool Function() vacuumPending = _alwaysPending,
+    void Function() takeVacuumTicket = _noop,
+    void Function() onVacuumed = _noop,
+  }) async {
+    // Whether this attempt will VACUUM, decided before the ladder starts so
+    // every progress report of this open counts the same total.
+    final willVacuum =
+        storedBefore != null && storedBefore < 183 && vacuumPending();
+    final ladderSteps = storedBefore == null
+        ? 0
+        : AppDatabase.migrationStepCount(storedBefore);
+    // The VACUUM is a step of the upgrade as the diver experiences it, so it
+    // is counted as one. Without it the ladder's last report reads
+    // "finished" and the bar sits full while a large file is rewritten, with
+    // nothing on screen saying the app is still working. The callback shape
+    // carries the total on every call, so an extra step needs no new API.
+    void report(int currentStep, int totalSteps) {
+      onMigrationProgress?.call(
+        currentStep,
+        willVacuum ? totalSteps + 1 : totalSteps,
+      );
     }
 
-    // Guard: reject databases created by a newer version of the app
-    _assertSchemaVersionCompatible(newPath);
+    final migrator = AppDatabase(
+      openMainIsolateConnection(file.path, keyHex: keyHex),
+      onMigrationProgress: onMigrationProgress == null ? null : report,
+    );
+    try {
+      // Force the upgrade ladder to completion before switching executors.
+      await migrator.customSelect('SELECT 1').get();
+      // [storedBefore] is the version the file had ON DISK before the
+      // ladder ran, read by the caller: keying off the migrator's own
+      // version here would always read 183 and never VACUUM. The ladder's
+      // own beforeOpen backstop can also drop the legacy tables on a file
+      // already stamped 183, which no version comparison can see, so the
+      // drop itself is the second reason to reclaim.
+      //
+      // Unreachable while 183 is the current version, because this method
+      // only runs with a ladder pending and every such file is below 183.
+      // It is here for the rung after next: a file stamped 183 whose v184
+      // ladder is pending has willVacuum false, and its backstop can still
+      // be the open that finally drops the tables. The background executor
+      // reopens on a fresh connection that no longer sees them, so nothing
+      // downstream would catch it.
+      //
+      // v190 (issue #227) recompresses raw_data in place, which frees pages
+      // the same way the v183 drop did. A file upgrading from 184 or later
+      // has willVacuum false, so the recompression reaches the one VACUUM
+      // through this branch, unannounced as a progress step. The totals were
+      // fixed before the ladder started, and reporting an unplanned reclaim
+      // as a step would send the bar past its own total.
+      final unplannedReclaim = !willVacuum && migrator.hasUnreclaimedPages;
+      if (vacuumPending() && (willVacuum || unplannedReclaim)) {
+        // v183 dropped the row-per-sample tables, which on an older file are
+        // most of its pages, and v190 rewrites every raw_data blob smaller;
+        // both leave the freed pages on the freelist. VACUUM here: outside
+        // any migration transaction,
+        // on the one exclusive main-isolate connection, and before the
+        // background executor opens the file. Non-fatal: a busy lock or an
+        // out-of-space temp store leaves a correct database that is merely
+        // larger than it needs to be.
+        //
+        // One shot per open. A VACUUM killed part way leaves a correct
+        // database still carrying its free pages, and the drop that earned
+        // the reclamation has already happened, so nothing asks again. The
+        // ticket is taken before the attempt, not after, so a VACUUM that
+        // throws is not retried either.
+        //
+        // Announced as a step only when it was PLANNED. The totals were
+        // fixed before the ladder started so every report of this open
+        // agrees, and reporting an unplanned reclaim as a step would send
+        // the bar past its own total.
+        takeVacuumTicket();
+        if (!unplannedReclaim) report(ladderSteps, ladderSteps);
+        try {
+          await migrator.customStatement('VACUUM');
+          onVacuumed();
+        } catch (e, stackTrace) {
+          _log.warning(
+            'Post-migration VACUUM skipped; the database is correct but has '
+            'not returned its free pages to the filesystem '
+            '(${migrator.unreclaimedPagesReason})',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+        if (!unplannedReclaim) report(ladderSteps + 1, ladderSteps);
+      }
+    } catch (_) {
+      // Best-effort close so we don't leak the connection (or its locks, which
+      // would defeat the retry), then let the original error surface.
+      await migrator
+          .close()
+          .timeout(const Duration(seconds: 5), onTimeout: () {})
+          .catchError((_) {});
+      rethrow;
+    }
+    // The synchronous connection MUST fully close (releasing its file locks)
+    // before the background executor reopens the same file. A timed-out close
+    // would leave locks held and risk "database is locked"/corruption on the
+    // reopen, so fail fast rather than silently proceed.
+    await migrator.close().timeout(const Duration(seconds: 5));
+  }
+
+  /// Opens on the worker isolate and forces the connection all the way open
+  /// before returning it.
+  ///
+  /// The forcing statement is the point. Drift opens lazily, so without it
+  /// `beforeOpen` -- which re-asserts schema and re-seeds reference data with
+  /// dozens of writes -- would not run until some unrelated screen happened to
+  /// issue the first query. That put a lock failure an arbitrary distance away
+  /// from the open that caused it: too late for the retry here, too late for
+  /// the startup screen to classify it, and reported against whatever feature
+  /// asked first. (It also silently made `flutter test` opens do nothing,
+  /// because the one statement that used to force them,
+  /// [_assertCipherAvailable]'s `PRAGMA cipher_version`, short-circuits under
+  /// FLUTTER_TEST.)
+  Future<AppDatabase> _openOnBackgroundExecutor(
+    String dbPath,
+    String? keyHex,
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  ) async {
+    final background = await BackgroundDatabaseConnection.open(
+      dbPath,
+      keyHex: keyHex,
+    );
+    final database = AppDatabase(
+      background.connection,
+      onMigrationProgress: onMigrationProgress,
+    );
+    try {
+      await database.customSelect('SELECT 1').get();
+    } catch (_) {
+      // Tear the whole attempt down, worker isolate included, so a retry does
+      // not race this connection's locks.
+      await closeDatabaseForAppShutdown(database, background: background);
+      rethrow;
+    }
+    // The forcing statement above ran beforeOpen, and that is where the
+    // v183 backstop drops a legacy sample table the rung had to skip. This
+    // open has no pending ladder, so nothing else will ever reclaim those
+    // pages: without this the diver's file stays at its pre-migration size
+    // permanently, because there is no other VACUUM of the live database
+    // anywhere in the app.
+    //
+    // On the worker isolate, so a large rewrite does not block the UI, and
+    // awaited, so nothing queries a file mid-VACUUM. Non-fatal for the same
+    // reason as the migration path's copy: a busy lock or a full temp store
+    // leaves a correct database that is merely larger than it needs to be.
+    //
+    // The v190 recompression reaches this the same way if it ever runs on an
+    // open with no pending ladder. It cannot today, but the gate is one
+    // signal so a future rung that frees pages does not have to remember to
+    // add itself in two places.
+    if (database.hasUnreclaimedPages) {
+      try {
+        await database.customStatement('VACUUM');
+      } catch (e, stackTrace) {
+        _log.warning(
+          'VACUUM after an upgrade freed pages was skipped; the database is '
+          'correct but has not returned them to the filesystem '
+          '(${database.unreclaimedPagesReason})',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    _background = background;
+    return database;
+  }
+
+  /// Reinitialize the database at a specific path (used during migration)
+  ///
+  /// Runs as a [SyncCoordinator] turn: a sync still merging would otherwise
+  /// carry its remaining steps into the newly opened file (issue #3798).
+  Future<void> reinitializeAtPath(String newPath) =>
+      SyncCoordinator.join(() => _reinitializeAtPath(newPath));
+
+  Future<void> _reinitializeAtPath(
+    String newPath, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    // Strict close: this method reopens immediately, so it must not race a
+    // background connection that timed out mid-close and is still holding
+    // file locks. A stuck close throws here rather than being abandoned.
+    await close(strict: true);
+
+    // Ensure directory exists. A browser has none: its databases are named
+    // in the origin private file system.
+    if (!HostPlatform.isWeb) {
+      final dbDir = Directory(p.dirname(newPath));
+      if (!await dbDir.exists()) {
+        await dbDir.create(recursive: true);
+      }
+    }
 
     // Small delay to ensure any previous database connections are fully released
     // This helps prevent SQLite file locking issues, especially with WAL mode
     await Future.delayed(const Duration(milliseconds: 100));
 
-    final file = File(newPath);
-    // Use synchronous NativeDatabase instead of createInBackground to avoid
-    // isolate communication issues during migration
-    _database = AppDatabase(NativeDatabase(file));
+    _database = await _openDatabase(
+      newPath,
+      onMigrationProgress: onMigrationProgress,
+    );
+    _installed();
 
     // Verify the database is ready by running a simple query
     // This ensures the connection is fully established before returning
@@ -138,76 +707,250 @@ class DatabaseService {
           .get()
           .timeout(const Duration(seconds: 10));
     } catch (e) {
-      // If verification fails, close and rethrow
-      await close();
+      // Verification failed: close the just-opened connection before
+      // rethrowing. Strict close so a timed-out close does NOT null
+      // _database and orphan a still-open background connection whose locks
+      // would block a rollback/retry. If the strict close itself throws,
+      // the reference is intentionally kept (strict contract) and we still
+      // surface the ORIGINAL verification error rather than masking it.
+      try {
+        await close(strict: true);
+      } catch (_) {}
       rethrow;
     }
+
+    // Commit the new path ONLY after a verified open. Setting it earlier
+    // would leave the service pointing at newPath even when _openDatabase
+    // threw (version mismatch / corrupt file) and nothing is open there,
+    // confusing later recovery/rollback code that reads databasePath.
+    _currentDatabasePath = newPath;
   }
 
-  Future<void> close() async {
-    if (_database == null) return;
-
-    try {
-      // Add timeout to prevent hanging indefinitely
-      await _database!.close().timeout(
-        const Duration(seconds: 5),
-        onTimeout: () {
-          // If close times out, just abandon the connection
-          // The OS will clean up the file handles when the app exits
-        },
-      );
-    } catch (e) {
-      // Ignore close errors - we're abandoning this connection anyway
-    } finally {
-      _database = null;
-    }
-  }
-
-  /// Throws [DatabaseVersionMismatchException] if the database file's schema
-  /// version is newer than what this build of the app supports.
+  /// Closes the active database connection.
   ///
-  /// Uses raw sqlite3 to read PRAGMA user_version before Drift opens the
-  /// database, ensuring the file is never modified by a stale migration.
-  void _assertSchemaVersionCompatible(String dbPath) {
-    final file = File(dbPath);
-    if (!file.existsSync()) return;
+  /// Default (shutdown/abandon) behavior: a timed-out or failed close is
+  /// swallowed and the connection is dropped — the OS reclaims the file
+  /// handles when the app exits.
+  ///
+  /// [strict] is for reopen-after-close paths (storage move / restore):
+  /// they immediately reopen the same file, so a half-closed background
+  /// connection still holding locks would race the reopen and surface as
+  /// "database is locked"/corruption. In strict mode a timed-out or failed
+  /// close THROWS instead of being abandoned, and [_database] is left
+  /// non-null so the still-open connection is not orphaned and the caller
+  /// can retry — [_database] is cleared ONLY on a clean close.
+  Future<void> close({bool strict = false}) async {
+    // A close ends the attempt [hasReachedFile] describes, including one
+    // whose open failed before a connection was ever recorded.
+    if (_database == null) {
+      _openAttempted = false;
+      return;
+    }
 
-    // Open in read-write mode so SQLite can recover any hot journal/WAL
-    // from a previous crash. Opening read-only would fail with
-    // SQLITE_READONLY_ROLLBACK (code 776) if recovery is needed.
-    final db = sqlite3.sqlite3.open(dbPath);
-    try {
-      final result = db.select('PRAGMA user_version');
-      if (result.isEmpty) return;
-
-      final storedVersion = result.first.values.first;
-      if (storedVersion is int &&
-          storedVersion > AppDatabase.currentSchemaVersion) {
-        throw DatabaseVersionMismatchException(
-          databaseVersion: storedVersion,
-          appVersion: AppDatabase.currentSchemaVersion,
-        );
+    if (strict) {
+      // Graceful close first, but only briefly: GeneratedDatabase.close()
+      // awaits streamQueries.close(), which hangs for as long as ANY watch()
+      // subscription is paused — and Riverpod 3 auto-pauses the streams of
+      // providers nobody is currently listening to, so a mid-session restore
+      // almost always has one. Trusting the graceful close with a throwing
+      // timeout here made large-DB restores fail with TimeoutException until
+      // retried. On a hang, fall through and close the executor directly:
+      // idempotent when the graceful close got that far, and it sends the
+      // shutdown request the hung close never reached. Skipping the
+      // stream-store cleanup is safe on this path — the connection is being
+      // replaced, and the old stream subscriptions die with it.
+      final graceful = _database!.close();
+      try {
+        await graceful.timeout(const Duration(seconds: 2));
+      } on TimeoutException {
+        graceful.ignore();
+        // No onTimeout swallow: if even the direct executor close cannot get
+        // an acknowledgment, the connection is genuinely stuck and the caller
+        // must not race the file swap. Clear the reference only after the
+        // close actually completed — on failure we keep it so the connection
+        // (and its locks) is not leaked and a retry can re-attempt the close
+        // before reopening.
+        await _database!.executor.close().timeout(const Duration(seconds: 5));
       }
+      // Drift acknowledges the shutdown request before the worker isolate
+      // runs sqlite3_close_v2, so the await above does NOT mean the file is
+      // closed. A caller about to reopen the same file must wait for the
+      // real close, and a stuck worker throws rather than being killed:
+      // killing it would strand an open handle holding the file locks.
+      //
+      // The budget here is deliberately much longer than the 5s ack wait:
+      // the worker's sqlite3_close_v2 is where a WAL checkpoint-on-close
+      // runs, which on a multi-hundred-MB database can take tens of
+      // seconds. Restore/move callers strongly prefer a slow success over
+      // a fast TimeoutException that aborts the whole operation.
+      await _background?.awaitWorkerShutdown(
+        timeout: const Duration(seconds: 60),
+        killIfStuck: false,
+      );
+      _background = null;
+      _database = null;
+      _openAttempted = false;
+      return;
+    }
+
+    // Shutdown/abandon path. Two traps make a plain close() unsafe here:
+    // paused watch() subscriptions (Riverpod 3 auto-pause) hang the graceful
+    // close before it ever reaches the executor, and the background worker
+    // acknowledges the executor close before SQLite is actually closed. If
+    // the app then terminates, the worker's sqlite3_close_v2 calls back into
+    // Dart (drift's SQL function destructors) after the VM tore down its FFI
+    // callback metadata, aborting with "GetFfiCallbackMetadata called after
+    // shutdown" and hanging the app in the Dock. See
+    // closeDatabaseForAppShutdown for how each is handled.
+    try {
+      await closeDatabaseForAppShutdown(_database!, background: _background);
     } finally {
-      db.dispose();
+      _background = null;
+      _database = null;
+      _openAttempted = false;
     }
   }
 
   /// Reads the stored schema version from a database file without opening it
   /// through Drift. Returns null if the file does not exist, or the integer
   /// PRAGMA user_version value otherwise.
-  static int? getStoredSchemaVersion(String dbPath) {
+  ///
+  /// Opens in read-write mode (not read-only) so SQLite can automatically
+  /// roll back any hot journal left behind by a previous crash. A read-only
+  /// open on a db with a pending rollback throws SQLITE_READONLY_ROLLBACK
+  /// (extended code 776) before even the first PRAGMA can execute.
+  static int? getStoredSchemaVersion(String dbPath, {String? keyHex}) {
     final file = File(dbPath);
     if (!file.existsSync()) return null;
 
-    final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+    final db = openRaw(dbPath, keyHex: keyHex);
     try {
       final result = db.select('PRAGMA user_version');
       if (result.isEmpty) return null;
       return result.first.values.first as int;
+    } on sqlite3.SqliteException catch (e) {
+      // An encrypted file read without (or with the wrong) key surfaces as
+      // NOTADB on the first real page read — but so does a CORRUPT plaintext
+      // database, since the header probe alone cannot tell the two apart
+      // (both simply fail to start with the SQLite magic).
+      //
+      // So require corroboration before routing to the unlock flow, the same
+      // rule the startup gate applies: either a key was supplied (we already
+      // believed the file was encrypted and it was rejected) or the keyslot
+      // sidecar exists (this install has security material). With neither,
+      // let the SqliteException through to the corruption-recovery flow —
+      // sending corruption to the lock screen would strand the user there,
+      // because no password can unwrap a sidecar that does not exist.
+      if (_isNotADatabaseError(e) &&
+          isEncryptedDatabaseFile(dbPath) &&
+          (keyHex != null || DatabaseSecuritySidecar.existsFor(dbPath))) {
+        throw DatabaseLockedException(dbPath, wrongKey: keyHex != null);
+      }
+      rethrow;
     } finally {
-      db.dispose();
+      db.close();
     }
+  }
+
+  /// The PRAGMA that keys a SQLCipher connection with a raw key. Delegate to
+  /// the single definition in sqlcipher_setup.dart.
+  static String cipherKeyPragma(String keyHex) =>
+      sqlcipher_setup.cipherKeyPragma(keyHex);
+
+  /// Single choke point for raw (non-drift) opens of the main database.
+  /// Applies the cipher key and busy timeout, and disposes the handle on
+  /// failure.
+  ///
+  /// The busy timeout matters as much here as on the drift connections: the
+  /// version probe and the pre-migration WAL checkpoint both run at startup,
+  /// the very moment a headless isolate is most likely to be holding a lock.
+  static sqlite3.CommonDatabase openRaw(
+    String path, {
+    sqlite3.OpenMode mode = sqlite3.OpenMode.readWrite,
+    String? keyHex,
+  }) {
+    final db = RawSqlite.open(path, mode: mode);
+    try {
+      // Basics only, never the journal mode: this opens backup artifacts and
+      // candidate files at other locations as well as the live database, and
+      // a probe has no business rewriting the header of a file it is only
+      // looking at. WAL is set by applyMainDatabaseSetup, on the real
+      // connection.
+      applyConnectionBasics(db, keyHex: keyHex);
+    } catch (_) {
+      db.close();
+      rethrow;
+    }
+    return db;
+  }
+
+  /// True when [error] is SQLite's NOTADB ("file is not a database", primary
+  /// result code 26) — what SQLCipher raises when reading an encrypted file
+  /// with a missing or wrong key.
+  static bool _isNotADatabaseError(Object error) =>
+      error is sqlite3.SqliteException && error.resultCode == 26;
+
+  /// Force SQLite to complete any pending hot-journal rollback on [dbPath].
+  ///
+  /// Opens the file in read-write mode — the very act of opening triggers
+  /// SQLite's automatic recovery of a hot journal. Returns true if the file
+  /// opened cleanly (recovery either wasn't needed or succeeded), false if
+  /// the journal could not be rolled back (file still read-only, on a
+  /// read-only volume, etc.).
+  ///
+  /// Safe to call on a file without a hot journal: it simply no-ops.
+  static bool recoverHotJournal(String dbPath, {String? keyHex}) {
+    final file = File(dbPath);
+    if (!file.existsSync()) return true;
+    try {
+      final db = openRaw(dbPath, keyHex: keyHex);
+      try {
+        db.select('PRAGMA user_version');
+      } finally {
+        db.close();
+      }
+      return true;
+    } on sqlite3.SqliteException {
+      return false;
+    }
+  }
+
+  /// Folds the `-wal` beside the database file at [dbPath] into the file
+  /// itself, so that the file alone holds every committed transaction.
+  ///
+  /// [restore] stages only the main file of its source. That is right for a
+  /// backup artifact, which never has a journal, but a database copy the
+  /// restore journal set aside can: a copy taken while the app was killed
+  /// with the database open keeps its latest dives in its `-wal` (issue
+  /// #1923). Restoring such a copy without this step would silently drop
+  /// them.
+  ///
+  /// Throws when the log could not be folded completely, which callers must
+  /// treat as "do not restore from this file".
+  static void checkpointWriteAheadLog(String dbPath, {String? keyHex}) {
+    final db = openRaw(dbPath, keyHex: keyHex);
+    try {
+      db.select('PRAGMA wal_checkpoint(TRUNCATE)');
+    } finally {
+      db.close();
+    }
+    // Judged by the file rather than the pragma's busy flag: a checkpoint
+    // another connection blocked leaves frames in the log, and so does one
+    // SQLite skipped for any other reason.
+    final wal = File('$dbPath-wal');
+    if (wal.existsSync() && wal.lengthSync() > 0) {
+      throw FileSystemException(
+        'The database journal could not be folded in completely',
+        wal.path,
+      );
+    }
+  }
+
+  /// True if [error] is a [sqlite3.SqliteException] in the SQLITE_READONLY
+  /// family (primary result code 8) — typically SQLITE_READONLY_ROLLBACK
+  /// (776) after a cancelled transaction left a hot journal behind.
+  static bool isRecoverableReadonlyError(Object error) {
+    return error is sqlite3.SqliteException && error.resultCode == 8;
   }
 
   /// Resolve the database path using location service or default
@@ -221,7 +964,7 @@ class DatabaseService {
   /// Get the default database path
   Future<String> _getDefaultPath() async {
     final dbFolder = await getApplicationDocumentsDirectory();
-    return p.join(dbFolder.path, 'Submersion', 'submersion.db');
+    return p.join(dbFolder.path, kAppDocumentsFolder, 'submersion.db');
   }
 
   /// Get the current database path (async version for external use)
@@ -232,31 +975,451 @@ class DatabaseService {
     return _resolveDatabasePath();
   }
 
+  /// Copies the live database to [destinationPath] as a PLAINTEXT SQLite
+  /// file — always. Backups are portable by design: they must restore on a
+  /// device where the DB password is unknown, and the existing SBE1 backup
+  /// encryption remains the (orthogonal) way to protect backup artifacts.
+  ///
+  /// Plaintext live DB: plain file copy, as before. Encrypted live DB:
+  /// decrypt-export through a staging file, then rename into place.
   Future<void> backup(String destinationPath) async {
     final sourcePath = await databasePath;
     final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) return;
 
-    if (await sourceFile.exists()) {
-      // Ensure the destination directory exists
-      final destDir = Directory(p.dirname(destinationPath));
-      if (!await destDir.exists()) {
-        await destDir.create(recursive: true);
-      }
-      await sourceFile.copy(destinationPath);
+    // Ensure the destination directory exists
+    final destDir = Directory(p.dirname(destinationPath));
+    if (!await destDir.exists()) {
+      await destDir.create(recursive: true);
     }
+
+    final keyHex = databaseKeyHex;
+    if (keyHex != null && isEncryptedDatabaseFile(sourcePath)) {
+      final exporter = debugExporterOverride ?? sqlcipherExport;
+      final staging = '$destinationPath.export-staging';
+      await _deleteIfExists(staging);
+      try {
+        await exporter(
+          sourcePath: sourcePath,
+          targetPath: staging,
+          sourceKeyHex: keyHex,
+          targetKeyHex: null,
+        );
+        await _deleteIfExists(destinationPath);
+        await File(staging).rename(destinationPath);
+      } catch (_) {
+        await _bestEffortDelete(staging);
+        rethrow;
+      }
+      return;
+    }
+
+    // Plaintext live DB. Export through SQLite rather than copying bytes: the
+    // database is OPEN and serving while this runs (no caller closes it), so a
+    // byte copy would miss every committed row still in `<db>-wal` under WAL,
+    // and could capture a torn mid-transaction state under DELETE.
+    final snapshotter = debugSnapshotterOverride ?? vacuumIntoSnapshot;
+    final staging = '$destinationPath.export-staging';
+    await _deleteIfExists(staging);
+    var exported = false;
+    try {
+      await snapshotter(sourcePath: sourcePath, targetPath: staging);
+      exported = true;
+    } catch (e, stack) {
+      await _bestEffortDelete(staging);
+      // Degraded fallback, deliberately not a rethrow -- and scoped to the
+      // EXPORT alone. A source SQLite cannot open (corrupt, truncated, a
+      // foreign file at the database path) has no SQL-level export, but its
+      // bytes are still the only copy of whatever survives in it and may be
+      // all a recovery has to work with. The pre-migration backup makes the
+      // same trade for the same reason.
+      _log.warning(
+        'Database export for the backup failed; falling back to a raw file '
+        'copy, which may omit WAL-resident rows',
+        error: e,
+        stackTrace: stack,
+      );
+    }
+
+    if (exported) {
+      // Past this point the artifact is good and only its PLACEMENT can fail
+      // (an unwritable destination, a cross-device rename). Falling back to a
+      // byte copy there would swap a correct backup for a lossy one over a
+      // problem the copy would hit as well, so these errors surface.
+      try {
+        await _deleteIfExists(destinationPath);
+        await File(staging).rename(destinationPath);
+      } catch (_) {
+        await _bestEffortDelete(staging);
+        rethrow;
+      }
+      return;
+    }
+
+    await sourceFile.copy(destinationPath);
   }
 
-  Future<void> restore(String backupPath) async {
-    await close();
+  /// Test seam for the SQL-level export used by [backup] on a plaintext
+  /// database. Mirrors [debugExporterOverride], which covers the encrypted
+  /// branch.
+  @visibleForTesting
+  DatabaseSnapshotter? debugSnapshotterOverride;
 
+  /// Test seam: invoked synchronously the instant the live database has been
+  /// closed during [restore] — i.e. when the "database unavailable" window
+  /// opens — with the staging path. Lets tests assert the backup was fully
+  /// staged BEFORE the window opened.
+  ///
+  /// One-shot: [restore] captures and clears it before firing, and
+  /// [resetForTesting] also clears it, so a callback never leaks across tests
+  /// (the service is a singleton).
+  @visibleForTesting
+  void Function(String stagingPath)? debugOnRestoreWindowOpen;
+
+  /// Test seam: the clock behind the restore journal's timestamps, so a test
+  /// can predict the name a leftover is quarantined under. Null means
+  /// [DateTime.now]. [resetForTesting] clears it.
+  @visibleForTesting
+  DateTime Function()? debugClock;
+
+  /// The restore journal for the database at [dbPath], probing with the live
+  /// key, deleting through [_deleteIfExists] (so [debugFailDeleteFor]
+  /// reaches it) and stamping with [debugClock] when set. Public for the
+  /// startup screen, which must ask the same question before anything is
+  /// opened.
+  RestoreJournal restoreJournalFor(String dbPath) => RestoreJournal(
+    dbPath,
+    readSchemaVersion: (path) =>
+        getStoredSchemaVersion(path, keyHex: databaseKeyHex),
+    deleteFile: _deleteIfExists,
+    now: debugClock,
+  );
+
+  /// Swap the live database for [backupPath].
+  ///
+  /// [onMigrationProgress] is forwarded to the post-swap [initialize]: when
+  /// the restored file carries an older schema, the reopen runs the upgrade
+  /// ladder, and this callback is the only feedback the user gets during it.
+  ///
+  /// Throws [RestoreSourceMissingException] when [backupPath] does not exist.
+  /// The live database is left open and untouched in that case; the throw is
+  /// what lets callers tell "nothing happened" from a completed restore.
+  ///
+  /// Runs as a [SyncCoordinator] turn, so a sync still merging finishes on
+  /// the live database rather than carrying on into the restored one
+  /// (issue #3798).
+  Future<void> restore(
+    String backupPath, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
+    // Inside the async body, so a sealed restore fails the returned future
+    // rather than throwing at the call.
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.restore);
+    return SyncCoordinator.join(
+      () => _restore(backupPath, onMigrationProgress: onMigrationProgress),
+    );
+  }
+
+  Future<void> _restore(
+    String backupPath, {
+    void Function(int currentStep, int totalSteps)? onMigrationProgress,
+  }) async {
     final backupFile = File(backupPath);
     final destinationPath = await databasePath;
 
-    if (await backupFile.exists()) {
-      await backupFile.copy(destinationPath);
+    // No backup to swap in: leave the live database exactly as it is. The old
+    // implementation closed and reopened the same file here, which was an
+    // effective no-op that still opened a needless "database unavailable"
+    // window — during which a provider rebuild caches a fatal
+    // "Database not initialized" error.
+    //
+    // Leaving the data alone is right; returning normally was not. Every
+    // caller treated the void return as a completed restore and showed
+    // "Restore Complete", so a user recovering from data loss could not tell a
+    // restore that did nothing from a restore of an empty library (issue
+    // #1344). The absence is reported as a typed failure instead.
+    if (!await backupFile.exists()) {
+      // Still sweep the staging copy a prior restore may have stranded, so it
+      // doesn't accumulate on disk. Best-effort; the live DB is untouched.
+      await _sweepRestoreTempFiles(destinationPath);
+      _log.warning(
+        'Restore source not found at $backupPath; the live database was left '
+        'untouched',
+      );
+      throw RestoreSourceMissingException(backupPath);
     }
 
-    await initialize();
+    // Copy the backup to a staging file NEXT TO the destination while the live
+    // database stays open and keeps serving reads. This keeps the database
+    // available during the slow part of a restore (copying a potentially large
+    // backup), so provider rebuilds never observe a null database and cache a
+    // fatal error. Same-directory staging also keeps the later rename on one
+    // filesystem, so the swap is an atomic metadata operation rather than a
+    // cross-device copy.
+    final stagingPath = '$destinationPath.restore-staging';
+    // The folder can be gone: the startup "dive log not found" screen offers a
+    // restore into a configured folder that no longer exists (#2177). It is
+    // created here exactly as initialize() creates it for a new dive log.
+    await Directory(p.dirname(destinationPath)).create(recursive: true);
+    await _deleteIfExists(stagingPath);
+    try {
+      await backupFile.copy(stagingPath);
+    } catch (_) {
+      await _deleteIfExists(stagingPath);
+      rethrow;
+    }
+
+    // Settle whatever an EARLIER restore left aside, then open this restore's
+    // journal entry. Both run before close(), so a failure here is a plain
+    // abort with nothing to roll back and no database left closed. The order
+    // matters: a marker written first could pair with an old leftover after a
+    // crash, and the next launch would offer to "recover" a database the
+    // diver replaced long ago (issue #1901).
+    final journal = restoreJournalFor(destinationPath);
+    try {
+      await _settleLeftoverPreRestore(journal);
+      await journal.begin();
+    } catch (_) {
+      await _bestEffortDelete(stagingPath);
+      rethrow;
+    }
+
+    // The ONLY window where the database is unavailable: close, swap the file,
+    // reopen. Its duration is a rename + open, not the backup copy.
+    //
+    // Strict close: the swap+reopen immediately follows, so a connection that
+    // timed out mid-close and still holds the file must throw here rather than
+    // race the rename.
+    await close(strict: true);
+    // Fire the test seam one-shot: capture and clear it before invoking so a
+    // callback set by one test cannot leak into a later restore (the service is
+    // a singleton).
+    final onWindowOpen = debugOnRestoreWindowOpen;
+    debugOnRestoreWindowOpen = null;
+    onWindowOpen?.call(stagingPath);
+
+    // Safe swap: move the live file ASIDE (never delete it before the new file
+    // is in place), move the staged file IN, and only then drop the old copy.
+    // If the move-in fails, roll the old file back so the app is never left
+    // with no database and no data. Renaming into a non-existent destination
+    // works identically on POSIX and Windows, so no per-platform branching.
+    //
+    // Nothing to delete here: _settleLeftoverPreRestore already cleared or
+    // quarantined this path before close(), so a locked leftover fails the
+    // restore while the database is still open instead of stranding a closed
+    // one (the concern #1856 addressed by guarding a delete at this point).
+    final asidePath = journal.asidePath;
+    final destFile = File(destinationPath);
+    final hadDest = await destFile.exists();
+    try {
+      if (hadDest) await destFile.rename(asidePath);
+      // The old WAL/SHM sidecars belong to the pre-restore database and must
+      // not be next to the swapped-in file: SQLite would replay them into it
+      // and corrupt it. They travel WITH the file they belong to rather than
+      // being deleted, because the rollback below has to put back a complete
+      // database. A clean close normally checkpoints the -wal away, but not
+      // when another isolate still holds the database open -- and that is
+      // exactly when a restore is most likely to fail its swap.
+      await _moveIfExists('$destinationPath-wal', '$asidePath-wal');
+      await _moveIfExists('$destinationPath-shm', '$asidePath-shm');
+      await File(stagingPath).rename(destinationPath);
+    } catch (_) {
+      // The swap failed with the database closed. Roll the original file and
+      // its sidecars back into place, drop the orphaned staging copy, and
+      // reopen so the app is never left with a dead (null) database, then
+      // surface the error.
+      if (hadDest &&
+          !await destFile.exists() &&
+          await File(asidePath).exists()) {
+        await File(asidePath).rename(destinationPath);
+        await _moveIfExists('$asidePath-wal', '$destinationPath-wal');
+        await _moveIfExists('$asidePath-shm', '$destinationPath-shm');
+      }
+      await _commitIfNothingAside(journal);
+      // Best-effort: this is cleanup of an orphaned copy we no longer need,
+      // not a step the rollback depends on. A transient failure to remove it
+      // (the same lock that likely broke the swap above) must not skip the
+      // reopen below and leave the app with no database until restart.
+      await _bestEffortDelete(stagingPath);
+      // Reopen only what was there to put back. With no database at the path
+      // before the restore (one reached from the startup "dive log not
+      // found" screen), a reopen would create an empty one that the next
+      // launch opens as the diver's dive log (#2177).
+      if (hadDest) await initialize();
+      rethrow;
+    }
+
+    // A restored backup is plaintext (portable-backup hard rule). When the
+    // live database is protected, re-encrypt the swapped-in file before the
+    // reopen so protection survives a restore without user action.
+    final keyHex = databaseKeyHex;
+    if (keyHex != null && !isEncryptedDatabaseFile(destinationPath)) {
+      await DatabaseEncryptionMigrator(
+        exporter: debugExporterOverride ?? sqlcipherExport,
+      ).encryptInPlace(dbPath: destinationPath, keyHex: keyHex);
+    }
+
+    // Reopen on the swapped-in file BEFORE dropping the pre-restore copy, so a
+    // cleanup hiccup can never prevent the reopen. An older-schema backup runs
+    // its migration ladder here; surface its progress to the caller.
+    try {
+      await initialize(onMigrationProgress: onMigrationProgress);
+    } on DatabaseVersionMismatchException {
+      // The restored file needs a newer app than this one. The backup layer
+      // pre-checks make this near-unreachable, but a raced or hand-placed
+      // file can still reach here, and by now the newer file is already live.
+      // Put the pre-restore database back and reopen so the app keeps a
+      // working library, then surface the error (issue #1089).
+      //
+      // Scoped to this one exception on purpose: every other reopen failure
+      // (corruption, a locked file) is the restored file's own problem and
+      // keeps its existing handling, which may legitimately want the
+      // swapped-in file left in place for recovery.
+      //
+      // The rejected file's journal goes FIRST and strictly. SQLite replays
+      // whatever -wal sits beside a database, and the pre-restore copy
+      // usually has no sidecar of its own to overwrite it (a clean close
+      // checkpoints it away). If it cannot be removed, stop here: the
+      // original stays untouched at asidePath rather than being paired with
+      // a foreign journal, and a reopen would only reject the same file.
+      await _deleteIfExists('$destinationPath-wal');
+      await _deleteIfExists('$destinationPath-shm');
+      if (hadDest && await File(asidePath).exists()) {
+        // No delete first: rename replaces its destination on every
+        // platform, so the live path always holds a complete database. A
+        // delete-then-rename would leave a window with no file there, in
+        // which a failed rename makes the next open create an empty one.
+        await File(asidePath).rename(destinationPath);
+        await _moveIfExists('$asidePath-wal', '$destinationPath-wal');
+        await _moveIfExists('$asidePath-shm', '$destinationPath-shm');
+      } else {
+        await _deleteIfExists(destinationPath);
+      }
+      await _commitIfNothingAside(journal);
+      // As in the swap rollback above: nothing was there, so nothing reopens.
+      if (hadDest) await initialize();
+      rethrow;
+    }
+
+    // The database is open again on the restored file; the pre-restore copy is
+    // no longer needed. Its deletion is best-effort — a transient failure (e.g.
+    // a Windows file lock) must NOT fail a restore that already succeeded and
+    // leave the app with a closed database despite a valid file on disk. A
+    // leftover copy costs only disk space: the next restore moves it aside
+    // under a timestamped name, because once the marker is gone nothing on
+    // disk can tell it from a stranded original (issue #1924).
+    //
+    // The journal is settled FIRST: this is the commit point, after which the
+    // aside copy is provably a leftover. Best-effort; a marker that survives
+    // only costs one unnecessary recovery prompt at the next launch.
+    await _bestEffortCommit(journal);
+    await _bestEffortDelete(asidePath);
+    await _bestEffortDelete('$asidePath-wal');
+    await _bestEffortDelete('$asidePath-shm');
+
+    // The swapped-in file carries the log of the device that made the backup,
+    // so the one thing it lacks is that this happened.
+    final restored = databaseOrNull;
+    if (restored != null) {
+      await ChangeLogScope.summary(
+        restored,
+        label: ChangeLogLabels.libraryRestored,
+        source: ChangeLogSource.system,
+      );
+    }
+  }
+
+  /// Renames [from] onto [to] when [from] exists, replacing [to].
+  Future<void> _moveIfExists(String from, String to) async {
+    final source = File(from);
+    if (!await source.exists()) return;
+    await _deleteIfExists(to);
+    await source.rename(to);
+  }
+
+  /// Test seam: paths on which EVERY [_deleteIfExists] call raises instead of
+  /// deleting, until the set is cleared, simulating a locked-file condition
+  /// that outlasts the restore (e.g. a cloud-sync provider materializing or
+  /// evicting the file) that real permission errors on desktop otherwise
+  /// need flaky OS-level setup to reproduce. It raises before the existence
+  /// check, so a path behaves as present-but-locked whether or not the file
+  /// is there. [resetForTesting] also clears it.
+  @visibleForTesting
+  Set<String>? debugFailDeleteFor;
+
+  Future<void> _deleteIfExists(String path) async {
+    if (debugFailDeleteFor?.contains(path) ?? false) {
+      throw FileSystemException('debug: simulated delete failure', path);
+    }
+    final file = File(path);
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+
+  /// Delete [path] if present, swallowing any error. For cleanup that must not
+  /// abort the caller (a transient file lock on a stale temp file is harmless).
+  Future<void> _bestEffortDelete(String path) async {
+    try {
+      await _deleteIfExists(path);
+    } catch (_) {
+      // Best-effort: a stranded temp file is harmless and swept on a later run.
+    }
+  }
+
+  /// Moves a `.pre-restore` left by an earlier restore to a timestamped name,
+  /// never deleting it: no leftover of an EARLIER restore is provably garbage
+  /// (issue #1924). Throws on failure, which aborts the restore before the
+  /// database is closed.
+  Future<void> _settleLeftoverPreRestore(RestoreJournal journal) async {
+    final state = journal.classifyPreRestore();
+    if (state == PreRestoreState.none) return;
+    final kept = await journal.quarantine(journal.asidePath);
+    if (state == PreRestoreState.precious) {
+      _log.warning(
+        'An earlier restore never settled, and its aside copy may be the '
+        'only copy of the previous database; kept it at $kept instead of '
+        'deleting it',
+      );
+    } else {
+      _log.info(
+        'Moved an unmarked leftover of an earlier restore to $kept; nothing '
+        'proves it is not the only copy of an earlier database',
+      );
+    }
+  }
+
+  /// Settles the journal once a rollback has put everything back: the marker
+  /// protects the aside copy, and with nothing aside there is nothing left to
+  /// protect. A rollback that could not finish leaves the marker, so the next
+  /// launch offers recovery.
+  Future<void> _commitIfNothingAside(RestoreJournal journal) async {
+    if (journal.classifyPreRestore() == PreRestoreState.none) {
+      await _bestEffortCommit(journal);
+    }
+  }
+
+  Future<void> _bestEffortCommit(RestoreJournal journal) async {
+    try {
+      await journal.commit();
+    } catch (e, stack) {
+      _log.warning(
+        'Could not clear the restore marker; the next launch may offer to '
+        'recover the previous database',
+        error: e,
+        stackTrace: stack,
+      );
+    }
+  }
+
+  /// Best-effort removal of the staging copy a [restore] may leave behind.
+  ///
+  /// Never touches a `.pre-restore`: a stranded original may be the only copy
+  /// of the diver's data (issue #1901), and without a journal entry nothing
+  /// on disk tells it from a leftover (issue #1924). The next real restore
+  /// moves it aside instead.
+  Future<void> _sweepRestoreTempFiles(String destinationPath) async {
+    await _bestEffortDelete('$destinationPath.restore-staging');
   }
 
   /// Delete all data and recreate a fresh empty database.
@@ -269,14 +1432,24 @@ class DatabaseService {
   /// Throws if the backup step fails (reset is aborted to protect data).
   /// If file deletion or reinitialize fails after backup succeeds,
   /// the error propagates and the caller should handle recovery.
+  ///
+  /// Runs as a [SyncCoordinator] turn, so a sync still merging finishes
+  /// before the database closes (issue #3798).
   Future<void> resetDatabase({required String backupPath}) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.databaseFile);
+    return SyncCoordinator.join(() => _resetDatabase(backupPath));
+  }
+
+  Future<void> _resetDatabase(String backupPath) async {
     final dbPath = await databasePath;
 
     // Step 1: Backup first (throws on failure, aborting the reset)
     await backup(backupPath);
 
-    // Step 2: Close the connection
-    await close();
+    // Step 2: Close the connection (strict: the files are about to be
+    // deleted and the path reopened, so a still-open connection must throw
+    // rather than be abandoned — deleting an open file fails on Windows).
+    await close(strict: true);
 
     // Step 3: Delete database files
     for (final suffix in ['', '-wal', '-shm']) {

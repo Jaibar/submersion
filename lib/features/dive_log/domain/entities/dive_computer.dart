@@ -38,14 +38,26 @@ class DiveComputer extends Equatable {
   /// Used for incremental downloads -- libdivecomputer stops at this dive.
   final String? lastDiveFingerprint;
 
-  /// Number of dives downloaded from this computer
+  /// Number of distinct dives this computer recorded, "Dives imported":
+  /// counted by the repository from its data sources and the dives
+  /// attributed to it (issue #4846), not the stored download counter.
   final int diveCount;
 
   /// Whether this is the user's primary/favorite computer
   final bool isFavorite;
 
+  /// Excludes this computer from auto-download even when the global
+  /// auto-connect switch is on (issue #3361).
+  final bool autoDownloadDisabled;
+
   /// Additional notes
   final String notes;
+
+  /// The equipment row representing this device as gear, its gear twin (v175).
+  ///
+  /// Null when the user has deleted that gear item, which is permanent: only a
+  /// genuine computer registration mints a twin, so nothing re-creates it.
+  final String? equipmentId;
 
   /// When this record was created
   final DateTime createdAt;
@@ -67,23 +79,42 @@ class DiveComputer extends Equatable {
     this.lastDiveFingerprint,
     this.diveCount = 0,
     this.isFavorite = false,
+    this.autoDownloadDisabled = false,
     this.notes = '',
+    this.equipmentId,
     required this.createdAt,
     required this.updatedAt,
   });
 
   /// Full display name combining manufacturer and model
-  String get fullName {
-    if (manufacturer != null && model != null) {
-      return '$manufacturer $model';
-    }
-    if (model != null) return model!;
-    if (manufacturer != null) return manufacturer!;
-    return name;
-  }
+  String get fullName => fullNameOf(name, manufacturer, model);
 
   /// Short display name for lists
-  String get displayName => name.isNotEmpty ? name : fullName;
+  String get displayName => displayNameOf(name, manufacturer, model);
+
+  /// [fullName] for a computer known only by its columns, as a query over
+  /// several tables returns it.
+  static String fullNameOf(String name, String? manufacturer, String? model) {
+    if (manufacturer != null && model != null) return '$manufacturer $model';
+    return model ?? manufacturer ?? name;
+  }
+
+  /// [displayName] for a computer known only by its columns.
+  static String displayNameOf(
+    String name,
+    String? manufacturer,
+    String? model,
+  ) => name.isNotEmpty ? name : fullNameOf(name, manufacturer, model);
+
+  /// The model and maker of the computer Apple Health dives are attributed
+  /// to (issue #637).
+  static const appleWatchModel = 'Apple Watch';
+  static const appleWatchManufacturer = 'Apple';
+
+  /// The diver's Apple Watch, whose dives come from Apple Health rather
+  /// than a download.
+  bool get isAppleWatch =>
+      manufacturer == appleWatchManufacturer && model == appleWatchModel;
 
   /// Whether this computer has Bluetooth connectivity
   bool get hasBluetooth =>
@@ -92,25 +123,6 @@ class DiveComputer extends Equatable {
   /// Whether we have complete device info
   bool get hasDeviceInfo =>
       manufacturer != null && model != null && serialNumber != null;
-
-  /// Last download formatted as relative time or date
-  String get lastDownloadFormatted {
-    if (lastDownload == null) return 'Never';
-
-    final now = DateTime.now();
-    final diff = now.difference(lastDownload!);
-
-    if (diff.inDays == 0) {
-      if (diff.inHours == 0) {
-        return '${diff.inMinutes} min ago';
-      }
-      return '${diff.inHours} hours ago';
-    }
-    if (diff.inDays == 1) return 'Yesterday';
-    if (diff.inDays < 7) return '${diff.inDays} days ago';
-
-    return '${lastDownload!.month}/${lastDownload!.day}/${lastDownload!.year}';
-  }
 
   /// Create a new dive computer with minimal info
   factory DiveComputer.create({
@@ -146,7 +158,9 @@ class DiveComputer extends Equatable {
     String? lastDiveFingerprint,
     int? diveCount,
     bool? isFavorite,
+    bool? autoDownloadDisabled,
     String? notes,
+    String? equipmentId,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -164,7 +178,9 @@ class DiveComputer extends Equatable {
       lastDiveFingerprint: lastDiveFingerprint ?? this.lastDiveFingerprint,
       diveCount: diveCount ?? this.diveCount,
       isFavorite: isFavorite ?? this.isFavorite,
+      autoDownloadDisabled: autoDownloadDisabled ?? this.autoDownloadDisabled,
       notes: notes ?? this.notes,
+      equipmentId: equipmentId ?? this.equipmentId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -185,7 +201,9 @@ class DiveComputer extends Equatable {
     lastDiveFingerprint,
     diveCount,
     isFavorite,
+    autoDownloadDisabled,
     notes,
+    equipmentId,
     createdAt,
     updatedAt,
   ];

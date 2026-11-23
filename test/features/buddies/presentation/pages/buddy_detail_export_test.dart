@@ -1,0 +1,296 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_chunk.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/services/export/export_service.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dives_extras.dart';
+import 'package:submersion/core/services/export/uddf/uddf_source_fetch.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_source_export.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/settings/presentation/providers/export_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank_pressure_export.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_agency.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+
+/// Records which UDDF delivery the buddy export chose.
+class _RecordingExportService implements ExportService {
+  final calls = <String>[];
+  List<DiveSite>? sites;
+  UddfDivesExtras? uddfExtras;
+  UddfExportOptions? uddfOptions;
+  CertificationCatalog? catalog;
+  List<Dive>? uddfDives;
+  UddfDiveChunkLoader? uddfLoader;
+
+  @override
+  Future<String> exportDivesToUddf(
+    List<Dive> dives, {
+    List<DiveSite>? sites,
+    Map<String, DiveTankPressureExport>? diveTankPressures,
+    List<DiveSourceExport>? dataSources,
+    CertificationCatalog? certificationCatalog,
+    UddfDivesExtras extras = const UddfDivesExtras.empty(),
+    UddfExportOptions options = const UddfExportOptions(),
+    UddfDiveChunkLoader? loadDiveChunk,
+  }) async {
+    this.sites = sites;
+    catalog = certificationCatalog;
+    uddfExtras = extras;
+    uddfOptions = options;
+    uddfDives = dives;
+    uddfLoader = loadDiveChunk;
+    calls.add('share:uddf');
+    return '/tmp/shared.uddf';
+  }
+
+  @override
+  Future<String?> saveDivesToUddfFile(
+    List<Dive> dives, {
+    List<DiveSite>? sites,
+    Map<String, DiveTankPressureExport>? diveTankPressures,
+    List<DiveSourceExport>? dataSources,
+    CertificationCatalog? certificationCatalog,
+    UddfDivesExtras extras = const UddfDivesExtras.empty(),
+    UddfExportOptions options = const UddfExportOptions(),
+    UddfDiveChunkLoader? loadDiveChunk,
+  }) async {
+    this.sites = sites;
+    catalog = certificationCatalog;
+    uddfExtras = extras;
+    uddfOptions = options;
+    uddfDives = dives;
+    uddfLoader = loadDiveChunk;
+    calls.add('save:uddf');
+    return '/tmp/saved.uddf';
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeDiveRepository implements DiveRepository {
+  _FakeDiveRepository(this.dives);
+  final List<Dive> dives;
+
+  @override
+  Future<Dive?> getDiveById(String id) async =>
+      dives.where((d) => d.id == id).firstOrNull;
+
+  @override
+  Future<List<Dive>> getDivesByIdsWithoutSamples(
+    List<String> ids, {
+    bool offUiIsolate = false,
+    int chunkSize = 50,
+  }) async {
+    offUiIsolateFlags.add(offUiIsolate);
+    return [
+      for (final dive in dives)
+        if (ids.contains(dive.id)) dive,
+    ];
+  }
+
+  /// The offUiIsolate flag of each sample-free read, in call order.
+  final List<bool> offUiIsolateFlags = [];
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  final buddy = Buddy(
+    id: 'buddy-1',
+    name: 'Jane Doe',
+    notes: '',
+    createdAt: DateTime(2026, 1, 1),
+    updatedAt: DateTime(2026, 1, 1),
+  );
+
+  final dives = [
+    Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 2, 2, 9),
+      entryTime: DateTime(2026, 2, 2, 9),
+      site: const DiveSite(id: 'site-1', name: 'Blue Hole'),
+    ),
+  ];
+
+  const extrasSentinel = UddfDivesExtras(diveBuddies: {'dive-1': []});
+  final extrasCalls = <(List<String>, UddfExportOptions)>[];
+  late _RecordingExportService exportService;
+  late _FakeDiveRepository diveRepository;
+
+  setUp(() {
+    exportService = _RecordingExportService();
+    diveRepository = _FakeDiveRepository(dives);
+    extrasCalls.clear();
+  });
+
+  /// Pumps the buddy page at phone width and opens the Share Dives flow.
+  Future<void> pumpAndOpenShareDives(WidgetTester tester) async {
+    // Phone-width so the page renders standalone rather than redirecting to
+    // the master-detail layout.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(600, 1200);
+    addTearDown(tester.view.reset);
+
+    final overrides = await getBaseOverrides();
+    final router = GoRouter(
+      initialLocation: '/buddies/buddy-1',
+      routes: [
+        GoRoute(
+          path: '/buddies/:id',
+          builder: (context, state) =>
+              BuddyDetailPage(buddyId: state.pathParameters['id']!),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...overrides,
+          buddyListViewModeProvider.overrideWith(
+            (ref) => ListViewMode.detailed,
+          ),
+          buddyByIdProvider(buddy.id).overrideWith((ref) async => buddy),
+          buddyStatsProvider(
+            buddy.id,
+          ).overrideWith((ref) async => const BuddyStats(totalDives: 1)),
+          diveIdsForBuddyProvider(
+            buddy.id,
+          ).overrideWith((ref) async => ['dive-1']),
+          divesForBuddyProvider(buddy.id).overrideWith((ref) async => dives),
+          diveRepositoryProvider.overrideWithValue(diveRepository),
+          exportServiceProvider.overrideWithValue(exportService),
+          // Every custom agency, loaded on demand (issue #690).
+          allCustomCertificationsCatalogProvider.overrideWith(
+            (ref) async => CertificationCatalog(
+              agencies: [
+                CustomCertificationAgency(
+                  id: 'club-id',
+                  diverId: 'a',
+                  name: 'Lakeshore Dive Club',
+                  colorArgb: 0xFF0EA5E9,
+                  createdAt: DateTime(2026),
+                  updatedAt: DateTime(2026),
+                ),
+              ],
+            ),
+          ),
+          // These tests have no database. The real fetch would reach the
+          // repository, so the export would never be issued.
+          uddfSourceFetchProvider.overrideWithValue(
+            (diveIds, options) async => const [],
+          ),
+          uddfDivesExtrasFetchProvider.overrideWithValue((
+            diveIds,
+            options,
+          ) async {
+            extrasCalls.add((diveIds, options));
+            return extrasSentinel;
+          }),
+        ].cast(),
+        child: MaterialApp.router(
+          routerConfig: router,
+          // Pinned: the finders below are English, and the host machine's
+          // locale would otherwise pick one of the 11 supported languages.
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share Dives'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('share dives offers a save destination and uses it', (
+    tester,
+  ) async {
+    await pumpAndOpenShareDives(tester);
+
+    await tester.tap(find.text('Save to File'));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, ['save:uddf']);
+    expect(exportService.sites?.map((s) => s.id), ['site-1']);
+    // A bulk read keeps decoding on the UI isolate; see offUiIsolate on
+    // DiveRepository.getDivesByIdsWithoutSamples.
+    expect(diveRepository.offUiIsolateFlags, [false]);
+  });
+
+  testWidgets('a share names custom agencies even before the catalog has '
+      'loaded anywhere (issue #690)', (tester) async {
+    await pumpAndOpenShareDives(tester);
+
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    expect(
+      exportService.catalog?.agencyExportText('club-id'),
+      'Lakeshore Dive Club',
+    );
+  });
+
+  testWidgets('share dives can still share', (tester) async {
+    await pumpAndOpenShareDives(tester);
+
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, ['share:uddf']);
+  });
+
+  testWidgets('dismissing the destination sheet exports nothing', (
+    tester,
+  ) async {
+    await pumpAndOpenShareDives(tester);
+
+    // Tap the scrim above the sheet.
+    await tester.tapAt(const Offset(300, 60));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, isEmpty);
+  });
+
+  testWidgets('share dives fetches extras and honours the checkboxes', (
+    tester,
+  ) async {
+    await pumpAndOpenShareDives(tester);
+
+    await tester.tap(find.text('Include dive participants'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    expect(exportService.calls, ['share:uddf']);
+    expect(extrasCalls.single.$1, ['dive-1']);
+    expect(identical(exportService.uddfExtras, extrasSentinel), isTrue);
+    expect(exportService.uddfOptions?.includeParticipants, isFalse);
+    // Issue #4249: the samples are read a run at a time as the file is
+    // written, not for every one of the buddy's dives up front.
+    expect(
+      exportService.uddfDives?.map((d) => d.profile),
+      everyElement(isEmpty),
+    );
+    expect(exportService.uddfLoader, isNotNull);
+  });
+}

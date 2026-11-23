@@ -14,9 +14,23 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_query_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
+import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_closed_tag.dart';
+import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 
+import '../../../../helpers/list_create_router.dart';
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 import '../../../../helpers/test_app.dart';
+import '../../../../helpers/bulk_delete_contract.dart';
+import '../../../../helpers/keyboard_navigation_contract.dart';
+import '../../../../helpers/selection_contract.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,6 +49,17 @@ class _MockDCListNotifier extends StateNotifier<AsyncValue<List<DiveCenter>>>
     implements DiveCenterListNotifier {
   _MockDCListNotifier(List<DiveCenter> centers)
     : super(AsyncValue.data(centers));
+
+  /// Narrow the visible list, standing in for a filter change.
+  void showOnly(List<DiveCenter> centers) {
+    state = AsyncValue.data(centers);
+  }
+
+  /// Ids bulk delete actually asked to remove.
+  final deleted = <String>[];
+
+  @override
+  Future<void> deleteDiveCenter(String id) async => deleted.add(id);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
@@ -90,7 +115,8 @@ Future<List<Override>> _buildOverrides({
     diveCenterTableConfigProvider.overrideWith(
       (ref) => _TestDCTableConfigNotifier(_testConfig),
     ),
-    // Override dive count provider so it returns 0 for any center
+    // Dive counts read 0 for any center, in the table and in the rows.
+    diveCenterDiveCountsProvider.overrideWith((ref) => const {}),
     diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
   ];
 }
@@ -114,6 +140,7 @@ Future<List<Override>> _buildPhoneOverrides({
     diveCenterTableConfigProvider.overrideWith(
       (ref) => _TestDCTableConfigNotifier(_testConfig),
     ),
+    diveCenterDiveCountsProvider.overrideWith((ref) => const {}),
     diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
     highlightedDiveCenterIdProvider.overrideWith(
       (ref) => highlightedDiveCenterId,
@@ -122,6 +149,301 @@ Future<List<Override>> _buildPhoneOverrides({
 }
 
 void main() {
+  // A selection made outside the list (the map, a deep link, the detail
+  // pane's previous and next) brings its row into view (#3301).
+  testWidgets('scrolls to a dive center selected from outside the list', (
+    tester,
+  ) async {
+    final overrides = await _buildPhoneOverrides(
+      centers: [
+        for (var i = 0; i < 60; i++)
+          _makeCenter(
+            id: 'r$i',
+            name: 'Center ${i.toString().padLeft(2, '0')}',
+          ),
+      ],
+    );
+    final selected = ValueNotifier<String?>(null);
+    addTearDown(selected.dispose);
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: ValueListenableBuilder<String?>(
+          valueListenable: selected,
+          builder: (_, id, _) =>
+              DiveCenterListContent(showAppBar: true, selectedId: id),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    selected.value = 'r50';
+    await tester.pumpAndSettle();
+
+    expect(find.text('Center 50'), findsOneWidget);
+  });
+
+  // A list built again after the diver left it comes back to the record they
+  // last opened (#3301).
+  testWidgets('scrolls to the highlighted dive center when built', (
+    tester,
+  ) async {
+    final overrides = await _buildPhoneOverrides(
+      centers: [
+        for (var i = 0; i < 60; i++)
+          _makeCenter(
+            id: 'r$i',
+            name: 'Center ${i.toString().padLeft(2, '0')}',
+          ),
+      ],
+      highlightedDiveCenterId: 'r50',
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: overrides,
+        child: const DiveCenterListContent(showAppBar: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Center 50'), findsOneWidget);
+  });
+
+  // The title's subtitle counts the list (#2669), in both the phone app bar
+  // and the desktop pane header.
+  group('entry count subtitle', () {
+    for (final showAppBar in const [true, false]) {
+      testWidgets('${showAppBar ? 'app bar' : 'compact bar'} counts the list', (
+        tester,
+      ) async {
+        final overrides = await _buildPhoneOverrides(
+          centers: [
+            _makeCenter(id: 'c1', name: 'Reef Divers'),
+            _makeCenter(id: 'c2', name: 'Blue Hole'),
+          ],
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: DiveCenterListContent(showAppBar: showAppBar),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.descendant(
+            of: find.byType(FeatureAppBarTitle),
+            matching: find.text('2 dive centers'),
+          ),
+          findsOneWidget,
+        );
+      });
+    }
+  });
+  group('bulk delete', () {
+    late _MockDCListNotifier notifier;
+
+    Future<Widget> host(List<dynamic> rows) async {
+      notifier = _MockDCListNotifier(rows.cast());
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      return testApp(
+        locale: const Locale('en'),
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          currentDiverIdProvider.overrideWith(
+            (ref) => MockCurrentDiverIdNotifier(),
+          ),
+          diveCenterListNotifierProvider.overrideWith((ref) => notifier),
+          diveCenterListViewModeProvider.overrideWith(
+            (ref) => ListViewMode.detailed,
+          ),
+          diveCenterTableConfigProvider.overrideWith(
+            (ref) => _TestDCTableConfigNotifier(_testConfig),
+          ),
+          diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+          highlightedDiveCenterIdProvider.overrideWith((ref) => null),
+        ],
+        child: const DiveCenterListContent(showAppBar: true),
+      );
+    }
+
+    testWidgets('deletes every checked row and reports the count', (
+      tester,
+    ) async {
+      final widget = await host([
+        _makeCenter(id: 'd1', name: 'Aaa Center'),
+        _makeCenter(id: 'd2', name: 'Bbb Center'),
+      ]);
+
+      await verifyBulkDelete(
+        tester,
+        build: () => widget,
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        expectedDeletedCount: 2,
+      );
+
+      expect(notifier.deleted, ['d1', 'd2']);
+      expect(find.text('2 deleted'), findsOneWidget);
+    });
+
+    testWidgets('cancelling deletes nothing and keeps the selection', (
+      tester,
+    ) async {
+      final widget = await host([_makeCenter(id: 'd1', name: 'Aaa Center')]);
+
+      await verifyBulkDeleteCancels(
+        tester,
+        build: () => widget,
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+      );
+
+      expect(notifier.deleted, isEmpty);
+    });
+  });
+
+  group('selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      final all = <DiveCenter>[
+        _makeCenter(id: 'd1', name: 'Aaa Center'),
+        _makeCenter(id: 'd2', name: 'Bbb Center'),
+        _makeCenter(id: 'd3', name: 'Ccc Center'),
+      ];
+      final notifier = _MockDCListNotifier(all);
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        diveCenterListNotifierProvider.overrideWith((ref) => notifier),
+        diveCenterListViewModeProvider.overrideWith(
+          (ref) => ListViewMode.detailed,
+        ),
+        diveCenterTableConfigProvider.overrideWith(
+          (ref) => _TestDCTableConfigNotifier(_testConfig),
+        ),
+        diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+        highlightedDiveCenterIdProvider.overrideWith((ref) => null),
+      ];
+
+      await verifySelectionContract(
+        tester,
+        build: () => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const DiveCenterListContent(showAppBar: true),
+        ),
+        selectMenu: overflowMenuButton,
+        selectButton: find.byKey(selectItemsMenuKey),
+        rowRoot: find.ancestor(
+          of: find.text('Aaa Center'),
+          matching: find.byType(DiveCenterListTile),
+        ),
+        firstRow: find.text('Aaa Center'),
+        applyFilter: (tester) async {
+          notifier.showOnly([all.first]);
+        },
+        visibleAfterFilter: 1,
+      );
+
+      List<Override> keyboardOverrides() => [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        diveCenterListNotifierProvider.overrideWith(
+          (ref) => _MockDCListNotifier(all),
+        ),
+        diveCenterListViewModeProvider.overrideWith(
+          (ref) => ListViewMode.detailed,
+        ),
+        diveCenterTableConfigProvider.overrideWith(
+          (ref) => _TestDCTableConfigNotifier(_testConfig),
+        ),
+        diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+        highlightedDiveCenterIdProvider.overrideWith((ref) => null),
+      ];
+
+      // The keyboard contract mounts the list twice, and a ProviderScope
+      // disposes the notifier it was handed, so each mount gets its own.
+      await verifyKeyboardNavigationContract(
+        tester,
+        build: (onItemSelected) => testApp(
+          overrides: keyboardOverrides(),
+          locale: const Locale('en'),
+          child: DiveCenterListContent(
+            showAppBar: true,
+            onItemSelected: onItemSelected,
+          ),
+        ),
+        firstRow: find.text('Aaa Center'),
+      );
+    });
+  });
+
+  // The desktop pane's own header (showAppBar: false) carries a second
+  // overflow menu, with the same "Select items" entry at its top.
+  group('compact bar "Select items"', () {
+    testWidgets('is first in the menu and enters selection', (tester) async {
+      final all = <DiveCenter>[
+        _makeCenter(id: 'd1', name: 'Aaa Center'),
+        _makeCenter(id: 'd2', name: 'Bbb Center'),
+        _makeCenter(id: 'd3', name: 'Ccc Center'),
+      ];
+      final notifier = _MockDCListNotifier(all);
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final overrides = <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        currentDiverIdProvider.overrideWith(
+          (ref) => MockCurrentDiverIdNotifier(),
+        ),
+        diveCenterListNotifierProvider.overrideWith((ref) => notifier),
+        diveCenterListViewModeProvider.overrideWith(
+          (ref) => ListViewMode.detailed,
+        ),
+        diveCenterTableConfigProvider.overrideWith(
+          (ref) => _TestDCTableConfigNotifier(_testConfig),
+        ),
+        diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+        highlightedDiveCenterIdProvider.overrideWith((ref) => null),
+      ];
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const DiveCenterListContent(showAppBar: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.checklist), findsNothing);
+
+      await tester.tap(overflowMenuButton);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+        lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+      );
+
+      await tester.tap(find.byKey(selectItemsMenuKey));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+    });
+  });
+
   group('DiveCenterListContent in table mode', () {
     testWidgets('renders table with column headers', (tester) async {
       final centers = [
@@ -177,6 +499,42 @@ void main() {
       expect(find.text('Blue Water Dive'), findsOneWidget);
       expect(find.text('Red Sea Divers'), findsOneWidget);
       expect(find.text('Pacific Reef Dive'), findsOneWidget);
+    });
+
+    testWidgets('greys and tags a permanently closed center (#3379)', (
+      tester,
+    ) async {
+      final centers = [
+        _makeCenter(id: 'dc1', name: 'Blue Water Dive'),
+        _makeCenter(
+          id: 'dc2',
+          name: 'Toucan Diving',
+        ).copyWith(isPermanentlyClosed: true),
+      ];
+
+      final overrides = await _buildOverrides(centers: centers);
+
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: const DiveCenterListContent(showAppBar: true),
+        ),
+      );
+      await tester.pump();
+
+      Finder muted(String text) => find.ancestor(
+        of: find.text(text),
+        matching: find.byWidgetPredicate(
+          (w) => w is Opacity && w.opacity == kEntityTableMutedOpacity,
+        ),
+      );
+      expect(find.byType(DiveCenterClosedTag), findsOneWidget);
+      expect(muted('Toucan Diving'), findsOneWidget);
+      expect(muted('Blue Water Dive'), findsNothing);
+      expect(
+        tester.getCenter(find.byType(DiveCenterClosedTag)).dy,
+        tester.getCenter(find.text('Toucan Diving')).dy,
+      );
     });
 
     testWidgets('shows empty state when no centers', (tester) async {
@@ -325,6 +683,9 @@ void main() {
       await tester.pump();
 
       expect(find.text('Phone Center'), findsOneWidget);
+      // A whole-star rating reads like a dive's, not "4.0" (#4573).
+      expect(find.text('4'), findsOneWidget);
+      expect(find.text('4.0'), findsNothing);
     });
 
     testWidgets('tapping a row sets highlighted dive center id', (
@@ -484,5 +845,225 @@ void main() {
         expect(bravo.isSelected, isTrue);
       },
     );
+  });
+
+  group('map view navigation', () {
+    // Both map buttons must push, not go: go() replaces the stack and leaves
+    // the Android system back button with nothing to pop (#647).
+    Future<bool> tapMapAction(
+      WidgetTester tester, {
+      required List<Override> overrides,
+      required Widget child,
+      required Finder mapButton,
+    }) async {
+      var reachedMap = false;
+      final router = GoRouter(
+        initialLocation: '/dive-centers',
+        routes: [
+          GoRoute(
+            path: '/dive-centers',
+            builder: (context, state) => child,
+            routes: [
+              GoRoute(
+                path: 'map',
+                builder: (context, state) {
+                  reachedMap = true;
+                  return const Scaffold(body: Text('Map view'));
+                },
+              ),
+            ],
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(mapButton);
+      await tester.pumpAndSettle();
+
+      // The list stays underneath, so back returns to it.
+      expect(router.routerDelegate.canPop(), isTrue);
+      return reachedMap;
+    }
+
+    testWidgets('app bar map action pushes the map view', (tester) async {
+      // Table mode short-circuits to its own scaffold, so the app bar action
+      // only exists in detailed/compact mode.
+      final overrides = await _buildPhoneOverrides(
+        centers: [_makeCenter(id: 'dc1', name: 'Reef Explorers')],
+      );
+
+      final reached = await tapMapAction(
+        tester,
+        overrides: overrides,
+        child: const Scaffold(body: DiveCenterListContent(showAppBar: true)),
+        mapButton: find
+            .descendant(
+              of: find.byType(AppBar),
+              matching: find.byIcon(Icons.map),
+            )
+            .first,
+      );
+
+      expect(reached, isTrue);
+    });
+
+    testWidgets('compact bar map action pushes the map view', (tester) async {
+      final overrides = await _buildPhoneOverrides(
+        centers: [_makeCenter(id: 'dc1', name: 'Reef Explorers')],
+      );
+
+      final reached = await tapMapAction(
+        tester,
+        overrides: overrides,
+        child: const Scaffold(body: DiveCenterListContent(showAppBar: false)),
+        mapButton: find.byIcon(Icons.map).first,
+      );
+
+      expect(reached, isTrue);
+    });
+  });
+
+  group('query (#2365)', () {
+    final good = ConditionNode(
+      FieldPath(['rating']),
+      QueryOp.gte,
+      const NumberValue(4, null),
+    );
+
+    Future<void> pumpWithQuery(
+      WidgetTester tester, {
+      required Set<String> ids,
+      ListViewMode viewMode = ListViewMode.detailed,
+    }) async {
+      final overrides = await _buildPhoneOverrides(
+        centers: [
+          _makeCenter(id: 'k1', name: 'Reef Divers', rating: 5),
+          _makeCenter(id: 'k2', name: 'Lake Club', rating: 2),
+        ],
+        viewMode: viewMode,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...overrides,
+            diveCenterQueryProvider.overrideWith((ref) => good),
+            entityQueryIdsProvider.overrideWith((ref, key) async => ids),
+          ],
+          child: const DiveCenterListContent(showAppBar: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the query narrows the list and shows its chip', (
+      tester,
+    ) async {
+      await pumpWithQuery(tester, ids: {'k1'});
+      expect(find.text('Reef Divers'), findsWidgets);
+      expect(find.text('Lake Club'), findsNothing);
+      expect(find.widgetWithText(InputChip, 'rating >= 4'), findsOneWidget);
+    });
+
+    testWidgets('a query that keeps nothing shows the no-match state', (
+      tester,
+    ) async {
+      await pumpWithQuery(tester, ids: const {});
+      expect(find.byType(QueryNoMatchState), findsOneWidget);
+    });
+
+    testWidgets('table mode reads the filtered centers', (tester) async {
+      await pumpWithQuery(tester, ids: {'k2'}, viewMode: ListViewMode.table);
+      expect(find.text('Lake Club'), findsWidgets);
+      expect(find.text('Reef Divers'), findsNothing);
+    });
+  });
+
+  group('empty state beside an open form (issue #3192)', () {
+    Future<GoRouter> pumpEmptyInRouter(
+      WidgetTester tester, {
+      required double width,
+    }) async {
+      final overrides = await _buildOverrides(centers: []);
+      return pumpListInCreateRouter(
+        tester,
+        overrides: overrides,
+        content: const DiveCenterListContent(showAppBar: true),
+        listPath: '/dive-centers',
+        width: width,
+      );
+    }
+
+    testWidgets('the create button opens the full-page form when narrow', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 900);
+
+      await tester.tap(find.text('Add Your First Dive Center'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/dive-centers/new');
+      expect(find.text(kFullPageCreateForm), findsOneWidget);
+    });
+
+    testWidgets('the create button opens the pane form beside a detail pane', (
+      tester,
+    ) async {
+      final router = await pumpEmptyInRouter(tester, width: 1400);
+
+      await tester.tap(find.text('Add Your First Dive Center'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.toString(), '/dive-centers?mode=new');
+    });
+
+    Future<void> pumpEmpty(
+      WidgetTester tester, {
+      required bool isFormOpen,
+    }) async {
+      final overrides = await _buildOverrides(centers: []);
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          // The assertions match English button labels.
+          locale: const Locale('en'),
+          child: MasterDetailFormScope(
+            isFormOpen: isFormOpen,
+            child: const DiveCenterListContent(showAppBar: true),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('offers the create button when no form is open', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: false);
+
+      expect(find.text('Add Your First Dive Center'), findsOneWidget);
+    });
+
+    testWidgets('hides the create button while a form is open beside it', (
+      tester,
+    ) async {
+      await pumpEmpty(tester, isFormOpen: true);
+
+      // Beside an open form it reads as the form's submit button, but it only
+      // reopens the create form, so nothing gets saved (issue #3192).
+      expect(find.text('Add Your First Dive Center'), findsNothing);
+      expect(find.text('Import'), findsOneWidget);
+    });
   });
 }

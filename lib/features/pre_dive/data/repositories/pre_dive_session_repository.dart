@@ -1,0 +1,700 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/equipment/domain/entities/overdue_service_entry.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart'
+    as domain;
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart'
+    as domain;
+
+class PreDiveSessionRepository {
+  AppDatabase get _db => DatabaseService.instance.database;
+  final SyncRepository _syncRepository = SyncRepository();
+  final _uuid = const Uuid();
+  final _log = LoggerService.forClass(PreDiveSessionRepository);
+
+  static const _sessionEntity = 'preDiveSessions';
+  static const _itemEntity = 'preDiveSessionItems';
+  static const _sectionEntity = 'preDiveSessionSections';
+
+  Stream<void> watchSessionsChanges() => _db.tableUpdates(
+    TableUpdateQuery.onAllTables([
+      _db.preDiveSessions,
+      _db.preDiveSessionSections,
+      _db.preDiveSessionItems,
+    ]),
+  );
+
+  Future<List<domain.PreDiveSessionSection>> getSectionsForSession(
+    String sessionId,
+  ) async {
+    try {
+      final rows =
+          await (_db.select(_db.preDiveSessionSections)
+                ..where((s) => s.sessionId.equals(sessionId))
+                ..orderBy([(s) => OrderingTerm.asc(s.sortOrder)]))
+              .get();
+      return rows.map(_mapSection).toList();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session sections',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Inserts the session plus its section and item snapshots in one
+  /// transaction. Items arrive with a blank sessionId, and either a blank id
+  /// (assigned here) or one the caller already minted. SessionItemComposer
+  /// mints its own so it can write the cell-linearity link between two items
+  /// it builds in the same pass, and the same section ids its items'
+  /// sectionId values already reference. Sync bookkeeping runs after the
+  /// transaction commits.
+  Future<domain.PreDiveSession> startSession({
+    required domain.PreDiveChecklistTemplate template,
+    required List<domain.PreDiveSessionItem> items,
+    List<domain.PreDiveSessionSection> sections = const [],
+    String? diverId,
+    String? diveId,
+    String? tripId,
+    String? equipmentSetId,
+    String? equipmentSetName,
+  }) async {
+    try {
+      final sessionId = _uuid.v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final itemIds = <String>[];
+      final sectionIds = <String>[];
+      await _db.transaction(() async {
+        await _db
+            .into(_db.preDiveSessions)
+            .insert(
+              PreDiveSessionsCompanion(
+                id: Value(sessionId),
+                diverId: Value(diverId),
+                templateId: Value(template.id.isEmpty ? null : template.id),
+                templateName: Value(template.name),
+                strictOrder: Value(template.strictOrder),
+                diveId: Value(diveId),
+                tripId: Value(tripId),
+                startedAt: Value(now),
+                status: Value(domain.PreDiveSessionStatus.inProgress.name),
+                equipmentSetId: Value(equipmentSetId),
+                equipmentSetName: Value(equipmentSetName),
+                createdAt: Value(now),
+                updatedAt: Value(now),
+              ),
+            );
+        for (final section in sections) {
+          final sectionId = section.id.isEmpty ? _uuid.v4() : section.id;
+          sectionIds.add(sectionId);
+          await _db
+              .into(_db.preDiveSessionSections)
+              .insert(
+                PreDiveSessionSectionsCompanion(
+                  id: Value(sectionId),
+                  sessionId: Value(sessionId),
+                  title: Value(section.title),
+                  sortOrder: Value(section.sortOrder),
+                  createdAt: Value(now),
+                  updatedAt: Value(now),
+                ),
+              );
+        }
+        for (final item in items) {
+          // Honour an id the caller already minted, so a cell-linearity
+          // item's sourceItemId still names a row that exists. Matches the
+          // shape saveItems uses for template items.
+          final itemId = item.id.isEmpty ? _uuid.v4() : item.id;
+          itemIds.add(itemId);
+          await _db
+              .into(_db.preDiveSessionItems)
+              .insert(
+                PreDiveSessionItemsCompanion(
+                  id: Value(itemId),
+                  sessionId: Value(sessionId),
+                  sectionId: Value(item.sectionId),
+                  title: Value(item.title),
+                  notes: Value(item.notes),
+                  sortOrder: Value(item.sortOrder),
+                  itemType: Value(item.itemType.name),
+                  valueLabel: Value(item.valueLabel),
+                  valueUnit: Value(item.valueUnit),
+                  valueMin: Value(item.valueMin),
+                  valueMax: Value(item.valueMax),
+                  isRequired: Value(item.isRequired),
+                  state: Value(item.state.name),
+                  note: Value(item.note),
+                  completedAt: Value(item.completedAt?.millisecondsSinceEpoch),
+                  equipmentId: Value(item.equipmentId),
+                  overdueServices: Value(
+                    _encodeOverdueServices(item.overdueServices),
+                  ),
+                  sourceItemId: Value(item.sourceItemId),
+                  sourceValueNumber: Value(item.sourceValueNumber),
+                  createdAt: Value(now),
+                  updatedAt: Value(now),
+                ),
+              );
+        }
+      });
+      await _syncRepository.markRecordPending(
+        entityType: _sessionEntity,
+        recordId: sessionId,
+        localUpdatedAt: now,
+      );
+      for (final id in sectionIds) {
+        await _syncRepository.markRecordPending(
+          entityType: _sectionEntity,
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+      for (final id in itemIds) {
+        await _syncRepository.markRecordPending(
+          entityType: _itemEntity,
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+      SyncEventBus.notifyLocalChange();
+      return (await getSessionById(sessionId))!;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to start pre-dive session',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<domain.PreDiveSession?> getSessionById(String id) async {
+    try {
+      final row = await (_db.select(
+        _db.preDiveSessions,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      return row == null ? null : _mapSession(row);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<List<domain.PreDiveSessionItem>> getItemsForSession(
+    String sessionId,
+  ) async {
+    try {
+      final rows =
+          await (_db.select(_db.preDiveSessionItems)
+                ..where((t) => t.sessionId.equals(sessionId))
+                ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+              .get();
+      return rows.map(_mapItem).toList();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session items',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Item tallies for every visible session in one aggregate query. A session
+  /// list renders a progress and flag badge per row; fetching each session's
+  /// items separately would be one query per row.
+  Future<Map<String, domain.PreDiveSessionStats>> getSessionStats({
+    String? diverId,
+  }) async {
+    try {
+      final sessions = _db.preDiveSessions;
+      final items = _db.preDiveSessionItems;
+
+      final total = items.id.count();
+      final resolved = items.id.count(
+        filter: items.state.equals(domain.PreDiveItemState.pending.name).not(),
+      );
+      final flagged = items.id.count(
+        filter: items.state.equals(domain.PreDiveItemState.flagged.name),
+      );
+
+      final query = _db.selectOnly(sessions).join([
+        leftOuterJoin(items, items.sessionId.equalsExp(sessions.id)),
+      ]);
+      query.addColumns([sessions.id, total, resolved, flagged]);
+      query.groupBy([sessions.id]);
+      if (diverId != null) {
+        query.where(
+          sessions.diverId.equals(diverId) | sessions.diverId.isNull(),
+        );
+      }
+
+      final rows = await query.get();
+      return {
+        for (final row in rows)
+          row.read(sessions.id)!: domain.PreDiveSessionStats(
+            total: row.read(total) ?? 0,
+            resolved: row.read(resolved) ?? 0,
+            flagged: row.read(flagged) ?? 0,
+          ),
+      };
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session stats',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Sections for many sessions in one query, grouped by session id and
+  /// sorted within each group. Mirrors [getItemsForSessions]; used by the
+  /// checklist export to resolve each item's section title.
+  Future<Map<String, List<domain.PreDiveSessionSection>>>
+  getSectionsForSessions(List<String> sessionIds) async {
+    if (sessionIds.isEmpty) return {};
+    try {
+      final rows =
+          await (_db.select(_db.preDiveSessionSections)
+                ..where((s) => s.sessionId.isIn(sessionIds))
+                ..orderBy([(s) => OrderingTerm.asc(s.sortOrder)]))
+              .get();
+      final grouped = <String, List<domain.PreDiveSessionSection>>{};
+      for (final row in rows) {
+        (grouped[row.sessionId] ??= []).add(_mapSection(row));
+      }
+      return grouped;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session sections in bulk',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Items for many sessions in one query, grouped by session id and sorted
+  /// within each group. Used by the checklist export, which would otherwise
+  /// issue one query per exported session.
+  Future<Map<String, List<domain.PreDiveSessionItem>>> getItemsForSessions(
+    List<String> sessionIds,
+  ) async {
+    if (sessionIds.isEmpty) return {};
+    try {
+      final rows =
+          await (_db.select(_db.preDiveSessionItems)
+                ..where((t) => t.sessionId.isIn(sessionIds))
+                ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+              .get();
+      final grouped = <String, List<domain.PreDiveSessionItem>>{};
+      for (final row in rows) {
+        (grouped[row.sessionId] ??= []).add(_mapItem(row));
+      }
+      return grouped;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session items in bulk',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<List<domain.PreDiveSession>> getAllSessions({String? diverId}) async {
+    try {
+      final query = _db.select(_db.preDiveSessions)
+        ..orderBy([(t) => OrderingTerm.desc(t.startedAt)]);
+      if (diverId != null) {
+        query.where((t) => t.diverId.equals(diverId) | t.diverId.isNull());
+      }
+      final rows = await query.get();
+      return rows.map(_mapSession).toList();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive sessions',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<domain.PreDiveSession?> getActiveSession({String? diverId}) async {
+    try {
+      final query = _db.select(_db.preDiveSessions)
+        ..where(
+          (t) => t.status.equals(domain.PreDiveSessionStatus.inProgress.name),
+        )
+        ..orderBy([(t) => OrderingTerm.desc(t.startedAt)])
+        ..limit(1);
+      if (diverId != null) {
+        query.where((t) => t.diverId.equals(diverId) | t.diverId.isNull());
+      }
+      final row = await query.getSingleOrNull();
+      return row == null ? null : _mapSession(row);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get active pre-dive session',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<domain.PreDiveSession?> getSessionForDive(String diveId) async {
+    try {
+      final row =
+          await (_db.select(_db.preDiveSessions)
+                ..where((t) => t.diveId.equals(diveId))
+                ..orderBy([(t) => OrderingTerm.desc(t.startedAt)])
+                ..limit(1))
+              .getSingleOrNull();
+      return row == null ? null : _mapSession(row);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get pre-dive session for dive $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Sessions not yet linked to a dive, any status. Diver filter is
+  /// exact-match (null means unscoped sessions only) so the auto-linker
+  /// never crosses diver boundaries.
+  Future<List<domain.PreDiveSession>> getUnlinkedSessions({
+    String? diverId,
+  }) async {
+    try {
+      final query = _db.select(_db.preDiveSessions)
+        ..where((t) => t.diveId.isNull())
+        ..orderBy([(t) => OrderingTerm.desc(t.startedAt)]);
+      if (diverId == null) {
+        query.where((t) => t.diverId.isNull());
+      } else {
+        query.where((t) => t.diverId.equals(diverId));
+      }
+      final rows = await query.get();
+      return rows.map(_mapSession).toList();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get unlinked pre-dive sessions',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Dives that already have a checklist run attached, across all divers.
+  ///
+  /// The manual link picker (#1066) subtracts these from its candidates so a
+  /// hand-made link does not silently shadow an existing run: [ChecklistDiveLinker]
+  /// itself allows several runs to share one dive (a check re-done, or
+  /// several checks before one dive), but [getSessionForDive] surfaces only
+  /// the latest, so a second manual link on the same dive would leave an
+  /// older run invisible from the dive side.
+  Future<Set<String>> getLinkedDiveIds() async {
+    try {
+      final query = _db.selectOnly(_db.preDiveSessions, distinct: true)
+        ..addColumns([_db.preDiveSessions.diveId])
+        ..where(_db.preDiveSessions.diveId.isNotNull());
+      final rows = await query.get();
+      return {for (final row in rows) ?row.read(_db.preDiveSessions.diveId)};
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get linked dive ids',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Mutates one item's run state. completedAt is stamped at tap time when
+  /// leaving pending and cleared when resetting to pending. Value/note
+  /// parameters are only written when provided so partial updates preserve
+  /// stored values.
+  ///
+  /// [overdueServices] freezes the item's overdue-service list at the moment
+  /// it leaves pending; omit it on a call that only edits the note or value
+  /// without changing [state] (the caller passes the item's current,
+  /// unchanged [domain.PreDiveSessionItem.overdueServices] back in that case)
+  /// so the frozen snapshot survives untouched. A transition to
+  /// [domain.PreDiveItemState.pending] always clears the snapshot back to
+  /// null regardless of what is passed, so the runner UI falls back to a
+  /// live-computed overdue list again.
+  Future<void> updateItemState({
+    required String sessionId,
+    required String itemId,
+    required domain.PreDiveItemState state,
+    double? valueNumber,
+    String? valueText,
+    String? note,
+    List<OverdueServiceEntry>? overdueServices,
+    double? sourceValueNumber,
+  }) async {
+    try {
+      await _assertMutable(sessionId);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final isPending = state == domain.PreDiveItemState.pending;
+      await (_db.update(_db.preDiveSessionItems)
+            ..where((t) => t.id.equals(itemId) & t.sessionId.equals(sessionId)))
+          .write(
+            PreDiveSessionItemsCompanion(
+              state: Value(state.name),
+              completedAt: Value(isPending ? null : now),
+              valueNumber: valueNumber == null
+                  ? const Value.absent()
+                  : Value(valueNumber),
+              valueText: valueText == null
+                  ? const Value.absent()
+                  : Value(valueText),
+              note: note == null ? const Value.absent() : Value(note),
+              overdueServices: Value(
+                isPending ? null : _encodeOverdueServices(overdueServices),
+              ),
+              // Frozen alongside overdueServices and cleared by the same
+              // rule: a reset returns the item to pending, where a stale
+              // frozen reading would be a lie. A call that passes nothing
+              // (a note edit, say) leaves the existing figure untouched.
+              sourceValueNumber: isPending
+                  ? const Value(null)
+                  : (sourceValueNumber == null
+                        ? const Value.absent()
+                        : Value(sourceValueNumber)),
+              updatedAt: Value(now),
+            ),
+          );
+      await _syncRepository.markRecordPending(
+        entityType: _itemEntity,
+        recordId: itemId,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to update pre-dive session item',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> completeSession(String id) =>
+      _finishSession(id, domain.PreDiveSessionStatus.completed);
+
+  Future<void> abortSession(String id) =>
+      _finishSession(id, domain.PreDiveSessionStatus.aborted);
+
+  Future<void> _finishSession(
+    String id,
+    domain.PreDiveSessionStatus status,
+  ) async {
+    try {
+      await _assertMutable(id);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.preDiveSessions,
+      )..where((t) => t.id.equals(id))).write(
+        PreDiveSessionsCompanion(
+          status: Value(status.name),
+          completedAt: Value(now),
+          updatedAt: Value(now),
+        ),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: _sessionEntity,
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to finish pre-dive session $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Linking is metadata, not audit content, so it is allowed on locked
+  /// sessions.
+  Future<void> linkToDive(String sessionId, String diveId) =>
+      _writeDiveLink(sessionId, diveId);
+
+  Future<void> unlinkFromDive(String sessionId) =>
+      _writeDiveLink(sessionId, null);
+
+  Future<void> _writeDiveLink(String sessionId, String? diveId) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.preDiveSessions,
+      )..where((t) => t.id.equals(sessionId))).write(
+        PreDiveSessionsCompanion(diveId: Value(diveId), updatedAt: Value(now)),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: _sessionEntity,
+        recordId: sessionId,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to update pre-dive session dive link',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> deleteSession(String id) async {
+    try {
+      final items = await getItemsForSession(id);
+      final sections = await getSectionsForSession(id);
+      await (_db.delete(
+        _db.preDiveSessionItems,
+      )..where((t) => t.sessionId.equals(id))).go();
+      await (_db.delete(
+        _db.preDiveSessionSections,
+      )..where((s) => s.sessionId.equals(id))).go();
+      for (final item in items) {
+        await _syncRepository.logDeletion(
+          entityType: _itemEntity,
+          recordId: item.id,
+        );
+      }
+      for (final section in sections) {
+        await _syncRepository.logDeletion(
+          entityType: _sectionEntity,
+          recordId: section.id,
+        );
+      }
+      await (_db.delete(
+        _db.preDiveSessions,
+      )..where((t) => t.id.equals(id))).go();
+      await _syncRepository.logDeletion(
+        entityType: _sessionEntity,
+        recordId: id,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to delete pre-dive session $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Audit-record integrity: no mutation once a session leaves inProgress.
+  Future<void> _assertMutable(String sessionId) async {
+    final session = await getSessionById(sessionId);
+    if (session == null) {
+      throw StateError('Pre-dive session $sessionId does not exist');
+    }
+    if (session.isLocked) {
+      throw StateError('Pre-dive session $sessionId is locked');
+    }
+  }
+
+  domain.PreDiveSession _mapSession(PreDiveSession row) =>
+      domain.PreDiveSession(
+        id: row.id,
+        diverId: row.diverId,
+        templateId: row.templateId,
+        templateName: row.templateName,
+        strictOrder: row.strictOrder,
+        diveId: row.diveId,
+        tripId: row.tripId,
+        startedAt: DateTime.fromMillisecondsSinceEpoch(row.startedAt),
+        completedAt: row.completedAt == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(row.completedAt!),
+        status: domain.PreDiveSessionStatus.parse(row.status),
+        equipmentSetId: row.equipmentSetId,
+        equipmentSetName: row.equipmentSetName,
+        notes: row.notes,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      );
+
+  domain.PreDiveSessionSection _mapSection(PreDiveSessionSectionRow row) =>
+      domain.PreDiveSessionSection(
+        id: row.id,
+        sessionId: row.sessionId,
+        title: row.title,
+        sortOrder: row.sortOrder,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      );
+
+  domain.PreDiveSessionItem _mapItem(PreDiveSessionItem row) =>
+      domain.PreDiveSessionItem(
+        id: row.id,
+        sessionId: row.sessionId,
+        sectionId: row.sectionId,
+        title: row.title,
+        notes: row.notes,
+        sortOrder: row.sortOrder,
+        itemType: domain.PreDiveItemType.parse(row.itemType),
+        valueLabel: row.valueLabel,
+        valueUnit: row.valueUnit,
+        valueMin: row.valueMin,
+        valueMax: row.valueMax,
+        isRequired: row.isRequired,
+        state: domain.PreDiveItemState.parse(row.state),
+        valueNumber: row.valueNumber,
+        valueText: row.valueText,
+        note: row.note,
+        completedAt: row.completedAt == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(row.completedAt!),
+        equipmentId: row.equipmentId,
+        overdueServices: _decodeOverdueServices(row.overdueServices),
+        sourceItemId: row.sourceItemId,
+        sourceValueNumber: row.sourceValueNumber,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      );
+
+  /// Null in, null out: "no frozen snapshot" (pending, or not passed by the
+  /// caller) stays represented as a SQL NULL rather than an empty JSON array,
+  /// so it stays distinguishable from "resolved with nothing overdue".
+  String? _encodeOverdueServices(List<OverdueServiceEntry>? entries) =>
+      entries == null
+      ? null
+      : jsonEncode(entries.map((e) => e.toJson()).toList());
+
+  List<OverdueServiceEntry>? _decodeOverdueServices(String? raw) {
+    if (raw == null) return null;
+    final decoded = jsonDecode(raw) as List;
+    return decoded
+        .map((e) => OverdueServiceEntry.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+}

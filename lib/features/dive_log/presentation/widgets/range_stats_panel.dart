@@ -2,17 +2,25 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/range_gas_consumption.dart';
+import 'package:submersion/features/dive_log/domain/services/range_profile_stats.dart';
+import 'package:submersion/features/dive_log/presentation/info/dive_profile_info.dart';
+import 'package:submersion/features/dive_log/presentation/providers/chart_tank_pressures_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_range_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
 
 /// Panel showing statistics for a selected range of the dive profile.
 ///
-/// Displays depth, rate, temperature, gas consumption, and heart rate
-/// metrics within the selected time range using a Wrap-based grid.
+/// Displays depth, rate, temperature, gas consumption (SAC and RMV, from the
+/// transmitter pressure series), and heart rate metrics within the selected
+/// time range using a Wrap-based grid.
 class RangeStatsPanel extends ConsumerWidget {
   /// The dive ID for scoping the range selection provider
   final String diveId;
@@ -26,11 +34,27 @@ class RangeStatsPanel extends ConsumerWidget {
   /// The dive's tanks (for SAC calculation)
   final List<DiveTank> tanks;
 
-  /// SAC unit preference from settings
-  final SacUnit sacUnit;
+  /// Whether the dive was on a rebreather, whose SAC reads the reference
+  /// cylinder alone (see `referencePressureDrop`).
+  final bool isRebreather;
+
+  /// The water and surface pressure of the dive, for its SAC and RMV.
+  final DiveEnvironment environment;
 
   /// Callback when range is cleared/closed
   final VoidCallback? onClose;
+
+  /// Most stats placed side by side in one row.
+  ///
+  /// The grid always has at least [_minColumns] columns, and adds more up to
+  /// this cap while each stat still gets [_minChipWidth]. The default keeps
+  /// the detail page's fixed four-column grid; the fullscreen strip raises
+  /// it so a wide screen shows the stats in one or two rows (#1577).
+  final int maxColumns;
+
+  static const int _minColumns = 4;
+  static const double _minChipWidth = 120;
+  static const double _chipSpacing = 8;
 
   const RangeStatsPanel({
     super.key,
@@ -38,8 +62,10 @@ class RangeStatsPanel extends ConsumerWidget {
     required this.profile,
     required this.units,
     required this.tanks,
-    required this.sacUnit,
+    this.isRebreather = false,
+    this.environment = DiveEnvironment.standard,
     this.onClose,
+    this.maxColumns = _minColumns,
   });
 
   @override
@@ -51,7 +77,12 @@ class RangeStatsPanel extends ConsumerWidget {
     }
 
     final colorScheme = Theme.of(context).colorScheme;
-    final stats = _calculateRangeStats(rangeState, tanks);
+    final stats = rangeProfileStats(
+      profile: profile,
+      startTimestamp: rangeState.startTimestamp!,
+      endTimestamp: rangeState.endTimestamp!,
+    );
+    final gas = _gasConsumption(ref, rangeState);
 
     return Card(
       margin: EdgeInsets.zero,
@@ -97,6 +128,19 @@ class RangeStatsPanel extends ConsumerWidget {
                   ),
                 ),
                 const Spacer(),
+                HeaderInfoButton(
+                  title: context.l10n.diveLog_rangeStats_title,
+                  height: 40,
+                  content: (context) {
+                    final display = ref.read(gasConsumptionDisplayProvider);
+                    return rangeStatsInfo(
+                      context.l10n,
+                      infoUnits(context),
+                      showsSac: display.showsSac,
+                      showsRmv: display.showsRmv,
+                    );
+                  },
+                ),
                 IconButton(
                   onPressed: () {
                     ref
@@ -112,23 +156,72 @@ class RangeStatsPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 12),
             // Stats grid
-            _buildStatsGrid(context, stats),
+            _buildStatsGrid(context, ref, stats, gas),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildStatsGrid(BuildContext context, _RangeStats stats) {
+  /// Columns for a grid [width] wide: as many [_minChipWidth] stats as fit,
+  /// clamped to [_minColumns]..[maxColumns].
+  int _columnCountFor(double width) {
+    final fitting = ((width + _chipSpacing) / (_minChipWidth + _chipSpacing))
+        .floor();
+    return fitting.clamp(_minColumns, math.max(_minColumns, maxColumns));
+  }
+
+  /// SAC and RMV over the selection, from the pressure series of the
+  /// source the chart draws, the same one [profile] comes from.
+  ///
+  /// The duration is what the pressure series cover of the range, and the
+  /// depth is [profile]'s plotted line over that time, not the selection's
+  /// Avg Depth (#3973). The line lets a range holding no sample of a sparse
+  /// profile still have a depth, and the range stops where the line does.
+  RangeGasConsumption _gasConsumption(
+    WidgetRef ref,
+    RangeSelectionState rangeState,
+  ) {
+    final pressures = ref
+        .watch(activeSourceTankPressuresProvider(diveId))
+        .value;
+    if (pressures == null || pressures.isEmpty) {
+      return (sac: null, rmv: null);
+    }
+    return rangeGasConsumption(
+      tanks: tanks,
+      tankPressures: pressures,
+      startTimestamp: rangeState.startTimestamp!,
+      endTimestamp: rangeState.endTimestamp!,
+      profile: profile,
+      model: ref.watch(gasModelProvider),
+      isRebreather: isRebreather,
+      environment: environment,
+    );
+  }
+
+  Widget _buildStatsGrid(
+    BuildContext context,
+    WidgetRef ref,
+    RangeProfileStats stats,
+    RangeGasConsumption gas,
+  ) {
     final colorScheme = Theme.of(context).colorScheme;
+    // The lanes the diver's preference asks for, as the dive summary shows
+    // them: RMV-only falls back to SAC when no cylinder has a volume.
+    final display = ref.watch(gasConsumptionDisplayProvider);
+    final sac = gas.sac;
+    final rmv = display.showsRmv ? gas.rmv : null;
+    final showSac = sac != null && (display.showsSac || rmv == null);
 
     return LayoutBuilder(
       builder: (context, constraints) {
+        final columns = _columnCountFor(constraints.maxWidth);
         final chipWidth =
-            (constraints.maxWidth - 24) / 4; // 3 gaps x 8px spacing
+            (constraints.maxWidth - _chipSpacing * (columns - 1)) / columns;
         return Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: _chipSpacing,
+          runSpacing: _chipSpacing,
           children: [
             // Row 1: Elapsed | Depth Delta | Min Depth | Max Depth
             _buildStatChip(
@@ -196,7 +289,7 @@ class RangeStatsPanel extends ConsumerWidget {
               Colors.orange,
               chipWidth,
             ),
-            // Conditional: Temp | Temp | Gas | SAC (flows into same row)
+            // Conditional: Temp | Temp (flows into same row)
             if (stats.hasTemperature) ...[
               _buildStatChip(
                 context,
@@ -215,6 +308,25 @@ class RangeStatsPanel extends ConsumerWidget {
                 chipWidth,
               ),
             ],
+            // Conditional: SAC | RMV
+            if (showSac)
+              _buildStatChip(
+                context,
+                context.l10n.diveLog_detail_label_sac,
+                units.formatSac(sac),
+                Icons.air,
+                Colors.orange,
+                chipWidth,
+              ),
+            if (rmv != null)
+              _buildStatChip(
+                context,
+                context.l10n.diveLog_detail_label_rmv,
+                units.formatRmv(rmv),
+                Icons.air,
+                Colors.orange,
+                chipWidth,
+              ),
             // Conditional: Heart rate
             if (stats.hasHeartRate) ...[
               _buildStatChip(
@@ -288,164 +400,23 @@ class RangeStatsPanel extends ConsumerWidget {
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  String _formatSignedDepth(double delta) {
+  String _formatSignedDepth(double? delta) {
+    if (delta == null) return units.formatDepth(null);
     final converted = units.convertDepth(delta);
     final sign = converted > 0 ? '+' : '';
     return '$sign${converted.toStringAsFixed(1)}${units.depthSymbol}';
   }
 
-  String _formatRate(double rate) {
+  String _formatRate(double? rate) {
+    if (rate == null) return units.formatDepthRate(null);
     final converted = units.convertDepth(rate);
-    return '${converted.toStringAsFixed(1)} ${units.depthSymbol}/min';
+    return '${converted.toStringAsFixed(1)} ${units.depthRateSymbol}';
   }
 
-  String _formatSignedRate(double rate) {
+  String _formatSignedRate(double? rate) {
+    if (rate == null) return units.formatDepthRate(null);
     final converted = units.convertDepth(rate);
     final sign = converted > 0 ? '+' : '';
-    return '$sign${converted.toStringAsFixed(1)} ${units.depthSymbol}/min';
+    return '$sign${converted.toStringAsFixed(1)} ${units.depthRateSymbol}';
   }
-
-  _RangeStats _calculateRangeStats(
-    RangeSelectionState rangeState,
-    List<DiveTank> tanks,
-  ) {
-    final rangePoints = profile
-        .where(
-          (p) =>
-              p.timestamp >= rangeState.startTimestamp! &&
-              p.timestamp <= rangeState.endTimestamp!,
-        )
-        .toList();
-
-    if (rangePoints.isEmpty) {
-      return const _RangeStats(
-        elapsedSeconds: 0,
-        depthDelta: 0,
-        minDepth: 0,
-        maxDepth: 0,
-        avgDepth: 0,
-        maxDescentRate: 0,
-        maxAscentRate: 0,
-        avgVerticalSpeed: 0,
-      );
-    }
-
-    // Elapsed time
-    final elapsedSeconds =
-        rangePoints.last.timestamp - rangePoints.first.timestamp;
-
-    // Depth stats (needed even for zero-duration to populate min/max/avg)
-    final depths = rangePoints.map((p) => p.depth).toList();
-    final minDepth = depths.reduce(math.min);
-    final maxDepth = depths.reduce(math.max);
-    final avgDepth = depths.reduce((a, b) => a + b) / depths.length;
-
-    // Depth delta (signed: positive = deeper)
-    final depthDelta = rangePoints.last.depth - rangePoints.first.depth;
-
-    // Guard: zero-duration range has no meaningful rates
-    if (elapsedSeconds <= 0) {
-      return _RangeStats(
-        elapsedSeconds: 0,
-        depthDelta: depthDelta,
-        minDepth: minDepth,
-        maxDepth: maxDepth,
-        avgDepth: avgDepth,
-        maxDescentRate: 0,
-        maxAscentRate: 0,
-        avgVerticalSpeed: 0,
-      );
-    }
-
-    final elapsedMinutes = elapsedSeconds / 60.0;
-
-    // Average vertical speed (m/min, signed)
-    final avgVerticalSpeed = depthDelta / elapsedMinutes;
-
-    // Max descent and ascent rates from consecutive point pairs
-    double maxDescentRate = 0;
-    double maxAscentRate = 0;
-    for (int i = 0; i < rangePoints.length - 1; i++) {
-      final dt = rangePoints[i + 1].timestamp - rangePoints[i].timestamp;
-      if (dt <= 0) continue;
-      final dd = rangePoints[i + 1].depth - rangePoints[i].depth;
-      final rate = dd / (dt / 60.0); // m/min
-      if (rate > 0 && rate > maxDescentRate) {
-        maxDescentRate = rate;
-      } else if (rate < 0 && rate.abs() > maxAscentRate) {
-        maxAscentRate = rate.abs();
-      }
-    }
-
-    // Temperature stats
-    final temps = rangePoints
-        .where((p) => p.temperature != null)
-        .map((p) => p.temperature!)
-        .toList();
-    double? minTemp, maxTemp;
-    if (temps.isNotEmpty) {
-      minTemp = temps.reduce(math.min);
-      maxTemp = temps.reduce(math.max);
-    }
-
-    // Heart rate stats
-    final heartRates = rangePoints
-        .where((p) => p.heartRate != null)
-        .map((p) => p.heartRate!)
-        .toList();
-    int? minHR, maxHR;
-    if (heartRates.isNotEmpty) {
-      minHR = heartRates.reduce(math.min);
-      maxHR = heartRates.reduce(math.max);
-    }
-
-    return _RangeStats(
-      elapsedSeconds: elapsedSeconds,
-      depthDelta: depthDelta,
-      minDepth: minDepth,
-      maxDepth: maxDepth,
-      avgDepth: avgDepth,
-      maxDescentRate: maxDescentRate,
-      maxAscentRate: maxAscentRate,
-      avgVerticalSpeed: avgVerticalSpeed,
-      minTemp: minTemp,
-      maxTemp: maxTemp,
-      minHR: minHR,
-      maxHR: maxHR,
-    );
-  }
-}
-
-/// Internal class to hold range statistics
-class _RangeStats {
-  final int elapsedSeconds;
-  final double depthDelta;
-  final double minDepth;
-  final double maxDepth;
-  final double avgDepth;
-  final double maxDescentRate;
-  final double maxAscentRate;
-  final double avgVerticalSpeed;
-  final double? minTemp;
-  final double? maxTemp;
-  final int? minHR;
-  final int? maxHR;
-
-  const _RangeStats({
-    required this.elapsedSeconds,
-    required this.depthDelta,
-    required this.minDepth,
-    required this.maxDepth,
-    required this.avgDepth,
-    required this.maxDescentRate,
-    required this.maxAscentRate,
-    required this.avgVerticalSpeed,
-    this.minTemp,
-    this.maxTemp,
-    this.minHR,
-    this.maxHR,
-  });
-
-  bool get hasTemperature => minTemp != null;
-  bool get hasHeartRate => minHR != null;
 }

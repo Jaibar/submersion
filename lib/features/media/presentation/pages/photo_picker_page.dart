@@ -1,11 +1,27 @@
+// showPhotoPicker lives beside the page; callers import it from here.
+export 'package:submersion/features/media/presentation/pages/photo_picker_launch.dart';
+
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:photo_manager/photo_manager.dart' as pm;
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/domain/value_objects/media_attach_target.dart';
+import 'package:submersion/features/media/presentation/helpers/files_tab_staging.dart';
+import 'package:submersion/features/media/presentation/helpers/gallery_album_filter.dart';
+import 'package:submersion/features/media/presentation/providers/files_tab_providers.dart';
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/media/presentation/providers/url_tab_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/files_tab.dart';
+import 'package:submersion/features/media/presentation/widgets/import_elsewhere_hint.dart';
+import 'package:submersion/features/media/presentation/widgets/gallery_album_filter_bar.dart';
+import 'package:submersion/features/media/presentation/widgets/gallery_selection_toolbar.dart';
+import 'package:submersion/features/media/presentation/widgets/url_tab.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/app_bar_tab_metrics.dart';
 import 'package:submersion/shared/widgets/drag_select_grid_view.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 /// Page for selecting photos from the device gallery within a date range.
 ///
@@ -24,37 +40,151 @@ class PhotoPickerPage extends ConsumerStatefulWidget {
   /// Called when user confirms selection with the selected assets.
   final void Function(List<AssetInfo> selectedAssets)? onSelectionConfirmed;
 
+  /// What this picker session attaches media to, when it has an owner.
+  ///
+  /// Only the Gallery tab hands its selection back to the caller; the Files
+  /// and URL tabs write rows themselves, so they need to be told the target
+  /// or they cannot link anything. Passing only a dive id (as this used to)
+  /// left a session opened from a dive site with no reachable commit path at
+  /// all: issue #1098.
+  ///
+  /// Null when the picker is opened with no owning entity, e.g. the library
+  /// importer.
+  final MediaAttachTarget? target;
+
+  /// Files the user already has in hand, such as a desktop drag-and-drop
+  /// (issue #2488), staged in the Files tab for review the moment the page
+  /// opens.
+  ///
+  /// When set, the page opens on the Files tab and the Gallery tab loads
+  /// only once it is shown. On Windows and Linux loading the Gallery opens a
+  /// file dialog, which would otherwise pop up over the files the user just
+  /// dropped.
+  final List<String>? initialFilePaths;
+
+  /// Replaces the Gallery tab's search of [startTime] to [endTime] on a
+  /// platform with a photo library, for a caller that knows better than a
+  /// date range. It is passed whether the page is still open, so it can stop
+  /// work nobody is waiting for.
+  final Future<List<AssetInfo>> Function(bool Function() isActive)? loadAssets;
+
+  /// Only the Gallery tab, with a line saying where files and links are
+  /// added: a species page's Add photos takes back only the Gallery's
+  /// choice (issue #4527, media library decision 5).
+  final bool galleryOnly;
+
   const PhotoPickerPage({
     super.key,
     required this.startTime,
     required this.endTime,
     this.alreadyLinkedIds = const {},
     this.onSelectionConfirmed,
-  });
+    this.target,
+    this.initialFilePaths,
+    this.loadAssets,
+    this.galleryOnly = false,
+  }) : assert(!galleryOnly || initialFilePaths == null);
 
   @override
   ConsumerState<PhotoPickerPage> createState() => _PhotoPickerPageState();
 }
 
-class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
+class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage>
+    with SingleTickerProviderStateMixin {
+  static const _galleryTabIndex = 0;
+  static const _filesTabIndex = 1;
+
   List<AssetInfo>? _assets;
+
+  /// The albums [_assets] came from, for the Gallery tab's album filter.
+  List<GalleryAlbumOption> _albumOptions = const [];
+
+  /// The album name the grid is narrowed to, or null for every album (#189).
+  String? _albumName;
+
+  late final TabController _tabController;
+  late final ValueNotifier<int> _openSessions;
+  bool _galleryLoadStarted = false;
 
   @override
   void initState() {
     super.initState();
-    _checkPermissionAndLoad();
+    _openSessions = ref.read(openPhotoPickerSessionsProvider);
+    _openSessions.value++;
+    _tabController = TabController(
+      length: 3,
+      vsync: this,
+      initialIndex: widget.initialFilePaths == null
+          ? _galleryTabIndex
+          : _filesTabIndex,
+    )..addListener(_loadGalleryWhenShown);
+    Future.microtask(_startSession);
+    _loadGalleryWhenShown();
+  }
+
+  @override
+  void dispose() {
+    _openSessions.value--;
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  /// Starts the Gallery tab's permission check and asset load the first time
+  /// that tab is the one on screen.
+  void _loadGalleryWhenShown() {
+    if (_galleryLoadStarted || _tabController.index != _galleryTabIndex) {
+      return;
+    }
+    _galleryLoadStarted = true;
+    logFailure(
+      _checkPermissionAndLoad(),
+      _PhotoPickerPageState,
+      'check permission and load',
+    );
+  }
+
+  /// Clears what an earlier session left behind, then stages the files this
+  /// session was opened with. In that order, so the clear cannot wipe them.
+  Future<void> _startSession() async {
+    _clearStaleStaging();
+    final paths = widget.initialFilePaths;
+    if (!mounted || paths == null || paths.isEmpty) return;
+    await stageFilesForReview(
+      ProviderScope.containerOf(context, listen: false),
+      paths,
+      target: widget.target,
+      isActive: () => mounted,
+    );
+  }
+
+  /// Drops files staged, and URLs drafted, by an earlier session that was
+  /// abandoned rather than committed: `filesTabNotifierProvider` and
+  /// `urlTabNotifierProvider` are not autoDispose, and this session may well
+  /// attach to a different dive, or to a site. The Gallery selection needs
+  /// no reset here; its provider is autoDispose.
+  ///
+  /// Deferred by a microtask because Riverpod forbids mutating a provider
+  /// inside a widget life-cycle. It still lands before the first frame the
+  /// user can interact with, and before [_startSession] stages any files
+  /// the page was opened with.
+  void _clearStaleStaging() {
+    if (!mounted) return;
+    ref.read(filesTabNotifierProvider.notifier).clearStagedFiles();
+    ref.read(urlTabNotifierProvider.notifier).startSession();
   }
 
   Future<void> _checkPermissionAndLoad() async {
     final notifier = ref.read(photoPickerNotifierProvider.notifier);
     await notifier.checkPermission();
+    // Closed while the check was in flight: the session's notifier is gone.
+    if (!mounted) return;
 
     // Set already-linked IDs so they appear dimmed and non-selectable
     notifier.setAlreadyLinkedIds(widget.alreadyLinkedIds);
 
     final state = ref.read(photoPickerNotifierProvider);
     if (state.hasPermission) {
-      _loadAssets();
+      logFailure(_loadAssets(), _PhotoPickerPageState, 'load assets');
     }
   }
 
@@ -85,14 +215,20 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
     }
 
     // Mobile: Query gallery by date range
-    final assets = await service.getAssetsInDateRange(
-      widget.startTime,
-      widget.endTime,
-    );
+    final loadAssets = widget.loadAssets;
+    final assets = loadAssets != null
+        ? await loadAssets(() => mounted)
+        : await service.getAssetsInDateRange(widget.startTime, widget.endTime);
     if (mounted) {
-      setState(() => _assets = assets);
+      setState(() {
+        _assets = assets;
+        _albumOptions = galleryAlbumOptions(assets);
+      });
     }
   }
+
+  /// The assets the grid shows: [_assets] narrowed to [_albumName].
+  List<AssetInfo> get _visibleAssets => assetsInAlbum(_assets!, _albumName);
 
   void _handleDone() {
     final state = ref.read(photoPickerNotifierProvider);
@@ -109,64 +245,120 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(photoPickerNotifierProvider);
-    final colorScheme = Theme.of(context).colorScheme;
+    // Tropical light fills its app bar with primary, the colour a stock tab
+    // and TextButton paint in, so both take colours that read on the bar.
+    final barColors = AppBarTabColors.of(Theme.of(context));
 
+    final appBarLeading = IconButton(
+      icon: const Icon(Icons.close),
+      tooltip: context.l10n.media_photoPicker_closeTooltip,
+      onPressed: () => Navigator.of(context).pop(),
+    );
+    final doneAction = TextButton(
+      style: barColors.textButtonStyle,
+      onPressed: state.selectionCount > 0 ? _handleDone : null,
+      child: Text(
+        state.selectionCount > 0
+            ? context.l10n.media_photoPicker_doneCountButton(
+                state.selectionCount,
+              )
+            : context.l10n.media_photoPicker_doneButton,
+      ),
+    );
+
+    final tabController = _tabController;
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          tooltip: context.l10n.media_photoPicker_closeTooltip,
-          onPressed: () => Navigator.of(context).pop(),
-        ),
+        leading: appBarLeading,
         title: Text(context.l10n.media_photoPicker_appBarTitle),
         actions: [
-          TextButton(
-            onPressed: state.selectionCount > 0 ? _handleDone : null,
-            child: Text(
-              state.selectionCount > 0
-                  ? context.l10n.media_photoPicker_doneCountButton(
-                      state.selectionCount,
-                    )
-                  : context.l10n.media_photoPicker_doneButton,
+          // Done commits the GALLERY tab's selection; the Files and URL
+          // tabs carry their own commit buttons. Showing a
+          // permanently-greyed Done over those tabs read as "the app
+          // rejected my photos" to users who had staged files there,
+          // so the action tracks the active tab.
+          if (widget.galleryOnly)
+            doneAction
+          else
+            ListenableBuilder(
+              listenable: tabController,
+              builder: (context, _) => tabController.index == _galleryTabIndex
+                  ? doneAction
+                  : const SizedBox.shrink(),
             ),
-          ),
         ],
+        bottom: widget.galleryOnly
+            ? null
+            : TabBar(
+                controller: tabController,
+                labelColor: barColors.selected,
+                unselectedLabelColor: barColors.unselected,
+                indicatorColor: barColors.selected,
+                overlayColor: barColors.overlay,
+                // On a coloured bar its own edge separates it from the page.
+                dividerColor: barColors.barMatchesPage
+                    ? null
+                    : Colors.transparent,
+                tabs: [
+                  Tab(text: context.l10n.media_photoPicker_tab_gallery),
+                  Tab(text: context.l10n.media_photoPicker_tab_files),
+                  Tab(text: context.l10n.media_photoPicker_tab_url),
+                ],
+              ),
       ),
-      body: _buildBody(context, state, colorScheme),
+      body: widget.galleryOnly
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: ImportElsewhereHint(
+                    // Where the Gallery is a file dialog, files are added here.
+                    message:
+                        ref
+                            .read(photoPickerServiceProvider)
+                            .supportsGalleryBrowsing
+                        ? context.l10n.media_photoPicker_galleryOnlyHint
+                        : context.l10n.media_photoPicker_galleryOnlyLinksHint,
+                  ),
+                ),
+                Expanded(child: _galleryTab(context)),
+              ],
+            )
+          : TabBarView(
+              controller: tabController,
+              children: [
+                _galleryTab(context),
+                FilesTab(target: widget.target),
+                UrlTab(target: widget.target),
+              ],
+            ),
     );
   }
 
-  Set<int> _computeSelectedIndices(Set<String> selectedIds) {
-    if (_assets == null) return {};
-    final indices = <int>{};
-    for (var i = 0; i < _assets!.length; i++) {
-      if (selectedIds.contains(_assets![i].id)) {
-        indices.add(i);
-      }
-    }
-    return indices;
+  Widget _galleryTab(BuildContext context) {
+    final state = ref.watch(photoPickerNotifierProvider);
+    final colorScheme = Theme.of(context).colorScheme;
+    return _buildBody(context, state, colorScheme);
   }
 
-  Set<int> _computeDisabledIndices(Set<String> alreadyLinkedIds) {
-    if (_assets == null) return {};
-    final indices = <int>{};
-    for (var i = 0; i < _assets!.length; i++) {
-      if (alreadyLinkedIds.contains(_assets![i].id)) {
-        indices.add(i);
-      }
-    }
-    return indices;
-  }
+  Set<int> _indicesOf(List<AssetInfo> visible, Set<String> ids) => {
+    for (var i = 0; i < visible.length; i++)
+      if (ids.contains(visible[i].id)) i,
+  };
 
-  void _syncSelectionToNotifier(Set<int> indices) {
-    if (_assets == null) return;
+  /// Takes the grid's report of its whole selection, which covers only the
+  /// [visible] assets, without dropping picks the album filter hides.
+  void _syncSelectionToNotifier(List<AssetInfo> visible, Set<int> indices) {
     final state = ref.read(photoPickerNotifierProvider);
-    final ids = indices
-        .where((i) => i < _assets!.length)
-        .map((i) => _assets![i].id)
-        .where((id) => !state.alreadyLinkedIds.contains(id))
-        .toList();
-    ref.read(photoPickerNotifierProvider.notifier).selectAll(ids);
+    final merged = mergeVisibleSelection(
+      current: state.selectedIds,
+      visibleIds: visible.map((a) => a.id),
+      selectedVisibleIds: indices
+          .where((i) => i < visible.length)
+          .map((i) => visible[i].id),
+    );
+    ref.read(photoPickerNotifierProvider.notifier).selectAll(merged.toList());
   }
 
   Widget _buildBody(
@@ -197,40 +389,54 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
       );
     }
 
+    final visible = _visibleAssets;
+    final selectableIds = [
+      for (final asset in visible)
+        if (!state.alreadyLinkedIds.contains(asset.id)) asset.id,
+    ];
+
     // Show grid
     return Column(
       children: [
         // Date range header
         _DateRangeHeader(startTime: widget.startTime, endTime: widget.endTime),
-        // Selection toolbar (shown when items are selected)
-        if (state.selectionCount > 0)
-          _SelectionToolbar(
-            selectedCount: state.selectionCount,
-            totalCount: _assets!
-                .where((a) => !state.alreadyLinkedIds.contains(a.id))
-                .length,
-            onSelectAll: () {
-              final selectableIds = _assets!
-                  .where((a) => !state.alreadyLinkedIds.contains(a.id))
-                  .map((a) => a.id)
-                  .toList();
-              ref
-                  .read(photoPickerNotifierProvider.notifier)
-                  .selectAll(selectableIds);
-            },
-            onClearSelection: () {
-              ref.read(photoPickerNotifierProvider.notifier).clearSelection();
-            },
+        GalleryAlbumFilterBar(
+          options: _albumOptions,
+          totalCount: _assets!.length,
+          selectedAlbum: _albumName,
+          onSelected: (name) => setState(() => _albumName = name),
+        ),
+        // Selection toolbar. Always present, even with nothing selected, so
+        // the first tap does not push the grid down a row under the user's
+        // next tap (#2059).
+        GallerySelectionToolbar(
+          selectedCount: state.selectionCount,
+          canSelectAll: selectableIds.any(
+            (id) => !state.selectedIds.contains(id),
           ),
+          // Adds the photos on screen; picks under other albums stay.
+          onSelectAll: () {
+            ref.read(photoPickerNotifierProvider.notifier).selectAll([
+              ...state.selectedIds,
+              ...selectableIds,
+            ]);
+          },
+          onClearSelection: () {
+            ref.read(photoPickerNotifierProvider.notifier).clearSelection();
+          },
+        ),
         // Photo grid
         Expanded(
           child: DragSelectGridView<AssetInfo>(
-            items: _assets!,
+            // A fresh grid per album: its scroll offset and index-based
+            // selection belong to the list it was built with.
+            key: ValueKey(_albumName),
+            items: visible,
             startInSelectionMode: state.selectionCount > 0,
-            initialSelection: _computeSelectedIndices(state.selectedIds),
-            disabledIndices: _computeDisabledIndices(state.alreadyLinkedIds),
+            initialSelection: _indicesOf(visible, state.selectedIds),
+            disabledIndices: _indicesOf(visible, state.alreadyLinkedIds),
             onSelectionChanged: (indices) {
-              _syncSelectionToNotifier(indices);
+              _syncSelectionToNotifier(visible, indices);
             },
             // Selection visibility is derived from state.selectionCount,
             // so no additional local tracking is needed here.
@@ -238,7 +444,7 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
             onItemTap: (index) {
               ref
                   .read(photoPickerNotifierProvider.notifier)
-                  .toggleSelection(_assets![index].id);
+                  .toggleSelection(visible[index].id);
             },
             padding: const EdgeInsets.all(4),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -262,19 +468,18 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
 }
 
 /// Header showing the date range being browsed.
-class _DateRangeHeader extends StatelessWidget {
+class _DateRangeHeader extends ConsumerWidget {
   final DateTime startTime;
   final DateTime endTime;
 
   const _DateRangeHeader({required this.startTime, required this.endTime});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    final dateFormat = DateFormat.MMMd();
-    final timeFormat = DateFormat.jm();
+    final units = ref.watch(unitFormatterProvider);
 
     final sameDay =
         startTime.day == endTime.day &&
@@ -284,10 +489,10 @@ class _DateRangeHeader extends StatelessWidget {
     String rangeText;
     if (sameDay) {
       rangeText =
-          '${dateFormat.format(startTime)}, ${timeFormat.format(startTime)} to ${timeFormat.format(endTime)}';
+          '${units.formatMonthDay(startTime)}, ${units.formatTime(startTime)} to ${units.formatTime(endTime)}';
     } else {
       rangeText =
-          '${dateFormat.format(startTime)} ${timeFormat.format(startTime)} to ${dateFormat.format(endTime)} ${timeFormat.format(endTime)}';
+          '${units.formatMonthDay(startTime)} ${units.formatTime(startTime)} to ${units.formatMonthDay(endTime)} ${units.formatTime(endTime)}';
     }
 
     return Container(
@@ -304,57 +509,6 @@ class _DateRangeHeader extends StatelessWidget {
         style: textTheme.bodySmall?.copyWith(
           color: colorScheme.onSurfaceVariant,
         ),
-      ),
-    );
-  }
-}
-
-/// Toolbar showing selection count with Select All and Clear buttons.
-class _SelectionToolbar extends StatelessWidget {
-  final int selectedCount;
-  final int totalCount;
-  final VoidCallback onSelectAll;
-  final VoidCallback onClearSelection;
-
-  const _SelectionToolbar({
-    required this.selectedCount,
-    required this.totalCount,
-    required this.onSelectAll,
-    required this.onClearSelection,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: colorScheme.primaryContainer.withValues(alpha: 0.3),
-        border: Border(
-          bottom: BorderSide(color: colorScheme.outlineVariant, width: 0.5),
-        ),
-      ),
-      child: Row(
-        children: [
-          const SizedBox(width: 8),
-          Text(
-            context.l10n.media_photoPicker_selectedCount(selectedCount),
-            style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
-          ),
-          const Spacer(),
-          if (selectedCount < totalCount)
-            TextButton(
-              onPressed: onSelectAll,
-              child: Text(context.l10n.media_photoPicker_selectAllButton),
-            ),
-          TextButton(
-            onPressed: onClearSelection,
-            child: Text(context.l10n.media_photoPicker_clearSelectionButton),
-          ),
-        ],
       ),
     );
   }
@@ -503,18 +657,17 @@ class _PhotoThumbnail extends ConsumerWidget {
 }
 
 /// View shown when no photos are found in the date range.
-class _EmptyStateView extends StatelessWidget {
+class _EmptyStateView extends ConsumerWidget {
   final DateTime startTime;
   final DateTime endTime;
 
   const _EmptyStateView({required this.startTime, required this.endTime});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final dateFormat = DateFormat.MMMd();
-    final timeFormat = DateFormat.jm();
+    final units = ref.watch(unitFormatterProvider);
 
     return Center(
       child: Padding(
@@ -535,10 +688,10 @@ class _EmptyStateView extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               context.l10n.media_photoPicker_emptyMessage(
-                dateFormat.format(startTime),
-                timeFormat.format(startTime),
-                dateFormat.format(endTime),
-                timeFormat.format(endTime),
+                units.formatMonthDay(startTime),
+                units.formatTime(startTime),
+                units.formatMonthDay(endTime),
+                units.formatTime(endTime),
               ),
               textAlign: TextAlign.center,
               style: textTheme.bodyMedium?.copyWith(
@@ -600,18 +753,7 @@ class _PermissionDeniedView extends StatelessWidget {
             const SizedBox(height: 24),
             if (isPermanentlyDenied)
               FilledButton(
-                onPressed: () {
-                  // Open app settings
-                  // Note: This requires platform-specific handling
-                  // For now, just show a message
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        context.l10n.media_photoPicker_openSettingsSnackbar,
-                      ),
-                    ),
-                  );
-                },
+                onPressed: () => pm.PhotoManager.openSetting(),
                 child: Text(context.l10n.media_photoPicker_openSettingsButton),
               )
             else
@@ -626,27 +768,26 @@ class _PermissionDeniedView extends StatelessWidget {
   }
 }
 
-/// Shows the photo picker as a full-screen modal.
-///
-/// Returns the list of selected [AssetInfo] objects, or null if cancelled.
-Future<List<AssetInfo>?> showPhotoPicker({
-  required BuildContext context,
-  required DateTime diveStartTime,
-  required DateTime diveEndTime,
-  Set<String> alreadyLinkedIds = const {},
-  Duration buffer = const Duration(minutes: 30),
-}) {
-  final startTime = diveStartTime.subtract(buffer);
-  final endTime = diveEndTime.add(buffer);
+/// Placeholder shown in tabs whose features are still pending. Currently
+/// unused after Phase 3a wired the URL tab to [UrlTab]; kept for future
+/// phases that may temporarily reintroduce a placeholder in the picker
+/// shell.
+// ignore: unused_element
+class _PlaceholderTab extends StatelessWidget {
+  const _PlaceholderTab({required this.message});
+  final String message;
 
-  return Navigator.of(context).push<List<AssetInfo>>(
-    MaterialPageRoute(
-      fullscreenDialog: true,
-      builder: (context) => PhotoPickerPage(
-        startTime: startTime,
-        endTime: endTime,
-        alreadyLinkedIds: alreadyLinkedIds,
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

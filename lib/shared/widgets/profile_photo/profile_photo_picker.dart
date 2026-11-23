@@ -1,0 +1,140 @@
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:image_picker/image_picker.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_photo_crop_dialog.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_photo_source_sheet.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+
+final _log = LoggerService.forClass(ProfilePhotoResult);
+
+/// Outcome of running the profile photo flow.
+///
+/// [removed] distinguishes "the user asked to delete the photo" from "the user
+/// cancelled", which a bare `Uint8List?` cannot express.
+@immutable
+class ProfilePhotoResult {
+  const ProfilePhotoResult({this.bytes, this.removed = false});
+
+  final Uint8List? bytes;
+  final bool removed;
+}
+
+/// Runs the whole flow: source sheet, byte acquisition, crop dialog, encode.
+///
+/// Returns null if the user cancelled at any point.
+///
+/// Size bounding happens in the crop dialog's encode step, never through
+/// ImagePicker's maxWidth / maxHeight / imageQuality: image_picker_macos,
+/// image_picker_windows and image_picker_linux all document that those
+/// arguments are silently ignored, so a desktop pick would be unbounded.
+///
+/// [contactPhotoLoader] is supplied by callers that can reach the address
+/// book, which keeps this shared widget free of a flutter_contacts dependency.
+///
+/// [sheetTitle] replaces the source sheet's "Profile Photo" heading.
+///
+/// [pickImageOverride] is a test seam replacing the platform image picker,
+/// which has no Dart-side entry point a fake can be injected through. Mirrors
+/// [OcrScanPage.pickImageOverride].
+Future<ProfilePhotoResult?> pickProfilePhoto({
+  required BuildContext context,
+  required bool hasPhoto,
+  required bool allowContacts,
+  Future<Uint8List?> Function(BuildContext context)? contactPhotoLoader,
+  String? sheetTitle,
+  @visibleForTesting
+  Future<({Uint8List bytes, String name})?> Function(ImageSource source)?
+  pickImageOverride,
+}) async {
+  // Offering Contacts without a loader would show a menu item that silently
+  // does nothing when tapped, which reads as a broken flow. The two are
+  // therefore gated together rather than independently.
+  final source = await showProfilePhotoSourceSheet(
+    context: context,
+    hasPhoto: hasPhoto,
+    allowContacts: allowContacts && contactPhotoLoader != null,
+    title: sheetTitle,
+  );
+  if (source == null || !context.mounted) return null;
+
+  if (source == ProfilePhotoSource.remove) {
+    return const ProfilePhotoResult(removed: true);
+  }
+
+  Uint8List? raw;
+  String? declaredName;
+
+  if (source == ProfilePhotoSource.contacts) {
+    // Unreachable without a loader, since the option is gated above.
+    raw = await contactPhotoLoader!(context);
+    // No declaredName: the address book gives no filename and a contact photo
+    // is not guaranteed to be JPEG. decodeNamedImage picks the decoder purely
+    // by extension with no fallback, so claiming '.jpg' over PNG bytes would
+    // hand them to the JPEG decoder and report a valid photo as undecodable.
+    // Null makes the codec probe the actual bytes.
+    declaredName = null;
+    if (raw == null) return null;
+  } else {
+    final imageSource = source == ProfilePhotoSource.camera
+        ? ImageSource.camera
+        : ImageSource.gallery;
+    final ({Uint8List bytes, String name})? picked;
+    try {
+      if (pickImageOverride != null) {
+        picked = await pickImageOverride(imageSource);
+      } else {
+        if (!demoSealGuard(context, DemoSealedFeature.mediaImport)) {
+          return null;
+        }
+        final file = await ImagePicker().pickImage(source: imageSource);
+        // Read through the XFile handle, not File(file.path). A picked file
+        // is a HANDLE: on Android SAF the path can be unusable, and
+        // image_picker makes no promise it addresses a real filesystem entry.
+        picked = file == null
+            ? null
+            : (bytes: await file.readAsBytes(), name: file.name);
+      }
+    } on PlatformException catch (e, stackTrace) {
+      // A denied camera permission lands here (image_picker's
+      // camera_access_denied, on iOS and on Android once the app declares
+      // the CAMERA permission), as does a library file that cannot be read.
+      _log.error(
+        'Could not pick a profile photo',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      if (context.mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            // Only the camera has a permission story to tell; a library or
+            // file failure is not the diver's camera settings.
+            content: Text(
+              imageSource == ImageSource.camera
+                  ? context.l10n.common_camera_unavailable
+                  : context.l10n.common_photo_pickFailed,
+            ),
+          ),
+        );
+      }
+      return null;
+    }
+    if (picked == null) return null;
+    raw = picked.bytes;
+    declaredName = picked.name;
+  }
+
+  if (!context.mounted) return null;
+
+  final encoded = await showProfilePhotoCropDialog(
+    context: context,
+    sourceBytes: raw,
+    declaredName: declaredName,
+  );
+  if (encoded == null) return null;
+  return ProfilePhotoResult(bytes: encoded);
+}

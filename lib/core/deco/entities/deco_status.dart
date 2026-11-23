@@ -1,5 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/entities/gas_exchange.dart';
 import 'package:submersion/core/deco/entities/tissue_compartment.dart';
 
 /// Represents the current decompression status at a point in time.
@@ -14,8 +18,18 @@ class DecoStatus extends Equatable {
   /// Decompression ceiling in meters (0 if no deco obligation)
   final double ceilingMeters;
 
-  /// Time To Surface in seconds (including deco stops)
+  /// Time To Surface in seconds: the mandatory ascent time plus any
+  /// decompression stops. The recommended safety stop is NOT included here --
+  /// it is reported separately in [safetyStopSeconds] so entering deco can only
+  /// ever increase TTS, never drop it.
   final int ttsSeconds;
+
+  /// Recommended safety-stop time remaining in seconds: a 3-minute stop on
+  /// no-deco dives, minus time already accumulated in the 3-6 m safety-stop
+  /// zone during the ascent. Zero once completed or when a mandatory
+  /// decompression obligation exists (the deco stops supersede the safety
+  /// stop). Not part of [ttsSeconds].
+  final int safetyStopSeconds;
 
   /// Gradient Factor Low (0.0 - 1.0)
   final double gfLow;
@@ -32,17 +46,164 @@ class DecoStatus extends Equatable {
   /// Current ambient pressure in bar absolute
   final double ambientPressureBar;
 
+  /// Surface pressure in bar used for surface-referenced metrics (SurfGF).
+  final double surfacePressureBar;
+
+  /// Inspired N2 partial pressure in bar (alveolar, after water vapour) of the
+  /// gas being breathed at this instant, or null when unknown. On a rebreather
+  /// this is the loop's, not the diluent's at ambient.
+  final double? inspiredN2Bar;
+
+  /// Inspired He partial pressure in bar, as [inspiredN2Bar].
+  final double? inspiredHeBar;
+
+  /// Deepest GF-low ceiling (meters) reached so far in the dive at this
+  /// sample: the running anchor BuhlmannAlgorithm interpolates gradient
+  /// factors from. Together with [compartments] it is the complete restorable
+  /// mid-dive state (`BuhlmannAlgorithm.restoreState`). Null when the status
+  /// was not produced by a profile walk (hand-built statuses, older callers).
+  final double? gfLowCeilingAnchor;
+
   const DecoStatus({
     required this.compartments,
     required this.ndlSeconds,
     required this.ceilingMeters,
     required this.ttsSeconds,
+    this.safetyStopSeconds = 0,
     required this.gfLow,
     required this.gfHigh,
     required this.decoStops,
     required this.currentDepthMeters,
     required this.ambientPressureBar,
+    this.surfacePressureBar = 1.0,
+    this.inspiredN2Bar,
+    this.inspiredHeBar,
+    this.gfLowCeilingAnchor,
   });
+
+  /// Rate noise floor, in bar/min, below which [isOffgassing]'s net rate is
+  /// treated as zero rather than a real on-gassing signal.
+  ///
+  /// A compartment projected toward equilibrium across many small time steps
+  /// (e.g. `TissueLiveService.surfaceIntervalTimeline`, which off-gasses a
+  /// surface interval in dozens of discrete segments) can land a few bits on
+  /// the wrong side of its exact equilibrium tension from accumulated
+  /// floating-point rounding, even though it approached that equilibrium
+  /// strictly from one side the whole time. Left at the literal `< 0`
+  /// boundary, that noise flips the badge to "on-gassing" for a compartment
+  /// that has, physically, simply finished off-gassing. This floor is far
+  /// above any such rounding noise (on the order of 1e-15) and far below any
+  /// real physiological rate, so it only ever absorbs noise, never a
+  /// genuine on-gassing signal.
+  static const double _netRateNoiseFloor = 1e-9;
+
+  /// Whether [compartment] is releasing inert gas at this instant, or null
+  /// when the inspired gas is unknown.
+  ///
+  /// Gas moves toward the inspired partial pressure, not toward ambient: a
+  /// tissue below ambient still off-gasses at a stop where the breathed inert
+  /// pressure is lower still. N2 and He each move at their own half-time rate,
+  /// so the direction is the sign of their combined Haldane rate.
+  bool? isOffgassing(TissueCompartment compartment) {
+    final netRate = _netRateOverLn2(compartment);
+    if (netRate == null) return null;
+    return netRate < _netRateNoiseFloor;
+  }
+
+  /// Net Haldane rate of [compartment], in bar/min, for both inert gases
+  /// together: positive while it takes gas up, or null when the inspired gas
+  /// is unknown. Unlike [isOffgassing], which only needs the sign, this keeps
+  /// the ln 2 so the value is a real rate, the one the profile's isobaric
+  /// counterdiffusion bands compare against a minimum (issue #4530).
+  double? netHaldaneRateBarPerMin(TissueCompartment compartment) {
+    final netRate = _netRateOverLn2(compartment);
+    return netRate == null ? null : math.ln2 * netRate;
+  }
+
+  /// The combined Haldane rate of [compartment] divided by ln 2, so only its
+  /// sign and relative size are meaningful; null when the inspired gas is
+  /// unknown.
+  double? _netRateOverLn2(TissueCompartment compartment) {
+    final pN2 = inspiredN2Bar;
+    final pHe = inspiredHeBar;
+    if (pN2 == null || pHe == null) return null;
+    return (pN2 - compartment.currentPN2) / compartment.halfTimeN2 +
+        (pHe - compartment.currentPHe) / compartment.halfTimeHe;
+  }
+
+  /// Distance, in bar, between a compartment's tension and the inspired
+  /// pressure of one gas below which that gas reads as in equilibrium rather
+  /// than still moving. Far above the floating-point noise a long surface
+  /// projection leaves behind, and below anything a diver would care about.
+  /// The same 0.01 bar the live residual-load check uses on the total
+  /// (`TissueLiveService.hasResidualLoad`), so a trivial dive does not read
+  /// as still moving for an extra slow-compartment half-time.
+  static const double gasEquilibriumToleranceBar = 0.01;
+
+  /// Direction nitrogen alone moves in [compartment], or null when the
+  /// inspired gas is unknown.
+  GasExchange? n2Exchange(TissueCompartment compartment) {
+    final inspired = inspiredN2Bar;
+    if (inspired == null) return null;
+    return _exchange(inspired, compartment.currentPN2);
+  }
+
+  /// Direction helium alone moves in [compartment], or null when the
+  /// inspired gas is unknown. After a trimix dive at the surface this reads
+  /// off-gassing while [n2Exchange] can read on-gassing at the same time.
+  GasExchange? heExchange(TissueCompartment compartment) {
+    final inspired = inspiredHeBar;
+    if (inspired == null) return null;
+    return _exchange(inspired, compartment.currentPHe);
+  }
+
+  /// Net direction of both gases together, as [gasExchanges] reads it.
+  GasExchange? netExchange(TissueCompartment compartment) =>
+      gasExchanges(compartment).net;
+
+  /// Each gas's direction in [compartment] and the net direction of both,
+  /// evaluated once for a view that shows all three (tooltip, detail panel).
+  /// Every field is null when the inspired gas is unknown.
+  ///
+  /// The net direction is derived from the per-gas ones, so the badge can
+  /// never contradict the arrows next to it: [GasExchange.equilibrium] when
+  /// neither gas moves, the moving gas's direction when only one does or
+  /// both move the same way, and the sign of the combined rate
+  /// ([isOffgassing]) only when they move in opposite directions. Taking
+  /// that sign whenever either gas moves let a helium difference inside the
+  /// tolerance (no arrow) outweigh nitrogen visibly moving in.
+  ({GasExchange? n2, GasExchange? he, GasExchange? net}) gasExchanges(
+    TissueCompartment compartment,
+  ) {
+    final n2 = n2Exchange(compartment);
+    final he = heExchange(compartment);
+    if (n2 == null || he == null) return (n2: n2, he: he, net: null);
+    final GasExchange net;
+    if (he == GasExchange.equilibrium) {
+      net = n2;
+    } else if (n2 == GasExchange.equilibrium || n2 == he) {
+      net = he;
+    } else {
+      net = isOffgassing(compartment)!
+          ? GasExchange.offgassing
+          : GasExchange.ongassing;
+    }
+    return (n2: n2, he: he, net: net);
+  }
+
+  static GasExchange _exchange(double inspired, double tension) {
+    final difference = inspired - tension;
+    if (difference.abs() < gasEquilibriumToleranceBar) {
+      return GasExchange.equilibrium;
+    }
+    return difference > 0 ? GasExchange.ongassing : GasExchange.offgassing;
+  }
+
+  /// Inspired N2 when breathing air at [surfacePressureBar]: the tension a
+  /// fully desaturated compartment settles at on land. Never zero, because
+  /// the body always holds the nitrogen of the air it breathes.
+  double get surfaceEquilibriumN2Bar =>
+      calculateInspiredN2(surfacePressureBar, airN2Fraction);
 
   /// Whether the diver is currently in decompression obligation.
   ///
@@ -93,7 +254,7 @@ class DecoStatus extends Equatable {
     if (compartments.isEmpty) return 0.0;
     double maxGf = double.negativeInfinity;
     for (final comp in compartments) {
-      final gf = comp.surfaceGradientFactor;
+      final gf = comp.gradientFactor(surfacePressureBar);
       if (gf > maxGf) maxGf = gf;
     }
     // Clamp at 0: negative SurfGF means all tissues are below surface
@@ -167,22 +328,32 @@ class DecoStatus extends Equatable {
     int? ndlSeconds,
     double? ceilingMeters,
     int? ttsSeconds,
+    int? safetyStopSeconds,
     double? gfLow,
     double? gfHigh,
     List<DecoStop>? decoStops,
     double? currentDepthMeters,
     double? ambientPressureBar,
+    double? surfacePressureBar,
+    double? inspiredN2Bar,
+    double? inspiredHeBar,
+    double? gfLowCeilingAnchor,
   }) {
     return DecoStatus(
       compartments: compartments ?? this.compartments,
       ndlSeconds: ndlSeconds ?? this.ndlSeconds,
       ceilingMeters: ceilingMeters ?? this.ceilingMeters,
       ttsSeconds: ttsSeconds ?? this.ttsSeconds,
+      safetyStopSeconds: safetyStopSeconds ?? this.safetyStopSeconds,
       gfLow: gfLow ?? this.gfLow,
       gfHigh: gfHigh ?? this.gfHigh,
       decoStops: decoStops ?? this.decoStops,
       currentDepthMeters: currentDepthMeters ?? this.currentDepthMeters,
       ambientPressureBar: ambientPressureBar ?? this.ambientPressureBar,
+      surfacePressureBar: surfacePressureBar ?? this.surfacePressureBar,
+      inspiredN2Bar: inspiredN2Bar ?? this.inspiredN2Bar,
+      inspiredHeBar: inspiredHeBar ?? this.inspiredHeBar,
+      gfLowCeilingAnchor: gfLowCeilingAnchor ?? this.gfLowCeilingAnchor,
     );
   }
 
@@ -192,11 +363,16 @@ class DecoStatus extends Equatable {
     ndlSeconds,
     ceilingMeters,
     ttsSeconds,
+    safetyStopSeconds,
     gfLow,
     gfHigh,
     decoStops,
     currentDepthMeters,
     ambientPressureBar,
+    surfacePressureBar,
+    inspiredN2Bar,
+    inspiredHeBar,
+    gfLowCeilingAnchor,
   ];
 }
 
@@ -214,11 +390,24 @@ class DecoStop extends Equatable {
   /// Whether this is a deep stop (below 9m)
   final bool isDeepStop;
 
+  /// Seconds of this stop spent on the break gas (air breaks). Included in
+  /// [durationSeconds]. Zero when no air breaks occurred.
+  final int airBreakSeconds;
+
+  /// Whether this stop is held only for the gas switch made here, with no
+  /// decompression owed at its depth (issue #4160): a switch before the
+  /// first deco stop, or any switch on a dive that owes nothing. It is not a
+  /// decompression stop, so it does not move the ascent onto the slower
+  /// between-stops rates (`AscentPhase.afterStop`).
+  final bool isGasSwitchOnly;
+
   const DecoStop({
     required this.depthMeters,
     required this.durationSeconds,
     this.gasName,
     this.isDeepStop = false,
+    this.airBreakSeconds = 0,
+    this.isGasSwitchOnly = false,
   });
 
   /// Duration formatted as minutes
@@ -243,5 +432,15 @@ class DecoStop extends Equatable {
     durationSeconds,
     gasName,
     isDeepStop,
+    airBreakSeconds,
+    isGasSwitchOnly,
   ];
 }
+
+/// The depths of the stops in [stops] that are held only to switch gas
+/// ([DecoStop.isGasSwitchOnly]), the form `SchedulePolicy.ascentLegs` takes
+/// them in.
+Set<double> gasSwitchOnlyDepthsOf(Iterable<DecoStop> stops) => {
+  for (final stop in stops)
+    if (stop.isGasSwitchOnly) stop.depthMeters,
+};

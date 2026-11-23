@@ -1,0 +1,654 @@
+import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/features/certifications/domain/constants/certification_field.dart';
+import 'package:submersion/features/courses/domain/constants/course_field.dart';
+import 'package:submersion/features/settings/presentation/conflicts/conflict_enum_labels.dart';
+import 'package:submersion/features/settings/presentation/conflicts/conflict_field.dart';
+
+/// Conflict labels and value kinds for divers, buddies, certifications, courses, dive plans and pre-dive checklists (#694). Generated from a
+/// reviewed column list; the coverage guard in
+/// test/features/settings/presentation/conflicts/ keeps it complete.
+final Map<String, ConflictField> peoplePlanningFields = {
+  'additionalCredentials': ConflictField(
+    (l) => l.settings_conflict_field_additionalCredentials,
+    FieldKind.opaque,
+  ),
+  'agency': ConflictField(
+    (l) => CourseField.agency.localizedDisplayName(l),
+    FieldKind.enumValue,
+    enumLabel: certificationAgencyLabeler,
+  ),
+  // A custom certification level's agency (issue #690): a built-in enum
+  // name, labelled like a certification's agency, or a custom agency id.
+  'agencyId': ConflictField(
+    (l) => CourseField.agency.localizedDisplayName(l),
+    FieldKind.enumValue,
+    enumLabel: certificationAgencyLabeler,
+  ),
+  'airBreakBreakSeconds': ConflictField(
+    (l) => l.settings_conflict_field_airBreakBreakSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'airBreakO2Seconds': ConflictField(
+    (l) => l.settings_conflict_field_airBreakO2Seconds,
+    FieldKind.durationSeconds,
+  ),
+  // True = no air breaks for this plan regardless of the diver's Settings
+  // default (issue #3552); the per-plan counterpart of airBreaks itself.
+  'airBreaksExplicitlyOff': ConflictField(
+    (l) => l.divePlanner_label_airBreaks,
+    FieldKind.boolean,
+  ),
+  'allergies': ConflictField(
+    (l) => l.settings_conflict_field_allergies,
+    FieldKind.longText,
+  ),
+  'ascentRate': ConflictField(
+    (l) => l.settings_conflict_field_ascentRate,
+    FieldKind.ascentRate,
+  ),
+  'batteryReserveFraction': ConflictField(
+    (l) => l.settings_conflict_field_batteryReserveFraction,
+    FieldKind.fraction,
+  ),
+  'bestMixEndMeters': ConflictField(
+    (l) => l.settings_conflict_field_bestMixEndMeters,
+    FieldKind.depth,
+  ),
+  'birthYear': ConflictField(
+    (l) => l.settings_conflict_field_birthYear,
+    FieldKind.number,
+  ),
+  'bloodType': ConflictField(
+    (l) => l.settings_conflict_field_bloodType,
+    FieldKind.shortText,
+  ),
+  'bodyFatPercent': ConflictField(
+    (l) => l.settings_conflict_field_bodyFatPercent,
+    FieldKind.percent,
+  ),
+  'buddyCardShare': ConflictField(
+    (l) => l.settings_conflict_field_buddyCardShare,
+    FieldKind.opaque,
+  ),
+  'builtinKey': ConflictField(
+    (l) => l.settings_conflict_field_builtinKey,
+    FieldKind.shortText,
+  ),
+  'cardDiveCount': ConflictField(
+    (l) => l.settings_conflict_field_cardDiveCount,
+    FieldKind.number,
+  ),
+  'cardDivingSince': ConflictField(
+    (l) => l.settings_conflict_field_cardDivingSince,
+    FieldKind.number,
+  ),
+  'cardId': ConflictField(
+    (l) => l.settings_conflict_field_cardId,
+    FieldKind.opaque,
+  ),
+  'cardLastDive': ConflictField(
+    (l) => l.settings_conflict_field_cardLastDive,
+    FieldKind.utcDate,
+  ),
+  'cardNumber': ConflictField(
+    (l) => CertificationField.cardNumber.localizedDisplayName(l),
+    FieldKind.shortText,
+  ),
+  'cardReceivedAt': ConflictField(
+    (l) => l.settings_conflict_field_cardReceivedAt,
+    FieldKind.dateTime,
+  ),
+  // A custom agency's card colour (issue #690); an ARGB integer means
+  // nothing to a diver, so the dialog only says it changed.
+  'colorArgb': ConflictField(
+    (l) => l.certificationAgencies_dialog_colorLabel,
+    FieldKind.opaque,
+  ),
+  'completionDate': ConflictField(
+    (l) => CourseField.completionDate.localizedDisplayName(l),
+    FieldKind.date,
+  ),
+  'currentSetsTowardDeg': ConflictField(
+    (l) => l.settings_conflict_field_currentSetsTowardDeg,
+    FieldKind.number,
+  ),
+  'currentSpeedMps': ConflictField(
+    (l) => l.settings_conflict_field_currentSpeedMps,
+    FieldKind.speed,
+  ),
+  // The MOD set by hand on a plan tank or a saved cylinder, for any role
+  // (issue #3567), labelled as its field is.
+  'decoSwitchDepth': ConflictField((l) => l.tankMod_label, FieldKind.depth),
+  'defaultCurrentSetsTowardDeg': ConflictField(
+    (l) => l.settings_conflict_field_defaultCurrentSetsTowardDeg,
+    FieldKind.number,
+  ),
+  'defaultCurrentSpeedMps': ConflictField(
+    (l) => l.settings_conflict_field_defaultCurrentSpeedMps,
+    FieldKind.speed,
+  ),
+  'depthM': ConflictField(
+    (l) => l.settings_conflict_field_depthM,
+    FieldKind.depth,
+  ),
+  'descentRate': ConflictField(
+    (l) => l.settings_conflict_field_descentRate,
+    FieldKind.ascentRate,
+  ),
+  'deviationDepthDelta': ConflictField(
+    (l) => l.settings_conflict_field_deviationDepthDelta,
+    FieldKind.depth,
+  ),
+  'deviationTimeMinutes': ConflictField(
+    (l) => l.settings_conflict_field_deviationTimeMinutes,
+    FieldKind.durationMinutes,
+  ),
+  'distanceM': ConflictField(
+    (l) => l.settings_conflict_field_distanceM,
+    FieldKind.distance,
+  ),
+  'diveModeOverride': ConflictField(
+    (l) => l.settings_conflict_field_diveModeOverride,
+    FieldKind.enumValue,
+    enumLabel: planModeLabeler,
+  ),
+  // A plan's own name within its repetitive series (issue #3565).
+  'diveName': ConflictField(
+    (l) => l.settings_conflict_field_diveName,
+    FieldKind.shortText,
+  ),
+  'divingSince': ConflictField(
+    (l) => l.settings_conflict_field_divingSince,
+    FieldKind.number,
+  ),
+  'emergencyContact2Name': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContact2Name,
+    FieldKind.shortText,
+  ),
+  'emergencyContact2Phone': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContact2Phone,
+    FieldKind.shortText,
+  ),
+  'emergencyContact2Relation': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContact2Relation,
+    FieldKind.shortText,
+  ),
+  'emergencyContactName': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContactName,
+    FieldKind.shortText,
+  ),
+  'emergencyContactPhone': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContactPhone,
+    FieldKind.shortText,
+  ),
+  'emergencyContactRelation': ConflictField(
+    (l) => l.settings_conflict_field_emergencyContactRelation,
+    FieldKind.shortText,
+  ),
+  'endDepth': ConflictField(
+    (l) => l.settings_conflict_field_endDepth,
+    FieldKind.depth,
+  ),
+  'environment': ConflictField(
+    (l) => l.settings_conflict_field_environment,
+    FieldKind.enumValue,
+    enumLabel: missionEnvironmentLabeler,
+  ),
+  'equipmentSetName': ConflictField(
+    (l) => l.settings_conflict_field_equipmentSetName,
+    FieldKind.shortText,
+  ),
+  'excludedFromRankings': ConflictField(
+    (l) => l.buddies_stat_excludedFromRankings,
+    FieldKind.boolean,
+  ),
+  'expiryDate': ConflictField(
+    (l) => CertificationField.expiryDate.localizedDisplayName(l),
+    FieldKind.date,
+  ),
+  'finalAscentRate': ConflictField(
+    (l) => l.settings_conflict_field_finalAscentRate,
+    FieldKind.ascentRate,
+  ),
+  // Whether a planned dive's start was set by hand (issue #3565).
+  'fixedStart': ConflictField(
+    (l) => l.settings_conflict_field_fixedStart,
+    FieldKind.boolean,
+  ),
+  'gasHe': ConflictField(
+    (l) => l.settings_conflict_field_gasHe,
+    FieldKind.percent,
+  ),
+  'gasO2': ConflictField(
+    (l) => l.settings_conflict_field_gasO2,
+    FieldKind.percent,
+  ),
+  'gasSwitchStopSeconds': ConflictField(
+    (l) => l.settings_conflict_field_gasSwitchStopSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'gfHigh': ConflictField(
+    (l) => DiveField.gradientFactorHigh.localizedDisplayName(l),
+    FieldKind.percent,
+  ),
+  'gfLow': ConflictField(
+    (l) => DiveField.gradientFactorLow.localizedDisplayName(l),
+    FieldKind.percent,
+  ),
+  'headingDeg': ConflictField(
+    (l) => l.settings_conflict_field_headingDeg,
+    FieldKind.number,
+  ),
+  'heightCm': ConflictField(
+    (l) => l.settings_conflict_field_heightCm,
+    FieldKind.heightCm,
+  ),
+  // Null = derive from this plan's own base SAC and the diver's Settings
+  // hypercapnia factor (issue #3743); the per-plan counterpart of
+  // plannerHypercapniaFactor.
+  'hypercapniaAmv': ConflictField(
+    (l) => l.divePlanner_gasOptions_hypercapniaAmv,
+    FieldKind.rmv,
+  ),
+  // True = this plan's OC bailout never uses a hypercapnia phase,
+  // regardless of the diver's Settings toggle (issue #3743). Labelled with
+  // the feature's name, like airBreaksExplicitlyOff, not the Settings
+  // "Use a hypercapnia phase" toggle, which a true (= off) value would read
+  // as the opposite of.
+  'hypercapniaExplicitlyOff': ConflictField(
+    (l) => l.settings_decompression_hypercapniaTitle,
+    FieldKind.boolean,
+  ),
+  'hypercapniaMinutes': ConflictField(
+    (l) => l.divePlanner_gasOptions_hypercapniaMinutes,
+    FieldKind.durationMinutes,
+  ),
+  'instructorName': ConflictField(
+    (l) => CourseField.instructorName.localizedDisplayName(l),
+    FieldKind.shortText,
+  ),
+  'instructorNumber': ConflictField(
+    (l) => CourseField.instructorNumber.localizedDisplayName(l),
+    FieldKind.shortText,
+  ),
+  'insuranceEmergencyPhone': ConflictField(
+    (l) => l.settings_conflict_field_insuranceEmergencyPhone,
+    FieldKind.shortText,
+  ),
+  'insuranceExpiryDate': ConflictField(
+    (l) => l.settings_conflict_field_insuranceExpiryDate,
+    FieldKind.date,
+  ),
+  'insurancePhone': ConflictField(
+    (l) => l.settings_conflict_field_insurancePhone,
+    FieldKind.shortText,
+  ),
+  'insurancePolicyNumber': ConflictField(
+    (l) => l.settings_conflict_field_insurancePolicyNumber,
+    FieldKind.shortText,
+  ),
+  'insuranceProvider': ConflictField(
+    (l) => l.settings_conflict_field_insuranceProvider,
+    FieldKind.shortText,
+  ),
+  'intermediateAscentRate': ConflictField(
+    (l) => l.settings_conflict_field_intermediateAscentRate,
+    FieldKind.ascentRate,
+  ),
+  // A custom certification level's group (issue #690): a ranked
+  // progression rung rather than a specialty.
+  'isProgression': ConflictField(
+    (l) => l.certifications_edit_group_progression,
+    FieldKind.boolean,
+  ),
+  'isRequired': ConflictField(
+    (l) => l.settings_conflict_field_isRequired,
+    FieldKind.boolean,
+  ),
+  'isTravelGas': ConflictField(
+    (l) => l.settings_conflict_field_isTravelGas,
+    FieldKind.boolean,
+  ),
+  'issueDate': ConflictField(
+    (l) => CertificationField.issueDate.localizedDisplayName(l),
+    FieldKind.date,
+  ),
+  'itemType': ConflictField(
+    (l) => l.settings_conflict_field_itemType,
+    FieldKind.enumValue,
+    enumLabel: preDiveItemTypeLabeler,
+  ),
+  'lastStopDepth': ConflictField(
+    (l) => l.settings_conflict_field_lastStopDepth,
+    FieldKind.depth,
+  ),
+  'level': ConflictField(
+    (l) => CertificationField.level.localizedDisplayName(l),
+    FieldKind.enumValue,
+    enumLabel: certificationLevelLabeler,
+  ),
+  // True = this plan never uses an explicit MOD for 100% O2, regardless of
+  // the diver's Settings toggle (issue #3580); the per-plan counterpart of
+  // maxO2DepthMeters itself.
+  'maxO2DepthExplicitlyOff': ConflictField(
+    (l) => l.settings_conflict_field_maxO2DepthEnabled,
+    FieldKind.boolean,
+  ),
+  'measuredAt': ConflictField(
+    (l) => l.settings_conflict_field_measuredAt,
+    FieldKind.dateTime,
+  ),
+  'medicalClearanceExpiryDate': ConflictField(
+    (l) => l.settings_conflict_field_medicalClearanceExpiryDate,
+    FieldKind.date,
+  ),
+  'medicalNotes': ConflictField(
+    (l) => l.settings_conflict_field_medicalNotes,
+    FieldKind.longText,
+  ),
+  'medications': ConflictField(
+    (l) => l.settings_conflict_field_medications,
+    FieldKind.longText,
+  ),
+  'mode': ConflictField(
+    (l) => l.settings_conflict_field_mode,
+    FieldKind.enumValue,
+    enumLabel: planModeLabeler,
+  ),
+  'o2Narcotic': ConflictField(
+    (l) => l.settings_conflict_field_o2Narcotic,
+    FieldKind.boolean,
+  ),
+  'overdueServices': ConflictField(
+    (l) => l.settings_conflict_field_overdueServices,
+    FieldKind.opaque,
+  ),
+  'photo': ConflictField(
+    (l) => l.settings_conflict_field_photo,
+    FieldKind.opaque,
+  ),
+  'photoBack': ConflictField(
+    (l) => l.settings_conflict_field_photoBack,
+    FieldKind.opaque,
+  ),
+  'photoBackPath': ConflictField(
+    (l) => l.settings_conflict_field_photoBackPath,
+    FieldKind.opaque,
+  ),
+  'photoFront': ConflictField(
+    (l) => l.settings_conflict_field_photoFront,
+    FieldKind.opaque,
+  ),
+  'photoFrontPath': ConflictField(
+    (l) => l.settings_conflict_field_photoFrontPath,
+    FieldKind.opaque,
+  ),
+  'plannedWeightKg': ConflictField(
+    (l) => l.settings_conflict_field_plannedWeightKg,
+    FieldKind.weight,
+  ),
+  'plannedWeightPlacement': ConflictField(
+    (l) => l.settings_conflict_field_plannedWeightPlacement,
+    FieldKind.opaque,
+  ),
+  'ppO2Bottom': ConflictField(
+    (l) => l.settings_conflict_field_ppO2Bottom,
+    FieldKind.partialPressure,
+  ),
+  'ppO2Deco': ConflictField(
+    (l) => l.settings_conflict_field_ppO2Deco,
+    FieldKind.partialPressure,
+  ),
+  // True = this plan never uses per-band deco ppO2 limits, regardless of the
+  // diver's Settings band toggle (issue #3580); the per-plan counterpart of
+  // ppO2DecoBand1/2/3 themselves.
+  'ppO2DecoBandsExplicitlyOff': ConflictField(
+    (l) => l.settings_decompression_ppO2BandsTitle,
+    FieldKind.boolean,
+  ),
+  'priorDiveCount': ConflictField(
+    (l) => l.settings_conflict_field_priorDiveCount,
+    FieldKind.number,
+  ),
+  'priorDiveTimeSeconds': ConflictField(
+    (l) => l.settings_conflict_field_priorDiveTimeSeconds,
+    FieldKind.totalDurationSeconds,
+  ),
+  'problemSolvingMinutes': ConflictField(
+    (l) => l.settings_conflict_field_problemSolvingMinutes,
+    FieldKind.durationMinutes,
+  ),
+  'rate': ConflictField(
+    (l) => l.settings_conflict_field_rate,
+    FieldKind.ascentRate,
+  ),
+  'reservePressure': ConflictField(
+    (l) => l.settings_conflict_field_reservePressure,
+    FieldKind.pressure,
+  ),
+  'sacBottom': ConflictField(
+    (l) => l.settings_conflict_field_sacBottom,
+    FieldKind.rmv,
+  ),
+  'sacDeco': ConflictField(
+    (l) => l.settings_conflict_field_sacDeco,
+    FieldKind.rmv,
+  ),
+  'sacFactor': ConflictField(
+    (l) => l.settings_conflict_field_sacFactor,
+    FieldKind.number,
+  ),
+  'sacStressed': ConflictField(
+    (l) => l.settings_conflict_field_sacStressed,
+    FieldKind.rmv,
+  ),
+  'salinityPpt': ConflictField(
+    (l) => l.settings_conflict_field_salinityPpt,
+    FieldKind.number,
+  ),
+  'scooterBurnSeconds': ConflictField(
+    (l) => l.settings_conflict_field_scooterBurnSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'scooterName': ConflictField(
+    (l) => l.settings_conflict_field_scooterName,
+    FieldKind.shortText,
+  ),
+  'scooterSpeedMps': ConflictField(
+    (l) => l.settings_conflict_field_scooterSpeedMps,
+    FieldKind.speed,
+  ),
+  'section': ConflictField(
+    (l) => l.settings_conflict_field_section,
+    FieldKind.shortText,
+  ),
+  // A plan's 0-based position in its repetitive series (issue #3565).
+  'seriesIndex': ConflictField(
+    (l) => l.settings_conflict_field_seriesIndex,
+    FieldKind.number,
+  ),
+  'setpointBar': ConflictField(
+    (l) => l.settings_conflict_field_setpointBar,
+    FieldKind.partialPressure,
+  ),
+  'setpointSwitchDepth': ConflictField(
+    (l) => l.settings_conflict_field_setpointSwitchDepth,
+    FieldKind.depth,
+  ),
+  // scrInjectionRate shares the logged dive's entry (dive_log_fields.dart):
+  // same column name, same volume-rate kind.
+  // VO2 reads as the logged dive's assumedVo2 does: at RMV precision in
+  // cuft/min, 1.3 and 1.4 L/min would show alike.
+  'scrVo2': ConflictField((l) => l.plannerCanvas_scr_vo2, FieldKind.number),
+  'pscrVo2': ConflictField((l) => l.plannerCanvas_pscr_vo2, FieldKind.number),
+  // The setting groups a planned dive keeps its own (issue #3565).
+  'settingOverrides': ConflictField(
+    (l) => l.settings_conflict_field_settingOverrides,
+    FieldKind.opaque,
+  ),
+  'sex': ConflictField(
+    (l) => l.settings_conflict_field_sex,
+    FieldKind.enumValue,
+    enumLabel: diverSexLabeler,
+  ),
+  'shallowAscentRate': ConflictField(
+    (l) => l.settings_conflict_field_shallowAscentRate,
+    FieldKind.ascentRate,
+  ),
+  'shoreSwimM': ConflictField(
+    (l) => l.settings_conflict_field_shoreSwimM,
+    FieldKind.distance,
+  ),
+  'shoreWalkM': ConflictField(
+    (l) => l.settings_conflict_field_shoreWalkM,
+    FieldKind.distance,
+  ),
+  'socialHandle': ConflictField(
+    (l) => l.settings_conflict_field_socialHandle,
+    FieldKind.shortText,
+  ),
+  'sourceItemId': ConflictField(
+    (l) => l.settings_conflict_field_sourceItemId,
+    FieldKind.opaque,
+  ),
+  // A plan tank's carry-over source (issue #3565): a logged dive's tank or
+  // a plan tank, so not a reference the dialog can resolve.
+  'sourceTankId': ConflictField(
+    (l) => l.settings_conflict_field_sourceTankId,
+    FieldKind.opaque,
+  ),
+  'sourceValueNumber': ConflictField(
+    (l) => l.settings_conflict_field_sourceValueNumber,
+    FieldKind.number,
+  ),
+  'splitAtConfiguredRate': ConflictField(
+    (l) => l.settings_conflict_field_splitAtConfiguredRate,
+    FieldKind.boolean,
+  ),
+  'startDateTime': ConflictField(
+    (l) => l.settings_conflict_field_startDateTime,
+    FieldKind.epochSeconds,
+  ),
+  'startDepth': ConflictField(
+    (l) => l.settings_conflict_field_startDepth,
+    FieldKind.depth,
+  ),
+  // True = a plan tank's start pressure was set by hand (issue #3565).
+  'startPressurePinned': ConflictField(
+    (l) => l.settings_conflict_field_startPressurePinned,
+    FieldKind.boolean,
+  ),
+  'startedAt': ConflictField(
+    (l) => l.settings_conflict_field_startedAt,
+    FieldKind.dateTime,
+  ),
+  'state': ConflictField(
+    (l) => l.settings_conflict_field_state,
+    FieldKind.enumValue,
+    enumLabel: preDiveItemStateLabeler,
+  ),
+  'stopMinimumsJson': ConflictField(
+    (l) => l.settings_conflict_field_stopMinimumsJson,
+    FieldKind.opaque,
+  ),
+  'strictOrder': ConflictField(
+    (l) => l.settings_conflict_field_strictOrder,
+    FieldKind.boolean,
+  ),
+  'summaryMaxDepth': ConflictField(
+    (l) => l.settings_conflict_field_summaryMaxDepth,
+    FieldKind.depth,
+  ),
+  'summaryRuntimeSeconds': ConflictField(
+    (l) => l.settings_conflict_field_summaryRuntimeSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'summaryTtsSeconds': ConflictField(
+    (l) => l.settings_conflict_field_summaryTtsSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'surfaceSwimLimitM': ConflictField(
+    (l) => l.settings_conflict_field_surfaceSwimLimitM,
+    FieldKind.distance,
+  ),
+  'swimSpeedMps': ConflictField(
+    (l) => l.settings_conflict_field_swimSpeedMps,
+    FieldKind.speed,
+  ),
+  'targetCount': ConflictField(
+    (l) => l.settings_conflict_field_targetCount,
+    FieldKind.number,
+  ),
+  'templateName': ConflictField(
+    (l) => l.settings_conflict_field_templateName,
+    FieldKind.shortText,
+  ),
+  'towBurnFactor': ConflictField(
+    (l) => l.settings_conflict_field_towBurnFactor,
+    FieldKind.number,
+  ),
+  'towSpeedFactor': ConflictField(
+    (l) => l.settings_conflict_field_towSpeedFactor,
+    FieldKind.number,
+  ),
+  'turnPressureFraction': ConflictField(
+    (l) => l.settings_conflict_field_turnPressureFraction,
+    FieldKind.fraction,
+  ),
+  'turnPressureRule': ConflictField(
+    (l) => l.settings_conflict_field_turnPressureRule,
+    FieldKind.enumValue,
+    enumLabel: turnPressureRuleLabeler,
+  ),
+  'valueLabel': ConflictField(
+    (l) => l.settings_conflict_field_valueLabel,
+    FieldKind.shortText,
+  ),
+  'valueMax': ConflictField(
+    (l) => l.settings_conflict_field_valueMax,
+    FieldKind.number,
+  ),
+  'valueMin': ConflictField(
+    (l) => l.settings_conflict_field_valueMin,
+    FieldKind.number,
+  ),
+  'valueNumber': ConflictField(
+    (l) => l.settings_conflict_field_valueNumber,
+    FieldKind.number,
+  ),
+  'valueUnit': ConflictField(
+    (l) => l.settings_conflict_field_valueUnit,
+    FieldKind.shortText,
+  ),
+  'walkSpeedMps': ConflictField(
+    (l) => l.settings_conflict_field_walkSpeedMps,
+    FieldKind.speed,
+  ),
+};
+
+/// Columns whose meaning depends on the entity, keyed `entity.column`.
+final Map<String, ConflictField> peoplePlanningOverrides = {
+  'courseRequirements.kind': ConflictField(
+    (l) => l.settings_conflict_field_courseRequirements_kind,
+    FieldKind.enumValue,
+    enumLabel: requirementKindLabeler,
+  ),
+  'divePlanSegments.type': ConflictField(
+    (l) => l.settings_conflict_field_divePlanSegments_type,
+    FieldKind.shortText,
+  ),
+  'divePlanTanks.role': ConflictField(
+    (l) => l.settings_conflict_field_divePlanTanks_role,
+    FieldKind.enumValue,
+    enumLabel: tankRoleLabeler,
+  ),
+  'preDiveChecklistTemplates.category': ConflictField(
+    (l) => l.settings_conflict_field_preDiveChecklistTemplates_category,
+    FieldKind.shortText,
+  ),
+  'preDiveSessions.status': ConflictField(
+    (l) => l.settings_conflict_field_preDiveSessions_status,
+    FieldKind.enumValue,
+    enumLabel: preDiveSessionStatusLabeler,
+  ),
+};

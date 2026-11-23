@@ -1,0 +1,240 @@
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/database/database.dart' show AppDatabase;
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/entities/backup_type.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/test_database.dart';
+
+class _NoopAdapter implements BackupDatabaseAdapter {
+  @override
+  Future<void> backup(String destinationPath, {String? note}) async {}
+
+  @override
+  Future<void> restore(
+    String backupPath, {
+    void Function(int, int)? onMigrationProgress,
+  }) async {}
+
+  @override
+  Future<String> get databasePath async => '/noop';
+
+  @override
+  AppDatabase get database => throw UnimplementedError();
+
+  @override
+  String? get databaseKeyHex => null;
+}
+
+/// Returns a canned record, and reports whether the cloud copy was withheld
+/// because the device is not unlocked for sync encryption.
+class _FakeBackupService extends BackupService {
+  bool blockedByEncryptionLock = false;
+  bool lockCheckThrows = false;
+  BackupLocation location = BackupLocation.local;
+  String? lastNote;
+  bool failBackup = false;
+  bool? lastPin;
+
+  final BackupPreferences _prefs;
+
+  _FakeBackupService(this._prefs)
+    : super(dbAdapter: _NoopAdapter(), preferences: _prefs);
+
+  /// Drops the record only: these tests have no backup files on disk.
+  @override
+  Future<void> deleteBackup(BackupRecord record) =>
+      _prefs.removeRecord(record.id);
+
+  @override
+  Future<BackupRecord> performBackup({
+    bool isAutomatic = false,
+    String? note,
+    bool pin = false,
+  }) async {
+    lastNote = note;
+    lastPin = pin;
+    if (failBackup) throw StateError('disk full');
+    return BackupRecord(
+      id: 'r1',
+      filename: 'submersion_backup_test.db',
+      timestamp: DateTime(2026, 10, 9),
+      sizeBytes: 2048,
+      location: location,
+      diveCount: 0,
+      siteCount: 0,
+      type: BackupType.manual,
+    );
+  }
+
+  @override
+  Future<bool> isCloudBackupBlockedByEncryptionLock() async {
+    if (lockCheckThrows) throw StateError('keychain unavailable');
+    return blockedByEncryptionLock;
+  }
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late SharedPreferences prefs;
+  late _FakeBackupService service;
+  final l10n = lookupAppLocalizations(const Locale('en'));
+
+  setUp(() async {
+    await setUpTestDatabase();
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    service = _FakeBackupService(BackupPreferences(prefs));
+  });
+
+  tearDown(() {
+    DatabaseService.instance.resetForTesting();
+  });
+
+  ProviderContainer makeContainer() {
+    final container = ProviderContainer(
+      overrides: [
+        localeProvider.overrideWithValue('en'),
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        cloudStorageProviderProvider.overrideWithValue(null),
+        backupServiceProvider.overrideWithValue(service),
+      ],
+    );
+    addTearDown(container.dispose);
+    return container;
+  }
+
+  test('Backup Now hands the note to the service', () async {
+    final container = makeContainer();
+    await container
+        .read(backupOperationProvider.notifier)
+        .performBackup(note: 'Before the trip');
+    expect(service.lastNote, 'Before the trip');
+  });
+
+  group('Keep this backup (issue #4535)', () {
+    test('hands the pin to the service', () async {
+      final container = makeContainer();
+      await container
+          .read(backupOperationProvider.notifier)
+          .performBackup(pin: true);
+      expect(service.lastPin, isTrue);
+      expect(
+        container.read(backupOperationProvider).message,
+        l10n.backup_operation_created('2.0 KB'),
+      );
+    });
+
+    test('pins nothing by default', () async {
+      final container = makeContainer();
+      await container.read(backupOperationProvider.notifier).performBackup();
+      expect(service.lastPin, isFalse);
+    });
+
+    test('a failed backup is reported as failed', () async {
+      service.failBackup = true;
+      final container = makeContainer();
+      await container
+          .read(backupOperationProvider.notifier)
+          .performBackup(pin: true);
+      expect(
+        container.read(backupOperationProvider).status,
+        BackupOperationStatus.error,
+      );
+    });
+  });
+
+  // Issue #4204: the home chip counts the copy taken before an upgrade, and
+  // deleting that copy changes no other value the chip's time watches.
+  test('deleting the upgrade copy refreshes the home chip time', () async {
+    final regular = DateTime(2026, 10, 20, 9);
+    final upgrade = BackupRecord(
+      id: 'pre-migration',
+      filename: 'pre-migration.db',
+      timestamp: DateTime(2026, 11, 3, 8),
+      sizeBytes: 1,
+      location: BackupLocation.local,
+      isAutomatic: true,
+      type: BackupType.preMigration,
+    );
+    final backupPrefs = BackupPreferences(prefs);
+    await backupPrefs.setLastBackupTime(regular);
+    await backupPrefs.addRecord(upgrade);
+    final container = makeContainer();
+    final sub = container.listen(newestBackupTimeProvider, (_, _) {});
+    addTearDown(sub.close);
+    expect(sub.read(), upgrade.timestamp);
+
+    await container
+        .read(backupOperationProvider.notifier)
+        .deleteBackup(upgrade);
+
+    expect(sub.read(), regular);
+  });
+
+  group('manual backup message (issue #3089)', () {
+    test('says the backup stayed on the device when encryption is '
+        'locked', () async {
+      service.blockedByEncryptionLock = true;
+      final container = makeContainer();
+
+      await container.read(backupOperationProvider.notifier).performBackup();
+
+      final state = container.read(backupOperationProvider);
+      expect(state.status, BackupOperationStatus.success);
+      expect(
+        state.message,
+        l10n.backup_operation_createdLocalOnlyLocked('2.0 KB'),
+      );
+    });
+
+    test('keeps the plain message otherwise', () async {
+      final container = makeContainer();
+
+      await container.read(backupOperationProvider.notifier).performBackup();
+
+      expect(
+        container.read(backupOperationProvider).message,
+        l10n.backup_operation_created('2.0 KB'),
+      );
+    });
+
+    test('a failing lock check does not fail a backup that was '
+        'written', () async {
+      service.lockCheckThrows = true;
+      final container = makeContainer();
+
+      await container.read(backupOperationProvider.notifier).performBackup();
+
+      final state = container.read(backupOperationProvider);
+      expect(state.status, BackupOperationStatus.success);
+      expect(state.message, l10n.backup_operation_created('2.0 KB'));
+    });
+
+    test('keeps the plain message when the cloud copy was made', () async {
+      // A lock that only appeared after the upload finished does not mean
+      // the upload was withheld.
+      service
+        ..blockedByEncryptionLock = true
+        ..location = BackupLocation.both;
+      final container = makeContainer();
+
+      await container.read(backupOperationProvider.notifier).performBackup();
+
+      expect(
+        container.read(backupOperationProvider).message,
+        l10n.backup_operation_created('2.0 KB'),
+      );
+    });
+  });
+}

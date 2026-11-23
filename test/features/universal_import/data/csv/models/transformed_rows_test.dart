@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/universal_import/data/csv/models/transformed_rows.dart';
+import 'package:submersion/features/universal_import/data/csv/transforms/date_order.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 
 void main() {
@@ -15,6 +16,7 @@ void main() {
     test('constructs with all parameters', () {
       const warning = ImportWarning(
         severity: ImportWarningSeverity.info,
+        code: ImportWarningCode.diagnostic,
         message: 'Test warning',
       );
       const rows = TransformedRows(
@@ -119,7 +121,11 @@ void main() {
           {'maxDepth': 25.0},
         ],
         warnings: [
-          ImportWarning(severity: ImportWarningSeverity.info, message: 'msg A'),
+          ImportWarning(
+            severity: ImportWarningSeverity.info,
+            code: ImportWarningCode.diagnostic,
+            message: 'msg A',
+          ),
         ],
       );
       const b = TransformedRows(
@@ -127,7 +133,11 @@ void main() {
           {'maxDepth': 25.0},
         ],
         warnings: [
-          ImportWarning(severity: ImportWarningSeverity.info, message: 'msg B'),
+          ImportWarning(
+            severity: ImportWarningSeverity.info,
+            code: ImportWarningCode.diagnostic,
+            message: 'msg B',
+          ),
         ],
       );
 
@@ -137,6 +147,7 @@ void main() {
     test('props includes all fields', () {
       const warning = ImportWarning(
         severity: ImportWarningSeverity.info,
+        code: ImportWarningCode.diagnostic,
         message: 'test',
       );
       const rows = TransformedRows(
@@ -145,12 +156,21 @@ void main() {
         ],
         warnings: [warning],
         fileRole: 'profile',
+        dateOrder: DateOrder.dayFirst,
       );
 
-      expect(rows.props, hasLength(3));
+      expect(rows.props, hasLength(5));
       expect(rows.props[0], rows.rows);
       expect(rows.props[1], rows.warnings);
       expect(rows.props[2], rows.fileRole);
+      expect(rows.props[3], DateOrder.dayFirst);
+      expect(rows.props[4], rows.sourceRows);
+    });
+
+    test('sourceRowOf reads the recorded row, else counts from the header', () {
+      const rows = TransformedRows(rows: [{}, {}], sourceRows: [5]);
+      expect(rows.sourceRowOf(0), 5);
+      expect(rows.sourceRowOf(1), 3);
     });
   });
 }

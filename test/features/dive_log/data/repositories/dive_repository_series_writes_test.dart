@@ -1,0 +1,884 @@
+import 'package:drift/drift.dart' hide isNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository dives;
+  late ProfileSeriesRepository series;
+
+  Future<void> computer(String id) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db
+        .into(db.diveComputers)
+        .insert(
+          DiveComputersCompanion.insert(
+            id: id,
+            name: 'Comp $id',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+  }
+
+  Future<void> source(
+    String id,
+    String diveId,
+    String? computerId, {
+    bool primary = false,
+  }) async {
+    final now = DateTime.now();
+    await db
+        .into(db.diveDataSources)
+        .insert(
+          DiveDataSourcesCompanion.insert(
+            id: id,
+            diveId: diveId,
+            computerId: Value(computerId),
+            isPrimary: Value(primary),
+            importedAt: now,
+            createdAt: now,
+          ),
+        );
+  }
+
+  /// The `local_updated_at` of the pending sync record of [seriesId], or null
+  /// when the series was never marked pending.
+  Future<int?> pendingSince(String seriesId) async {
+    final row = await db
+        .customSelect(
+          "SELECT local_updated_at AS t FROM sync_records "
+          "WHERE entity_type = 'diveProfileSeries' AND record_id = ? "
+          "AND sync_status = 'pending'",
+          variables: [Variable<String>(seriesId)],
+        )
+        .getSingleOrNull();
+    return row?.read<int>('t');
+  }
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    dives = DiveRepository();
+    series = ProfileSeriesRepository();
+  });
+
+  tearDown(tearDownTestDatabase);
+
+  domain.Dive dive(String id, List<domain.DiveProfilePoint> profile) =>
+      domain.Dive(id: id, dateTime: DateTime(2026, 1, 1), profile: profile);
+
+  test(
+    'createDive writes one primary null-identity series and no legacy rows',
+    () async {
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 10, depth: 5.0),
+          domain.DiveProfilePoint(timestamp: 0, depth: 0.0),
+        ]),
+      );
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows, hasLength(1));
+      expect(rows.single.isPrimary, isTrue);
+      expect(rows.single.computerId, isNull);
+      expect(rows.single.sourceId, isNull);
+      expect(rows.single.samples.map((s) => s.timestamp), [0, 10]);
+    },
+  );
+
+  test('createDive with no profile writes no series row', () async {
+    await dives.createDive(dive('dive-1', const []));
+    expect(await series.getSeriesForDive('dive-1'), isEmpty);
+  });
+
+  test(
+    'createDive rolls everything back when the series write fails',
+    () async {
+      // A NaN depth encodes fine and then fails the series insert: SQLite has
+      // no NaN, so the bound summary depths arrive as NULL and the NOT NULL
+      // constraint rejects the row. Any failure of that write must leave the
+      // dive absent rather than half written, because createDive rethrows and
+      // every caller reports total failure.
+      await expectLater(
+        dives.createDive(
+          dive('dive-1', const [
+            domain.DiveProfilePoint(timestamp: 0, depth: double.nan),
+          ]),
+        ),
+        throwsA(anything),
+      );
+      expect(await db.select(db.dives).get(), isEmpty);
+      expect(await db.select(db.diveDiveTypes).get(), isEmpty);
+      expect(await series.getSeriesForDive('dive-1'), isEmpty);
+    },
+  );
+
+  test(
+    'saveEditedProfile demotes every series and inserts the edit under the primary source',
+    () async {
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 1.0),
+        ]),
+      );
+      await computer('comp-1');
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+        now: 1000,
+      );
+      await dives.saveEditedProfile('dive-1', const [
+        domain.DiveProfilePoint(timestamp: 0, depth: 9.0),
+        domain.DiveProfilePoint(timestamp: 5, depth: 8.0),
+      ]);
+      final rows = await series.getSeriesForDive('dive-1');
+      final primary = rows.where((s) => s.isPrimary).toList();
+      expect(primary, hasLength(1));
+      expect(primary.single.computerId, isNull);
+      expect(primary.single.sourceId, 'src-1');
+      expect(primary.single.samples.map((s) => s.depth), [9.0, 8.0]);
+      expect(rows.where((s) => !s.isPrimary), hasLength(2));
+      expect((await dives.getDiveProfile('dive-1')).map((p) => p.depth), [
+        9.0,
+        8.0,
+      ]);
+      final row = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('dive-1'))).getSingle();
+      expect(row.maxDepth, 9.0);
+    },
+  );
+
+  test('saveEditedProfile writes revision kind with edit source', () async {
+    await dives.createDive(
+      dive('dive-1', const [domain.DiveProfilePoint(timestamp: 0, depth: 1.0)]),
+    );
+
+    await dives.saveEditedProfile('dive-1', const [
+      domain.DiveProfilePoint(timestamp: 0, depth: 8.0),
+    ]);
+
+    final history = await dives.getProfileHistory('dive-1');
+    final active = history.firstWhere(
+      (r) => r.isActive,
+      orElse: () => history.first,
+    );
+    expect(active.revisionKind, 'Edit: profile_editor');
+  });
+
+  test(
+    'history backfill marks computer-origin legacy series as computer_import',
+    () async {
+      await computer('comp-1');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+
+      final computerSeries = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        isPrimary: false,
+        revisionKind: 'legacy',
+        samples: const [ProfileSample(timestamp: 0, depth: 12.0)],
+        now: 1000,
+      );
+      final unknownSeries = await series.insertSeries(
+        diveId: 'dive-1',
+        isPrimary: false,
+        revisionKind: 'legacy',
+        samples: const [ProfileSample(timestamp: 5, depth: 4.0)],
+        now: 1000,
+      );
+
+      await db.customStatement(
+        'DELETE FROM dive_profile_series_history WHERE series_id IN (?, ?)',
+        [computerSeries, unknownSeries],
+      );
+
+      await db.customStatement(
+        '''
+        INSERT OR IGNORE INTO dive_profile_series_history (
+          series_id,
+          dive_id,
+          parent_series_id,
+          root_series_id,
+          content_hash,
+          revision_kind,
+          created_at
+        )
+        SELECT
+          s.id,
+          s.dive_id,
+          NULL,
+          s.id,
+          'legacy:' || s.id,
+          CASE
+            WHEN s.computer_id IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM dive_data_sources ds
+                WHERE ds.id = s.source_id
+                  AND (
+                    ds.source_format = 'dive_computer'
+                    OR ds.computer_id IS NOT NULL
+                  )
+              )
+            THEN 'computer_import'
+            ELSE 'legacy'
+          END,
+          s.created_at
+        FROM dive_profile_series s
+        WHERE s.id IN (?, ?)
+      ''',
+        [computerSeries, unknownSeries],
+      );
+
+      final history = await dives.getProfileHistory('dive-1');
+      final byId = {for (final r in history) r.seriesId: r};
+      expect(byId[computerSeries]?.revisionKind, 'computer_import');
+      expect(byId[unknownSeries]?.revisionKind, 'legacy');
+    },
+  );
+
+  test(
+    'restoreOriginalProfile deletes the edit and re-promotes the primary computer only',
+    () async {
+      await computer('comp-1');
+      await computer('comp-2');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      await source('src-2', 'dive-1', 'comp-2');
+      final a = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      final b = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-2',
+        sourceId: 'src-2',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+        now: 1000,
+      );
+      final edit = await series.insertSeries(
+        diveId: 'dive-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 9.0)],
+        now: 1000,
+      );
+      await dives.restoreOriginalProfile('dive-1');
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.map((s) => s.id).toSet(), {a, b});
+      expect(rows.firstWhere((s) => s.id == a).isPrimary, isTrue);
+      expect(rows.firstWhere((s) => s.id == b).isPrimary, isFalse);
+      final tombstones = await db.select(db.deletionLog).get();
+      expect(tombstones.map((t) => t.recordId), [edit]);
+    },
+  );
+
+  test(
+    'restoreOriginalProfile on a single-computer dive promotes everything left',
+    () async {
+      await dives.createDive(dive('dive-1', const []));
+      await series.insertSeries(
+        diveId: 'dive-1',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      await series.insertSeries(
+        diveId: 'dive-1',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 5, depth: 2.0)],
+        now: 1000,
+      );
+      await dives.restoreOriginalProfile('dive-1');
+      expect(
+        (await series.getSeriesForDive('dive-1')).every((s) => s.isPrimary),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'restoreOriginalProfile leaves a primary when the primary source owns no series',
+    () async {
+      // The primary dive_data_sources row names comp-1, which owns nothing:
+      // a metadata-only source, or one whose samples a consolidation
+      // re-stamped onto another computer. Deleting the edit and then
+      // promoting by comp-1 matches zero rows, and the dive is left with no
+      // primary series at all. It keeps rendering, because getDiveById and
+      // getMergedProfile ignore the flag, while getDiveProfile,
+      // getAscentDescentRates, getTimeAtDepthRanges and the data-quality
+      // prefilters all silently skip it (issue #1149).
+      await computer('comp-1');
+      await computer('comp-2');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      final owned = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-2',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      await series.insertSeries(
+        diveId: 'dive-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 9.0)],
+        now: 1000,
+      );
+      await dives.restoreOriginalProfile('dive-1');
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.map((s) => s.id), [owned]);
+      expect(rows.single.isPrimary, isTrue);
+      expect((await dives.getDiveProfile('dive-1')).map((p) => p.depth), [1.0]);
+    },
+  );
+
+  test(
+    'restoreOriginalProfile fallback deletes a parentless edited primary (regression)',
+    () async {
+      await computer('comp-1');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+
+      final original = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 4.0)],
+        now: 1000,
+      );
+      final edited = await series.insertSeries(
+        diveId: 'dive-1',
+        sourceId: 'src-1',
+        isPrimary: true,
+        samples: const [ProfileSample(timestamp: 0, depth: 9.0)],
+        now: 1000,
+      );
+
+      // Parentless edited rows hit the legacy fallback path. Restore must not
+      // re-promote this edited row, otherwise the action becomes a no-op.
+      await dives.restoreOriginalProfile('dive-1');
+
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.map((s) => s.id), [original]);
+      expect(rows.single.isPrimary, isTrue);
+      expect(rows.single.computerId, 'comp-1');
+      expect((await dives.getDiveProfile('dive-1')).map((p) => p.depth), [4.0]);
+
+      final tombstones = await db.select(db.deletionLog).get();
+      expect(tombstones.map((t) => t.recordId), contains(edited));
+    },
+  );
+
+  test('restoreOriginalProfile with parent history activates the parent and '
+      'deletes the undone edit', () async {
+    await computer('comp-1');
+    await dives.createDive(dive('dive-1', const []));
+    await source('src-1', 'dive-1', 'comp-1', primary: true);
+
+    final original = await series.insertSeries(
+      diveId: 'dive-1',
+      computerId: 'comp-1',
+      sourceId: 'src-1',
+      isPrimary: true,
+      samples: const [ProfileSample(timestamp: 0, depth: 4.0)],
+      now: 1000,
+    );
+
+    await dives.saveEditedProfile('dive-1', const [
+      domain.DiveProfilePoint(timestamp: 0, depth: 9.0),
+    ]);
+
+    final afterEdit = await series.getSeriesForDive('dive-1');
+    final edited = afterEdit.singleWhere((s) => s.isPrimary).id;
+
+    await dives.restoreOriginalProfile('dive-1');
+
+    final rows = await series.getSeriesForDive('dive-1');
+    expect(rows.map((s) => s.id), [original]);
+    expect(rows.single.isPrimary, isTrue);
+    expect((await dives.getDiveProfile('dive-1')).map((p) => p.depth), [4.0]);
+
+    final tombstones = await db.select(db.deletionLog).get();
+    expect(tombstones.map((t) => t.recordId), [edited]);
+    final history = await dives.getProfileHistory('dive-1');
+    expect(history.map((r) => r.seriesId), [original]);
+  });
+
+  test('an undone edit stays undone across a primary-source swap', () async {
+    await computer('comp-1');
+    await computer('comp-2');
+    await dives.createDive(dive('dive-1', const []));
+    await source('src-1', 'dive-1', 'comp-1', primary: true);
+    await source('src-2', 'dive-1', 'comp-2');
+    final a = await series.insertSeries(
+      diveId: 'dive-1',
+      computerId: 'comp-1',
+      sourceId: 'src-1',
+      samples: const [ProfileSample(timestamp: 0, depth: 4.0)],
+      now: 1000,
+    );
+    await series.insertSeries(
+      diveId: 'dive-1',
+      computerId: 'comp-2',
+      sourceId: 'src-2',
+      isPrimary: false,
+      samples: const [ProfileSample(timestamp: 0, depth: 5.0)],
+      now: 1000,
+    );
+
+    await dives.saveEditedProfile('dive-1', const [
+      domain.DiveProfilePoint(timestamp: 0, depth: 9.0),
+    ]);
+    await dives.restoreOriginalProfile('dive-1');
+    await dives.setPrimaryDataSource(
+      diveId: 'dive-1',
+      computerReadingId: 'src-2',
+    );
+    await dives.setPrimaryDataSource(
+      diveId: 'dive-1',
+      computerReadingId: 'src-1',
+    );
+
+    final live = (await series.getSeriesForDive(
+      'dive-1',
+    )).where((s) => s.isPrimary).map((s) => s.id);
+    expect(live, [a]);
+    expect((await dives.getDiveProfile('dive-1')).map((p) => p.depth), [4.0]);
+  });
+
+  test('restoring the parent of an edit brings back every disjoint segment of '
+      'its recording', () async {
+    await computer('comp-1');
+    await dives.createDive(dive('dive-1', const []));
+    await source('src-1', 'dive-1', 'comp-1', primary: true);
+    // One computer's dive merged from two downloads: two primary series
+    // over disjoint time ranges.
+    final first = await series.insertSeries(
+      diveId: 'dive-1',
+      computerId: 'comp-1',
+      sourceId: 'src-1',
+      samples: const [
+        ProfileSample(timestamp: 0, depth: 0.0),
+        ProfileSample(timestamp: 60, depth: 10.0),
+      ],
+      now: 1000,
+    );
+    final second = await series.insertSeries(
+      diveId: 'dive-1',
+      computerId: 'comp-1',
+      sourceId: 'src-1',
+      samples: const [
+        ProfileSample(timestamp: 600, depth: 12.0),
+        ProfileSample(timestamp: 660, depth: 0.0),
+      ],
+      now: 1000,
+    );
+
+    await dives.saveEditedProfile('dive-1', const [
+      domain.DiveProfilePoint(timestamp: 0, depth: 0.0),
+      domain.DiveProfilePoint(timestamp: 660, depth: 0.0),
+    ]);
+    await dives.restoreOriginalProfile('dive-1');
+
+    final live = (await series.getSeriesForDive(
+      'dive-1',
+    )).where((s) => s.isPrimary).map((s) => s.id).toSet();
+    expect(live, {first, second});
+    expect((await dives.getDiveProfile('dive-1')).map((p) => p.timestamp), [
+      0,
+      60,
+      600,
+      660,
+    ]);
+  });
+
+  test(
+    'switching revisions refreshes the dive depth stats from the live samples',
+    () async {
+      await computer('comp-1');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      final original = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [
+          ProfileSample(timestamp: 0, depth: 0.0),
+          ProfileSample(timestamp: 60, depth: 40.0),
+        ],
+        now: 1000,
+      );
+
+      await dives.saveEditedProfile('dive-1', const [
+        domain.DiveProfilePoint(timestamp: 0, depth: 0.0),
+        domain.DiveProfilePoint(timestamp: 60, depth: 30.0),
+      ]);
+      Future<double?> maxDepth() async => (await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals('dive-1'))).getSingle()).maxDepth;
+      expect(await maxDepth(), 30.0);
+
+      await dives.setActiveProfileSeries('dive-1', original);
+
+      expect(await maxDepth(), 40.0);
+    },
+  );
+
+  test(
+    'deleteComputerReading restamps the series whose source it deletes',
+    () async {
+      // dive_profile_series.source_id is ON DELETE SET NULL, so the cascade
+      // changes the row with no updated_at bump, no hlc restamp and nothing
+      // pending. This device then reads the series as unattributed while
+      // every peer still reads it as owned by the deleted source, and no
+      // later write republishes it.
+      await computer('comp-1');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      final id = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      final before = (await series.getRowsForDives(['dive-1'])).single;
+      await dives.deleteComputerReading('src-1');
+      final after = (await series.getRowsForDives(['dive-1'])).single;
+      expect(after.sourceId, isNull);
+      expect(after.updatedAt, greaterThan(before.updatedAt));
+      expect(after.hlc, isNot(before.hlc));
+      expect(await pendingSince(id), greaterThan(1000));
+    },
+  );
+
+  test(
+    'saveComputerReading adopts the unattributed series of a single-source dive',
+    () async {
+      await computer('comp-1');
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 1.0),
+        ]),
+      );
+      await dives.saveComputerReading(
+        DiveDataSourcesCompanion.insert(
+          id: 'src-1',
+          diveId: 'dive-1',
+          computerId: const Value('comp-1'),
+          isPrimary: const Value(true),
+          importedAt: DateTime(2026),
+          createdAt: DateTime(2026),
+        ),
+      );
+      expect(
+        (await series.getSeriesForDive('dive-1')).single.sourceId,
+        'src-1',
+      );
+    },
+  );
+
+  test(
+    'setPrimaryDataSource promotes the winner series owned by the new primary',
+    () async {
+      await computer('comp-1');
+      await computer('comp-2');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      await source('src-2', 'dive-1', 'comp-2');
+      await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      final b = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-2',
+        sourceId: 'src-2',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+        now: 1000,
+      );
+      await dives.setPrimaryDataSource(
+        diveId: 'dive-1',
+        computerReadingId: 'src-2',
+      );
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.where((s) => s.isPrimary).map((s) => s.id), [b]);
+      expect((await dives.getDiveProfile('dive-1')).single.depth, 2.0);
+      // A swap flips flags in place. A series deleted and re-inserted would
+      // tombstone it, and the tombstone would delete it on every peer.
+      final seriesTombstones =
+          await (db.select(db.deletionLog)..where(
+                (t) => t.entityType.equals(ProfileSeriesRepository.entityType),
+              ))
+              .get();
+      expect(seriesTombstones, isEmpty);
+    },
+  );
+
+  test(
+    'setPrimaryDataSource keeps every disjoint segment the winner owns',
+    () async {
+      await computer('comp-1');
+      await computer('comp-2');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      await source('src-2', 'dive-1', 'comp-2');
+      await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      // Two segments of comp-2 carrying no source of their own: what a merge
+      // of one computer's dive logged in two pieces leaves behind. They cover
+      // disjoint time ranges, so neither supersedes the other and both have to
+      // stay live.
+      final early = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-2',
+        isPrimary: false,
+        samples: const [
+          ProfileSample(timestamp: 0, depth: 2.0),
+          ProfileSample(timestamp: 60, depth: 10.0),
+        ],
+        now: 1000,
+      );
+      final tail = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-2',
+        isPrimary: false,
+        samples: const [
+          ProfileSample(timestamp: 600, depth: 12.0),
+          ProfileSample(timestamp: 660, depth: 3.0),
+        ],
+        now: 1000,
+      );
+
+      await dives.setPrimaryDataSource(
+        diveId: 'dive-1',
+        computerReadingId: 'src-2',
+      );
+
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.where((s) => s.isPrimary).map((s) => s.id).toSet(), {
+        early,
+        tail,
+      });
+      expect((await dives.getDiveProfile('dive-1')).map((p) => p.timestamp), [
+        0,
+        60,
+        600,
+        660,
+      ]);
+    },
+  );
+
+  test(
+    'setPrimaryDataSource leaves the flags alone when the new primary owns nothing',
+    () async {
+      await computer('comp-1');
+      await computer('comp-2');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      await source('src-2', 'dive-1', 'comp-2');
+      final a = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [ProfileSample(timestamp: 0, depth: 1.0)],
+        now: 1000,
+      );
+      await dives.setPrimaryDataSource(
+        diveId: 'dive-1',
+        computerReadingId: 'src-2',
+      );
+      expect((await series.getSeriesForDive('dive-1')).single.id, a);
+      expect(
+        (await series.getSeriesForDive('dive-1')).single.isPrimary,
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'deleteProfileSeriesWithHistoryForDive deletes the active primary and promotes the newest remaining revision',
+    () async {
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 1.0),
+        ]),
+      );
+      final primary = (await series.getSeriesForDive('dive-1')).single.id;
+      final replacement = await series.insertSeries(
+        diveId: 'dive-1',
+        // Overlaps the first, as an edit of a profile does: disjoint
+        // series of one reading would be segments of a single revision.
+        samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+        isPrimary: false,
+        now: 1000,
+      );
+
+      await dives.deleteProfileSeriesWithHistoryForDive('dive-1', primary);
+
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.map((s) => s.id), [replacement]);
+      expect(rows.single.isPrimary, isTrue);
+      expect(await series.primarySeriesIdForDive('dive-1'), replacement);
+      expect((await dives.getProfileHistory('dive-1')).map((r) => r.seriesId), [
+        replacement,
+      ]);
+    },
+  );
+
+  test(
+    'deleteProfileSeriesWithHistoryForDive rejects deleting the only revision',
+    () async {
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 1.0),
+        ]),
+      );
+      final id = (await series.getSeriesForDive('dive-1')).single.id;
+
+      await expectLater(
+        dives.deleteProfileSeriesWithHistoryForDive('dive-1', id),
+        throwsA(isA<ArgumentError>()),
+      );
+    },
+  );
+
+  test('two concurrent deletes of a two-revision dive leave one revision '
+      'standing', () async {
+    await dives.createDive(
+      dive('dive-1', const [domain.DiveProfilePoint(timestamp: 0, depth: 1.0)]),
+    );
+    final first = (await series.getSeriesForDive('dive-1')).single.id;
+    final second = await series.insertSeries(
+      diveId: 'dive-1',
+      // Overlaps the first, as an edit of a profile does: disjoint
+      // series of one reading would be segments of a single revision.
+      samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+      isPrimary: false,
+      now: 1000,
+    );
+
+    final outcomes = await Future.wait([
+      for (final id in [first, second])
+        dives
+            .deleteProfileSeriesWithHistoryForDive('dive-1', id)
+            .then<Object?>((_) => null, onError: (Object e) => e),
+    ]);
+
+    expect(outcomes.whereType<ArgumentError>(), hasLength(1));
+    final rows = await series.getSeriesForDive('dive-1');
+    expect(rows, hasLength(1));
+    expect(rows.single.isPrimary, isTrue);
+    expect(await dives.getProfileHistory('dive-1'), hasLength(1));
+  });
+
+  group('a revision split into segments', () {
+    late String first;
+    late String second;
+
+    setUp(() async {
+      await computer('comp-1');
+      await dives.createDive(dive('dive-1', const []));
+      await source('src-1', 'dive-1', 'comp-1', primary: true);
+      // One live profile in two disjoint segments of the same reading.
+      first = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [
+          ProfileSample(timestamp: 0, depth: 0.0),
+          ProfileSample(timestamp: 60, depth: 10.0),
+        ],
+        now: 1000,
+      );
+      second = await series.insertSeries(
+        diveId: 'dive-1',
+        computerId: 'comp-1',
+        sourceId: 'src-1',
+        samples: const [
+          ProfileSample(timestamp: 600, depth: 12.0),
+          ProfileSample(timestamp: 660, depth: 0.0),
+        ],
+        now: 1000,
+      );
+    });
+
+    test('deleting one segment deletes the whole revision and promotes '
+        'the next one', () async {
+      final edit = await series.insertSeries(
+        diveId: 'dive-1',
+        isPrimary: false,
+        samples: const [
+          ProfileSample(timestamp: 0, depth: 0.0),
+          ProfileSample(timestamp: 660, depth: 8.0),
+        ],
+        now: 2000,
+      );
+
+      await dives.deleteProfileSeriesWithHistoryForDive('dive-1', second);
+
+      final rows = await series.getSeriesForDive('dive-1');
+      expect(rows.map((s) => s.id), [edit]);
+      expect(rows.single.isPrimary, isTrue);
+      final tombstones = await db.select(db.deletionLog).get();
+      expect(tombstones.map((t) => t.recordId).toSet(), {first, second});
+    });
+
+    test('its segments do not count as other revisions', () async {
+      await expectLater(
+        dives.deleteProfileSeriesWithHistoryForDive('dive-1', first),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect((await series.getSeriesForDive('dive-1')), hasLength(2));
+    });
+  });
+
+  test(
+    'deleteProfileSeriesWithHistoryForDive rejects deleting an unknown series',
+    () async {
+      await dives.createDive(
+        dive('dive-1', const [
+          domain.DiveProfilePoint(timestamp: 0, depth: 1.0),
+        ]),
+      );
+      await series.insertSeries(
+        diveId: 'dive-1',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 2.0)],
+        now: 1000,
+      );
+
+      await expectLater(
+        dives.deleteProfileSeriesWithHistoryForDive('dive-1', 'missing-series'),
+        throwsA(isA<ArgumentError>()),
+      );
+    },
+  );
+}

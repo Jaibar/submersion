@@ -4,14 +4,24 @@ import 'package:flutter_map_marker_cluster/flutter_map_marker_cluster.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_closed_tag.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_camera_animator.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_corner_controls.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_interaction_options.dart';
+import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
+import 'package:submersion/features/maps/presentation/widgets/world_copies.dart';
+import 'package:submersion/features/maps/presentation/widgets/my_location_button.dart';
+import 'package:submersion/features/maps/presentation/widgets/my_location_layer.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/shared/widgets/map_list_layout/map_info_card.dart';
+import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_avatar.dart';
 
 /// Map content widget for displaying dive centers on a map.
 ///
@@ -48,10 +58,20 @@ class DiveCenterMapContent extends ConsumerStatefulWidget {
 class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     with TickerProviderStateMixin {
   final MapController _mapController = MapController();
+  late final MapCameraAnimator _camera = MapCameraAnimator(
+    controller: _mapController,
+    vsync: this,
+  );
   bool _mapReady = false;
 
   static const _defaultCenter = LatLng(20.0, -157.0);
   static const _defaultZoom = 3.0;
+
+  @override
+  void dispose() {
+    _camera.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(DiveCenterMapContent oldWidget) {
@@ -71,42 +91,9 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     centersAsync.whenData((centers) {
       final center = centers.where((c) => c.id == centerId).firstOrNull;
       if (center?.hasCoordinates == true) {
-        _animateToLocation(LatLng(center!.latitude!, center.longitude!));
+        _camera.animateTo(LatLng(center!.latitude!, center.longitude!));
       }
     });
-  }
-
-  /// Smoothly animate the map to a specific location
-  Future<void> _animateToLocation(LatLng target) async {
-    final startCamera = _mapController.camera;
-    // Use a reasonable zoom level for viewing a single center
-    final targetZoom = startCamera.zoom < 10 ? 12.0 : startCamera.zoom;
-
-    final animationController = AnimationController(
-      duration: const Duration(milliseconds: 500),
-      vsync: this,
-    );
-
-    final animation = CurvedAnimation(
-      parent: animationController,
-      curve: Curves.easeInOut,
-    );
-
-    animation.addListener(() {
-      final t = animation.value;
-      final lat =
-          startCamera.center.latitude +
-          (target.latitude - startCamera.center.latitude) * t;
-      final lng =
-          startCamera.center.longitude +
-          (target.longitude - startCamera.center.longitude) * t;
-      final zoom = startCamera.zoom + (targetZoom - startCamera.zoom) * t;
-
-      _mapController.move(LatLng(lat, lng), zoom);
-    });
-
-    await animationController.forward();
-    animationController.dispose();
   }
 
   @override
@@ -128,17 +115,23 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     return Stack(
       children: [
         _buildMap(context, centers),
-        // Fit all centers control
+        // Fit all centers and Show my location controls
         Positioned(
           top: 8,
           right: 8,
           child: Card(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              child: IconButton(
-                icon: const Icon(Icons.my_location, size: 20),
-                tooltip: context.l10n.diveCenters_tooltip_fitAllCenters,
-                onPressed: () => _fitAllCenters(centers),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.zoom_out_map, size: 20),
+                    tooltip: context.l10n.diveCenters_tooltip_fitAllCenters,
+                    onPressed: () => _camera.fitAll(_centerPoints(centers)),
+                  ),
+                  MyLocationButton(onLocated: _camera.animateTo, iconSize: 20),
+                ],
               ),
             ),
           ),
@@ -169,94 +162,104 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     }).toList();
     final colorScheme = Theme.of(context).colorScheme;
 
-    // Calculate initial center and zoom
-    // If there's a selected center with location, start centered on it
-    LatLng center = _defaultCenter;
-    double zoom = _defaultZoom;
-
-    if (widget.selectedId != null) {
-      // Find the selected center's location
-      final selectedCenter = centersWithLocation
-          .where((c) => c.id == widget.selectedId)
-          .firstOrNull;
-      if (selectedCenter?.hasCoordinates == true) {
-        center = LatLng(selectedCenter!.latitude!, selectedCenter.longitude!);
-        zoom = 12.0; // Reasonable zoom for viewing a single center
-      }
-    } else if (centersWithLocation.isNotEmpty) {
-      // No selection - fit all centers
-      final bounds = _calculateBounds(centersWithLocation);
-      center = LatLng(
-        (bounds.north + bounds.south) / 2,
-        (bounds.east + bounds.west) / 2,
-      );
-      zoom = 4.0;
-    }
+    // A selected center with a location opens centred on it.
+    final selectedCenter = widget.selectedId == null
+        ? null
+        : centersWithLocation
+              .where((c) => c.id == widget.selectedId)
+              .firstOrNull;
+    final selectedPoint = selectedCenter?.hasCoordinates == true
+        ? LatLng(selectedCenter!.latitude!, selectedCenter.longitude!)
+        : null;
+    final center = selectedPoint ?? _defaultCenter;
+    // Reasonable zoom for viewing a single center
+    final zoom = selectedPoint != null ? 12.0 : _defaultZoom;
+    // No selection, or one the map cannot place: open framed on every centre
+    // the way the fit-all button frames them, across the date line when that
+    // is tighter (#2516).
+    final initialFit = selectedPoint == null
+        ? MapCameraAnimator.fitAllCameraFit(_centerPoints(centersWithLocation))
+        : null;
 
     return Stack(
       children: [
-        FlutterMap(
-          mapController: _mapController,
-          options: MapOptions(
-            initialCenter: center,
-            initialZoom: zoom,
-            minZoom: 2.0,
-            maxZoom: 18.0,
-            onMapReady: () {
-              _mapReady = true;
-            },
-            onTap: (_, _) {
-              widget.onItemSelected(null);
-            },
-            cameraConstraint: CameraConstraint.contain(
-              bounds: LatLngBounds(
-                const LatLng(-90, -180),
-                const LatLng(90, 180),
-              ),
+        TrackpadZoomMap(
+          controller: _mapController,
+          child: FlutterMap(
+            mapController: _mapController,
+            options: MapOptions(
+              initialCenter: center,
+              initialZoom: zoom,
+              initialCameraFit: initialFit,
+              minZoom: 2.0,
+              maxZoom: 18.0,
+              interactionOptions: rotatableMapInteraction,
+              onMapReady: () {
+                _mapReady = true;
+              },
+              onTap: (_, _) {
+                widget.onItemSelected(null);
+              },
+              cameraConstraint: worldMapCameraConstraint,
             ),
+            children: [
+              TileLayer(
+                urlTemplate: ref.watch(mapTileUrlProvider),
+                userAgentPackageName: 'app.submersion',
+                maxZoom: ref.watch(mapTileMaxZoomProvider),
+                tileProvider: TileCacheService.instance.tileProviderFor(
+                  urlTemplate: ref.watch(mapTileUrlProvider),
+                ),
+              ),
+              WorldWrappedMarkerClusterLayer(
+                options: MarkerClusterLayerOptions(
+                  maxClusterRadius: 80,
+                  size: const Size(50, 50),
+                  markers: centersWithLocation.map((diveCenter) {
+                    final isSelected = widget.selectedId == diveCenter.id;
+                    return Marker(
+                      point: LatLng(
+                        diveCenter.latitude!,
+                        diveCenter.longitude!,
+                      ),
+                      width: isSelected ? 50 : 40,
+                      height: isSelected ? 50 : 40,
+                      child: Semantics(
+                        button: true,
+                        label: context.l10n
+                            .diveCenters_accessibility_markerLabel(
+                              diveCenter.name,
+                            ),
+                        child: GestureDetector(
+                          onTap: () => _onMarkerTapped(diveCenter),
+                          child: _buildMarker(context, diveCenter, isSelected),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                  builder: (context, markers) {
+                    return _buildClusterMarker(context, markers.length);
+                  },
+                  zoomToBoundsOnClick: false,
+                  onClusterTap: (node) {
+                    _camera.animateToBounds(node.bounds);
+                  },
+                ),
+              ),
+              // The device, once Show my location has found it (#4808).
+              const MyLocationLayer(),
+              const MapAttribution(),
+            ],
           ),
-          children: [
-            TileLayer(
-              urlTemplate: ref.watch(mapTileUrlProvider),
-              userAgentPackageName: 'app.submersion',
-              maxZoom: ref.watch(mapTileMaxZoomProvider),
-              tileProvider: TileCacheService.instance.isInitialized
-                  ? TileCacheService.instance.getTileProvider()
-                  : null,
-            ),
-            MarkerClusterLayerWidget(
-              options: MarkerClusterLayerOptions(
-                maxClusterRadius: 80,
-                size: const Size(50, 50),
-                markers: centersWithLocation.map((diveCenter) {
-                  final isSelected = widget.selectedId == diveCenter.id;
-                  return Marker(
-                    point: LatLng(diveCenter.latitude!, diveCenter.longitude!),
-                    width: isSelected ? 50 : 40,
-                    height: isSelected ? 50 : 40,
-                    child: Semantics(
-                      button: true,
-                      label: context.l10n.diveCenters_accessibility_markerLabel(
-                        diveCenter.name,
-                      ),
-                      child: GestureDetector(
-                        onTap: () => _onMarkerTapped(diveCenter),
-                        child: _buildMarker(context, diveCenter, isSelected),
-                      ),
-                    ),
-                  );
-                }).toList(),
-                builder: (context, markers) {
-                  return _buildClusterMarker(context, markers.length);
-                },
-                zoomToBoundsOnClick: false,
-                onClusterTap: (node) {
-                  _animateToCluster(node.bounds);
-                },
-              ),
-            ),
-            const MapAttribution(),
-          ],
+        ),
+
+        // Map style switcher and reset-to-north compass (hidden until the map
+        // is rotated), tucked below the fit-all control so the controls stack
+        // rather than overlap.
+        Positioned(
+          top: 64,
+          right: 8,
+          child: MapCornerControls(controller: _mapController),
         ),
 
         // Empty state overlay
@@ -310,7 +313,7 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     }
     if (center.rating != null) {
       subtitle += subtitle.isNotEmpty ? ' \u2022 ' : '';
-      subtitle += '\u2605 ${center.rating!.toStringAsFixed(1)}';
+      subtitle += '\u2605 ${formatRatingForDisplay(center.rating!)}';
     }
     if (center.affiliations.isNotEmpty) {
       subtitle += subtitle.isNotEmpty ? ' \u2022 ' : '';
@@ -320,9 +323,10 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     return MapInfoCard(
       title: center.name,
       subtitle: subtitle.isNotEmpty ? subtitle : null,
-      leading: CircleAvatar(
-        backgroundColor: colorScheme.primaryContainer,
-        child: Icon(Icons.store, color: colorScheme.primary),
+      leading: DiveCenterAvatar(
+        logo: center.logo,
+        iconColor: colorScheme.primary,
+        iconSize: 24,
       ),
       onDetailsTap: widget.onDetailsTap != null
           ? () => widget.onDetailsTap!(center.id)
@@ -338,7 +342,7 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     final colorScheme = Theme.of(context).colorScheme;
     final markerColor = _getMarkerColor(context, center.rating);
 
-    return AnimatedContainer(
+    final marker = AnimatedContainer(
       duration: const Duration(milliseconds: 200),
       decoration: BoxDecoration(
         color: isSelected ? colorScheme.primary : markerColor,
@@ -355,13 +359,23 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
           ),
         ],
       ),
+      // The logo sits inside the rating colour, leaving a 4 px band of it
+      // showing; with none, the store icon sits on it as before (#4460).
+      // Markers are 50 or 40 wide with a 2 px border.
       child: Center(
-        child: Icon(
-          Icons.store,
-          size: isSelected ? 24 : 20,
-          color: Colors.white,
+        child: DiveCenterMarkerGlyph(
+          logo: center.logo,
+          radius: DiveCenterMarkerGlyph.radiusFor(isSelected ? 50 : 40),
+          iconColor: isSelected ? colorScheme.onPrimary : Colors.white,
+          iconSize: isSelected ? 24 : 20,
         ),
       ),
+    );
+    // A permanently closed center is still on the map, drawn faded (#3379),
+    // except while selected.
+    return greyIfClosed(
+      closed: center.isPermanentlyClosed && !isSelected,
+      child: marker,
     );
   }
 
@@ -413,102 +427,15 @@ class _DiveCenterMapContentState extends ConsumerState<DiveCenterMapContent>
     } else {
       widget.onItemSelected(center.id);
       // Smooth scroll to the tapped marker
-      _animateToLocation(LatLng(center.latitude!, center.longitude!));
+      _camera.animateTo(LatLng(center.latitude!, center.longitude!));
     }
   }
 
-  Future<void> _animateToCluster(LatLngBounds bounds) async {
-    final targetCamera = CameraFit.bounds(
-      bounds: bounds,
-      padding: const EdgeInsets.all(120),
-      maxZoom: 14.0,
-    ).fit(_mapController.camera);
-
-    final startCamera = _mapController.camera;
-    final animationController = AnimationController(
-      duration: const Duration(milliseconds: 800),
-      vsync: this,
-    );
-
-    final animation = CurvedAnimation(
-      parent: animationController,
-      curve: Curves.easeInOut,
-    );
-
-    animation.addListener(() {
-      final t = animation.value;
-      final lat =
-          startCamera.center.latitude +
-          (targetCamera.center.latitude - startCamera.center.latitude) * t;
-      final lng =
-          startCamera.center.longitude +
-          (targetCamera.center.longitude - startCamera.center.longitude) * t;
-      final zoom =
-          startCamera.zoom + (targetCamera.zoom - startCamera.zoom) * t;
-
-      _mapController.move(LatLng(lat, lng), zoom);
-    });
-
-    await animationController.forward();
-    animationController.dispose();
-  }
-
-  void _fitAllCenters(List<DiveCenter> centers) {
-    // Filter centers with valid coordinates
-    final centersWithLocation = centers.where((c) {
-      if (!c.hasCoordinates) return false;
-      final lat = c.latitude!;
-      final lng = c.longitude!;
-      return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
-    }).toList();
-
-    if (centersWithLocation.isEmpty) return;
-
-    if (centersWithLocation.length == 1) {
-      final center = centersWithLocation.first;
-      _mapController.move(LatLng(center.latitude!, center.longitude!), 12.0);
-      return;
-    }
-
-    final bounds = _calculateBounds(centersWithLocation);
-    _mapController.fitCamera(
-      CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(50)),
-    );
-  }
-
-  LatLngBounds _calculateBounds(List<DiveCenter> centers) {
-    double minLat = 90, maxLat = -90;
-    double minLng = 180, maxLng = -180;
-
-    for (final center in centers) {
-      if (center.hasCoordinates) {
-        final lat = center.latitude!;
-        final lng = center.longitude!;
-
-        // Skip invalid coordinates
-        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-          continue;
-        }
-
-        if (lat < minLat) minLat = lat;
-        if (lat > maxLat) maxLat = lat;
-        if (lng < minLng) minLng = lng;
-        if (lng > maxLng) maxLng = lng;
-      }
-    }
-
-    // Add some padding
-    final latPadding = (maxLat - minLat) * 0.1;
-    final lngPadding = (maxLng - minLng) * 0.1;
-
-    // Clamp bounds to valid coordinate ranges
-    final south = (minLat - latPadding).clamp(-90.0, 90.0);
-    final north = (maxLat + latPadding).clamp(-90.0, 90.0);
-    final west = (minLng - lngPadding).clamp(-180.0, 180.0);
-    final east = (maxLng + lngPadding).clamp(-180.0, 180.0);
-
-    return LatLngBounds(LatLng(south, west), LatLng(north, east));
-  }
+  /// Where [centers] sit on the map, skipping any without coordinates.
+  static List<LatLng> _centerPoints(Iterable<DiveCenter> centers) => [
+    for (final center in centers)
+      if (center.hasCoordinates) LatLng(center.latitude!, center.longitude!),
+  ];
 
   Widget _buildErrorState(BuildContext context, Object error) {
     return Center(

@@ -2,55 +2,85 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 
 void main() {
-  group('DiveDuplicateResolution', () {
-    test('has three values', () {
-      expect(DiveDuplicateResolution.values, hasLength(3));
-    });
-
-    test('skip displayName', () {
-      expect(DiveDuplicateResolution.skip.displayName, 'Skip');
-    });
-
-    test('importAsNew displayName', () {
-      expect(DiveDuplicateResolution.importAsNew.displayName, 'Import as New');
-    });
-
-    test('consolidate displayName', () {
-      expect(
-        DiveDuplicateResolution.consolidate.displayName,
-        'Consolidate as additional computer',
-      );
-    });
-  });
-
   group('ImportFormat', () {
     test('has all expected values', () {
-      expect(ImportFormat.values, hasLength(12));
+      expect(ImportFormat.values, hasLength(23));
     });
 
     test('displayName for each format', () {
       expect(ImportFormat.csv.displayName, 'CSV');
+      expect(
+        ImportFormat.submersionDivesCsv.displayName,
+        'Submersion Dives CSV',
+      );
+      expect(
+        ImportFormat.submersionSitesCsv.displayName,
+        'Submersion Sites CSV',
+      );
+      expect(
+        ImportFormat.submersionEquipmentCsv.displayName,
+        'Submersion Equipment CSV',
+      );
+      expect(
+        ImportFormat.submersionFillsCsv.displayName,
+        'Submersion Fills CSV',
+      );
       expect(ImportFormat.uddf.displayName, 'UDDF');
+      expect(ImportFormat.macdiveXml.displayName, 'MacDive XML');
+      expect(ImportFormat.macdiveSqlite.displayName, 'MacDive SQLite');
       expect(ImportFormat.subsurfaceXml.displayName, 'Subsurface XML');
       expect(ImportFormat.divingLogXml.displayName, 'Diving Log XML');
+      expect(ImportFormat.divingLogSqlite.displayName, 'Diving Log');
+      expect(ImportFormat.diveMateDdb.displayName, 'DiveMate');
       expect(ImportFormat.suuntoSml.displayName, 'Suunto SML');
       expect(ImportFormat.suuntoDm5.displayName, 'Suunto DM5');
       expect(ImportFormat.fit.displayName, 'Garmin FIT');
       expect(ImportFormat.shearwaterDb.displayName, 'Shearwater Cloud');
       expect(ImportFormat.scubapro.displayName, 'Scubapro');
       expect(ImportFormat.danDl7.displayName, 'DAN DL7');
+      expect(ImportFormat.ratioXml.displayName, 'Ratio XML');
       expect(ImportFormat.sqlite.displayName, 'SQLite Database');
+      expect(ImportFormat.navTrack.displayName, 'Seacraft ENC log');
       expect(ImportFormat.unknown.displayName, 'Unknown');
     });
 
+    test('suuntoJson is a hand-off, not a universal parse (#1445)', () {
+      expect(ImportFormat.suuntoJson.displayName, 'Suunto JSON');
+      expect(ImportFormat.suuntoJson.isSupported, isFalse);
+      expect(ImportFormat.suuntoJson.isHandoff, isTrue);
+    });
+
+    test('isHandoff covers exactly the formats with their own import flow', () {
+      expect(ImportFormat.navTrack.isHandoff, isTrue);
+      expect(
+        ImportFormat.values.where((f) => f.isHandoff),
+        unorderedEquals([ImportFormat.navTrack, ImportFormat.suuntoJson]),
+      );
+    });
+
+    test('navTrack is deliberately unsupported by the dive pipeline', () {
+      // A Seacraft ENC log is a measured underwater route, not a dive log
+      // (spec 2026-09-10-underwater-nav-track-design.md); the parser
+      // registry must never receive it.
+      expect(ImportFormat.navTrack.isSupported, isFalse);
+    });
+
     test(
-      'isSupported returns true for csv, uddf, subsurfaceXml, fit, shearwaterDb',
+      'isSupported returns true for csv, uddf, subsurfaceXml, fit, shearwaterDb, macdiveXml, macdiveSqlite, danDl7, ratioXml',
       () {
         expect(ImportFormat.csv.isSupported, isTrue);
         expect(ImportFormat.uddf.isSupported, isTrue);
         expect(ImportFormat.subsurfaceXml.isSupported, isTrue);
         expect(ImportFormat.fit.isSupported, isTrue);
         expect(ImportFormat.shearwaterDb.isSupported, isTrue);
+        expect(ImportFormat.macdiveXml.isSupported, isTrue);
+        expect(ImportFormat.macdiveSqlite.isSupported, isTrue);
+        expect(ImportFormat.danDl7.isSupported, isTrue);
+        expect(ImportFormat.ratioXml.isSupported, isTrue);
+        expect(ImportFormat.submersionDivesCsv.isSupported, isTrue);
+        expect(ImportFormat.submersionSitesCsv.isSupported, isTrue);
+        expect(ImportFormat.submersionEquipmentCsv.isSupported, isTrue);
+        expect(ImportFormat.submersionFillsCsv.isSupported, isTrue);
       },
     );
 
@@ -59,7 +89,6 @@ void main() {
       expect(ImportFormat.suuntoSml.isSupported, isFalse);
       expect(ImportFormat.suuntoDm5.isSupported, isFalse);
       expect(ImportFormat.scubapro.isSupported, isFalse);
-      expect(ImportFormat.danDl7.isSupported, isFalse);
       expect(ImportFormat.sqlite.isSupported, isFalse);
       expect(ImportFormat.unknown.isSupported, isFalse);
     });
@@ -67,7 +96,7 @@ void main() {
 
   group('SourceApp', () {
     test('has all expected values', () {
-      expect(SourceApp.values, hasLength(12));
+      expect(SourceApp.values, hasLength(14));
     });
 
     test('displayName for each source app', () {
@@ -82,6 +111,7 @@ void main() {
       expect(SourceApp.scubapro.displayName, 'Scubapro');
       expect(SourceApp.ssiMyDiveGuide.displayName, 'SSI MyDiveGuide');
       expect(SourceApp.dan.displayName, 'DAN');
+      expect(SourceApp.ratio.displayName, 'Ratio Computers');
       expect(SourceApp.generic.displayName, 'Unknown App');
     });
 
@@ -105,16 +135,16 @@ void main() {
       expect(SourceApp.submersion.exportInstructions, isNull);
       expect(SourceApp.subsurface.exportInstructions, isNull);
       expect(SourceApp.macdive.exportInstructions, isNull);
-      expect(SourceApp.divingLog.exportInstructions, isNull);
       expect(SourceApp.diveMate.exportInstructions, isNull);
       expect(SourceApp.garminConnect.exportInstructions, isNull);
+      expect(SourceApp.ratio.exportInstructions, isNull);
       expect(SourceApp.generic.exportInstructions, isNull);
     });
   });
 
   group('ImportEntityType', () {
     test('has all expected values', () {
-      expect(ImportEntityType.values, hasLength(11));
+      expect(ImportEntityType.values, hasLength(14));
     });
 
     test('displayName for each entity type', () {
@@ -126,9 +156,12 @@ void main() {
       expect(ImportEntityType.buddies.displayName, 'Buddies');
       expect(ImportEntityType.diveCenters.displayName, 'Dive Centers');
       expect(ImportEntityType.certifications.displayName, 'Certifications');
+      expect(ImportEntityType.media.displayName, 'Photos');
       expect(ImportEntityType.courses.displayName, 'Courses');
       expect(ImportEntityType.tags.displayName, 'Tags');
       expect(ImportEntityType.diveTypes.displayName, 'Dive Types');
+      expect(ImportEntityType.serviceRecords.displayName, 'Service Records');
+      expect(ImportEntityType.fills.displayName, 'Fills');
     });
 
     test('shortName for each entity type', () {
@@ -143,13 +176,25 @@ void main() {
       expect(ImportEntityType.courses.shortName, 'Courses');
       expect(ImportEntityType.tags.shortName, 'Tags');
       expect(ImportEntityType.diveTypes.shortName, 'Types');
+      expect(ImportEntityType.serviceRecords.shortName, 'Service');
+      expect(ImportEntityType.fills.shortName, 'Fills');
     });
   });
 
   group('SourceOverrideOption', () {
     group('supported list', () {
       test('contains expected number of entries', () {
-        expect(SourceOverrideOption.supported.length, 14);
+        expect(SourceOverrideOption.supported.length, 25);
+      });
+
+      test('contains Submersion Fills CSV entry', () {
+        final match = SourceOverrideOption.supported.where(
+          (o) =>
+              o.sourceApp == SourceApp.submersion &&
+              o.format == ImportFormat.submersionFillsCsv,
+        );
+        expect(match, hasLength(1));
+        expect(match.first.displayName, 'Submersion (Fills CSV)');
       });
 
       test('contains Submersion CSV entry', () {
@@ -237,6 +282,26 @@ void main() {
         );
         expect(match, hasLength(1));
         expect(match.first.displayName, 'MacDive (CSV)');
+      });
+
+      test('contains MacDive XML entry', () {
+        final match = SourceOverrideOption.supported.where(
+          (o) =>
+              o.sourceApp == SourceApp.macdive &&
+              o.format == ImportFormat.macdiveXml,
+        );
+        expect(match, hasLength(1));
+        expect(match.first.displayName, 'MacDive (XML)');
+      });
+
+      test('contains MacDive SQLite entry', () {
+        final match = SourceOverrideOption.supported.where(
+          (o) =>
+              o.sourceApp == SourceApp.macdive &&
+              o.format == ImportFormat.macdiveSqlite,
+        );
+        expect(match, hasLength(1));
+        expect(match.first.displayName, 'MacDive (SQLite)');
       });
 
       test('contains Diving Log CSV entry', () {
@@ -347,8 +412,8 @@ void main() {
         expect(result, isNull);
       });
 
-      test('returns null for sourceApp not in any supported option', () {
-        // The "dan" sourceApp has no entries in the supported list.
+      test('returns null for a format the sourceApp does not offer', () {
+        // "dan" offers only DL7, never CSV.
         final result = SourceOverrideOption.findMatch(
           SourceApp.dan,
           ImportFormat.csv,
@@ -385,8 +450,11 @@ void main() {
       test(
         'returns null when sourceApp has no supported entries and format is null',
         () {
-          // "dan" has no entries in the supported list.
-          final result = SourceOverrideOption.findMatch(SourceApp.dan, null);
+          // "generic" has no entries in the supported list.
+          final result = SourceOverrideOption.findMatch(
+            SourceApp.generic,
+            null,
+          );
           expect(result, isNull);
         },
       );
@@ -526,6 +594,40 @@ void main() {
           Object.hash(SourceApp.garminConnect, ImportFormat.fit),
         );
       });
+    });
+  });
+
+  group('DiverLog+ / DL7 wiring', () {
+    test('danDl7 is a supported format', () {
+      expect(ImportFormat.danDl7.isSupported, isTrue);
+    });
+
+    test('SourceApp.diverLog has DiveCloud export instructions', () {
+      expect(SourceApp.diverLog.displayName, 'DiverLog+');
+      expect(SourceApp.diverLog.exportInstructions, contains('DiveCloud'));
+      expect(SourceApp.diverLog.exportInstructions, contains('.zxu'));
+    });
+
+    test('source override dropdown offers DiverLog+ and DAN DL7', () {
+      expect(
+        SourceOverrideOption.supported,
+        contains(
+          predicate<SourceOverrideOption>(
+            (o) =>
+                o.sourceApp == SourceApp.diverLog &&
+                o.format == ImportFormat.danDl7,
+          ),
+        ),
+      );
+      expect(
+        SourceOverrideOption.supported,
+        contains(
+          predicate<SourceOverrideOption>(
+            (o) =>
+                o.sourceApp == SourceApp.dan && o.format == ImportFormat.danDl7,
+          ),
+        ),
+      );
     });
   });
 }

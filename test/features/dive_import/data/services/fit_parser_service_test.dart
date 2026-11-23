@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:fit_tool/fit_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/dive_import/data/services/fit_parser_service.dart';
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
 
 /// Builds a minimal FIT file representing a dive activity.
 ///
@@ -18,20 +20,26 @@ Uint8List buildTestDiveFitFile({
   List<double?>? temperatureSamples,
   List<int?>? heartRateSamples,
   int serialNumber = 12345,
+  int manufacturer = 1, // Garmin
+  int product = 3943, // Descent Mk2
+  String? productName,
   double? startLat,
   double? startLong,
+  double? endLat,
+  double? endLong,
+  (double, double)? lapEndPosition,
+  Map<int, (double, double)>? recordPositions,
 }) {
   final builder = FitFileBuilder(autoDefine: true, minStringSize: 50);
 
   // FileId message: identifies this as an activity file
   final fileId = FileIdMessage()
     ..type = FileType.activity
-    ..manufacturer =
-        1 // Garmin
-    ..product =
-        3943 // Descent Mk2
+    ..manufacturer = manufacturer
+    ..product = product
     ..serialNumber = serialNumber
     ..timeCreated = startTime.millisecondsSinceEpoch;
+  if (productName != null) fileId.productName = productName;
 
   builder.add(fileId);
 
@@ -58,11 +66,47 @@ Uint8List buildTestDiveFitFile({
       }
     }
 
+    final position = recordPositions?[i];
+    if (position != null) {
+      record.positionLat = position.$1;
+      record.positionLong = position.$2;
+    }
+
     builder.add(record);
   }
 
-  // Session message: activity summary
   final endTime = startTime.add(Duration(seconds: durationSeconds));
+
+  if (lapEndPosition != null) {
+    builder.add(
+      LapMessage()
+        ..timestamp = endTime.millisecondsSinceEpoch
+        ..startTime = startTime.millisecondsSinceEpoch
+        ..endPositionLat = lapEndPosition.$1
+        ..endPositionLong = lapEndPosition.$2,
+    );
+  }
+
+  // fit_tool's SessionMessage has no setter for end_position (fields 38/39),
+  // so a session carrying one is written as a raw message instead. fit_tool
+  // still decodes it as a SessionMessage, dropping 38/39 exactly as it does
+  // for a real Garmin file.
+  if (endLat != null || endLong != null) {
+    builder.add(
+      _rawDiveSession(
+        startTime: startTime,
+        endTime: endTime,
+        durationSeconds: durationSeconds,
+        startLat: startLat,
+        startLong: startLong,
+        endLat: endLat,
+        endLong: endLong,
+      ),
+    );
+    return builder.build().toBytes();
+  }
+
+  // Session message: activity summary
   final session = SessionMessage()
     ..sport = Sport.diving
     ..timestamp = endTime.millisecondsSinceEpoch
@@ -80,6 +124,46 @@ Uint8List buildTestDiveFitFile({
   builder.add(session);
 
   return builder.build().toBytes();
+}
+
+/// A diving session (msg 18) written field by field, so it can carry
+/// end_position_lat/long (fields 38/39), which fit_tool's profile lacks.
+/// Values are raw: FIT-epoch seconds, milliseconds for the scale-1000
+/// elapsed time, semicircles for positions.
+DataMessage _rawDiveSession({
+  required DateTime startTime,
+  required DateTime endTime,
+  required int durationSeconds,
+  double? startLat,
+  double? startLong,
+  double? endLat,
+  double? endLong,
+}) {
+  const fitEpochSeconds = 631065600;
+  int fitSeconds(DateTime t) =>
+      t.millisecondsSinceEpoch ~/ 1000 - fitEpochSeconds;
+  int semicircles(double degrees) => (degrees * 2147483648.0 / 180.0).round();
+
+  final values = <int, (BaseType, int, int)>{
+    253: (BaseType.UINT32, 4, fitSeconds(endTime)),
+    2: (BaseType.UINT32, 4, fitSeconds(startTime)),
+    5: (BaseType.ENUM, 1, 53), // sport = diving
+    7: (BaseType.UINT32, 4, durationSeconds * 1000),
+    if (startLat != null) 3: (BaseType.SINT32, 4, semicircles(startLat)),
+    if (startLong != null) 4: (BaseType.SINT32, 4, semicircles(startLong)),
+    if (endLat != null) 38: (BaseType.SINT32, 4, semicircles(endLat)),
+    if (endLong != null) 39: (BaseType.SINT32, 4, semicircles(endLong)),
+  };
+  final def = DefinitionMessage(
+    globalId: SessionMessage.ID,
+    fieldDefinitions: [
+      for (final e in values.entries)
+        FieldDefinition(id: e.key, size: e.value.$2, type: e.value.$1),
+    ],
+  );
+  final m = GenericMessage(definitionMessage: def);
+  values.forEach((id, v) => m.getField(id)!.setValue(0, v.$3, null));
+  return m;
 }
 
 /// Builds a FIT file for a non-dive activity (running).
@@ -122,11 +206,241 @@ Uint8List buildTestRunningFitFile({
   return builder.build().toBytes();
 }
 
+/// Builds a feature-rich dive FIT file (deco records, gas mix, dive settings,
+/// dive summary, GPS) for exercising the enriched orchestrator.
+Uint8List buildRichDiveFitFile() {
+  final builder = FitFileBuilder(autoDefine: true, minStringSize: 50);
+  final start = DateTime.utc(2025, 10, 13, 11, 24, 0);
+
+  builder.add(
+    FileIdMessage()
+      ..type = FileType.activity
+      ..manufacturer = 1
+      ..product =
+          4223 // Descent Mk3i
+      ..serialNumber = 3502016516
+      ..timeCreated = start.millisecondsSinceEpoch,
+  );
+
+  final depths = [1.6, 15.0, 29.5, 20.0, 6.0, 0.5];
+  for (var i = 0; i < depths.length; i++) {
+    builder.add(
+      RecordMessage()
+        ..timestamp = start
+            .add(Duration(seconds: i * 60))
+            .millisecondsSinceEpoch
+        ..depth = depths[i]
+        ..temperature = 24
+        ..nextStopDepth = i == 2 ? 6.0 : 0.0
+        ..ndlTime = i == 2 ? 0 : 99
+        ..timeToSurface = i == 2 ? 480 : 0
+        ..cnsLoad = i + 1,
+    );
+  }
+
+  builder.add(
+    DiveGasMessage()
+      ..messageIndex = 0
+      ..oxygenContent = 28
+      ..heliumContent = 0
+      ..status = DiveGasStatus.enabled,
+  );
+
+  builder.add(
+    DiveSettingsMessage()
+      ..waterType = WaterType.salt
+      ..gfLow = 50
+      ..gfHigh = 85
+      ..model = TissueModelType.zhl16c,
+  );
+
+  builder.add(
+    DiveSummaryMessage()
+      ..diveNumber = 73
+      ..bottomTime = 3263.0
+      ..surfaceInterval = 4612
+      ..startCns = 0
+      ..endCns = 12
+      ..o2Toxicity = 25,
+  );
+
+  builder.add(
+    SessionMessage()
+      ..sport = Sport.diving
+      ..timestamp = start
+          .add(const Duration(seconds: 360))
+          .millisecondsSinceEpoch
+      ..startTime = start.millisecondsSinceEpoch
+      ..totalElapsedTime = 360.0
+      ..totalTimerTime = 360.0
+      ..startPositionLat = 35.815
+      ..startPositionLong = 14.451,
+  );
+
+  return builder.build().toBytes();
+}
+
+/// A synthetic unnamed FIT message (e.g. tank_update/tank_summary) built the way
+/// fit_tool reconstructs messages it has no profile for.
+DataMessage _genericTank(int globalId, Map<int, int> values) {
+  final def = DefinitionMessage(
+    globalId: globalId,
+    fieldDefinitions: [
+      for (final id in values.keys)
+        FieldDefinition(
+          id: id,
+          size: id == 1 || id == 2 ? 2 : 4, // pressure fields are uint16
+          type: id == 1 || id == 2 ? BaseType.UINT16 : BaseType.UINT32,
+        ),
+    ],
+  );
+  final m = GenericMessage(definitionMessage: def);
+  values.forEach((id, v) => m.getField(id)!.setValue(0, v, null));
+  return m;
+}
+
+/// A dive FIT file with air-integration: a tank_summary (323) per transmitter
+/// in [sensors] and a tank_update (319) per record and transmitter, plus a gas
+/// mix per entry in [o2Percents]. The default is one transmitter on EAN28.
+Uint8List buildAiDiveFitFile({
+  List<int> sensors = const [2772884913],
+  List<int> o2Percents = const [28],
+}) {
+  final builder = FitFileBuilder(autoDefine: true, minStringSize: 50);
+  final start = DateTime.utc(2025, 9, 8, 9, 19, 49);
+
+  builder.add(
+    FileIdMessage()
+      ..type = FileType.activity
+      ..manufacturer = 1
+      ..product = 4223
+      ..serialNumber = 1
+      ..timeCreated = start.millisecondsSinceEpoch,
+  );
+
+  // tank_summary: start 22125 -> 221.25 bar, end 8811 -> 88.11 bar, vol 199350.
+  for (final sensor in sensors) {
+    builder.add(_genericTank(323, {0: sensor, 1: 22125, 2: 8811, 3: 199350}));
+  }
+
+  const depths = [2.0, 20.0, 5.0];
+  const pressuresRaw = [22000, 15000, 9000];
+  for (var i = 0; i < depths.length; i++) {
+    final t = start.add(Duration(seconds: i * 60));
+    builder.add(
+      RecordMessage()
+        ..timestamp = t.millisecondsSinceEpoch
+        ..depth = depths[i]
+        ..temperature = 26,
+    );
+    // tank_update at the same instant; field 253 is raw FIT-epoch seconds.
+    final fitSec = t.millisecondsSinceEpoch ~/ 1000 - 631065600;
+    for (final sensor in sensors) {
+      builder.add(
+        _genericTank(319, {253: fitSec, 0: sensor, 1: pressuresRaw[i]}),
+      );
+    }
+  }
+
+  for (var g = 0; g < o2Percents.length; g++) {
+    builder.add(
+      DiveGasMessage()
+        ..messageIndex = g
+        ..oxygenContent = o2Percents[g]
+        ..heliumContent = 0
+        ..status = DiveGasStatus.enabled,
+    );
+  }
+  builder.add(
+    SessionMessage()
+      ..sport = Sport.diving
+      ..timestamp = start
+          .add(const Duration(seconds: 180))
+          .millisecondsSinceEpoch
+      ..startTime = start.millisecondsSinceEpoch
+      ..totalElapsedTime = 180.0
+      ..totalTimerTime = 180.0,
+  );
+
+  return builder.build().toBytes();
+}
+
 void main() {
   late FitParserService service;
 
   setUp(() {
     service = const FitParserService();
+  });
+
+  group('fitManufacturerName (#3106)', () {
+    test('maps Garmin and Suunto, nothing else', () {
+      expect(fitManufacturerName(1), 'Garmin');
+      expect(fitManufacturerName(23), 'Suunto');
+      expect(fitManufacturerName(255), isNull);
+      expect(fitManufacturerName(null), isNull);
+    });
+
+    test('parseFitFile records the manufacturer from file_id', () async {
+      final bytes = buildTestDiveFitFile(
+        startTime: DateTime(2024, 6, 15, 10, 30),
+        durationSeconds: 600,
+        depthSamples: [0.0, 10.0, 0.0],
+      );
+      final result = await service.parseFitFile(bytes);
+      expect(result?.computerManufacturer, 'Garmin');
+    });
+  });
+
+  group('computer model from file_id (#3045)', () {
+    test(
+      'a serial-less Suunto Nautic S export names its manufacturer and model',
+      () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 6, 15, 10, 30),
+          durationSeconds: 600,
+          depthSamples: [0.0, 10.0, 0.0],
+          serialNumber: 0,
+          manufacturer: 23,
+          product: 73,
+          productName: 'Suunto Nautic S',
+        );
+        final result = await service.parseFitFile(bytes);
+        expect(result?.computerManufacturer, 'Suunto');
+        expect(result?.computerModel, 'Nautic S');
+        expect(result?.computerSerial, isNull);
+      },
+    );
+
+    test(
+      'a Garmin file still takes its model from the product table',
+      () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 6, 15, 10, 30),
+          durationSeconds: 600,
+          depthSamples: [0.0, 10.0, 0.0],
+          product: 4223,
+        );
+        final result = await service.parseFitFile(bytes);
+        expect(result?.computerModel, 'Descent Mk3i');
+      },
+    );
+
+    test(
+      'an unrecognized manufacturer without product_name has no model',
+      () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 6, 15, 10, 30),
+          durationSeconds: 600,
+          depthSamples: [0.0, 10.0, 0.0],
+          manufacturer: 255,
+          product: 73,
+        );
+        final result = await service.parseFitFile(bytes);
+        expect(result, isNotNull);
+        expect(result!.computerManufacturer, isNull);
+        expect(result.computerModel, isNull);
+      },
+    );
   });
 
   group('parseFitFile', () {
@@ -186,7 +500,8 @@ void main() {
     });
 
     test('extracts correct start and end times from session', () async {
-      final startTime = DateTime(2024, 3, 20, 14, 0, 0);
+      // Built as UTC so the wall-clock-as-UTC assertion is timezone-independent.
+      final startTime = DateTime.utc(2024, 3, 20, 14, 0, 0);
       const durationSeconds = 2400; // 40 minutes
       final bytes = buildTestDiveFitFile(
         startTime: startTime,
@@ -230,6 +545,21 @@ void main() {
 
       expect(result, isNotNull);
       expect(result!.avgDepth, 20.0);
+    });
+
+    test('averages depth over time, not over samples (#3891)', () async {
+      final bytes = buildTestDiveFitFile(
+        startTime: DateTime(2024, 1, 1, 10, 0, 0),
+        durationSeconds: 600,
+        depthSamples: [10.0, 10.0, 30.0],
+      );
+
+      final result = await service.parseFitFile(bytes);
+
+      // Two equal intervals averaging 10 m and 20 m. A sample average would
+      // say 16.67 m.
+      expect(result, isNotNull);
+      expect(result!.avgDepth, closeTo(15.0, 1e-9));
     });
 
     test('extracts temperature range from records', () async {
@@ -381,6 +711,236 @@ void main() {
       expect(result!.latitude, isNull);
       expect(result.longitude, isNull);
     });
+
+    test('falls back to the first record with a GPS fix when the session has '
+        'no start position (device hadn\'t locked on yet)', () async {
+      final bytes = buildTestDiveFitFile(
+        startTime: DateTime(2024, 1, 1, 10, 0, 0),
+        durationSeconds: 1800,
+        depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+        // No session start position -- the device hadn't acquired a fix
+        // yet when it started logging.
+        recordPositions: {2: (28.46, -16.32), 3: (28.461, -16.321)},
+      );
+
+      final result = await service.parseFitFile(bytes);
+
+      expect(result, isNotNull);
+      expect(result!.latitude, closeTo(28.46, 0.0001));
+      expect(result.longitude, closeTo(-16.32, 0.0001));
+    });
+
+    test('prefers the session start position over any record fix when both '
+        'are present', () async {
+      final bytes = buildTestDiveFitFile(
+        startTime: DateTime(2024, 1, 1, 10, 0, 0),
+        durationSeconds: 1800,
+        depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+        startLat: 28.4594,
+        startLong: -16.3228,
+        recordPositions: {2: (28.999, -16.999)},
+      );
+
+      final result = await service.parseFitFile(bytes);
+
+      expect(result, isNotNull);
+      expect(result!.latitude, closeTo(28.4594, 0.0001));
+      expect(result.longitude, closeTo(-16.3228, 0.0001));
+    });
+
+    group('exit GPS', () {
+      test('reads the session end position the watch records on surfacing '
+          '(issue #1797)', () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 1, 1, 10, 0, 0),
+          durationSeconds: 1800,
+          depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+          startLat: 28.4594,
+          startLong: -16.3228,
+          // Underwater records carry no fixes; only the session holds exit.
+          endLat: 28.4612,
+          endLong: -16.3251,
+        );
+
+        final result = await service.parseFitFile(bytes);
+
+        expect(result, isNotNull);
+        expect(result!.latitude, closeTo(28.4594, 1e-6));
+        expect(result.longitude, closeTo(-16.3228, 1e-6));
+        expect(result.exitLatitude, closeTo(28.4612, 1e-6));
+        expect(result.exitLongitude, closeTo(-16.3251, 1e-6));
+      });
+
+      test(
+        'prefers the session end position over the last record fix',
+        () async {
+          final bytes = buildTestDiveFitFile(
+            startTime: DateTime(2024, 1, 1, 10, 0, 0),
+            durationSeconds: 1800,
+            depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+            endLat: 28.4612,
+            endLong: -16.3251,
+            recordPositions: {4: (28.999, -16.999)},
+          );
+
+          final result = await service.parseFitFile(bytes);
+
+          expect(result!.exitLatitude, closeTo(28.4612, 1e-6));
+          expect(result.exitLongitude, closeTo(-16.3251, 1e-6));
+        },
+      );
+
+      test('ignores a session end position with only one half set', () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 1, 1, 10, 0, 0),
+          durationSeconds: 1800,
+          depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+          endLat: 28.4612,
+          recordPositions: {4: (28.47, -16.33)},
+        );
+
+        final result = await service.parseFitFile(bytes);
+
+        expect(result!.exitLatitude, closeTo(28.47, 1e-4));
+        expect(result.exitLongitude, closeTo(-16.33, 1e-4));
+      });
+
+      test(
+        'falls back to the lap end position when the session has none',
+        () async {
+          final bytes = buildTestDiveFitFile(
+            startTime: DateTime(2024, 1, 1, 10, 0, 0),
+            durationSeconds: 1800,
+            depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+            lapEndPosition: (28.4633, -16.3277),
+            recordPositions: {4: (28.999, -16.999)},
+          );
+
+          final result = await service.parseFitFile(bytes);
+
+          expect(result!.exitLatitude, closeTo(28.4633, 1e-4));
+          expect(result.exitLongitude, closeTo(-16.3277, 1e-4));
+        },
+      );
+
+      test('falls back to the last record fix when neither session nor lap '
+          'has an end position', () async {
+        final bytes = buildTestDiveFitFile(
+          startTime: DateTime(2024, 1, 1, 10, 0, 0),
+          durationSeconds: 1800,
+          depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+          recordPositions: {0: (28.46, -16.32), 4: (28.47, -16.33)},
+        );
+
+        final result = await service.parseFitFile(bytes);
+
+        expect(result!.exitLatitude, closeTo(28.47, 1e-4));
+        expect(result.exitLongitude, closeTo(-16.33, 1e-4));
+      });
+
+      test(
+        'leaves exit empty when the file has no end position at all',
+        () async {
+          final bytes = buildTestDiveFitFile(
+            startTime: DateTime(2024, 1, 1, 10, 0, 0),
+            durationSeconds: 1800,
+            depthSamples: [0.0, 10.0, 15.0, 10.0, 0.0],
+            startLat: 28.4594,
+            startLong: -16.3228,
+          );
+
+          final result = await service.parseFitFile(bytes);
+
+          expect(result!.exitLatitude, isNull);
+          expect(result.exitLongitude, isNull);
+        },
+      );
+    });
+
+    test(
+      'enriched parse surfaces gas, deco, dive number, GPS, water type',
+      () async {
+        final dive = await service.parseFitFile(buildRichDiveFitFile());
+
+        expect(dive, isNotNull);
+        expect(dive!.diveNumber, 73);
+        expect(dive.waterType, 'salt');
+        expect(dive.gfLow, 50);
+        expect(dive.gfHigh, 85);
+        expect(dive.decoModel, 'zhl_16c');
+        expect(dive.cnsEnd, 12);
+        expect(dive.otu, 25);
+        expect(dive.bottomTimeSeconds, 3263);
+        expect(dive.surfaceIntervalSeconds, 4612);
+        expect(dive.latitude, closeTo(35.815, 1e-3));
+        expect(dive.computerModel, 'Descent Mk3i');
+        expect(dive.sourceUuid, dive.sourceId);
+        // No transmitter -> synthesize a tank from the gas mix (EAN28).
+        expect(dive.tanks, hasLength(1));
+        expect(dive.tanks.single.o2Percent, 28);
+        expect(dive.tanks.single.startPressureBar, isNull);
+        expect(dive.tanks.single.transmitterSerial, isNull);
+        // Recorded deco values present on the deep sample.
+        expect(dive.profile.any((s) => s.ceiling == 6.0), isTrue);
+        expect(dive.profile.any((s) => s.ttsSeconds == 480), isTrue);
+      },
+    );
+
+    test(
+      'air-integration: tank pressure from msgs 319/323 merges to samples',
+      () async {
+        final dive = await service.parseFitFile(buildAiDiveFitFile());
+
+        expect(dive, isNotNull);
+        expect(dive!.tanks, hasLength(1));
+        final tank = dive.tanks.single;
+        expect(tank.o2Percent, 28);
+        expect(tank.startPressureBar, closeTo(221.25, 1e-6));
+        expect(tank.endPressureBar, closeTo(88.11, 1e-6));
+        expect(tank.volumeUsedLiters, closeTo(1993.5, 1e-6));
+        // Cylinder volume derived from volume_used / pressure_drop:
+        // 1993.5 / (221.25 - 88.11) = 14.97 -> rounded to 15.0 L.
+        expect(tank.volumeLiters, closeTo(15.0, 1e-9));
+        // The transmitter's ANT channel id, as the file records it (#4419).
+        expect(tank.transmitterSerial, '2772884913');
+
+        // The pressure series is merged onto the contemporaneous depth samples.
+        final withPressure = dive.profile
+            .where((s) => s.tankPressures != null)
+            .toList();
+        expect(withPressure, isNotEmpty);
+        final firstReading = withPressure.first.tankPressures!.single;
+        expect(firstReading.tankIndex, 0);
+        expect(firstReading.pressureBar, closeTo(220.0, 1e-6));
+      },
+    );
+  });
+
+  group('transmitter serials (#4419)', () {
+    test('each sidemount transmitter keeps its own serial', () async {
+      final dive = await service.parseFitFile(
+        buildAiDiveFitFile(sensors: const [2772884913, 2504425580]),
+      );
+
+      expect(dive, isNotNull);
+      expect(dive!.tanks.map((t) => t.transmitterSerial), [
+        '2772884913',
+        '2504425580',
+      ]);
+    });
+
+    test('a gas with no transmitter of its own has no serial', () async {
+      // One transmitter, two gases: the second tank comes from the gas list
+      // alone, so it must not borrow the first tank's transmitter.
+      final dive = await service.parseFitFile(
+        buildAiDiveFitFile(o2Percents: const [28, 50]),
+      );
+
+      expect(dive!.tanks, hasLength(2));
+      expect(dive.tanks[0].transmitterSerial, '2772884913');
+      expect(dive.tanks[1].o2Percent, 50);
+      expect(dive.tanks[1].transmitterSerial, isNull);
+    });
   });
 
   group('parseFitFiles', () {
@@ -431,5 +991,36 @@ void main() {
 
       expect(results, isEmpty);
     });
+  });
+
+  group('computer tissue', () {
+    const service = FitParserService();
+
+    test('is null when the FIT file records no N2 loading', () async {
+      final dive = await service.parseFitFile(buildRichDiveFitFile());
+      expect(dive, isNotNull);
+      expect(dive!.computerTissue, isNull);
+      expect(dive.profile.any((s) => s.n2Load != null), isFalse);
+    });
+
+    test(
+      'reads the Descent N2 loading into the snapshot and samples',
+      () async {
+        final bytes = File(
+          'test/dives/005_oc-trimix-two-deco-gases.fit',
+        ).readAsBytesSync();
+        final dive = (await service.parseFitFile(bytes))!;
+
+        final tissue = dive.computerTissue;
+        expect(tissue, isA<ComputerTissueSnapshot>());
+        expect(tissue!.start?.n2LoadPercent, 0);
+        expect(tissue.end?.n2LoadPercent, 86);
+        // CNS and the deco model ride on the dive itself (issue #2555).
+        expect(dive.decoModel, 'zhl_16c');
+        expect(dive.cnsEnd, isNotNull);
+        expect(dive.profile.first.n2Load, isNull);
+        expect(dive.profile.last.n2Load, 86);
+      },
+    );
   });
 }

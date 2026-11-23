@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart' show DateFormat;
 
-import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/courses/domain/entities/course.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/constants/entity_field.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
 
 /// Enumeration of every displayable field for the course table view.
 enum CourseField implements EntityField {
@@ -48,6 +49,35 @@ enum CourseField implements EntityField {
     CourseField.location => 'Location',
     CourseField.isCompleted => 'Done',
     CourseField.notes => 'Notes',
+  };
+
+  @override
+  String localizedDisplayName(AppLocalizations l10n) => switch (this) {
+    CourseField.courseName => l10n.enum_courseField_courseName,
+    CourseField.agency => l10n.enum_courseField_agency,
+    CourseField.startDate => l10n.enum_courseField_startDate,
+    CourseField.completionDate => l10n.enum_courseField_completionDate,
+    CourseField.durationDays => l10n.enum_courseField_durationDays,
+    CourseField.instructorName => l10n.enum_courseField_instructorName,
+    CourseField.instructorNumber => l10n.enum_courseField_instructorNumber,
+    CourseField.location => l10n.enum_courseField_location,
+    CourseField.isCompleted => l10n.enum_courseField_isCompleted,
+    CourseField.notes => l10n.enum_courseField_notes,
+  };
+
+  @override
+  String localizedShortLabel(AppLocalizations l10n) => switch (this) {
+    CourseField.courseName => l10n.enum_courseField_courseName_short,
+    CourseField.agency => l10n.enum_courseField_agency_short,
+    CourseField.startDate => l10n.enum_courseField_startDate_short,
+    CourseField.completionDate => l10n.enum_courseField_completionDate_short,
+    CourseField.durationDays => l10n.enum_courseField_durationDays_short,
+    CourseField.instructorName => l10n.enum_courseField_instructorName_short,
+    CourseField.instructorNumber =>
+      l10n.enum_courseField_instructorNumber_short,
+    CourseField.location => l10n.enum_courseField_location_short,
+    CourseField.isCompleted => l10n.enum_courseField_isCompleted_short,
+    CourseField.notes => l10n.enum_courseField_notes_short,
   };
 
   @override
@@ -131,7 +161,15 @@ enum CourseField implements EntityField {
 /// table infrastructure.
 class CourseFieldAdapter extends EntityFieldAdapter<Course, CourseField> {
   static final CourseFieldAdapter instance = CourseFieldAdapter._();
-  CourseFieldAdapter._();
+  CourseFieldAdapter._({CertificationCatalog? catalog})
+    : _catalog = catalog ?? CertificationCatalog.builtInOnly;
+
+  /// An adapter that names custom agencies and levels from [catalog]
+  /// (issue #690). The shared [instance] knows built-ins only.
+  factory CourseFieldAdapter.withCatalog(CertificationCatalog catalog) =>
+      CourseFieldAdapter._(catalog: catalog);
+
+  final CertificationCatalog _catalog;
 
   static const List<CourseField> _allFields = CourseField.values;
 
@@ -142,8 +180,6 @@ class CourseFieldAdapter extends EntityFieldAdapter<Course, CourseField> {
     }
     return map;
   }();
-
-  static final DateFormat _dateFormat = DateFormat.yMMMd();
 
   @override
   List<CourseField> get allFields => _allFields;
@@ -163,7 +199,7 @@ class CourseFieldAdapter extends EntityFieldAdapter<Course, CourseField> {
       CourseField.instructorNumber => entity.instructorNumber,
       CourseField.location => entity.location,
       CourseField.isCompleted => entity.isCompleted,
-      CourseField.notes => entity.notes,
+      CourseField.notes => markdownToPlainText(entity.notes),
     };
   }
 
@@ -171,9 +207,9 @@ class CourseFieldAdapter extends EntityFieldAdapter<Course, CourseField> {
   String formatValue(CourseField field, dynamic value, UnitFormatter units) {
     if (value == null) return '--';
     return switch (field) {
-      CourseField.agency => (value as CertificationAgency).name,
-      CourseField.startDate => _dateFormat.format(value as DateTime),
-      CourseField.completionDate => _dateFormat.format(value as DateTime),
+      CourseField.agency => _catalog.agency(value as String).interchangeName,
+      CourseField.startDate => units.formatDate(value as DateTime),
+      CourseField.completionDate => units.formatDate(value as DateTime),
       CourseField.durationDays => '${value as int} days',
       CourseField.isCompleted => (value as bool) ? 'Yes' : 'No',
       _ => value is String ? (value.isEmpty ? '--' : value) : value.toString(),

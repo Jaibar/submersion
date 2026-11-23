@@ -1,13 +1,33 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/features/settings/presentation/providers/hidden_built_ins_provider.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
+import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/buddies/presentation/buddy_certification_l10n.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/dive_role_list_display.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart'
+    show BuddyWithDiveCount;
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_favorite_button.dart';
+import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/dive_roles/presentation/widgets/dive_role_selector_sheet.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/widgets/dive_owner_avatar.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 
 /// Widget for selecting buddies for a dive
 class BuddyPicker extends ConsumerWidget {
@@ -15,15 +35,39 @@ class BuddyPicker extends ConsumerWidget {
   final List<BuddyWithRole> selectedBuddies;
   final ValueChanged<List<BuddyWithRole>> onChanged;
 
+  /// The active diver's own role ids (#547, several since #1221). The pinned
+  /// Me chip renders only when [onDiverRoleChanged] is provided (bulk-edit
+  /// surfaces pass null).
+  final List<String> diverRoleIds;
+  final ValueChanged<List<String>>? onDiverRoleChanged;
+
+  /// Roles offered even when hidden from the pickers (issue #401): the ones
+  /// the dive had when the editor opened.
+  final Set<String> keepRoleIds;
+
+  /// The dive's owner (`Dive.diverId`), whose photo and name the Me chip
+  /// shows (#4458). Null for a new dive or one with no owner, which shows the
+  /// active diver.
+  final String? diveOwnerId;
+
   const BuddyPicker({
     super.key,
     this.diveId,
     required this.selectedBuddies,
     required this.onChanged,
+    this.diverRoleIds = const [],
+    this.onDiverRoleChanged,
+    this.keepRoleIds = const {},
+    this.diveOwnerId,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(certificationCatalogSyncProvider);
+    final roles = ref.watch(allDiveRolesProvider).value ?? const <DiveRole>[];
+    final hiddenRoleIds = ref.watch(
+      hiddenBuiltInIdsProvider(BuiltInCatalog.diveRoles),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -46,7 +90,48 @@ class BuddyPicker extends ConsumerWidget {
         ),
         const SizedBox(height: 8),
 
-        // Selected buddies as chips
+        // Pinned Me chip + selected buddies as chips
+        if (onDiverRoleChanged != null || selectedBuddies.isNotEmpty)
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (onDiverRoleChanged != null)
+                _MeChip(
+                  diverRoleIds: diverRoleIds,
+                  onChanged: onDiverRoleChanged!,
+                  keepRoleIds: keepRoleIds,
+                  diveOwnerId: diveOwnerId,
+                ),
+              ...selectedBuddies.map((bwr) {
+                return _BuddyChip(
+                  buddyWithRole: bwr,
+                  roles: roles,
+                  hiddenRoleIds: hiddenRoleIds,
+                  keepRoleIds: keepRoleIds,
+                  onCreateCustomRole: (name) =>
+                      _createCustomRole(context, ref, name),
+                  onRemove: () {
+                    final updated = selectedBuddies
+                        .where((b) => b.buddy.id != bwr.buddy.id)
+                        .toList();
+                    onChanged(updated);
+                  },
+                  onRoleChanged: (picked) {
+                    final updated = selectedBuddies.map((b) {
+                      if (b.buddy.id == bwr.buddy.id) {
+                        return BuddyWithRole(buddy: b.buddy, roles: picked);
+                      }
+                      return b;
+                    }).toList();
+                    onChanged(updated);
+                  },
+                );
+              }),
+            ],
+          ),
+        if (onDiverRoleChanged != null && selectedBuddies.isEmpty)
+          const SizedBox(height: 8),
         if (selectedBuddies.isEmpty)
           Container(
             padding: const EdgeInsets.symmetric(vertical: 16),
@@ -82,40 +167,37 @@ class BuddyPicker extends ConsumerWidget {
                 ),
               ],
             ),
-          )
-        else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: selectedBuddies.map((bwr) {
-              return _BuddyChip(
-                buddyWithRole: bwr,
-                onRemove: () {
-                  final updated = selectedBuddies
-                      .where((b) => b.buddy.id != bwr.buddy.id)
-                      .toList();
-                  onChanged(updated);
-                },
-                onRoleChanged: (role) {
-                  final updated = selectedBuddies.map((b) {
-                    if (b.buddy.id == bwr.buddy.id) {
-                      return BuddyWithRole(buddy: b.buddy, role: role);
-                    }
-                    return b;
-                  }).toList();
-                  onChanged(updated);
-                },
-              );
-            }).toList(),
           ),
       ],
     );
+  }
+
+  Future<DiveRole?> _createCustomRole(
+    BuildContext context,
+    WidgetRef ref,
+    String name,
+  ) async {
+    try {
+      return await ref
+          .read(diveRoleListNotifierProvider.notifier)
+          .addDiveRoleByName(name);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(context.l10n.diveRoles_snackbar_errorAdding(e)),
+          ),
+        );
+      }
+      return null;
+    }
   }
 
   void _showBuddySelectionSheet(BuildContext context, WidgetRef ref) async {
     final result = await showModalBottomSheet<List<BuddyWithRole>>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) =>
           _BuddySelectionSheet(selectedBuddies: selectedBuddies),
     );
@@ -129,41 +211,46 @@ class BuddyPicker extends ConsumerWidget {
 
 class _BuddyChip extends StatelessWidget {
   final BuddyWithRole buddyWithRole;
+  final List<DiveRole> roles;
+
+  /// Built-in roles hidden from the pickers (issue #401).
+  final Set<String> hiddenRoleIds;
+
+  /// Roles offered even when hidden.
+  final Set<String> keepRoleIds;
   final VoidCallback onRemove;
-  final ValueChanged<BuddyRole> onRoleChanged;
+  final ValueChanged<List<DiveRole>> onRoleChanged;
+  final Future<DiveRole?> Function(String name) onCreateCustomRole;
 
   const _BuddyChip({
     required this.buddyWithRole,
+    required this.roles,
     required this.onRemove,
     required this.onRoleChanged,
+    required this.onCreateCustomRole,
+    this.hiddenRoleIds = const {},
+    this.keepRoleIds = const {},
   });
 
   @override
   Widget build(BuildContext context) {
+    final roleLabel = buddyWithRole.roles.joinedLocalizedNames(context.l10n);
     return InputChip(
-      avatar: CircleAvatar(
+      tooltip: roleLabel,
+      avatar: ProfileAvatar(
+        photo: buddyWithRole.buddy.photo,
+        initials: buddyWithRole.buddy.initials,
         backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-        child: Text(
-          buddyWithRole.buddy.initials,
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.bold,
-            color: Theme.of(context).colorScheme.onSecondaryContainer,
-          ),
+        textStyle: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          color: Theme.of(context).colorScheme.onSecondaryContainer,
         ),
       ),
       label: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(buddyWithRole.buddy.name),
-          Text(
-            buddyWithRole.role.displayName,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ],
+        children: [Text(buddyWithRole.buddy.name), _RoleLine(roleLabel)],
       ),
       labelPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       onDeleted: onRemove,
@@ -171,45 +258,107 @@ class _BuddyChip extends StatelessWidget {
     );
   }
 
-  void _showRoleSelector(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                context.l10n.buddies_picker_selectRole(
-                  buddyWithRole.buddy.name,
-                ),
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-            ),
-            const Divider(),
-            ...BuddyRole.values.map((role) {
-              final isSelected = role == buddyWithRole.role;
-              return ListTile(
-                leading: Icon(
-                  isSelected
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                  color: isSelected
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                ),
-                title: Text(role.displayName),
-                onTap: () {
-                  onRoleChanged(role);
-                  Navigator.pop(context);
-                },
-              );
-            }),
-            const SizedBox(height: 16),
-          ],
+  void _showRoleSelector(BuildContext context) async {
+    final selection = await showDiveRoleSelector(
+      context,
+      title: context.l10n.buddies_picker_selectRole(buddyWithRole.buddy.name),
+      roles: roles,
+      selectedRoleIds: buddyWithRole.roleIds,
+      hiddenRoleIds: hiddenRoleIds,
+      keepRoleIds: keepRoleIds,
+      onCreateCustomRole: onCreateCustomRole,
+    );
+    if (selection != null) {
+      onRoleChanged(selection.isEmpty ? [DiveRole.builtInBuddy()] : selection);
+    }
+  }
+}
+
+/// A chip's role line: the joined role names on one line, ellipsized past a
+/// chip-friendly width; the chip's tooltip carries the full text (#1221).
+class _RoleLine extends StatelessWidget {
+  final String label;
+
+  const _RoleLine(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 200),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
+    );
+  }
+}
+
+/// Pinned chip for the active diver's own role on the dive (#547).
+class _MeChip extends ConsumerWidget {
+  final List<String> diverRoleIds;
+  final ValueChanged<List<String>> onChanged;
+
+  const _MeChip({
+    required this.diverRoleIds,
+    required this.onChanged,
+    this.keepRoleIds = const {},
+    this.diveOwnerId,
+  });
+
+  /// Roles offered even when hidden.
+  final Set<String> keepRoleIds;
+
+  /// See [BuddyPicker.diveOwnerId].
+  final String? diveOwnerId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(certificationCatalogSyncProvider);
+    final ownerAsync = ref.watch(diveOwnerProvider(diveOwnerId));
+    final diver = ownerAsync.value;
+    final pending = isDiveOwnerPending(ownerAsync);
+    final rolesById =
+        ref.watch(diveRoleMapProvider).value ?? const <String, DiveRole>{};
+    final roleLabel = diverRoleIds.isEmpty
+        ? context.l10n.buddies_picker_setMyRole
+        : rolesForIds(
+            diverRoleIds,
+            rolesById,
+          ).joinedLocalizedNames(context.l10n);
+    return InputChip(
+      tooltip: roleLabel,
+      avatar: DiveOwnerAvatar(diver: diver, iconSize: 14, pending: pending),
+      label: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DiveOwnerName(diver: diver, pending: pending),
+          _RoleLine(roleLabel),
+        ],
+      ),
+      labelPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      onPressed: () async {
+        final roles =
+            ref.read(allDiveRolesProvider).value ?? const <DiveRole>[];
+        final selection = await showDiveRoleSelector(
+          context,
+          title: context.l10n.buddies_picker_selectMyRole,
+          roles: roles,
+          hiddenRoleIds: ref.read(
+            hiddenBuiltInIdsProvider(BuiltInCatalog.diveRoles),
+          ),
+          keepRoleIds: keepRoleIds,
+          allowEmpty: true,
+          selectedRoleIds: diverRoleIds,
+        );
+        if (selection != null) {
+          onChanged([for (final r in selection) r.id]);
+        }
+      },
     );
   }
 }
@@ -229,13 +378,28 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
   String _searchQuery = '';
   String _debouncedQuery = '';
   Timer? _debounceTimer;
-  List<Buddy>? _lastSearchResults;
+  List<BuddyWithDiveCount>? _lastSearchResults;
   late List<BuddyWithRole> _localSelectedBuddies;
+  Map<String, List<Certification>> _certsByBuddy =
+      const <String, List<Certification>>{};
 
   @override
   void initState() {
     super.initState();
     _localSelectedBuddies = List.from(widget.selectedBuddies);
+    // A manual listener rather than `ref.watch(allBuddyCertificationsProvider)`
+    // in build(): this widget also watches allBuddiesProvider directly for
+    // the buddy list, and allBuddyCertificationsProvider transitively
+    // watches allBuddiesProvider too. Riverpod's TickerMode-driven
+    // auto-pause (which pauses `ref.watch` subscriptions while this sheet
+    // is covered by another route, e.g. pushing the new-buddy page) trips a
+    // pausedActiveSubscriptionCount assertion on resume for that diamond
+    // dependency. Manual listeners are exempt from auto-pause, sidestepping
+    // the bug while staying reactive via setState.
+    ref.listenManual(allBuddyCertificationsProvider, (previous, next) {
+      final value = next.value ?? const <String, List<Certification>>{};
+      if (mounted) setState(() => _certsByBuddy = value);
+    }, fireImmediately: true);
   }
 
   @override
@@ -247,9 +411,11 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(certificationCatalogSyncProvider);
     final buddiesAsync = _debouncedQuery.isEmpty
-        ? ref.watch(allBuddiesProvider)
-        : ref.watch(buddySearchProvider(_debouncedQuery));
+        ? ref.watch(allBuddiesWithDiveCountProvider)
+        : ref.watch(buddySearchWithDiveCountProvider(_debouncedQuery));
+    final sort = ref.watch(buddyPickerSortProvider);
 
     return DraggableScrollableSheet(
       initialChildSize: 0.7,
@@ -338,6 +504,7 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
                   if (result != null) {
                     // New buddy was created, refresh the list so they can select it
                     ref.invalidate(allBuddiesProvider);
+                    ref.invalidate(allBuddiesWithDiveCountProvider);
                   }
                 },
                 icon: const Icon(Icons.person_add),
@@ -347,8 +514,40 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            const Divider(),
+            const SizedBox(height: 4),
+
+            // Sort toggle (issue #638): alternates between dive-count-desc
+            // (the default -- who do I dive with most) and alphabetical.
+            // Favorites are pinned to the top regardless of this choice.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () {
+                    final next = sort.field == BuddySortField.diveCount
+                        // Text fields invert direction throughout this
+                        // codebase: descending is what renders A->Z. Ascending
+                        // here would flip the alphabetical toggle to Z->A.
+                        ? const SortState(
+                            field: BuddySortField.name,
+                            direction: SortDirection.descending,
+                          )
+                        : const SortState(
+                            field: BuddySortField.diveCount,
+                            direction: SortDirection.descending,
+                          );
+                    ref.read(buddyPickerSortProvider.notifier).state = next;
+                  },
+                  icon: Icon(sort.field.icon, size: 18),
+                  label: Text(
+                    '${context.l10n.buddies_action_sort}: '
+                    '${sort.field.localizedName(context.l10n)}',
+                  ),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
 
             // Buddy list
             Expanded(
@@ -383,7 +582,12 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
                     );
                   }
 
-                  return _buildBuddyListView(scrollController, buddies);
+                  return _buildBuddyListView(
+                    scrollController,
+                    buddies,
+                    _certsByBuddy,
+                    sort,
+                  );
                 },
                 loading: () {
                   if (_lastSearchResults != null &&
@@ -395,6 +599,8 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
                           child: _buildBuddyListView(
                             scrollController,
                             _lastSearchResults!,
+                            _certsByBuddy,
+                            sort,
                           ),
                         ),
                       ],
@@ -402,7 +608,9 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
                   }
                   return const Center(child: CircularProgressIndicator());
                 },
-                error: (error, _) => Center(child: Text('Error: $error')),
+                error: (error, _) => Center(
+                  child: Text('${context.l10n.common_label_error}: $error'),
+                ),
               ),
             ),
           ],
@@ -413,54 +621,133 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
 
   Widget _buildBuddyListView(
     ScrollController scrollController,
-    List<Buddy> buddies,
+    List<BuddyWithDiveCount> buddies,
+    Map<String, List<Certification>> certsByBuddy,
+    SortState<BuddySortField> sort,
   ) {
+    // Favorites are pinned to the top regardless of the chosen sort field
+    // (issue #638); each partition is sorted independently so the toggle
+    // still reorders within both groups.
+    final (:favorites, :others) = pinFavoriteBuddiesToTop(buddies, sort);
+
+    final rows = <_PickerRow>[
+      if (favorites.isNotEmpty)
+        _PickerRow.header(context.l10n.diveLog_filterChip_favorites),
+      ...favorites.map(_PickerRow.entry),
+      if (favorites.isNotEmpty && others.isNotEmpty) const _PickerRow.divider(),
+      ...others.map(_PickerRow.entry),
+    ];
+
     return ListView.builder(
       controller: scrollController,
-      itemCount: buddies.length,
+      itemCount: rows.length,
       itemBuilder: (context, index) {
-        final buddy = buddies[index];
+        final row = rows[index];
+        if (row.isDivider) return const Divider(height: 1);
+        if (row.header != null) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text(
+              row.header!,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          );
+        }
+
+        final buddy = row.entry!.buddy;
+        final diveCount = row.entry!.diveCount;
         final isSelected = _localSelectedBuddies.any(
           (b) => b.buddy.id == buddy.id,
         );
-        final selectedRole = _localSelectedBuddies
+        final selectedRoles = _localSelectedBuddies
             .where((b) => b.buddy.id == buddy.id)
-            .map((b) => b.role)
+            .map((b) => b.roles)
             .firstOrNull;
+        final certLine = buddyCertificationLineL10n(
+          buddy,
+          context.l10n,
+          catalog: context.certificationCatalog,
+        );
 
         return ListTile(
-          leading: CircleAvatar(
-            backgroundColor: isSelected
-                ? Theme.of(context).colorScheme.primaryContainer
-                : Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: isSelected
-                ? Icon(
+          // Selection wins over the photo: a checked row must read as checked
+          // at a glance, which a face would undercut.
+          leading: isSelected
+              ? CircleAvatar(
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.primaryContainer,
+                  child: Icon(
                     Icons.check,
                     color: Theme.of(context).colorScheme.onPrimaryContainer,
-                  )
-                : Text(
-                    buddy.initials,
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
+                  ),
+                )
+              : ProfileAvatar(
+                  photo: buddy.photo,
+                  initials: buddy.initials,
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest,
+                  foregroundColor: Theme.of(
+                    context,
+                  ).colorScheme.onSurfaceVariant,
+                ),
+          title: Text(buddy.name),
+          isThreeLine: certLine != null && isSelected,
+          // The role chip sits under the name rather than in trailing: a
+          // ListTile measures trailing before the title, so a text-bearing
+          // chip there squeezes the name to one fragment per line on a
+          // phone or in a longer translation (issue #2717).
+          subtitle: certLine == null && !isSelected
+              ? null
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (certLine != null) Text(certLine),
+                    if (isSelected)
+                      Chip(
+                        label: Text(
+                          selectedRoles?.joinedLocalizedNames(context.l10n) ??
+                              context.l10n.diveRole_builtin_buddy,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                  ],
+                ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (diveCount > 0)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Text(
+                    context.l10n.buddies_label_diveCount(diveCount),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
+                ),
+              BuddyFavoriteButton(
+                isFavorite: buddy.isFavorite,
+                iconSize: 20,
+                unselectedColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ],
           ),
-          title: Text(buddy.name),
-          subtitle: buddy.certificationLevel != null
-              ? Text(buddy.certificationLevel!.displayName)
-              : null,
-          trailing: isSelected
-              ? Chip(
-                  label: Text(selectedRole?.displayName ?? 'Buddy'),
-                  visualDensity: VisualDensity.compact,
-                )
-              : null,
           onTap: () {
             if (isSelected) {
               _removeBuddy(buddy.id);
             } else {
-              _showRoleSelectorForBuddy(context, buddy);
+              _showRoleSelectorForBuddy(
+                context,
+                buddy,
+                certsByBuddy[buddy.id] ?? const [],
+              );
             }
           },
         );
@@ -476,56 +763,101 @@ class _BuddySelectionSheetState extends ConsumerState<_BuddySelectionSheet> {
     });
   }
 
-  void _addBuddy(Buddy buddy, BuddyRole role) {
+  void _addBuddy(Buddy buddy, List<DiveRole> roles) {
     final existing = _localSelectedBuddies.indexWhere(
       (b) => b.buddy.id == buddy.id,
     );
     setState(() {
       if (existing >= 0) {
-        // Update role
+        // Update roles
         _localSelectedBuddies = [
           ..._localSelectedBuddies.sublist(0, existing),
-          BuddyWithRole(buddy: buddy, role: role),
+          BuddyWithRole(buddy: buddy, roles: roles),
           ..._localSelectedBuddies.sublist(existing + 1),
         ];
       } else {
         _localSelectedBuddies = [
           ..._localSelectedBuddies,
-          BuddyWithRole(buddy: buddy, role: role),
+          BuddyWithRole(buddy: buddy, roles: roles),
         ];
       }
     });
   }
 
-  void _showRoleSelectorForBuddy(BuildContext context, Buddy buddy) {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                context.l10n.buddies_picker_selectRole(buddy.name),
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-            ),
-            const Divider(),
-            ...BuddyRole.values.map((role) {
-              return ListTile(
-                leading: const Icon(Icons.person),
-                title: Text(role.displayName),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _addBuddy(buddy, role);
-                },
-              );
-            }),
-            const SizedBox(height: 16),
-          ],
-        ),
+  void _showRoleSelectorForBuddy(
+    BuildContext context,
+    Buddy buddy,
+    List<Certification> certs,
+  ) async {
+    final roles = ref.read(allDiveRolesProvider).value ?? const <DiveRole>[];
+    final selection = await showDiveRoleSelector(
+      context,
+      title: context.l10n.buddies_picker_selectRole(buddy.name),
+      roles: roles,
+      hiddenRoleIds: ref.read(
+        hiddenBuiltInIdsProvider(BuiltInCatalog.diveRoles),
       ),
+      credentialRoleIds: _professionalRoleIds(certs),
+      onCreateCustomRole: _createCustomRole,
     );
+    if (selection != null) {
+      _addBuddy(
+        buddy,
+        selection.isEmpty ? [DiveRole.builtInBuddy()] : selection,
+      );
+    }
   }
+
+  /// Dive-role ids this buddy plausibly acts as professionally, derived from
+  /// their certification levels; floats those roles to the top of the sheet
+  /// and badges them (replaces the buddy_roles credential lookup).
+  Set<String> _professionalRoleIds(List<Certification> certs) {
+    final ids = <String>{};
+    for (final cert in certs) {
+      final level = CertificationLevel.fromId(cert.level);
+      if (level == null) continue;
+      if (level.isInstructorLevel) ids.add(DiveRole.instructorId);
+      if (level == CertificationLevel.diveMaster) {
+        ids.add(DiveRole.diveMasterId);
+      }
+      if (level == CertificationLevel.diveGuide) {
+        ids.add(DiveRole.diveGuideId);
+      }
+    }
+    return ids;
+  }
+
+  Future<DiveRole?> _createCustomRole(String name) async {
+    try {
+      return await ref
+          .read(diveRoleListNotifierProvider.notifier)
+          .addDiveRoleByName(name);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(context.l10n.diveRoles_snackbar_errorAdding(e)),
+          ),
+        );
+      }
+      return null;
+    }
+  }
+}
+
+/// A single row in the Add-buddy list: a section header, a divider between
+/// the favorites section and the rest, or a buddy entry.
+class _PickerRow {
+  final String? header;
+  final bool isDivider;
+  final BuddyWithDiveCount? entry;
+
+  const _PickerRow.header(this.header) : isDivider = false, entry = null;
+
+  const _PickerRow.divider() : header = null, isDivider = true, entry = null;
+
+  const _PickerRow.entry(BuddyWithDiveCount value)
+    : header = null,
+      isDivider = false,
+      entry = value;
 }

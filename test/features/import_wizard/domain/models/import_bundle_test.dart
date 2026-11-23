@@ -7,18 +7,23 @@ import 'package:submersion/features/import_wizard/domain/models/import_bundle.da
 void main() {
   group('ImportSourceType', () {
     test('has all expected values', () {
-      expect(ImportSourceType.values, hasLength(5));
+      expect(ImportSourceType.values, hasLength(9));
       expect(ImportSourceType.values, contains(ImportSourceType.uddf));
       expect(ImportSourceType.values, contains(ImportSourceType.fit));
       expect(ImportSourceType.values, contains(ImportSourceType.healthKit));
       expect(ImportSourceType.values, contains(ImportSourceType.universal));
       expect(ImportSourceType.values, contains(ImportSourceType.diveComputer));
+      expect(ImportSourceType.values, contains(ImportSourceType.suuntoCloud));
+      expect(ImportSourceType.values, contains(ImportSourceType.suuntoFile));
+      expect(ImportSourceType.values, contains(ImportSourceType.garminCloud));
+      expect(ImportSourceType.values, contains(ImportSourceType.divelogs));
     });
   });
 
   group('ImportEntityType', () {
-    test('has all 11 expected values', () {
-      expect(ImportEntityType.values, hasLength(11));
+    test('has all 13 expected values', () {
+      expect(ImportEntityType.values, hasLength(13));
+      expect(ImportEntityType.values, contains(ImportEntityType.fills));
       expect(ImportEntityType.values, contains(ImportEntityType.dives));
       expect(ImportEntityType.values, contains(ImportEntityType.sites));
       expect(ImportEntityType.values, contains(ImportEntityType.buddies));
@@ -33,6 +38,7 @@ void main() {
       expect(ImportEntityType.values, contains(ImportEntityType.diveTypes));
       expect(ImportEntityType.values, contains(ImportEntityType.equipmentSets));
       expect(ImportEntityType.values, contains(ImportEntityType.courses));
+      expect(ImportEntityType.values, contains(ImportEntityType.media));
     });
   });
 

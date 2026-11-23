@@ -1,0 +1,855 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
+import 'package:http/testing.dart';
+import 'package:http/http.dart' as http;
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/media_store/google_drive_media_object_store.dart';
+import 'package:submersion/core/services/media_store/media_object_store.dart';
+
+import '../../../helpers/fake_drive_server.dart';
+import '../../../helpers/google_auth_client.dart';
+import '../../../helpers/revocable_client.dart';
+import 'media_object_store_contract.dart';
+
+void main() {
+  late Directory tmp;
+  late FakeDriveServer server;
+
+  GoogleDriveMediaObjectStore build({int? chunkSizeBytes}) {
+    return GoogleDriveMediaObjectStore.withClient(
+      server.client,
+      chunkSizeBytes: chunkSizeBytes ?? 8 * 1024 * 1024,
+      apiBase: 'https://fake.googleapis.test',
+    );
+  }
+
+  setUp(() async {
+    server = FakeDriveServer();
+    tmp = await Directory.systemTemp.createTemp('gdrive_mos_test');
+  });
+
+  tearDown(() => tmp.delete(recursive: true));
+
+  runMediaObjectStoreContract('GoogleDriveMediaObjectStore', () async {
+    server = FakeDriveServer();
+    return build();
+  });
+
+  test('putFile stores the key as the file name in the media '
+      'folder', () async {
+    final store = build();
+    final src = File('${tmp.path}/a.jpg')..writeAsBytesSync([1, 2, 3]);
+    await store.putFile(
+      'smv1/objects/ab/abc.jpg',
+      src,
+      contentType: 'image/jpeg',
+    );
+    expect(server.filesById.values.single.name, 'smv1/objects/ab/abc.jpg');
+    expect(server.filesById.values.single.bytes, [1, 2, 3]);
+    expect(server.foldersByName.keys, ['submersion-media']);
+  });
+
+  test('large putFile chunks through one session with progress and resume '
+      'state', () async {
+    const chunk = 256 * 1024;
+    final store = build(chunkSizeBytes: chunk);
+    final bytes = List<int>.generate(700 * 1024, (i) => i % 251);
+    final src = File('${tmp.path}/video.mp4')..writeAsBytesSync(bytes);
+
+    final progress = <int>[];
+    String? resumeJson;
+    await store.putFile(
+      'smv1/objects/aa/video.mp4',
+      src,
+      contentType: 'video/mp4',
+      onProgress: (sent, total) => progress.add(sent),
+      onResumeStateChanged: (json) => resumeJson = json,
+    );
+
+    expect(server.filesById.values.single.bytes, bytes);
+    expect(server.chunkPutCount, 3, reason: '700KiB / 256KiB = 3 chunks');
+    expect(progress.last, bytes.length);
+    expect(resumeJson, contains('"sessionUri"'));
+  });
+
+  test('kill-and-resume probes the session and uploads only the '
+      'tail', () async {
+    const chunk = 256 * 1024;
+    final store = build(chunkSizeBytes: chunk);
+    final bytes = List<int>.generate(700 * 1024, (i) => (i * 3) % 251);
+    final src = File('${tmp.path}/kr.mp4')..writeAsBytesSync(bytes);
+
+    String? resumeJson;
+    server.failAfterChunkPuts = 2; // chunks 1-2 land, chunk 3 dies once
+    await expectLater(
+      store.putFile(
+        'smv1/objects/aa/kr.mp4',
+        src,
+        contentType: 'video/mp4',
+        onResumeStateChanged: (json) => resumeJson = json,
+      ),
+      throwsA(isA<MediaStoreException>()),
+    );
+    expect(resumeJson, isNotNull);
+    final putsBefore = server.chunkPutCount;
+    expect(putsBefore, 2);
+
+    final resumed = build(chunkSizeBytes: chunk);
+    await resumed.putFile(
+      'smv1/objects/aa/kr.mp4',
+      src,
+      contentType: 'video/mp4',
+      resumeStateJson: resumeJson,
+    );
+    expect(server.filesById.values.single.bytes, bytes);
+    expect(
+      server.chunkPutCount - putsBefore,
+      1,
+      reason: 'only chunk 3 uploads on resume',
+    );
+    final probes = server.captured.where(
+      (r) =>
+          r.method == 'PUT' &&
+          (r.headers['Content-Range'] ?? '').startsWith('bytes */'),
+    );
+    expect(probes, isNotEmpty, reason: 'resume must probe the session');
+  });
+
+  test('stale session (404 probe) restarts fresh', () async {
+    const chunk = 256 * 1024;
+    final store = build(chunkSizeBytes: chunk);
+    final bytes = List<int>.generate(300 * 1024, (i) => i % 199);
+    final src = File('${tmp.path}/stale.mp4')..writeAsBytesSync(bytes);
+
+    await store.putFile(
+      'smv1/objects/aa/stale.mp4',
+      src,
+      contentType: 'video/mp4',
+      resumeStateJson:
+          '{"sessionUri":"https://fake.googleapis.test/fake-session/'
+          'session-nope","totalBytes":${bytes.length},'
+          '"chunkSizeBytes":$chunk}',
+    );
+    expect(server.filesById.values.single.bytes, bytes);
+  });
+
+  test('getBytes hands a whole object back in memory, and a missing one is '
+      'notFound', () async {
+    final store = build(chunkSizeBytes: 256 * 1024);
+    final bytes = List<int>.generate(700 * 1024, (i) => (i * 5) % 251);
+    final src = File('${tmp.path}/m.bin')..writeAsBytesSync(bytes);
+    await store.putFile(
+      'smv1/objects/aa/m.bin',
+      src,
+      contentType: 'application/octet-stream',
+    );
+
+    expect(await store.getBytes('smv1/objects/aa/m.bin'), bytes);
+    await expectLater(
+      store.getBytes('smv1/objects/aa/missing.bin'),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.kind,
+          'kind',
+          MediaStoreErrorKind.notFound,
+        ),
+      ),
+    );
+  });
+
+  test('chunked getFile round-trips with progress', () async {
+    const chunk = 256 * 1024;
+    final store = build(chunkSizeBytes: chunk);
+    final bytes = List<int>.generate(700 * 1024, (i) => (i * 7) % 251);
+    // Seed via the adapter itself (also exercises folder reuse).
+    final src = File('${tmp.path}/seed.bin')..writeAsBytesSync(bytes);
+    await store.putFile(
+      'smv1/objects/aa/big.bin',
+      src,
+      contentType: 'application/octet-stream',
+    );
+
+    final dest = File('${tmp.path}/big.out');
+    final progress = <int>[];
+    await store.getFile(
+      'smv1/objects/aa/big.bin',
+      dest,
+      onProgress: (received, total) => progress.add(received),
+    );
+    expect(await dest.readAsBytes(), bytes);
+    expect(progress.length, greaterThan(1));
+    expect(progress.last, bytes.length);
+  });
+
+  test('head returns null for a missing key and metadata for an existing '
+      'one', () async {
+    final store = build();
+    expect(await store.head('smv1/objects/aa/none.jpg'), isNull);
+    final src = File('${tmp.path}/h.jpg')
+      ..writeAsBytesSync(Uint8List.fromList([5, 5]));
+    await store.putFile(
+      'smv1/objects/aa/h.jpg',
+      src,
+      contentType: 'image/jpeg',
+    );
+    final info = await store.head('smv1/objects/aa/h.jpg');
+    expect(info!.sizeBytes, 2);
+  });
+
+  test('list follows nextPageToken instead of stopping at the first '
+      'page', () async {
+    // Drive caps files.list at one page (100 by default) and reports the
+    // rest only through nextPageToken, so an unpaginated query silently
+    // hides every media object past the cap.
+    server.queryPageSize = 2;
+    for (var i = 0; i < 5; i++) {
+      server.filesById['id-$i'] = (
+        name: 'smv1/objects/aa/$i.jpg',
+        bytes: Uint8List.fromList([i]),
+      );
+    }
+    final store = build();
+
+    final keys = [
+      await for (final info in store.list('smv1/objects/')) info.key,
+    ];
+
+    expect(keys, hasLength(5));
+  });
+
+  test('deleteExtraCopies keeps one copy of a duplicated key', () async {
+    for (var i = 0; i < 3; i++) {
+      server.filesById['dup-$i'] = (
+        name: 'smv1/objects/aa/aabb.jpg',
+        bytes: Uint8List.fromList([1, 2]),
+      );
+    }
+    server.filesById['other'] = (
+      name: 'smv1/objects/aa/other.jpg',
+      bytes: Uint8List.fromList([3]),
+    );
+    final store = build();
+
+    expect(store, isA<DuplicateKeyStore>());
+    expect(await store.deleteExtraCopies('smv1/objects/aa/aabb.jpg'), 2);
+
+    final names = server.filesById.values.map((f) => f.name).toList();
+    expect(names.where((n) => n == 'smv1/objects/aa/aabb.jpg'), hasLength(1));
+    expect(names, contains('smv1/objects/aa/other.jpg'));
+  });
+
+  test('deleteExtraCopies stops once its guard says no', () async {
+    for (var i = 0; i < 3; i++) {
+      server.filesById['dup-$i'] = (
+        name: 'smv1/objects/aa/aabb.jpg',
+        bytes: Uint8List.fromList([1, 2]),
+      );
+    }
+    final store = build();
+    var asked = 0;
+
+    final removed = await store.deleteExtraCopies(
+      'smv1/objects/aa/aabb.jpg',
+      mayDelete: () => ++asked == 1,
+    );
+
+    expect(removed, 1);
+    expect(server.filesById, hasLength(2));
+  });
+
+  test('deleteExtraCopies deletes nothing when one copy exists', () async {
+    server.filesById['only'] = (
+      name: 'smv1/objects/aa/aabb.jpg',
+      bytes: Uint8List.fromList([1]),
+    );
+    final store = build();
+
+    expect(await store.deleteExtraCopies('smv1/objects/aa/aabb.jpg'), 0);
+    expect(server.filesById, hasLength(1));
+  });
+
+  test('a 5xx from Drive surfaces as MediaStoreException on every '
+      'verb', () async {
+    final store = GoogleDriveMediaObjectStore.withClient(
+      MockClient(
+        (_) async => http.Response('{"error":{"message":"boom"}}', 500),
+      ),
+      apiBase: 'https://fake.googleapis.test',
+    );
+    final src = File('${tmp.path}/x.bin')..writeAsBytesSync([1]);
+    await expectLater(
+      store.head('smv1/objects/aa/x.bin'),
+      throwsA(isA<MediaStoreException>()),
+    );
+    await expectLater(
+      store.putFile('smv1/objects/aa/x.bin', src, contentType: 'x'),
+      throwsA(isA<MediaStoreException>()),
+    );
+    await expectLater(
+      store.getFile('smv1/objects/aa/x.bin', File('${tmp.path}/o')),
+      throwsA(isA<MediaStoreException>()),
+    );
+    await expectLater(
+      store.getBytes('smv1/objects/aa/x.bin'),
+      throwsA(isA<MediaStoreException>()),
+    );
+    await expectLater(
+      store.delete('smv1/objects/aa/x.bin'),
+      throwsA(isA<MediaStoreException>()),
+    );
+    await expectLater(
+      store.list('smv1/objects/').toList(),
+      throwsA(isA<MediaStoreException>()),
+    );
+  });
+
+  test("an error response's own message is folded into the exception "
+      '(issue reported by Max: a bare "HTTP 400" gave no way to diagnose '
+      'why Drive rejected the request)', () async {
+    final store = GoogleDriveMediaObjectStore.withClient(
+      MockClient(
+        (_) async => http.Response(
+          '{"error":{"message":"Invalid request: parent not found"}}',
+          400,
+        ),
+      ),
+      apiBase: 'https://fake.googleapis.test',
+    );
+
+    await expectLater(
+      store.head('smv1/objects/aa/x.bin'),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.message,
+          'message',
+          contains('Invalid request: parent not found'),
+        ),
+      ),
+    );
+  });
+
+  test('an unparsable error body degrades to the bare status code instead of '
+      'throwing while building the error message', () async {
+    final store = GoogleDriveMediaObjectStore.withClient(
+      MockClient((_) async => http.Response('not json', 400)),
+      apiBase: 'https://fake.googleapis.test',
+    );
+
+    await expectLater(
+      store.head('smv1/objects/aa/x.bin'),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.message,
+          'message',
+          contains('HTTP 400'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'a non-string error.message (Copilot review) degrades to the bare '
+    'status code instead of throwing a TypeError while building the error',
+    () async {
+      final store = GoogleDriveMediaObjectStore.withClient(
+        MockClient((_) async => http.Response('{"error":{"message":42}}', 400)),
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.bin'),
+        throwsA(
+          isA<MediaStoreException>().having(
+            (e) => e.message,
+            'message',
+            contains('HTTP 400'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('a missing source file is a fatal MediaStoreException', () async {
+    final store = build();
+    await expectLater(
+      store.putFile(
+        'smv1/objects/aa/gone.bin',
+        File('${tmp.path}/nope.bin'),
+        contentType: 'x',
+      ),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.kind,
+          'kind',
+          MediaStoreErrorKind.fatal,
+        ),
+      ),
+    );
+  });
+
+  test('reapStaleUploadSessions is a self-expiry no-op', () async {
+    expect(
+      await build().reapStaleUploadSessions(olderThan: DateTime.utc(2026)),
+      0,
+    );
+  });
+
+  test('a re-auth that closes and replaces the client is followed on the '
+      'next request', () async {
+    var live = RevocableClient(server.client);
+    final store = GoogleDriveMediaObjectStore(
+      clientSupplier: () async => live,
+      apiBase: 'https://fake.googleapis.test',
+    );
+    final src = File('${tmp.path}/reauth.jpg')..writeAsBytesSync([7, 7, 7]);
+    await store.putFile(
+      'smv1/objects/aa/before.jpg',
+      src,
+      contentType: 'image/jpeg',
+    );
+
+    // What the authenticator does on every re-auth (the 401 retry being
+    // the routine trigger): close the published client, then publish a
+    // fresh one for the same account.
+    live.close();
+    live = RevocableClient(server.client);
+
+    await store.putFile(
+      'smv1/objects/aa/after.jpg',
+      src,
+      contentType: 'image/jpeg',
+    );
+
+    expect(
+      server.filesById.values.map((f) => f.name),
+      containsAll(<String>[
+        'smv1/objects/aa/before.jpg',
+        'smv1/objects/aa/after.jpg',
+      ]),
+    );
+  });
+
+  test('a client closed with no replacement surfaces as a transient '
+      'transport failure', () async {
+    // The re-auth that never lands: the authenticator tore its client down
+    // and no fresh one arrived. This is the exact shape of the bug the
+    // supplier exists to prevent, so pin the symptom as well as the kind.
+    final dead = RevocableClient(server.client)..close();
+    final store = GoogleDriveMediaObjectStore(
+      clientSupplier: () async => dead,
+      apiBase: 'https://fake.googleapis.test',
+    );
+    await expectLater(
+      store.head('smv1/objects/aa/x.jpg'),
+      throwsA(
+        isA<MediaStoreException>()
+            .having((e) => e.kind, 'kind', MediaStoreErrorKind.transient)
+            .having(
+              (e) => (e.cause as http.ClientException).message,
+              'cause',
+              contains('Client is already closed'),
+            ),
+      ),
+    );
+  });
+
+  test('a supplier that fails to produce a client is transient', () async {
+    final store = GoogleDriveMediaObjectStore(
+      clientSupplier: () async =>
+          throw const CloudStorageException('silent auth exploded'),
+      apiBase: 'https://fake.googleapis.test',
+    );
+    await expectLater(
+      store.head('smv1/objects/aa/x.jpg'),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.kind,
+          'kind',
+          MediaStoreErrorKind.transient,
+        ),
+      ),
+    );
+  });
+
+  // The clients production hands this store are googleapis_auth clients, which
+  // raise AccessDeniedException themselves for any response carrying
+  // www-authenticate. Google sends that header on these rejections, so the
+  // store never sees their status.
+  group('a rejection raised by the real auth client', () {
+    http.Client rejecting(
+      int status,
+      String challenge, {
+      void Function()? onSend,
+    }) => googleAuthClient(
+      MockClient((_) async {
+        onSend?.call();
+        return http.Response(
+          '',
+          status,
+          headers: {'www-authenticate': challenge},
+        );
+      }),
+    );
+
+    final expired = rejecting(401, 'Bearer error="invalid_token"');
+    final noDriveScope = rejecting(403, 'Bearer error="insufficient_scope"');
+
+    test('refreshes an expired token and retries the request', () async {
+      http.Client current = expired;
+      final rejectedClients = <http.Client>[];
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => current,
+        onAuthRejected: (rejected) async {
+          rejectedClients.add(rejected);
+          current = server.client;
+          return true;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      expect(await store.head('smv1/objects/aa/x.jpg'), isNull);
+      expect(rejectedClients, [same(expired)]);
+    });
+
+    test('reports an expired token nothing could refresh as auth', () async {
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => expired,
+        onAuthRejected: (_) async => false,
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>()
+              .having((e) => e.kind, 'kind', MediaStoreErrorKind.auth)
+              .having((e) => e.message, 'message', contains('sign in again')),
+        ),
+      );
+    });
+
+    test('reports a refresh token Google refused as auth', () async {
+      // The desktop client refreshes on the first request after the access
+      // token expires, so a revoked grant fails there with invalid_grant.
+      // Read as a failure to reach Drive, it was retried and never dropped.
+      final revoked = MockClient(
+        (_) async => throw gauth.ServerRequestFailedException(
+          'Failed to obtain access credentials.',
+          statusCode: 400,
+          responseContent: {'error': 'invalid_grant'},
+        ),
+      );
+      final rejectedClients = <http.Client>[];
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => revoked,
+        onAuthRejected: (rejected) async {
+          rejectedClients.add(rejected);
+          return false;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>()
+              .having((e) => e.kind, 'kind', MediaStoreErrorKind.auth)
+              .having((e) => e.message, 'message', contains('sign in again')),
+        ),
+      );
+      expect(rejectedClients, [same(revoked)]);
+    });
+
+    test('still treats any other refresh failure as transient', () async {
+      final outage = MockClient(
+        (_) async => throw gauth.ServerRequestFailedException(
+          'Failed to obtain access credentials.',
+          statusCode: 503,
+          responseContent: 'unavailable',
+        ),
+      );
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => outage,
+        onAuthRejected: (_) async => fail('an outage is not a rejection'),
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>().having(
+            (e) => e.kind,
+            'kind',
+            MediaStoreErrorKind.transient,
+          ),
+        ),
+      );
+    });
+
+    final asksForTheDriveBox = isA<MediaStoreException>()
+        .having((e) => e.kind, 'kind', MediaStoreErrorKind.auth)
+        .having((e) => e.message, 'message', contains('Google Drive box'))
+        // The queue stores toString, which adds the cause, and the Transfers
+        // page shows it, so a cause here puts the raw header on screen.
+        .having((e) => e.toString(), 'toString', isNot(contains('www-auth')));
+
+    test('drops a grant without Drive access and does not retry', () async {
+      final rejectedClients = <http.Client>[];
+      var sent = 0;
+      final refused = rejecting(
+        403,
+        'Bearer error="insufficient_scope"',
+        onSend: () => sent++,
+      );
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => refused,
+        onAuthRejected: (rejected) async {
+          rejectedClients.add(rejected);
+          return true;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(asksForTheDriveBox),
+      );
+      expect(rejectedClients, [same(refused)]);
+      expect(sent, 1);
+    });
+
+    test('still asks for Drive access if dropping the grant fails', () async {
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => noDriveScope,
+        onAuthRejected: (_) async => throw Exception('token store locked'),
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(asksForTheDriveBox),
+      );
+    });
+  });
+
+  test('the same client looks the media folder up once', () async {
+    final store = build();
+
+    await store.head('smv1/objects/aa/x.jpg');
+    await store.head('smv1/objects/aa/y.jpg');
+
+    final folderLookups = server.captured.where(
+      (r) => (r.url.queryParameters['q'] ?? '').contains('mimeType'),
+    );
+    expect(folderLookups, hasLength(1));
+  });
+
+  test('a client from a new sign-in looks the media folder up again', () async {
+    // A dropped grant leaves this store in place, and the diver may then pick
+    // another account, whose appDataFolder does not hold the cached folder.
+    final otherAccount = FakeDriveServer();
+    http.Client current = server.client;
+    final store = GoogleDriveMediaObjectStore(
+      clientSupplier: () async => current,
+      apiBase: 'https://fake.googleapis.test',
+    );
+
+    await store.head('smv1/objects/aa/x.jpg');
+    current = otherAccount.client;
+    await store.head('smv1/objects/aa/x.jpg');
+
+    expect(otherAccount.foldersByName.keys, ['submersion-media']);
+  });
+
+  group('an expired access token', () {
+    // The google_sign_in client carries a token that dies after about an
+    // hour. Without a refresh, every media transfer after that failed as an
+    // auth error until a sync call happened to replace the client (#3602).
+    final expired = MockClient(
+      (_) async => http.Response('{"error":{"code":401}}', 401),
+    );
+
+    test('is refreshed once and the request retried', () async {
+      http.Client current = expired;
+      final rejectedClients = <http.Client>[];
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => current,
+        onAuthRejected: (rejected) async {
+          rejectedClients.add(rejected);
+          current = server.client;
+          return true;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      expect(await store.head('smv1/objects/aa/x.jpg'), isNull);
+      expect(rejectedClients, [same(expired)]);
+    });
+
+    test('a request body survives the retry', () async {
+      http.Client current = expired;
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => current,
+        onAuthRejected: (_) async {
+          current = server.client;
+          return true;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+      final src = File('${tmp.path}/retry.jpg')..writeAsBytesSync([1, 2, 3]);
+
+      await store.putFile(
+        'smv1/objects/aa/retry.jpg',
+        src,
+        contentType: 'image/jpeg',
+      );
+
+      expect(
+        server.filesById.values.map((f) => f.name),
+        contains('smv1/objects/aa/retry.jpg'),
+      );
+    });
+
+    test('fails as an auth error when the refresh fails', () async {
+      var refreshes = 0;
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => expired,
+        onAuthRejected: (_) async {
+          refreshes++;
+          return false;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>()
+              .having((e) => e.kind, 'kind', MediaStoreErrorKind.auth)
+              // The queue shows this text as is, so it must say how to
+              // recover rather than quote an HTTP status.
+              .having((e) => e.message, 'message', contains('sign in again')),
+        ),
+      );
+      expect(refreshes, 1);
+    });
+
+    test('a refresh that throws is a transient failure', () async {
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => expired,
+        onAuthRejected: (_) async =>
+            throw const CloudStorageException('keychain locked'),
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>().having(
+            (e) => e.kind,
+            'kind',
+            MediaStoreErrorKind.transient,
+          ),
+        ),
+      );
+    });
+
+    test('is retried only once when the fresh token is refused too', () async {
+      var refreshes = 0;
+      final store = GoogleDriveMediaObjectStore(
+        clientSupplier: () async => expired,
+        onAuthRejected: (_) async {
+          refreshes++;
+          return true;
+        },
+        apiBase: 'https://fake.googleapis.test',
+      );
+
+      await expectLater(
+        store.head('smv1/objects/aa/x.jpg'),
+        throwsA(
+          isA<MediaStoreException>()
+              .having((e) => e.kind, 'kind', MediaStoreErrorKind.auth)
+              // The queue shows this text as is, so it must say how to
+              // recover rather than quote an HTTP status.
+              .having((e) => e.message, 'message', contains('sign in again')),
+        ),
+      );
+      expect(refreshes, 1);
+    });
+  });
+
+  test('a supplier with no Google session fails as an auth error', () async {
+    final store = GoogleDriveMediaObjectStore(
+      clientSupplier: () async => null,
+      apiBase: 'https://fake.googleapis.test',
+    );
+    await expectLater(
+      store.head('smv1/objects/aa/x.jpg'),
+      throwsA(
+        isA<MediaStoreException>().having(
+          (e) => e.kind,
+          'kind',
+          MediaStoreErrorKind.auth,
+        ),
+      ),
+    );
+  });
+
+  group('readRange', () {
+    const key = 'smv1/objects/ab/abc.mp4';
+    Future<GoogleDriveMediaObjectStore> withVideo() async {
+      final store = build();
+      final src = File('${tmp.path}/v.mp4')
+        ..writeAsBytesSync(List<int>.generate(100, (i) => i));
+      await store.putFile(key, src, contentType: 'video/mp4');
+      return store;
+    }
+
+    test('sends the Range header and returns the 206 body', () async {
+      final store = await withVideo();
+      final bytes = await store.readRange(key, start: 10, endInclusive: 19);
+      expect(bytes, List<int>.generate(10, (i) => 10 + i));
+      expect(server.captured.last.headers['Range'], 'bytes=10-19');
+    });
+
+    test('slices a 200 answer to the requested range', () async {
+      final store = await withVideo();
+      server.ignoresRange = true;
+      final bytes = await store.readRange(key, start: 95, endInclusive: 120);
+      expect(bytes, [95, 96, 97, 98, 99]);
+    });
+
+    test('missing key throws notFound', () async {
+      await expectLater(
+        build().readRange(
+          'smv1/objects/zz/none.mp4',
+          start: 0,
+          endInclusive: 9,
+        ),
+        throwsA(
+          isA<MediaStoreException>().having(
+            (e) => e.kind,
+            'kind',
+            MediaStoreErrorKind.notFound,
+          ),
+        ),
+      );
+    });
+
+    test('looks the file id up once across reads', () async {
+      final store = await withVideo();
+      bool isLookup(http.Request r) =>
+          r.method == 'GET' &&
+          r.url.path == '/drive/v3/files' &&
+          (r.url.queryParameters['q'] ?? '').contains("name = '$key'");
+      final before = server.captured.where(isLookup).length;
+      await store.readRange(key, start: 0, endInclusive: 9);
+      await store.readRange(key, start: 10, endInclusive: 19);
+      expect(server.captured.where(isLookup).length, before + 1);
+    });
+  });
+}

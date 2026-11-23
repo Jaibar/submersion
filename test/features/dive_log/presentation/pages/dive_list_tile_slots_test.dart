@@ -1,0 +1,359 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../../../helpers/test_app.dart';
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier(super.initial);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _TestCardConfigNotifier extends CardViewConfigNotifier {
+  _TestCardConfigNotifier(CardViewConfig config)
+    : super.withMode(ListViewMode.detailed) {
+    state = config;
+  }
+}
+
+void main() {
+  DiveSummary summary({String? name, String? siteName}) => DiveSummary(
+    id: 'd1',
+    diveNumber: 7,
+    dateTime: DateTime(2024, 6, 1),
+    name: name,
+    siteName: siteName,
+    maxDepth: 30.0,
+    sortTimestamp: 0,
+  );
+
+  Widget buildTile({
+    required CardViewConfig config,
+    required DiveSummary diveSummary,
+  }) {
+    return testApp(
+      overrides: [
+        settingsProvider.overrideWith(
+          (ref) => _TestSettingsNotifier(const AppSettings()),
+        ),
+        detailedCardConfigProvider.overrideWith(
+          (ref) => _TestCardConfigNotifier(config),
+        ),
+      ],
+      child: DiveListTile(
+        diveId: 'd1',
+        diveNumber: 7,
+        dateTime: DateTime(2024, 6, 1),
+        siteName: diveSummary.siteName,
+        summary: diveSummary,
+      ),
+    );
+  }
+
+  CardViewConfig configWithSlot(String slotId, DiveField field) {
+    final base = CardViewConfig.defaultDetailed();
+    return base.copyWith(
+      slots: [
+        for (final slot in base.slots)
+          if (slot.slotId == slotId)
+            CardSlotConfig(slotId: slotId, field: field)
+          else
+            slot,
+      ],
+    );
+  }
+
+  group('DiveListTile detailed slot assignments', () {
+    testWidgets('title slot diveName shows the custom dive name', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: configWithSlot('title', DiveField.diveName),
+          diveSummary: summary(
+            name: 'Wreck penetration dive',
+            siteName: 'Blue Hole',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Wreck penetration dive'), findsOneWidget);
+    });
+
+    testWidgets('title slot diveName falls back to site name when unnamed', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: configWithSlot('title', DiveField.diveName),
+          diveSummary: summary(siteName: 'Blue Hole'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Blue Hole'), findsOneWidget);
+    });
+
+    testWidgets('default title slot renders the site name as before', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: CardViewConfig.defaultDetailed(),
+          diveSummary: summary(
+            name: 'Wreck penetration dive',
+            siteName: 'Blue Hole',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Default (siteName) slot keeps legacy behavior: the site, not the name.
+      expect(find.text('Blue Hole'), findsOneWidget);
+      expect(find.text('Wreck penetration dive'), findsNothing);
+    });
+
+    testWidgets('date slot honors a non-default field', (tester) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: configWithSlot('date', DiveField.maxDepth),
+          diveSummary: summary(siteName: 'Blue Hole'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The date line now shows the configured field (max depth, 30 m)
+      // instead of the formatted date.
+      expect(find.textContaining('30'), findsWidgets);
+      expect(find.textContaining('2024'), findsNothing);
+    });
+  });
+
+  group('DiveListTile Runtime stat', () {
+    Widget tile({Duration? runtime}) => testApp(
+      overrides: [
+        settingsProvider.overrideWith(
+          (ref) => _TestSettingsNotifier(const AppSettings()),
+        ),
+        detailedCardConfigProvider.overrideWith(
+          (ref) => _TestCardConfigNotifier(
+            configWithSlot('stat1', DiveField.runtime),
+          ),
+        ),
+      ],
+      child: DiveListTile(
+        diveId: 'd1',
+        diveNumber: 7,
+        dateTime: DateTime(2024, 6, 1),
+        siteName: 'Reef',
+        // As DiveListItem passes it: the runtime, else the bottom time.
+        duration: runtime ?? const Duration(minutes: 37),
+        summary: DiveSummary(
+          id: 'd1',
+          dateTime: DateTime(2024, 6, 1),
+          runtime: runtime,
+          bottomTime: const Duration(minutes: 37),
+          sortTimestamp: 0,
+        ),
+      ),
+    );
+
+    testWidgets('shows the runtime of a dive that has one', (tester) async {
+      await tester.pumpWidget(tile(runtime: const Duration(minutes: 52)));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('52'), findsWidgets);
+    });
+
+    testWidgets('does not pass a bottom time off as a runtime', (tester) async {
+      await tester.pumpWidget(tile());
+      await tester.pumpAndSettle();
+      expect(find.textContaining('37'), findsNothing);
+    });
+
+    testWidgets('does not pass a runtime off as a bottom time', (tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            settingsProvider.overrideWith(
+              (ref) => _TestSettingsNotifier(const AppSettings()),
+            ),
+            detailedCardConfigProvider.overrideWith(
+              (ref) => _TestCardConfigNotifier(
+                CardViewConfig.defaultDetailed().copyWith(
+                  slots: const [
+                    CardSlotConfig(slotId: 'stat1', field: DiveField.maxDepth),
+                    CardSlotConfig(
+                      slotId: 'stat2',
+                      field: DiveField.bottomTime,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          child: DiveListTile(
+            diveId: 'd1',
+            diveNumber: 7,
+            dateTime: DateTime(2024, 6, 1),
+            siteName: 'Reef',
+            duration: const Duration(minutes: 52),
+            summary: DiveSummary(
+              id: 'd1',
+              dateTime: DateTime(2024, 6, 1),
+              runtime: const Duration(minutes: 52),
+              sortTimestamp: 0,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('52'), findsNothing);
+    });
+
+    Widget tileWithExtra(
+      DiveField extra, {
+      Duration? runtime,
+      Duration? bottomTime,
+    }) => testApp(
+      overrides: [
+        settingsProvider.overrideWith(
+          (ref) => _TestSettingsNotifier(const AppSettings()),
+        ),
+        detailedCardConfigProvider.overrideWith(
+          (ref) => _TestCardConfigNotifier(
+            CardViewConfig.defaultDetailed().copyWith(
+              slots: const [
+                CardSlotConfig(slotId: 'stat1', field: DiveField.maxDepth),
+                CardSlotConfig(slotId: 'stat2', field: DiveField.waterTemp),
+              ],
+              extraFields: [extra],
+            ),
+          ),
+        ),
+      ],
+      child: DiveListTile(
+        diveId: 'd1',
+        diveNumber: 7,
+        dateTime: DateTime(2024, 6, 1),
+        siteName: 'Reef',
+        duration: runtime ?? bottomTime,
+        summary: DiveSummary(
+          id: 'd1',
+          dateTime: DateTime(2024, 6, 1),
+          runtime: runtime,
+          bottomTime: bottomTime,
+          sortTimestamp: 0,
+        ),
+      ),
+    );
+
+    testWidgets('an extra Runtime field does not show a bottom time', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        tileWithExtra(
+          DiveField.runtime,
+          bottomTime: const Duration(minutes: 37),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('37'), findsNothing);
+    });
+
+    testWidgets('an extra Bottom Time field does not show a runtime', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        tileWithExtra(
+          DiveField.bottomTime,
+          runtime: const Duration(minutes: 52),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('52'), findsNothing);
+    });
+  });
+
+  group('DiveListTile dive number badge', () {
+    testWidgets('large dive number stays on one line and scales to fit', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            settingsProvider.overrideWith(
+              (ref) => _TestSettingsNotifier(const AppSettings()),
+            ),
+            detailedCardConfigProvider.overrideWith(
+              (ref) =>
+                  _TestCardConfigNotifier(CardViewConfig.defaultDetailed()),
+            ),
+          ],
+          child: DiveListTile(
+            diveId: 'd1',
+            diveNumber: 88888,
+            dateTime: DateTime(2024, 6, 1),
+            siteName: 'Blue Hole',
+            summary: summary(siteName: 'Blue Hole'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final badge = find.text('#88888');
+      expect(badge, findsOneWidget);
+      expect(tester.widget<Text>(badge).maxLines, 1);
+      expect(
+        find.ancestor(of: badge, matching: find.byType(FittedBox)),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('DiveListTile dive mode badge', () {
+    testWidgets('shows the short code from the summary', (tester) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: CardViewConfig.defaultDetailed(),
+          diveSummary: DiveSummary(
+            id: 'd1',
+            diveNumber: 7,
+            dateTime: DateTime(2024, 6, 1),
+            siteName: 'Blue Hole',
+            maxDepth: 30.0,
+            sortTimestamp: 0,
+            diveMode: DiveMode.ccr,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('CCR'), findsOneWidget);
+    });
+
+    testWidgets('defaults to OC when the summary omits a mode', (tester) async {
+      await tester.pumpWidget(
+        buildTile(
+          config: CardViewConfig.defaultDetailed(),
+          diveSummary: summary(siteName: 'Blue Hole'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('OC'), findsOneWidget);
+    });
+  });
+}

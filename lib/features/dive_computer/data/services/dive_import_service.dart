@@ -1,8 +1,22 @@
+import 'dart:typed_data';
+
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+import 'package:submersion/features/dive_computer/data/services/bailout_gas_claim.dart';
 import 'package:submersion/features/dive_computer/data/services/dive_parser.dart';
+import 'package:submersion/features/dive_computer/data/services/downloaded_tank_defaults.dart';
+import 'package:submersion/features/dive_computer/domain/services/profile_overlap_match.dart';
+import 'package:submersion/features/dive_computer/data/services/transmitter_registry_matcher.dart';
+import 'package:submersion/features/dive_computer/data/services/unused_oc_gas_cleanup.dart';
+import 'package:submersion/features/dive_log/domain/services/transmitter_serial.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/tank_presets/domain/entities/tank_preset_entity.dart';
+import 'package:submersion/features/transmitters/data/services/transmitter_auto_registrar.dart';
 
 /// Mode for importing dives.
 enum ImportMode {
@@ -66,12 +80,29 @@ class DuplicateResult {
   /// Depth difference in meters (if matched)
   final double? depthDifferenceMeters;
 
+  /// True when [matchingDiveId] is confidently the SAME data the diver
+  /// already has, rather than fuzzy time/depth/duration matching: either an
+  /// exact hit against one of the matched dive's EXISTING
+  /// `dive_data_sources` keys (fingerprint or source UUID), or a contained-
+  /// segment match (see [DiveImportService._detectContainedSegment]) —
+  /// timestamp containment plus depth-curve agreement showing the download
+  /// is a native re-recording of part of a dive already stored.
+  ///
+  /// Set by [DiveImportService.detectDuplicate]'s fingerprint and
+  /// contained-segment passes. Propagated through
+  /// `DiveMatchResult.matchedExistingSource` so the import wizard can
+  /// default such matches to skip instead of consolidate — the downloaded
+  /// dive is a re-download of data the matched dive already has, and
+  /// "Combiner" would just refuse a same-computer pair anyway.
+  final bool matchedExistingSource;
+
   const DuplicateResult({
     this.matchingDiveId,
     required this.confidence,
     required this.score,
     this.timeDifferenceSeconds,
     this.depthDifferenceMeters,
+    this.matchedExistingSource = false,
   });
 
   /// No duplicate found
@@ -163,6 +194,11 @@ class ImportResult {
   /// Error message if import failed
   final String? errorMessage;
 
+  /// Normalized transmitter serials on the imported tanks that matched no
+  /// registry entry, distinct and sorted, so the wizard can point the diver
+  /// at the registry (issue #1365).
+  final List<String> unmatchedTransmitterSerials;
+
   const ImportResult({
     required this.imported,
     required this.skipped,
@@ -172,6 +208,7 @@ class ImportResult {
     this.importedDives = const [],
     this.duplicateCandidates = const [],
     this.errorMessage,
+    this.unmatchedTransmitterSerials = const [],
   });
 
   /// Create a successful result
@@ -183,6 +220,7 @@ class ImportResult {
     required List<DownloadedDive> importedDives,
     List<ImportConflict> conflicts = const [],
     List<DuplicateCandidate> duplicateCandidates = const [],
+    List<String> unmatchedTransmitterSerials = const [],
   }) => ImportResult(
     imported: imported,
     skipped: skipped,
@@ -191,6 +229,7 @@ class ImportResult {
     importedDiveIds: importedDiveIds,
     importedDives: importedDives,
     duplicateCandidates: duplicateCandidates,
+    unmatchedTransmitterSerials: unmatchedTransmitterSerials,
   );
 
   /// Create a failed result
@@ -215,19 +254,136 @@ class ImportResult {
   int get totalProcessed => imported + skipped + updated;
 }
 
+/// Supplies the default tank preset to fill downloaded cylinders with for the
+/// diver a dive is imported for (null for the active diver), or null when
+/// that diver has not opted in (or the preset no longer exists).
+typedef DefaultTankPresetLoader =
+    Future<TankPresetEntity?> Function(String? diverId);
+
+/// Loads the transmitter registry of the diver a dive is imported for (null
+/// for the active diver), at import time so an entry saved a moment ago
+/// applies to the next download (issue #2050).
+typedef ImportTransmitterMatcherLoader =
+    Future<TransmitterMatcher> Function(String? diverId);
+
+/// Whether the diver a dive is imported for (null for the active diver) has
+/// asked rebreather downloads to leave out unused open-circuit gases (issue
+/// #3668), read at import time so a switch flipped a moment ago applies.
+typedef OmitUnusedOcGasesLoader = Future<bool> Function(String? diverId);
+
+/// The id of the trip whose dates cover a dive starting at [diveStart], among
+/// the trips the diver it is imported for (null or empty for the active
+/// diver) can see, or null when none does (issue #3022). Read per dive at
+/// import time, so a trip planned a moment ago takes the next download.
+typedef ImportTripResolver =
+    Future<String?> Function(DateTime diveStart, String? diverId);
+
 /// Service for importing downloaded dives into the app's database.
 class DiveImportService {
   final DiveComputerRepository _repository;
   final DiveRepository? _diveRepository;
   final DiveParser _parser;
+  final DefaultTankPresetLoader? _defaultTankPresetForImports;
+  final ImportTransmitterMatcherLoader? _transmitterMatcherForImports;
+  final OmitUnusedOcGasesLoader? _omitUnusedOcGasesForImports;
+  final ImportTripResolver? _tripForImports;
+  final Set<String> _unmatchedSerials = {};
+  static final _log = LoggerService.forClass(DiveImportService);
 
   DiveImportService({
     required DiveComputerRepository repository,
     DiveRepository? diveRepository,
     DiveParser? parser,
+    DefaultTankPresetLoader? defaultTankPresetForImports,
+    ImportTransmitterMatcherLoader? transmitterMatcherForImports,
+    OmitUnusedOcGasesLoader? omitUnusedOcGasesForImports,
+    ImportTripResolver? tripForImports,
   }) : _repository = repository,
        _diveRepository = diveRepository,
-       _parser = parser ?? const DiveParser();
+       _parser = parser ?? const DiveParser(),
+       _defaultTankPresetForImports = defaultTankPresetForImports,
+       _transmitterMatcherForImports = transmitterMatcherForImports,
+       _omitUnusedOcGasesForImports = omitUnusedOcGasesForImports,
+       _tripForImports = tripForImports;
+
+  /// Serials seen on tanks imported through this service that matched no
+  /// registry entry. Accumulated across the per-dive entry points so the
+  /// wizard can report them once at the end of a run; [importDives] and the
+  /// wizard adapter call [resetUnmatchedTransmitterSerials] first, since the
+  /// service is a long-lived provider and a stale serial from an earlier
+  /// session must not surface in a later notice.
+  List<String> get unmatchedTransmitterSerials =>
+      _unmatchedSerials.toList()..sort();
+
+  /// Start a fresh accumulation for the next import run.
+  void resetUnmatchedTransmitterSerials() => _unmatchedSerials.clear();
+
+  /// The diver's transmitter registry, or an empty matcher when none is
+  /// configured or the load fails: a download must never fail because the
+  /// registry could not be read.
+  Future<TransmitterMatcher> _loadTransmitterMatcher(String? diverId) async {
+    final loader = _transmitterMatcherForImports;
+    if (loader == null) return const TransmitterMatcher.empty();
+    try {
+      return await loader(diverId);
+    } catch (e, st) {
+      _log.warning(
+        'Transmitter registry unavailable, importing without it',
+        error: e,
+        stackTrace: st,
+      );
+      return const TransmitterMatcher.empty();
+    }
+  }
+
+  /// Whether to leave out unused open-circuit gases (issue #3668). Off when no
+  /// loader is configured or the load fails: a download must never fail, nor
+  /// lose a cylinder, because a setting could not be read.
+  Future<bool> _loadOmitUnusedOcGases(String? diverId) async {
+    final loader = _omitUnusedOcGasesForImports;
+    if (loader == null) return false;
+    try {
+      return await loader(diverId);
+    } catch (e, st) {
+      _log.warning(
+        'Unused-gas setting unavailable, importing every gas',
+        error: e,
+        stackTrace: st,
+      );
+      return false;
+    }
+  }
+
+  /// The trip a new dive starting at [diveStart] joins (issue #3022), or null
+  /// when no resolver is configured, no trip covers the dive, or the lookup
+  /// fails: a download must never fail because the trips could not be read.
+  Future<String?> _resolveTrip(DateTime diveStart, String? diverId) async {
+    final resolver = _tripForImports;
+    if (resolver == null) return null;
+    try {
+      return await resolver(diveStart, diverId);
+    } catch (e, st) {
+      _log.warning(
+        'Trips unavailable, importing the dive without one',
+        error: e,
+        stackTrace: st,
+      );
+      return null;
+    }
+  }
+
+  /// The preset to fill downloaded cylinders with.
+  ///
+  /// [importDives] resolves it once for the whole batch. The wizard's
+  /// per-dive entry points ([importSingleDiveAsNew], [resolveConflict])
+  /// resolve it per call: one small preset lookup beside a profile write of
+  /// thousands of samples, and deliberately not cached across calls so a
+  /// toggle flipped in Settings applies to the next download.
+  Future<TankPresetEntity?> _loadDefaultTankPreset(String? diverId) async {
+    final loader = _defaultTankPresetForImports;
+    if (loader == null) return null;
+    return loader(diverId);
+  }
 
   /// Import a list of downloaded dives.
   ///
@@ -250,6 +406,33 @@ class DiveImportService {
     String? descriptorProduct,
     int? descriptorModel,
     String? libdivecomputerVersion,
+  }) => ChangeLogScope.run(
+    DatabaseService.instance.databaseOrNull,
+    source: ChangeLogSource.download,
+    label: computer.displayName,
+    body: () => _importDivesInner(
+      dives: dives,
+      computer: computer,
+      mode: mode,
+      defaultResolution: defaultResolution,
+      diverId: diverId,
+      descriptorVendor: descriptorVendor,
+      descriptorProduct: descriptorProduct,
+      descriptorModel: descriptorModel,
+      libdivecomputerVersion: libdivecomputerVersion,
+    ),
+  );
+
+  Future<ImportResult> _importDivesInner({
+    required List<DownloadedDive> dives,
+    required DiveComputer computer,
+    required ImportMode mode,
+    required ConflictResolution defaultResolution,
+    required String? diverId,
+    required String? descriptorVendor,
+    required String? descriptorProduct,
+    required int? descriptorModel,
+    required String? libdivecomputerVersion,
   }) async {
     int imported = 0;
     int skipped = 0;
@@ -258,16 +441,35 @@ class DiveImportService {
     final importedDives = <DownloadedDive>[];
     final conflicts = <ImportConflict>[];
     final duplicateCandidates = <DuplicateCandidate>[];
+    final replacedDiveIds = <String>[];
 
     // Sort dives chronologically (oldest first) so that sequential
     // getDiveNumberForDate() calls produce correct numbering.
     final sortedDives = List<DownloadedDive>.of(dives)
       ..sort((a, b) => a.startTime.compareTo(b.startTime));
 
+    // One source-key snapshot for the whole batch. Downloaded dives carry
+    // unique fingerprints, so a dive imported earlier in this loop can never
+    // be a fingerprint match for a later one -- the snapshot cannot go stale
+    // within the batch.
+    final sourceKeysCache = _diveRepository != null
+        ? await _diveRepository.getSourceKeysByDiveId()
+        : null;
+
+    final defaultTankPreset = await _loadDefaultTankPreset(diverId);
+    final transmitterMatcher = await _loadTransmitterMatcher(diverId);
+    final omitUnusedOcGases = await _loadOmitUnusedOcGases(diverId);
+    resetUnmatchedTransmitterSerials();
+
     for (final dive in sortedDives) {
       try {
         // Check for duplicates
-        final duplicateResult = await detectDuplicate(dive);
+        final duplicateResult = await detectDuplicate(
+          dive,
+          diverId: diverId,
+          computerId: computer.id,
+          sourceKeysCache: sourceKeysCache,
+        );
 
         if (duplicateResult.isDuplicate) {
           // Handle based on mode and confidence
@@ -299,11 +501,14 @@ class DiveImportService {
                 dive,
                 duplicateResult.matchingDiveId!,
                 computer.id,
+                omitUnusedOcGases: omitUnusedOcGases,
+                transmitterMatcher: transmitterMatcher,
                 descriptorVendor: descriptorVendor,
                 descriptorProduct: descriptorProduct,
                 descriptorModel: descriptorModel,
                 libdivecomputerVersion: libdivecomputerVersion,
               );
+              replacedDiveIds.add(duplicateResult.matchingDiveId!);
               updated++;
             } else {
               // Import as new (importAsNew or consolidate treated as new here;
@@ -314,6 +519,9 @@ class DiveImportService {
                 computer.id,
                 diverId,
                 forceNew: true,
+                defaultTankPreset: defaultTankPreset,
+                transmitterMatcher: transmitterMatcher,
+                omitUnusedOcGases: omitUnusedOcGases,
                 descriptorVendor: descriptorVendor,
                 descriptorProduct: descriptorProduct,
                 descriptorModel: descriptorModel,
@@ -329,11 +537,14 @@ class DiveImportService {
               dive,
               duplicateResult.matchingDiveId!,
               computer.id,
+              omitUnusedOcGases: omitUnusedOcGases,
+              transmitterMatcher: transmitterMatcher,
               descriptorVendor: descriptorVendor,
               descriptorProduct: descriptorProduct,
               descriptorModel: descriptorModel,
               libdivecomputerVersion: libdivecomputerVersion,
             );
+            replacedDiveIds.add(duplicateResult.matchingDiveId!);
             updated++;
           } else {
             // Low confidence match in 'all' mode - import as new.
@@ -343,6 +554,9 @@ class DiveImportService {
               computer.id,
               diverId,
               forceNew: true,
+              defaultTankPreset: defaultTankPreset,
+              transmitterMatcher: transmitterMatcher,
+              omitUnusedOcGases: omitUnusedOcGases,
               descriptorVendor: descriptorVendor,
               descriptorProduct: descriptorProduct,
               descriptorModel: descriptorModel,
@@ -358,6 +572,9 @@ class DiveImportService {
             dive,
             computer.id,
             diverId,
+            defaultTankPreset: defaultTankPreset,
+            transmitterMatcher: transmitterMatcher,
+            omitUnusedOcGases: omitUnusedOcGases,
             descriptorVendor: descriptorVendor,
             descriptorProduct: descriptorProduct,
             descriptorModel: descriptorModel,
@@ -373,6 +590,12 @@ class DiveImportService {
       }
     }
 
+    // The stored cylinders keep the diver's edits, so the registry match a
+    // new dive gets never reached them: a serial a Replace source just gave
+    // one gets its item (#3676) and that transmitter's setup, fill-only
+    // (issue #4388). Once for the batch.
+    await settleTransmittersForDives(replacedDiveIds);
+
     return ImportResult.success(
       imported: imported,
       skipped: skipped,
@@ -381,27 +604,76 @@ class DiveImportService {
       importedDives: importedDives,
       conflicts: conflicts,
       duplicateCandidates: duplicateCandidates,
+      unmatchedTransmitterSerials: unmatchedTransmitterSerials,
     );
   }
 
   /// Detect if a downloaded dive matches an existing dive.
+  ///
+  /// Checks for an exact fingerprint match against ANY of a dive's sources
+  /// (primary or consolidated secondary) before falling back to fuzzy
+  /// time/depth/duration matching. This closes the re-download hole where a
+  /// dive that was previously consolidated as a SECONDARY computer's data
+  /// would not be recognized as a duplicate on the next download from that
+  /// same secondary computer, since only the primary computer's fingerprint
+  /// was ever checked.
+  ///
+  /// When [computerId] is given and the fuzzy pass above finds nothing,
+  /// falls back to [_detectContainedSegment]: a dive computer that split one
+  /// physical dive into two native log entries on a brief surface pause logs
+  /// the second entry with its own later start time, which sits well outside
+  /// [timeTolerance] of a FIRST entry that was already merged (in this app or
+  /// another) into a longer dive. That merged dive's own recorded profile
+  /// still spans the second entry's start, so this checks containment
+  /// directly instead of comparing whole-dive summaries.
   Future<DuplicateResult> detectDuplicate(
     DownloadedDive dive, {
     double timeTolerance = 5.0, // minutes
-    double depthTolerance = 0.5, // meters
     String? diverId,
+    String? computerId,
+    Map<String, Set<String>>? sourceKeysCache,
   }) async {
+    final rawFingerprint = dive.rawFingerprint;
+    if (rawFingerprint != null &&
+        rawFingerprint.isNotEmpty &&
+        _diveRepository != null) {
+      final hexFingerprint = _hexEncodeUppercase(rawFingerprint);
+      // Callers checking many dives in one session (the wizard adapter,
+      // importDives) prefetch the source-key map once and pass it in;
+      // querying it per dive is O(dives x whole-log source keys).
+      final sourceKeys =
+          sourceKeysCache ??
+          await _diveRepository.getSourceKeysByDiveId(diverId: diverId);
+      for (final entry in sourceKeys.entries) {
+        if (entry.value.contains(hexFingerprint)) {
+          return DuplicateResult(
+            matchingDiveId: entry.key,
+            confidence: DuplicateConfidence.exact,
+            score: 1.0,
+            matchedExistingSource: true,
+          );
+        }
+      }
+    }
+
     // Use the repository's enhanced matching with scoring
     final match = await _repository.findMatchingDiveWithScore(
       profileStartTime: dive.startTime,
       toleranceMinutes: timeTolerance.round(),
       durationSeconds: dive.durationSeconds,
       maxDepth: dive.maxDepth,
-      fingerprint: dive.fingerprint,
       diverId: diverId,
     );
 
     if (match == null) {
+      if (computerId != null && computerId.isNotEmpty) {
+        final contained = await _detectContainedSegment(
+          dive,
+          computerId: computerId,
+          diverId: diverId,
+        );
+        if (contained != null) return contained;
+      }
       return DuplicateResult.noMatch();
     }
 
@@ -420,6 +692,81 @@ class DiveImportService {
     );
   }
 
+  /// Whether [dive] is a native segment already recorded, on [computerId],
+  /// inside an existing dive's own profile window -- see [detectDuplicate].
+  ///
+  /// Two checks must both pass, so an unrelated dive that merely started
+  /// during the window (a buddy's separate dive logged on the same
+  /// computer, days of edits later) is never claimed:
+  /// - timestamp containment: [DiveComputerRepository.findComputerDivesContainingTime]
+  ///   restricts candidates to dives whose recorded profile, on this same
+  ///   computer, actually spans [dive]'s start;
+  /// - curve agreement: [compareProfileOverlap] then requires [dive]'s own
+  ///   samples to track that candidate's depth tightly over (nearly) their
+  ///   whole length, not merely start inside its time span.
+  ///
+  /// Returns null rather than a low-confidence result when no candidate
+  /// clears [ProfileOverlapMatch.isStrongMatch]; the caller falls through to
+  /// [DuplicateResult.noMatch] itself.
+  Future<DuplicateResult?> _detectContainedSegment(
+    DownloadedDive dive, {
+    required String computerId,
+    String? diverId,
+  }) async {
+    if (_diveRepository == null || dive.profile.length < 2) return null;
+
+    final candidates = await _repository.findComputerDivesContainingTime(
+      computerId: computerId,
+      time: dive.startTime,
+      diverId: diverId,
+    );
+    if (candidates.isEmpty) return null;
+
+    final incomingSamples = [
+      for (final s in dive.profile)
+        (offsetSeconds: s.timeSeconds, depth: s.depth),
+    ];
+
+    for (final candidate in candidates) {
+      // The specific series the containment query matched, not the dive's
+      // merged, all-sources profile: a consolidated or edited dive can hold
+      // more than one series, and the merged view can mix in samples from a
+      // different computer, or drop this exact one if a later edit
+      // superseded it.
+      final series = await _repository.getProfileSeriesById(candidate.seriesId);
+      if (series == null || series.samples.length < 2) continue;
+
+      final existingSamples = [
+        for (final s in series.samples)
+          (offsetSeconds: s.timestamp, depth: s.depth),
+      ];
+      final incomingOffsetSeconds = dive.startTime
+          .difference(candidate.effectiveStart)
+          .inSeconds;
+
+      final overlap = compareProfileOverlap(
+        existing: existingSamples,
+        incoming: incomingSamples,
+        incomingOffsetSeconds: incomingOffsetSeconds,
+      );
+      if (overlap == null || !overlap.isStrongMatch) continue;
+
+      _log.info(
+        'Contained-segment match: ${candidate.diveId} already spans this '
+        'download (coverage ${overlap.coverage.toStringAsFixed(2)}, mean '
+        'error ${overlap.meanAbsDepthErrorMeters.toStringAsFixed(2)}m)',
+      );
+      return DuplicateResult(
+        matchingDiveId: candidate.diveId,
+        confidence: DuplicateConfidence.exact,
+        score: 1.0,
+        timeDifferenceSeconds: incomingOffsetSeconds,
+        matchedExistingSource: true,
+      );
+    }
+    return null;
+  }
+
   /// Convert a numeric score to a confidence level.
   DuplicateConfidence _scoreToConfidence(double score) {
     if (score >= 0.9) return DuplicateConfidence.exact;
@@ -429,19 +776,30 @@ class DiveImportService {
   }
 
   /// Import a downloaded dive as a new dive.
+  ///
+  /// [defaultTankPreset], when given, fills the cylinder size the computer
+  /// did not report so volumetric SAC is reachable on the new dive.
+  ///
+  /// [retainSourceDiveNumber] keeps the number the source reported in
+  /// [DownloadedDive.diveNumber] instead of assigning the next one. A dive
+  /// whose source reported no number is still numbered automatically, so
+  /// the option never leaves a dive unnumbered (issue #1832).
   Future<String> _importNewDive(
     DownloadedDive dive,
     String computerId,
     String? diverId, {
     bool forceNew = false,
+    bool retainSourceDiveNumber = false,
+    TankPresetEntity? defaultTankPreset,
+    TransmitterMatcher? transmitterMatcher,
+    bool omitUnusedOcGases = false,
     String? descriptorVendor,
     String? descriptorProduct,
     int? descriptorModel,
     String? libdivecomputerVersion,
   }) async {
-    // Calculate chronological dive number
-    int? diveNumber;
-    if (_diveRepository != null) {
+    int? diveNumber = retainSourceDiveNumber ? dive.diveNumber : null;
+    if (diveNumber == null && _diveRepository != null) {
       diveNumber = await _diveRepository.getDiveNumberForDate(
         dive.startTime,
         diverId: diverId,
@@ -451,11 +809,54 @@ class DiveImportService {
     // Parse profile data
     final profilePoints = _parser.parseProfile(dive);
 
-    // Convert tanks to TankData
-    final tanks = _parser.parseTanks(dive);
+    // Convert tanks to TankData, filling the cylinder size from the default
+    // preset when the diver opted in (computers report pressure, not size).
+    // Registry first so a matched entry claims its tank; the default preset
+    // then fills only the back-gas tanks nobody claimed.
+    final parsedTanks = _parser.parseTanks(dive);
+    final matchedTanks = transmitterMatcher == null
+        ? parsedTanks
+        : applyTransmitterRegistry(
+            parsedTanks,
+            transmitterMatcher,
+            computerId: computerId,
+          );
+    if (transmitterMatcher != null) {
+      for (final tank in parsedTanks) {
+        final serial = normalizeTransmitterSerial(tank.transmitterSerial);
+        if (serial == null) continue;
+        final hit = transmitterMatcher.match(
+          serial: serial,
+          computerId: computerId,
+          index: tank.index,
+        );
+        if (hit == null) _unmatchedSerials.add(serial);
+      }
+    }
+    // A transmitter the registry made the bailout takes the gas list's
+    // bailout cylinder, and switches to that cylinder follow it (#3307).
+    final claim = _claimBailoutGases(dive, matchedTanks);
+    // After the claim, so a bailout transmitter has taken an unused gas's mix
+    // before that gas's own cylinder goes (issue #3668).
+    final kept = omitUnusedOcGases
+        ? dropUnusedOcGases(claim.tanks).tanks
+        : claim.tanks;
+    final tanks = defaultTankPreset == null
+        ? kept
+        : applyDefaultPresetToTanks(kept, defaultTankPreset);
 
     // Convert events to EventData
     final events = _convertEvents(dive.events);
+
+    // Convert gas switches to GasSwitchData
+    final gasSwitches = [
+      for (final sw in _parser.parseGasSwitches(dive))
+        GasSwitchData(
+          timestamp: sw.timestamp,
+          depth: sw.depth,
+          toTankIndex: claim.remappedIndices[sw.toTankIndex] ?? sw.toTankIndex,
+        ),
+    ];
 
     // Import using repository
     final diveId = await _repository.importProfile(
@@ -472,7 +873,12 @@ class DiveImportService {
       gfLow: dive.gfLow,
       gfHigh: dive.gfHigh,
       decoConservatism: dive.decoConservatism,
+      computerTissue: dive.computerTissue,
+      diveMode: dive.diveMode,
+      diluentO2: dive.diluentO2,
+      diluentHe: dive.diluentHe,
       events: events,
+      gasSwitches: gasSwitches,
       diveNumber: diveNumber,
       forceNew: forceNew,
       rawData: dive.rawData,
@@ -481,6 +887,32 @@ class DiveImportService {
       descriptorProduct: descriptorProduct,
       descriptorModel: descriptorModel,
       libdivecomputerVersion: libdivecomputerVersion,
+      entryLatitude: dive.entryLatitude,
+      entryLongitude: dive.entryLongitude,
+      exitLatitude: dive.exitLatitude,
+      exitLongitude: dive.exitLongitude,
+      // Already resolved by parsed_dive_mapper: the dive header's minimum
+      // where the computer reports one, else the coldest sample. Computers
+      // that log temperature only in the header (the Cressi Leonardo) have no
+      // other route into the dive record.
+      minTemperature: dive.minTemperature,
+      surfacePressure: dive.surfacePressure,
+      // A summary the source reported itself (Garmin Connect, issue #1798).
+      // All null for libdivecomputer downloads, which derive what they can.
+      bottomTimeSeconds: dive.bottomTimeSeconds,
+      surfaceIntervalSeconds: dive.surfaceIntervalSeconds,
+      waterType: dive.waterType,
+      cnsStart: dive.cnsStart,
+      cnsEnd: dive.cnsEnd,
+      otu: dive.otu,
+      // The trip whose dates cover the dive (issue #3022). Only a new dive
+      // row takes it; a dive this download matches keeps its own trip. A
+      // dive the source gave no time is filed at the moment of the download,
+      // which says nothing about its trip, so it joins none (as for an
+      // undated file dive, #2618).
+      tripId: dive.startTimeReported
+          ? await _resolveTrip(dive.startTime, diverId)
+          : null,
     );
 
     return diveId;
@@ -489,7 +921,8 @@ class DiveImportService {
   /// Import a single dive as a new dive, ignoring any duplicate match.
   ///
   /// Used when the user explicitly chooses "Import as New" from the
-  /// post-download consolidation review.
+  /// post-download consolidation review. [retainSourceDiveNumber] is the
+  /// wizard's "Retain source dive numbers" option; see [_importNewDive].
   Future<String> importSingleDiveAsNew(
     DownloadedDive dive, {
     required String computerId,
@@ -498,12 +931,17 @@ class DiveImportService {
     String? descriptorProduct,
     int? descriptorModel,
     String? libdivecomputerVersion,
+    bool retainSourceDiveNumber = false,
   }) async {
     return _importNewDive(
       dive,
       computerId,
       diverId,
       forceNew: true,
+      retainSourceDiveNumber: retainSourceDiveNumber,
+      defaultTankPreset: await _loadDefaultTankPreset(diverId),
+      transmitterMatcher: await _loadTransmitterMatcher(diverId),
+      omitUnusedOcGases: await _loadOmitUnusedOcGases(diverId),
       descriptorVendor: descriptorVendor,
       descriptorProduct: descriptorProduct,
       descriptorModel: descriptorModel,
@@ -511,14 +949,39 @@ class DiveImportService {
     );
   }
 
+  /// [_importNewDive]'s bailout transmitter claim (#3307) for [dive]'s
+  /// cylinders, shared with the re-download path's unused-gas drop.
+  BailoutClaim _claimBailoutGases(DownloadedDive dive, List<TankData> tanks) =>
+      claimBailoutGasesInDive(
+        tanks: tanks,
+        diveMode: dive.diveMode.code,
+        switches: dive.gasSwitches,
+        samples: [
+          for (final s in dive.profile)
+            (
+              timeSeconds: s.timeSeconds,
+              pressureBar: s.pressure,
+              tankIndex: s.tankIndex,
+              tankPressuresBar: s.tankPressures,
+            ),
+        ],
+        depths: [
+          for (final s in dive.profile) (t: s.timeSeconds, depth: s.depth),
+        ],
+      );
+
   /// Replace an existing dive's source data with a fresh download.
   ///
   /// Clears the old profile and data source rows for this computer, then
-  /// re-imports so the new raw bytes and parsed data are stored.
+  /// re-imports so the new raw bytes and parsed data are stored. Other
+  /// computers' readings of the dive are left alone, and this computer keeps
+  /// the primary or secondary role it had (#2582).
   Future<void> _updateExistingDive(
     DownloadedDive dive,
     String existingDiveId,
     String computerId, {
+    bool omitUnusedOcGases = false,
+    TransmitterMatcher? transmitterMatcher,
     String? descriptorVendor,
     String? descriptorProduct,
     int? descriptorModel,
@@ -526,13 +989,46 @@ class DiveImportService {
   }) async {
     // Remove the existing profile + source row so importProfile won't
     // short-circuit on the "already exists" check.
-    await _repository.clearSourceAndProfiles(
+    final wasPrimary = await _repository.clearSourceAndProfiles(
       diveId: existingDiveId,
       computerId: computerId,
     );
 
     final profilePoints = _parser.parseProfile(dive);
     final events = _convertEvents(dive.events);
+    var gasSwitches = _parser.parseGasSwitches(dive);
+    // Tanks are passed so gas switches can be matched to the existing
+    // cylinders by gas mix rather than by a possibly-stale cylinder index.
+    // importProfile keeps the stored cylinders, which may be the diver's
+    // edits, and adds only those this parse reports at an index none of them
+    // holds, such as a sidemount pair's second transmitter (#2517).
+    var tanks = _parser.parseTanks(dive);
+    // With the unused-gas switch on, a gas the diver never carried is not
+    // re-added (issue #3668). A bailout transmitter this download adds as a
+    // new cylinder takes its gas first, as on a new dive; a stored cylinder
+    // keeps what it holds. With nothing to drop, the switch changes nothing.
+    if (omitUnusedOcGases && tanks.any((t) => t.unusedOcGas)) {
+      final claim = _claimBailoutGases(
+        dive,
+        transmitterMatcher == null
+            ? tanks
+            : applyTransmitterRegistry(
+                tanks,
+                transmitterMatcher,
+                computerId: computerId,
+              ),
+      );
+      tanks = dropUnusedOcGases(claim.tanks).tanks;
+      gasSwitches = [
+        for (final sw in gasSwitches)
+          GasSwitchData(
+            timestamp: sw.timestamp,
+            depth: sw.depth,
+            toTankIndex:
+                claim.remappedIndices[sw.toTankIndex] ?? sw.toTankIndex,
+          ),
+      ];
+    }
 
     // Re-import using the existing dive's start time so that importProfile
     // matches it back to the same dive row.
@@ -543,19 +1039,119 @@ class DiveImportService {
       durationSeconds: dive.durationSeconds,
       maxDepth: dive.maxDepth,
       avgDepth: dive.avgDepth,
-      isPrimary: true,
+      // A dive left with no reading makes this one primary regardless.
+      isPrimary: wasPrimary,
+      tanks: tanks,
       decoAlgorithm: dive.decoAlgorithm,
       gfLow: dive.gfLow,
       gfHigh: dive.gfHigh,
       decoConservatism: dive.decoConservatism,
+      computerTissue: dive.computerTissue,
+      diveMode: dive.diveMode,
+      diluentO2: dive.diluentO2,
+      diluentHe: dive.diluentHe,
       events: events,
+      gasSwitches: gasSwitches,
       rawData: dive.rawData,
       rawFingerprint: dive.rawFingerprint,
       descriptorVendor: descriptorVendor,
       descriptorProduct: descriptorProduct,
       descriptorModel: descriptorModel,
       libdivecomputerVersion: libdivecomputerVersion,
+      entryLatitude: dive.entryLatitude,
+      entryLongitude: dive.entryLongitude,
+      exitLatitude: dive.exitLatitude,
+      exitLongitude: dive.exitLongitude,
+      // Already resolved by parsed_dive_mapper: the dive header's minimum
+      // where the computer reports one, else the coldest sample. Computers
+      // that log temperature only in the header (the Cressi Leonardo) have no
+      // other route into the dive record.
+      minTemperature: dive.minTemperature,
+      surfacePressure: dive.surfacePressure,
+      // Only the source row takes these on an existing dive (issue #1798).
+      bottomTimeSeconds: dive.bottomTimeSeconds,
+      surfaceIntervalSeconds: dive.surfaceIntervalSeconds,
+      waterType: dive.waterType,
+      cnsStart: dive.cnsStart,
+      cnsEnd: dive.cnsEnd,
+      otu: dive.otu,
+      addMissingTanks: true,
     );
+  }
+
+  /// Attach [dive]'s download to the planned dive [targetDiveId] (issue
+  /// #2002). Like [_updateExistingDive] but nothing is cleared first, since
+  /// a planned dive holds no source for this computer, and the target is
+  /// named explicitly so a sibling dive at the same minute cannot be picked
+  /// by the time match.
+  ///
+  /// The deco settings and tissue snapshot are the values the fill already
+  /// wrote onto the row, the download's own or the plan's where it reports
+  /// none. This reading becomes the dive's primary, so [importProfile] writes
+  /// them outright, and the raw download's nulls would blank the plan's.
+  Future<void> attachToPlannedDive(
+    DownloadedDive dive,
+    String targetDiveId,
+    String computerId, {
+    required ({
+      int? gfLow,
+      int? gfHigh,
+      String? decoAlgorithm,
+      int? decoConservatism,
+      ComputerTissueSnapshot? computerTissue,
+    })
+    settled,
+    String? descriptorVendor,
+    String? descriptorProduct,
+    int? descriptorModel,
+    String? libdivecomputerVersion,
+  }) async {
+    final profilePoints = _parser.parseProfile(dive);
+    final events = _convertEvents(dive.events);
+    final gasSwitches = _parser.parseGasSwitches(dive);
+    final tanks = _parser.parseTanks(dive);
+    final attachedTo = await _repository.importProfile(
+      computerId: computerId,
+      profileStartTime: dive.startTime,
+      points: profilePoints,
+      durationSeconds: dive.durationSeconds,
+      maxDepth: dive.maxDepth,
+      avgDepth: dive.avgDepth,
+      isPrimary: true,
+      tanks: tanks,
+      decoAlgorithm: settled.decoAlgorithm,
+      gfLow: settled.gfLow,
+      gfHigh: settled.gfHigh,
+      decoConservatism: settled.decoConservatism,
+      computerTissue: settled.computerTissue,
+      diveMode: dive.diveMode,
+      events: events,
+      gasSwitches: gasSwitches,
+      rawData: dive.rawData,
+      rawFingerprint: dive.rawFingerprint,
+      descriptorVendor: descriptorVendor,
+      descriptorProduct: descriptorProduct,
+      descriptorModel: descriptorModel,
+      libdivecomputerVersion: libdivecomputerVersion,
+      entryLatitude: dive.entryLatitude,
+      entryLongitude: dive.entryLongitude,
+      exitLatitude: dive.exitLatitude,
+      exitLongitude: dive.exitLongitude,
+      minTemperature: dive.minTemperature,
+      surfacePressure: dive.surfacePressure,
+      bottomTimeSeconds: dive.bottomTimeSeconds,
+      surfaceIntervalSeconds: dive.surfaceIntervalSeconds,
+      waterType: dive.waterType,
+      cnsStart: dive.cnsStart,
+      cnsEnd: dive.cnsEnd,
+      otu: dive.otu,
+      targetDiveId: targetDiveId,
+    );
+    if (attachedTo != targetDiveId) {
+      throw StateError(
+        'importProfile attached to $attachedTo, expected $targetDiveId',
+      );
+    }
   }
 
   /// Resolve a specific conflict and import the dive accordingly.
@@ -576,15 +1172,23 @@ class DiveImportService {
         return null;
 
       case ConflictResolution.replaceSource:
+        // The registry only feeds the unused-gas claim, so it is read only
+        // when the switch is on.
+        final omitUnusedOcGases = await _loadOmitUnusedOcGases(diverId);
         await _updateExistingDive(
           conflict.downloaded,
           conflict.existingDiveId,
           computerId,
+          omitUnusedOcGases: omitUnusedOcGases,
+          transmitterMatcher: omitUnusedOcGases
+              ? await _loadTransmitterMatcher(diverId)
+              : null,
           descriptorVendor: descriptorVendor,
           descriptorProduct: descriptorProduct,
           descriptorModel: descriptorModel,
           libdivecomputerVersion: libdivecomputerVersion,
         );
+        await settleTransmittersForDives([conflict.existingDiveId]);
         return conflict.existingDiveId;
 
       case ConflictResolution.importAsNew:
@@ -592,6 +1196,9 @@ class DiveImportService {
           conflict.downloaded,
           computerId,
           diverId,
+          defaultTankPreset: await _loadDefaultTankPreset(diverId),
+          transmitterMatcher: await _loadTransmitterMatcher(diverId),
+          omitUnusedOcGases: await _loadOmitUnusedOcGases(diverId),
           descriptorVendor: descriptorVendor,
           descriptorProduct: descriptorProduct,
           descriptorModel: descriptorModel,
@@ -603,10 +1210,22 @@ class DiveImportService {
         return null;
 
       case ConflictResolution.consolidate:
-        // Consolidation is handled by DiveComputerAdapter._consolidateDive()
-        // which calls DiveRepository.consolidateComputer() directly.
+        // Consolidation is handled by DiveComputerAdapter._consolidateDive(),
+        // which imports the download as a new dive then folds it into the
+        // matched dive via DiveConsolidationService.apply().
         return null;
     }
+  }
+
+  /// Hex-encode [bytes] the same way SQLite's `hex()` function does
+  /// (uppercase, no separators), so it can be compared against
+  /// `DiveRepository.getSourceKeysByDiveId`'s fingerprint keys.
+  static String _hexEncodeUppercase(Uint8List bytes) {
+    final buffer = StringBuffer();
+    for (final byte in bytes) {
+      buffer.write(byte.toRadixString(16).padLeft(2, '0'));
+    }
+    return buffer.toString().toUpperCase();
   }
 
   List<EventData> _convertEvents(List<DownloadedEvent> events) {

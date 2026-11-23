@@ -4,8 +4,9 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/core/utils/unit_formatter_settings.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_log/data/services/profile_surface_lead_in.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// A compact dive profile chart overlay for the photo viewer.
@@ -13,6 +14,12 @@ import 'package:submersion/l10n/l10n_extension.dart';
 /// Shows the depth profile with a marker indicating where the photo was taken.
 /// Designed to be displayed in the corner of full-screen photo views.
 class MiniDiveProfileOverlay extends StatelessWidget {
+  /// The chart's height.
+  static const double height = 100;
+
+  /// The chart's width.
+  static const double width = 160;
+
   /// The dive profile data points.
   final List<DiveProfilePoint> profile;
 
@@ -23,7 +30,7 @@ class MiniDiveProfileOverlay extends StatelessWidget {
   final double? photoDepthMeters;
 
   /// App settings for unit formatting.
-  final AppSettings settings;
+  final UnitFormatterSettings settings;
 
   /// Callback when the overlay is tapped (e.g., to dismiss or expand).
   final VoidCallback? onTap;
@@ -48,8 +55,8 @@ class MiniDiveProfileOverlay extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          width: 160,
-          height: 100,
+          width: MiniDiveProfileOverlay.width,
+          height: MiniDiveProfileOverlay.height,
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.7),
             borderRadius: BorderRadius.circular(12),
@@ -85,12 +92,19 @@ class MiniDiveProfileOverlay extends StatelessWidget {
           color: Colors.white.withValues(alpha: 0.7),
         ),
         const SizedBox(width: 4),
-        Text(
-          context.l10n.media_miniProfile_headerLabel,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.7),
-            fontSize: 10,
-            fontWeight: FontWeight.w500,
+        // Flexible + ellipsis: the card is a fixed 160 px, so a long
+        // translation (or the wide test font) must truncate instead of
+        // overflowing the row.
+        Flexible(
+          child: Text(
+            context.l10n.media_miniProfile_headerLabel,
+            softWrap: false,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.7),
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
         const Spacer(),
@@ -130,9 +144,13 @@ class MiniDiveProfileOverlay extends StatelessWidget {
 
     // Create depth line spots with NEGATED depths for proper orientation
     // (fl_chart Y-axis goes up, but we want depth to increase downward)
-    final depthSpots = sortedProfile
-        .map((p) => FlSpot(p.timestamp.toDouble(), -p.depth))
-        .toList();
+    // The x-axis starts at 0 but computers do not sample there, so descend
+    // from the surface to close the gap (issue #684). Same one-sample-interval
+    // rule as the full profile chart.
+    final depthSpots = <FlSpot>[
+      if (shouldDrawSurfaceLeadIn(sortedProfile)) const FlSpot(0, 0),
+      ...sortedProfile.map((p) => FlSpot(p.timestamp.toDouble(), -p.depth)),
+    ];
 
     // Find the depth at the photo timestamp for the marker
     final photoDepth = _interpolateDepth(sortedProfile, photoElapsedSeconds);
@@ -200,6 +218,10 @@ class MiniDiveProfileOverlay extends StatelessWidget {
                   ],
                 ),
               ),
+              // The marker dot below is a Positioned widget that jumps
+              // instantly when the photo changes; without this the marker
+              // line would trail it by the default 150ms implicit animation.
+              duration: Duration.zero,
             ),
 
             // Photo marker dot (positioned on top of the chart)
@@ -272,9 +294,18 @@ class PositionedMiniProfileOverlay extends StatelessWidget {
   final List<DiveProfilePoint> profile;
   final int photoElapsedSeconds;
   final double? photoDepthMeters;
-  final AppSettings settings;
+  final UnitFormatterSettings settings;
   final bool visible;
   final VoidCallback? onTap;
+
+  /// How far in from the viewer's bottom right corner the chart sits.
+  static const double margin = 16;
+
+  /// How far up from the viewer's bottom edge the chart reaches.
+  static const double reach = margin + MiniDiveProfileOverlay.height;
+
+  /// How far in from the viewer's right edge the chart reaches.
+  static const double span = margin + MiniDiveProfileOverlay.width;
 
   const PositionedMiniProfileOverlay({
     super.key,
@@ -289,8 +320,8 @@ class PositionedMiniProfileOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      right: 16,
-      bottom: 16, // Lower right corner
+      right: margin,
+      bottom: margin, // Lower right corner
       child: AnimatedOpacity(
         opacity: visible ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 200),

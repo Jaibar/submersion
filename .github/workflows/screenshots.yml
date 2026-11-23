@@ -37,12 +37,12 @@ jobs:
   # ============================================================================
   capture-ios:
     name: Capture iOS
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 45
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -56,20 +56,14 @@ jobs:
           xcode-version: 'latest-stable'
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: ./.github/actions/setup-flutter
         id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: stable
 
-      - name: Cache Flutter SDK
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
-          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
-
       - name: Cache pub dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.pub-cache
@@ -79,7 +73,7 @@ jobs:
             pub-${{ runner.os }}-
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -88,10 +82,10 @@ jobs:
           flutter pub get
           dart run build_runner build --delete-conflicting-outputs
 
-      - name: Generate UDDF test data
-        run: |
-          mkdir -p integration_test/fixtures
-          python3 scripts/generate_uddf_test_data.py -n 50 --sample-interval 30 -o integration_test/fixtures/screenshot_test_data.uddf
+      - name: Fetch the demo logbook
+        # The screenshots show the demo-mode sample logbook (issue #3708),
+        # from the demo-data release.
+        run: python3 scripts/demo_data/fetch_demo_db.py demo_package
 
       - name: Capture iPhone 6.7" screenshots
         run: |
@@ -119,7 +113,7 @@ jobs:
             --dart-define=SCREENSHOT_DEVICE_NAME=iPhone_6_7_inch \
             --dart-define=SCREENSHOT_OUTPUT_DIR="$GITHUB_WORKSPACE/screenshots" \
             --dart-define=SCREENSHOT_ORIENTATION=portrait \
-            --dart-define=UDDF_TEST_DATA_PATH="$GITHUB_WORKSPACE/integration_test/fixtures/screenshot_test_data.uddf"
+            --dart-define=DEMO_PACKAGE_DIR="$GITHUB_WORKSPACE/demo_package"
 
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
 
@@ -152,7 +146,7 @@ jobs:
             --dart-define=SCREENSHOT_DEVICE_NAME=iPad_13_inch \
             --dart-define=SCREENSHOT_OUTPUT_DIR="$GITHUB_WORKSPACE/screenshots" \
             --dart-define=SCREENSHOT_ORIENTATION=landscape \
-            --dart-define=UDDF_TEST_DATA_PATH="$GITHUB_WORKSPACE/integration_test/fixtures/screenshot_test_data.uddf"
+            --dart-define=DEMO_PACKAGE_DIR="$GITHUB_WORKSPACE/demo_package"
 
           mv "$PLIST.backup" "$PLIST"
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
@@ -172,12 +166,12 @@ jobs:
   # ============================================================================
   capture-macos:
     name: Capture macOS
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -191,20 +185,14 @@ jobs:
           xcode-version: 'latest-stable'
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: ./.github/actions/setup-flutter
         id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: stable
 
-      - name: Cache Flutter SDK
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
-          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
-
       - name: Cache pub dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.pub-cache
@@ -214,7 +202,7 @@ jobs:
             pub-${{ runner.os }}-
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -229,10 +217,16 @@ jobs:
           echo 'CODE_SIGNING_REQUIRED = NO' >> macos/Runner/Configs/Debug.xcconfig
           echo 'CODE_SIGN_IDENTITY = ' >> macos/Runner/Configs/Debug.xcconfig
 
-      - name: Generate UDDF test data
+      - name: Fetch the demo logbook
+        # The screenshots show the demo-mode sample logbook (issue #3708).
+        # A relative path resolves against the project directory without the
+        # sandbox and against the app's container with it, so it goes in both.
         run: |
-          mkdir -p integration_test/fixtures
-          python3 scripts/generate_uddf_test_data.py -n 50 --sample-interval 30 -o integration_test/fixtures/screenshot_test_data.uddf
+          python3 scripts/demo_data/fetch_demo_db.py demo_package
+          container="$HOME/Library/Containers/app.submersion/Data"
+          mkdir -p "$container"
+          rm -rf "$container/demo_package"
+          cp -R demo_package "$container/demo_package"
 
       - name: Capture macOS screenshots
         run: |
@@ -241,7 +235,7 @@ jobs:
             --dart-define=SCREENSHOT_MODE=true \
             --dart-define=SCREENSHOT_DEVICE_NAME=macOS \
             --dart-define=SCREENSHOT_OUTPUT_DIR=screenshots \
-            --dart-define=UDDF_TEST_DATA_PATH=integration_test/fixtures/screenshot_test_data.uddf
+            --dart-define=DEMO_PACKAGE_DIR=demo_package
 
       - name: Collect screenshots
         run: |
@@ -274,13 +268,13 @@ jobs:
   # ============================================================================
   upload:
     name: Upload to App Store Connect
-    runs-on: macos-14
+    runs-on: macos-26
     needs: [capture-ios, capture-macos]
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -305,7 +299,7 @@ jobs:
       - name: Setup Ruby (iOS)
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
+          ruby-version: '3.4'
           bundler-cache: true
           working-directory: ios
 

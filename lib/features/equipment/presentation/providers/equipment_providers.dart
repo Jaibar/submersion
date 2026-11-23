@@ -1,18 +1,44 @@
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+// The dependency-only module, not dive_providers.dart: that file imports
+// trip_providers.dart, which imports this feature's repository impl.
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/features/dive_computer/presentation/providers/clock_sync_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/service_kind_repository.dart';
 import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_field.dart';
+import 'package:submersion/features/equipment/data/services/loaded_service_clocks.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
 import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_filter_state.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_picker_filter.dart';
+import 'package:submersion/features/equipment/presentation/providers/exposure_thresholds_provider.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_share_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_tag_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/notifications/presentation/providers/notification_providers.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/transmitters/presentation/providers/transmitter_providers.dart';
+import 'package:submersion/features/trips/domain/services/trip_gear_scope.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_gear_ids_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 /// Repository provider
 final equipmentRepositoryProvider = Provider<EquipmentRepository>((ref) {
@@ -27,6 +53,14 @@ final activeEquipmentProvider = FutureProvider<List<EquipmentItem>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  // Shared gear (issue #2046) comes and goes with a share row.
+  ref.invalidateSelfWhen(
+    ref.read(equipmentShareRepositoryProvider).watchChanges(),
+  );
+  // The list filters on hydrated attributes (#1805), and saveAttributes
+  // or a sync pull writes only equipment_attributes.
+  ref.invalidateSelfWhen(repository.watchAttributeChanges());
   return repository.getActiveEquipment(diverId: validatedDiverId);
 });
 
@@ -37,6 +71,11 @@ final retiredEquipmentProvider = FutureProvider<List<EquipmentItem>>((
   final repository = ref.watch(equipmentRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
+  );
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  // Shared gear (issue #2046) comes and goes with a share row.
+  ref.invalidateSelfWhen(
+    ref.read(equipmentShareRepositoryProvider).watchChanges(),
   );
   return repository.getRetiredEquipment(diverId: validatedDiverId);
 });
@@ -51,68 +90,265 @@ final equipmentByStatusProvider =
       final validatedDiverId = await ref.watch(
         validatedCurrentDiverIdProvider.future,
       );
+      ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+      // Shared gear (issue #2046) comes and goes with a share row.
+      ref.invalidateSelfWhen(
+        ref.read(equipmentShareRepositoryProvider).watchChanges(),
+      );
+      // The list filters on hydrated attributes (#1805), and saveAttributes
+      // or a sync pull writes only equipment_attributes.
+      ref.invalidateSelfWhen(repository.watchAttributeChanges());
       if (status == null) {
         return repository.getAllEquipment(diverId: validatedDiverId);
       }
       return repository.getEquipmentByStatus(status, diverId: validatedDiverId);
     });
 
-/// All equipment provider
+/// All equipment provider (filtered by current diver).
+///
+/// A one-shot read that self-invalidates whenever the `equipment` table
+/// changes (a sync apply, a local create/edit/delete, ...), so list UIs
+/// refresh automatically while imperative
+/// `ref.read(allEquipmentProvider.future)` reads still resolve.
 final allEquipmentProvider = FutureProvider<List<EquipmentItem>>((ref) async {
   final repository = ref.watch(equipmentRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  invalidateOnEquipmentListChanges(ref);
   return repository.getAllEquipment(diverId: validatedDiverId);
 });
 
-/// Equipment sort state provider
-final equipmentSortProvider = StateProvider<SortState<EquipmentSortField>>(
-  (ref) => const SortState(
-    field: EquipmentSortField.name,
-    direction: SortDirection.descending,
+/// Rebuilds [ref]'s provider whenever [allEquipmentProvider] would refresh,
+/// for a read of some of the same items (Global Search's rows, issue #4247).
+void invalidateOnEquipmentListChanges(Ref ref) {
+  final repository = ref.read(equipmentRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  // Shared gear (issue #2046) comes and goes with a share row.
+  ref.invalidateSelfWhen(
+    ref.read(equipmentShareRepositoryProvider).watchChanges(),
+  );
+  // The list filters on hydrated attributes (#1805), and saveAttributes
+  // or a sync pull writes only equipment_attributes.
+  ref.invalidateSelfWhen(repository.watchAttributeChanges());
+}
+
+/// Retired and sold gear: what a past dive's pickers add on request, since
+/// a dive logged after the fact may well have used it (#3210). Derived from
+/// [allEquipmentProvider], so it orders and refreshes the same way.
+final leftKitEquipmentProvider = FutureProvider<List<EquipmentItem>>((
+  ref,
+) async {
+  final all = await ref.watch(allEquipmentProvider.future);
+  return [
+    for (final item in all)
+      if (item.hasLeftKit) item,
+  ];
+});
+
+/// Whether the dive gear picker also lists [leftKitEquipmentProvider]'s
+/// gear (#3210). autoDispose for the same reason as
+/// [equipmentPickerFilterProvider]: a choice made for one old dive should
+/// not quietly lengthen the next dive's picker.
+final equipmentPickerShowLeftKitProvider = StateProvider.autoDispose<bool>(
+  (ref) => false,
+);
+
+/// Whether the dive gear picker also lists the components of assemblies it
+/// offers (#2514). autoDispose like [equipmentPickerShowLeftKitProvider]:
+/// adding one part on its own is the exception, not the next dive's default.
+final equipmentPickerShowAssemblyPartsProvider =
+    StateProvider.autoDispose<bool>((ref) => false);
+
+/// Equipment filter state provider.
+///
+/// Holds the status and category axes edited in the equipment filter panel.
+/// Kept outside the list widget so the panel can be opened from any of the
+/// three layouts (phone app bar, master-detail compact bar, table mode's
+/// TableModeLayout actions) and they all narrow the same list.
+final equipmentFilterProvider = StateProvider<EquipmentFilterState>(
+  (ref) => const EquipmentFilterState(),
+);
+
+/// The filter the list applies: [equipmentFilterProvider] without its owner
+/// axis while only one profile exists (issue #2046). The Owner chips are
+/// hidden then, so a leftover Mine or Shared with me must neither narrow the
+/// list nor light the filter badge where it cannot be cleared.
+final effectiveEquipmentFilterProvider = Provider<EquipmentFilterState>((ref) {
+  final filter = ref.watch(equipmentFilterProvider);
+  if (filter.owner == EquipmentOwnerFilter.all ||
+      ref.watch(hasMultipleDiversProvider)) {
+    return filter;
+  }
+  return filter.copyWith(owner: EquipmentOwnerFilter.all);
+});
+
+/// The gear categories the diver actually owns, in [EquipmentType] order.
+///
+/// That order is not the display order: the surfaces that show these sort
+/// them by localized label (#2937).
+///
+/// Drives the filter panel's category chips so it never offers a type with no
+/// gear behind it. Derived from every item -- including retired -- because the
+/// status axis can put retired gear back on screen.
+final ownedEquipmentTypesProvider = Provider<List<EquipmentType>>(
+  (ref) => _typesPresentIn(
+    ref.watch(allEquipmentProvider).value ?? const <EquipmentItem>[],
   ),
 );
 
-/// Apply sorting to a list of equipment items
+/// The types [items] hold, in [EquipmentType] order.
+List<EquipmentType> _typesPresentIn(Iterable<EquipmentItem> items) {
+  final present = items.map((e) => e.type).toSet();
+  return EquipmentType.values.where(present.contains).toList();
+}
+
+/// The gear categories a diver can filter dives by: [ownedEquipmentTypesProvider]
+/// less any type held only by wishlist gear (#2025), which is never on a dive.
+final diveGearTypesProvider = Provider<List<EquipmentType>>(
+  (ref) => _typesPresentIn(
+    (ref.watch(allEquipmentProvider).value ?? const <EquipmentItem>[]).where(
+      (e) => !e.isWanted,
+    ),
+  ),
+);
+
+/// The Add Equipment picker's own filter (#1576).
+///
+/// Separate from [equipmentFilterProvider], which belongs to the Equipment
+/// page: sharing one would mean narrowing the gear list silently narrowed the
+/// dive picker, which is not what either control implies.
+///
+/// autoDispose so it resets when the picker closes. A plain StateProvider
+/// lives for the whole ProviderContainer, i.e. the app session, so a
+/// narrowing applied to find one regulator would still be hiding gear the
+/// next time a dive's picker opened, with only a badge to explain the short
+/// list. The picker is the sole listener, so losing it is exactly the signal
+/// that the narrowing is done with.
+final equipmentPickerFilterProvider =
+    StateProvider.autoDispose<EquipmentPickerFilter>(
+      (ref) => EquipmentPickerFilter.none,
+    );
+
+/// Equipment sort state provider.
+///
+/// Ascending means A to Z and oldest first, the same as the dive surfaces'
+/// `EquipmentArrangement`, because both sheets now share one layout and the
+/// same arrow must mean the same thing on each.
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final equipmentSortProvider = Provider<SortState<EquipmentSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(
+          settingsProvider.select((s) => s.listArrangements.equipmentSort),
+        ),
+        EquipmentSortField.values,
+      ) ??
+      equipmentStartingSort,
+);
+
+/// The Equipment page's sort before the diver changes it: A to Z.
+const equipmentStartingSort = SortState<EquipmentSortField>(
+  field: EquipmentSortField.name,
+  direction: SortDirection.ascending,
+);
+
+/// Apply sorting to a list of equipment items.
+///
+/// [serviceUrgency] is the most-urgent clock per equipment id (from
+/// [equipmentServiceUrgencyProvider]); it is only consulted for the
+/// [EquipmentSortField.serviceDue] field.
 List<EquipmentItem> applyEquipmentSorting(
   List<EquipmentItem> equipment,
-  SortState<EquipmentSortField> sort,
-) {
-  final sorted = List<EquipmentItem>.from(equipment);
+  SortState<EquipmentSortField> sort, {
+  Map<String, ServiceClockStatus> serviceUrgency = const {},
+}) {
+  return List<EquipmentItem>.from(equipment)
+    ..sort(equipmentSortComparator(sort, serviceUrgency: serviceUrgency));
+}
 
-  sorted.sort((a, b) {
-    int comparison;
-    // For text fields, invert direction (user expects descending = A→Z)
-    final invertForText =
-        sort.field == EquipmentSortField.name ||
-        sort.field == EquipmentSortField.type;
+/// The Equipment page's item order as a comparator.
+///
+/// Separate from [applyEquipmentSorting] so the grouped list can hand it to
+/// `arrangeEquipment`, which orders the type axis itself and needs only the
+/// order inside each group.
+///
+/// Matches the arranger's conventions: names compare case-insensitively,
+/// undated gear sorts last in both directions, and every field falls through
+/// to a name-then-id tie-break that is never inverted. List.sort is not
+/// stable, so without the tie-break equal items reorder between rebuilds.
+Comparator<EquipmentItem> equipmentSortComparator(
+  SortState<EquipmentSortField> sort, {
+  Map<String, ServiceClockStatus> serviceUrgency = const {},
+}) {
+  // Rank for the service-due sort: overdue (2) > dueSoon (1) > ok (0); items
+  // with no clock rank -1 so they sort last on ascending (most-urgent first).
+  int urgencyRank(EquipmentItem e) =>
+      serviceUrgency[e.id]?.severity.index ?? -1;
 
+  // Lowercased once per item rather than per comparison, as the arranger does.
+  final lowerNames = <String, String>{};
+  String lowerName(EquipmentItem item) =>
+      lowerNames[item.id] ??= item.name.toLowerCase();
+
+  DateTime? dateOf(EquipmentItem item) => switch (sort.field) {
+    EquipmentSortField.purchaseDate => item.purchaseDate,
+    EquipmentSortField.lastServiceDate => item.lastServiceDate,
+    _ => null,
+  };
+  final byDate =
+      sort.field == EquipmentSortField.purchaseDate ||
+      sort.field == EquipmentSortField.lastServiceDate;
+
+  return (a, b) {
+    if (byDate) {
+      // Undated gear sorts last in BOTH directions, so flipping the direction
+      // never buries the dated items the diver was looking for.
+      final aMissing = dateOf(a) == null;
+      final bMissing = dateOf(b) == null;
+      if (aMissing != bMissing) return aMissing ? 1 : -1;
+    }
+
+    int primary;
     switch (sort.field) {
       case EquipmentSortField.name:
-        comparison = a.name.compareTo(b.name);
-      case EquipmentSortField.type:
-        comparison = a.type.displayName.compareTo(b.type.displayName);
+        primary = lowerName(a).compareTo(lowerName(b));
       case EquipmentSortField.purchaseDate:
-        comparison = (a.purchaseDate ?? DateTime(1900)).compareTo(
-          b.purchaseDate ?? DateTime(1900),
-        );
       case EquipmentSortField.lastServiceDate:
-        comparison = (a.lastServiceDate ?? DateTime(1900)).compareTo(
-          b.lastServiceDate ?? DateTime(1900),
-        );
+        final da = dateOf(a), db = dateOf(b);
+        primary = da == null || db == null ? 0 : da.compareTo(db);
+      case EquipmentSortField.serviceDue:
+        final ra = urgencyRank(a), rb = urgencyRank(b);
+        if (ra != rb) {
+          // Higher rank = more urgent; ascending lists most urgent first.
+          primary = rb.compareTo(ra);
+        } else {
+          final da = serviceUrgency[a.id]?.dueDate;
+          final db = serviceUrgency[b.id]?.dueDate;
+          primary = (da ?? DateTime(9999)).compareTo(db ?? DateTime(9999));
+        }
     }
+    if (sort.direction == SortDirection.descending) primary = -primary;
+    if (primary != 0) return primary;
 
-    if (invertForText) {
-      return sort.direction == SortDirection.ascending
-          ? -comparison
-          : comparison;
-    }
-    return sort.direction == SortDirection.ascending ? comparison : -comparison;
-  });
-
-  return sorted;
+    final byName = lowerName(a).compareTo(lowerName(b));
+    return byName != 0 ? byName : a.id.compareTo(b.id);
+  };
 }
+
+/// Whether the item is a dive computer's or transmitter's one entry (issue
+/// #3676), so its type is fixed.
+final equipmentHasDeviceProvider = FutureProvider.family<bool, String>((
+  ref,
+  id,
+) async {
+  final repository = ref.watch(equipmentRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDeviceRecordChanges());
+  return repository.hasDeviceRecord(id);
+});
 
 /// Single equipment item provider
 final equipmentItemProvider = FutureProvider.family<EquipmentItem?, String>((
@@ -120,46 +356,138 @@ final equipmentItemProvider = FutureProvider.family<EquipmentItem?, String>((
   id,
 ) async {
   final repository = ref.watch(equipmentRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
   return repository.getEquipmentById(id);
 });
 
-/// Dive count for equipment provider
+/// The active children installed in a parent, for the children card
+/// (condition phase 4a): cells by slot, then batteries, then any other part
+/// by type name, each group by name after that. The order is spelled out
+/// rather than read from `EquipmentType.index`, which only records when each
+/// type was added.
+final childEquipmentProvider =
+    FutureProvider.family<List<EquipmentItem>, String>((ref, parentId) async {
+      final repository = ref.watch(equipmentRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+      // Slots and install dates are attributes, written without touching
+      // the equipment row.
+      ref.invalidateSelfWhen(repository.watchAttributeChanges());
+      final children = await repository.getChildEquipment(parentId);
+      int slotOf(EquipmentItem e) => e.cellSlot ?? 1 << 20;
+      int rankOf(EquipmentType t) => switch (t) {
+        EquipmentType.o2Cell => 0,
+        EquipmentType.battery => 1,
+        _ => 2,
+      };
+      // isFitted, not isActive: a legacy row can be retired or sold with
+      // isActive left true, and must not show as an installed part.
+      return children.where((c) => c.isFitted).toList()..sort((a, b) {
+        final byRank = rankOf(a.type).compareTo(rankOf(b.type));
+        if (byRank != 0) return byRank;
+        final byType = a.type.name.compareTo(b.type.name);
+        if (byType != 0) return byType;
+        final bySlot = slotOf(a).compareTo(slotOf(b));
+        if (bySlot != 0) return bySlot;
+        return compareTextForSort(a.name, b.name);
+      });
+    });
+
+/// The tables an item's dives are read from: the dives and their gear and
+/// tank links.
+const _itemDiveTables = {'dives', 'dive_equipment', 'dive_tanks'};
+
+/// Dive count for equipment provider.
+///
+/// Backs the "Used on N dives" figure. A junction read over `dive_equipment`,
+/// whose rows vanish by cascade when a dive is deleted, so it over-counted
+/// after a merge until it took the dives tick as well (issue #974).
 final equipmentDiveCountProvider = FutureProvider.family<int, String>((
   ref,
   equipmentId,
 ) async {
   final repository = ref.watch(equipmentRepositoryProvider);
-  return repository.getDiveCountForEquipment(equipmentId);
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  // The count reads the dives and their gear and tank links, so putting the
+  // item on (or off) a dive refreshes it.
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchTables(_itemDiveTables),
+  );
+  // The active diver's dives, as the dive list the row opens (issue #2046).
+  final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+  return repository.getDiveCountForEquipment(equipmentId, diverId: diverId);
 });
 
-/// Trip count for equipment provider
+/// Total seconds of the dives [equipmentDiveCountProvider] counts, for the
+/// item page's Dive Time row. Refreshes on the same changes as that count.
+final equipmentDiveTimeProvider = FutureProvider.family<int, String>((
+  ref,
+  equipmentId,
+) async {
+  final repository = ref.watch(equipmentRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchTables(_itemDiveTables),
+  );
+  final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
+  return repository.getDiveTimeForEquipment(equipmentId, diverId: diverId);
+});
+
+/// The trips an item's Trips row counts: the ones the list it opens shows,
+/// read through that list's own filter so the two cannot disagree (issue
+/// #4016). That filter refreshes this on a write to anything it reads.
+final equipmentTripIdsProvider = FutureProvider.family<Set<String>, String>(
+  (ref, equipmentId) => ref.watch(
+    queryFilteredTripIdsProvider(
+      TripFilterState(equipmentId: equipmentId),
+    ).future,
+  ),
+);
+
+/// Trip count for equipment provider. See [equipmentTripIdsProvider].
 final equipmentTripCountProvider = FutureProvider.family<int, String>((
   ref,
   equipmentId,
 ) async {
-  final repository = ref.watch(equipmentRepositoryProvider);
-  return repository.getTripCountForEquipment(equipmentId);
+  final ids = await ref.watch(equipmentTripIdsProvider(equipmentId).future);
+  return ids.length;
 });
 
-/// Trip IDs for equipment provider
-final equipmentTripIdsProvider = FutureProvider.family<List<String>, String>((
-  ref,
-  equipmentId,
-) async {
-  final repository = ref.watch(equipmentRepositoryProvider);
-  return repository.getTripIdsForEquipment(equipmentId);
-});
+/// Active gear whose service is due, narrowed to one severity, worst first.
+///
+/// Reads the service ledger (schedules + records + usage, via
+/// [equipmentWorstClockProvider]), the same source as the row badges and the
+/// dashboard card. It must not go back to the legacy
+/// `EquipmentItem.isServiceDue` getter: that reads `serviceIntervalDays`, a
+/// column the v122/v131 migrations copied into the ledger and no in-app
+/// editor writes any more, so the Service Due filter always came back empty
+/// while the badges said overdue.
+///
+/// Each item is bucketed by its WORST clock, so it appears under exactly one
+/// severity. That is what lets the home strip's counted chips promise a
+/// number and land on a list with that many rows in it.
+final serviceDueEquipmentProvider =
+    FutureProvider.family<List<EquipmentItem>, ServiceDueFilter>((
+      ref,
+      filter,
+    ) async {
+      // Keyed by item and already sorted overdue-first, so the result needs
+      // no de-duplication of its own.
+      final worst = await ref.watch(equipmentWorstClockProvider.future);
+      return [
+        for (final clock in worst.values)
+          if (matchesServiceDue(filter, clock.status.severity)) clock.item,
+      ];
+    });
 
-/// Equipment with service due provider
-final serviceDueEquipmentProvider = FutureProvider<List<EquipmentItem>>((
-  ref,
-) async {
-  final repository = ref.watch(equipmentRepositoryProvider);
-  final validatedDiverId = await ref.watch(
-    validatedCurrentDiverIdProvider.future,
-  );
-  return repository.getEquipmentWithServiceDue(diverId: validatedDiverId);
-});
+/// Whether a clock of [severity] belongs in the [filter]'s list.
+bool matchesServiceDue(
+  ServiceDueFilter filter,
+  ServiceClockSeverity severity,
+) => switch (filter) {
+  ServiceDueFilter.any => severity != ServiceClockSeverity.ok,
+  ServiceDueFilter.overdue => severity == ServiceClockSeverity.overdue,
+  ServiceDueFilter.dueSoon => severity == ServiceClockSeverity.dueSoon,
+};
 
 /// Equipment search provider
 final equipmentSearchProvider =
@@ -171,6 +499,16 @@ final equipmentSearchProvider =
         return ref.watch(allEquipmentProvider).value ?? [];
       }
       final repository = ref.watch(equipmentRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+      // Shared gear (issue #2046) comes and goes with a share row.
+      ref.invalidateSelfWhen(
+        ref.read(equipmentShareRepositoryProvider).watchChanges(),
+      );
+      // Tag names match too (issue #1942): a rename or a new link must
+      // refresh the results.
+      ref.invalidateSelfWhen(
+        ref.read(equipmentTagRepositoryProvider).watchChanges(),
+      );
       return repository.searchEquipment(query, diverId: validatedDiverId);
     });
 
@@ -183,7 +521,11 @@ class EquipmentListNotifier
 
   EquipmentListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(
+      _initializeAndLoad(),
+      EquipmentListNotifier,
+      'initialize and load',
+    );
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -191,7 +533,11 @@ class EquipmentListNotifier
         state = const AsyncValue.loading();
         _ref.invalidate(validatedCurrentDiverIdProvider);
         _ref.invalidate(allEquipmentProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          EquipmentListNotifier,
+          'initialize and load',
+        );
       }
     });
   }
@@ -223,7 +569,9 @@ class EquipmentListNotifier
     _ref.invalidate(activeEquipmentProvider);
     _ref.invalidate(retiredEquipmentProvider);
     _ref.invalidate(allEquipmentProvider);
-    _ref.invalidate(serviceDueEquipmentProvider);
+    // The service-due list derives from the clock evaluation, which caches per
+    // item; invalidating the leaf alone would replay the cached verdicts.
+    _ref.invalidate(activeEquipmentClocksProvider);
     // Invalidate all status filters
     for (final status in EquipmentStatus.values) {
       _ref.invalidate(equipmentByStatusProvider(status));
@@ -231,27 +579,38 @@ class EquipmentListNotifier
     _ref.invalidate(equipmentByStatusProvider(null));
   }
 
-  Future<EquipmentItem> addEquipment(EquipmentItem equipment) async {
-    // Get fresh validated diver ID before creating
-    final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
-
-    // Always set diverId to the current validated diver for new items
-    final equipmentWithDiver = validatedId != null
-        ? equipment.copyWith(diverId: validatedId)
-        : equipment;
-    final newEquipment = await _repository.createEquipment(equipmentWithDiver);
-    await refresh();
-    return newEquipment;
-  }
-
+  /// Writes [equipment]'s row, leaving its tags as they are.
   Future<void> updateEquipment(EquipmentItem equipment) async {
     await _repository.updateEquipment(equipment);
     await refresh();
   }
 
-  Future<void> deleteEquipment(String id) async {
-    await _repository.deleteEquipment(id);
+  /// False, changing nothing, when the active diver does not own [id].
+  Future<bool> deleteEquipment(String id) async {
+    final diverId =
+        _validatedDiverId ??
+        await _ref.read(validatedCurrentDiverIdProvider.future);
+    // A computer's item takes the computer with it (issue #3676); read which
+    // first, so its installation-local clock sync choice (#1216) and the
+    // computer providers go too, as a computer delete does.
+    final computers = await _ref
+        .read(diveComputerRepositoryProvider)
+        .getComputersForEquipment(id);
+    final deleted = await _repository.deleteOwnedEquipment(
+      id,
+      actingDiverId: diverId,
+    );
+    if (deleted && computers.isNotEmpty) {
+      final clockSync = _ref.read(clockSyncSettingsNotifierProvider.notifier);
+      for (final c in computers) {
+        await clockSync.forget(c.id);
+        _ref.invalidate(diveComputerByIdProvider(c.id));
+      }
+      _ref.invalidate(allDiveComputersProvider);
+      _ref.invalidate(favoriteDiveComputerProvider);
+    }
     await refresh();
+    return deleted;
   }
 
   Future<void> markAsServiced(String id) async {
@@ -266,6 +625,15 @@ class EquipmentListNotifier
 
   Future<void> reactivateEquipment(String id) async {
     await _repository.reactivateEquipment(id);
+    await refresh();
+  }
+
+  /// The status offer after a location move (v268).
+  Future<void> setStatusForMany(
+    List<String> ids,
+    EquipmentStatus status,
+  ) async {
+    await _repository.setStatusForMany(ids, status);
     await refresh();
   }
 }
@@ -297,32 +665,17 @@ final serviceRecordsForEquipmentProvider =
       equipmentId,
     ) async {
       final repository = ref.watch(serviceRecordRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchServiceRecordsChanges());
       return repository.getRecordsForEquipment(equipmentId);
     });
-
-/// Single service record provider
-final serviceRecordByIdProvider = FutureProvider.family<ServiceRecord?, String>(
-  (ref, id) async {
-    final repository = ref.watch(serviceRecordRepositoryProvider);
-    return repository.getRecordById(id);
-  },
-);
 
 /// Most recent service record for equipment
 final mostRecentServiceRecordProvider =
     FutureProvider.family<ServiceRecord?, String>((ref, equipmentId) async {
       final repository = ref.watch(serviceRecordRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchServiceRecordsChanges());
       return repository.getMostRecentRecord(equipmentId);
     });
-
-/// Total service cost for equipment
-final serviceRecordTotalCostProvider = FutureProvider.family<double, String>((
-  ref,
-  equipmentId,
-) async {
-  final repository = ref.watch(serviceRecordRepositoryProvider);
-  return repository.getTotalServiceCost(equipmentId);
-});
 
 /// Service record count for equipment
 final serviceRecordCountProvider = FutureProvider.family<int, String>((
@@ -330,12 +683,14 @@ final serviceRecordCountProvider = FutureProvider.family<int, String>((
   equipmentId,
 ) async {
   final repository = ref.watch(serviceRecordRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchServiceRecordsChanges());
   return repository.getRecordCount(equipmentId);
 });
 
-/// Service record notifier for mutations
+/// An item's service records, refreshed after a sitting writes them.
 class ServiceRecordNotifier
     extends StateNotifier<AsyncValue<List<ServiceRecord>>> {
+  static final _log = LoggerService.forClass(ServiceRecordNotifier);
   final ServiceRecordRepository _repository;
   final Ref _ref;
   final String equipmentId;
@@ -359,27 +714,39 @@ class ServiceRecordNotifier
     await _loadRecords();
     _ref.invalidate(serviceRecordsForEquipmentProvider(equipmentId));
     _ref.invalidate(mostRecentServiceRecordProvider(equipmentId));
-    _ref.invalidate(serviceRecordTotalCostProvider(equipmentId));
     _ref.invalidate(serviceRecordCountProvider(equipmentId));
     // Also refresh equipment to update lastServiceDate
     _ref.invalidate(equipmentItemProvider(equipmentId));
+    // A new record of kind X resets clock X: re-evaluate clocks and lists.
+    _ref.invalidate(serviceClockStatusesProvider(equipmentId));
+    // The base evaluation, not the derived lists: dueClocksProvider and the
+    // service-due list would otherwise rebuild off its cached verdicts.
+    _ref.invalidate(activeEquipmentClocksProvider);
+    await _rescheduleNotifications();
   }
 
-  Future<ServiceRecord> addRecord(ServiceRecord record) async {
-    final newRecord = await _repository.createRecord(record);
-    await refresh();
-    return newRecord;
-  }
-
-  Future<void> updateRecord(ServiceRecord record) async {
-    await _repository.updateRecord(record);
-    await refresh();
-    _ref.invalidate(serviceRecordByIdProvider(record.id));
-  }
-
-  Future<void> deleteRecord(String id) async {
-    await _repository.deleteRecord(id);
-    await refresh();
+  /// A record moves the clock anchor, so a usage reminder armed for the old
+  /// anchor may no longer be due. Re-evaluate this item's reminders now
+  /// rather than at the next app start; a failure here must not fail the
+  /// record write.
+  Future<void> _rescheduleNotifications() async {
+    try {
+      final settings = _ref.read(settingsProvider);
+      if (!settings.notificationsEnabled) return;
+      final item = await _ref
+          .read(equipmentRepositoryProvider)
+          .getEquipmentById(equipmentId);
+      if (item == null) return;
+      await _ref
+          .read(notificationSchedulerProvider)
+          .updateForEquipment(item: item, globalSettings: settings);
+    } catch (e, stackTrace) {
+      _log.warning(
+        'Failed to reschedule reminders after a service record',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
   }
 }
 
@@ -469,3 +836,368 @@ final equipmentCompactCardConfigProvider =
         ],
       ),
     );
+
+// ---------------------------------------------------------------------------
+// Service ledger (multi-clock service tracking)
+// ---------------------------------------------------------------------------
+
+/// One equipment item paired with one evaluated service clock, for
+/// cross-equipment lists (dashboard card, trip alerts, list badges).
+typedef DueClock = ({EquipmentItem item, ServiceClockStatus status});
+
+final serviceKindRepositoryProvider = Provider<ServiceKindRepository>((ref) {
+  return ServiceKindRepository();
+});
+
+final serviceScheduleRepositoryProvider = Provider<ServiceScheduleRepository>((
+  ref,
+) {
+  return ServiceScheduleRepository();
+});
+
+/// Built-in kinds plus the current diver's custom kinds.
+final serviceKindsProvider = FutureProvider<List<ServiceKind>>((ref) async {
+  final validatedDiverId = await ref.watch(
+    validatedCurrentDiverIdProvider.future,
+  );
+  final repository = ref.watch(serviceKindRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchServiceKindsChanges());
+  return repository.getAllKinds(diverId: validatedDiverId);
+});
+
+/// Every service kind by id, whoever created it. For resolving the name of
+/// a kind a schedule or record already references: a shared item's clock can
+/// use its owner's custom kind, which [serviceKindsProvider] (the active
+/// diver's choices) leaves out (issue #2046).
+final allServiceKindsByIdProvider = FutureProvider<Map<String, ServiceKind>>((
+  ref,
+) async {
+  final repository = ref.watch(serviceKindRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchServiceKindsChanges());
+  return {for (final k in await repository.getAllKinds()) k.id: k};
+});
+
+/// The dueSoon window: the widest configured reminder-days value for the
+/// current diver, so a clock turns amber as soon as its earliest reminder
+/// would fire.
+final serviceDueSoonWindowDaysProvider = FutureProvider<int>((ref) async {
+  final validatedDiverId = await ref.watch(
+    validatedCurrentDiverIdProvider.future,
+  );
+  final repository = ref.watch(serviceScheduleRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchSchedulesChanges());
+  return repository.getDueSoonWindowDays(diverId: validatedDiverId);
+});
+
+/// Re-evaluates a clock provider when a service record or a schedule
+/// changes by any route. The notifiers invalidate after their own writes,
+/// but a record or schedule applied by sync writes neither, and a service
+/// can move a clock's anchor (see `clockAnchorFromServices`). Rare writes,
+/// so cheap even for the list-wide evaluation.
+void _invalidateOnServiceLedgerChanges(Ref ref) {
+  ref.invalidateSelfWhen(
+    ref.watch(serviceRecordRepositoryProvider).watchServiceRecordsChanges(),
+  );
+  ref.invalidateSelfWhen(
+    ref.watch(serviceScheduleRepositoryProvider).watchSchedulesChanges(),
+  );
+}
+
+/// Evaluates every enabled clock on [item] at this moment.
+Future<List<ServiceClockStatus>> _evaluateClocksFor(
+  Ref ref,
+  EquipmentItem item,
+) async {
+  final schedules = await ref
+      .watch(serviceScheduleRepositoryProvider)
+      .getSchedulesForEquipment(item.id);
+  if (schedules.isEmpty) return const [];
+  final allKinds = await ref.watch(serviceKindRepositoryProvider).getAllKinds();
+  final records = await ref
+      .watch(serviceRecordRepositoryProvider)
+      .getRecordsForEquipment(item.id);
+  // A transmitter's dives include the tanks that carried its registered
+  // serials, and assigning a serial writes only the registry.
+  if (item.type == EquipmentType.transmitter) {
+    ref.invalidateSelfWhen(
+      ref.watch(transmitterRepositoryProvider).watchTransmittersChanges(),
+    );
+  }
+  // The repository's one wiring, shared with the exposure card and the
+  // condition engine: fitted parts only, and a replaced part's dives stop at
+  // its successor.
+  final exposure = await ref
+      .watch(equipmentRepositoryProvider)
+      .getItemExposure(item);
+  final window = await ref.watch(serviceDueSoonWindowDaysProvider.future);
+  return evaluateLoadedServiceClocks(
+    item,
+    schedules: schedules,
+    kindsById: {for (final k in allKinds) k.id: k},
+    records: records,
+    exposure: exposure,
+    thresholds: ref.watch(exposureThresholdsProvider),
+    dueSoonWindowDays: window,
+    now: DateTime.now(),
+  );
+}
+
+/// Every evaluated clock on [items], keyed by equipment id, in statements that
+/// grow by chunk rather than by item. [schedulesById] is the caller's schedule
+/// read; an item without an entry is absent. Registers only
+/// the invalidation input that depends on which gear has clocks: the caller
+/// chooses the rest, because a list-wide provider cannot afford the dive
+/// detail stream a single item can.
+Future<Map<String, List<ServiceClockStatus>>> _evaluateScheduledItems(
+  Ref ref,
+  List<EquipmentItem> items,
+  Map<String, List<ServiceSchedule>> schedulesById,
+) async {
+  final scheduled = [
+    for (final item in items)
+      if (schedulesById.containsKey(item.id)) item,
+  ];
+  if (scheduled.isEmpty) return const {};
+  // A transmitter's dives include the tanks that carried its registered
+  // serials, and assigning a serial writes only the registry.
+  if (scheduled.any((i) => i.type == EquipmentType.transmitter)) {
+    ref.invalidateSelfWhen(
+      ref.watch(transmitterRepositoryProvider).watchTransmittersChanges(),
+    );
+  }
+
+  final kinds = await ref.watch(serviceKindRepositoryProvider).getAllKinds();
+  final kindsById = {for (final k in kinds) k.id: k};
+  final recordsById = await ref
+      .watch(serviceRecordRepositoryProvider)
+      .getRecordsForEquipmentIds([for (final i in scheduled) i.id]);
+  final exposures = await ref
+      .watch(equipmentRepositoryProvider)
+      .getItemExposures(scheduled);
+  final window = await ref.watch(serviceDueSoonWindowDaysProvider.future);
+  final thresholds = ref.watch(exposureThresholdsProvider);
+  final now = DateTime.now();
+
+  return {
+    for (final item in scheduled)
+      item.id: evaluateLoadedServiceClocks(
+        item,
+        schedules: schedulesById[item.id]!,
+        kindsById: kindsById,
+        records: recordsById[item.id] ?? const [],
+        exposure: exposures[item.id]!,
+        thresholds: thresholds,
+        dueSoonWindowDays: window,
+        now: now,
+      ),
+  };
+}
+
+/// [_evaluateScheduledItems] for gear already loaded: reads [items]' schedules
+/// once, so gear with no clock costs nothing past that read.
+Future<Map<String, List<ServiceClockStatus>>> _evaluateItems(
+  Ref ref,
+  List<EquipmentItem> items,
+) async {
+  final schedulesById = await ref
+      .watch(serviceScheduleRepositoryProvider)
+      .getSchedulesForEquipmentIds([for (final i in items) i.id]);
+  return _evaluateScheduledItems(ref, items, schedulesById);
+}
+
+/// Every evaluated clock on the gear named by [ids], keyed by equipment id,
+/// in statements that grow by chunk rather than by id. Unlike
+/// [activeEquipmentClocksProvider], retired and spare gear is evaluated
+/// too, and every clock is kept, not only the worst. An id with no gear
+/// row, or gear with no configured clock, is absent.
+///
+/// Registers the same invalidation inputs as [serviceClockStatusesProvider]
+/// on [ref], so a provider built on this refreshes when that family would.
+Future<Map<String, List<ServiceClockStatus>>> evaluateServiceClocksForIds(
+  Ref ref,
+  List<String> ids,
+) async {
+  final repository = ref.watch(equipmentRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  ref.invalidateSelfWhen(repository.watchAttributeChanges());
+  ref.invalidateSelfWhen(
+    ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+  );
+  _invalidateOnServiceLedgerChanges(ref);
+  if (ids.isEmpty) return const {};
+
+  final schedulesById = await ref
+      .watch(serviceScheduleRepositoryProvider)
+      .getSchedulesForEquipmentIds(ids);
+  if (schedulesById.isEmpty) return const {};
+  final items = await repository.getEquipmentByIds(schedulesById.keys.toList());
+  return _evaluateScheduledItems(ref, items, schedulesById);
+}
+
+/// All evaluated clocks for one equipment item (detail page).
+final serviceClockStatusesProvider =
+    FutureProvider.family<List<ServiceClockStatus>, String>((
+      ref,
+      equipmentId,
+    ) async {
+      final repository = ref.watch(equipmentRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+      // The same inputs as the item page's exposure card, so the two never
+      // disagree: install dates and slots live in the attribute table, and
+      // a dive link or profile edit writes no equipment row.
+      ref.invalidateSelfWhen(repository.watchAttributeChanges());
+      ref.invalidateSelfWhen(
+        ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
+      );
+      _invalidateOnServiceLedgerChanges(ref);
+      final item = await repository.getEquipmentById(equipmentId);
+      if (item == null) return const [];
+      return _evaluateClocksFor(ref, item);
+    });
+
+/// One active equipment item paired with every evaluated clock on it.
+typedef EquipmentClocks = ({
+  EquipmentItem item,
+  List<ServiceClockStatus> statuses,
+});
+
+/// Evaluates the clocks of every active gear item exactly once, in one batch
+/// whose statements grow by chunk rather than by item. Both [dueClocksProvider]
+/// (badges/dashboard/trip) and [equipmentServiceUrgencyProvider] (sort/table
+/// columns) derive from this, so a screen watching both pays the evaluation
+/// (schedules + records + usage + window) a single time instead of twice.
+/// Invalidate THIS provider (not the derived ones) to force a re-evaluation
+/// after schedule/kind edits.
+final activeEquipmentClocksProvider = FutureProvider<List<EquipmentClocks>>((
+  ref,
+) async {
+  final repository = ref.watch(equipmentRepositoryProvider);
+  final validatedDiverId = await ref.watch(
+    validatedCurrentDiverIdProvider.future,
+  );
+  ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+  // Shared gear (issue #2046) comes and goes with a share row.
+  ref.invalidateSelfWhen(
+    ref.read(equipmentShareRepositoryProvider).watchChanges(),
+  );
+  // Install dates and slots decide which dives a part owns. Rare writes,
+  // unlike the dive detail stream (media ticks it), which would re-evaluate
+  // every item's clocks far too often for a list-wide provider.
+  ref.invalidateSelfWhen(repository.watchAttributeChanges());
+  _invalidateOnServiceLedgerChanges(ref);
+
+  final items = await repository.getActiveEquipment(diverId: validatedDiverId);
+  final statuses = await _evaluateItems(ref, items);
+  return [
+    for (final item in items)
+      (item: item, statuses: statuses[item.id] ?? const []),
+  ];
+});
+
+/// Every clock on active gear that is due soon or overdue, overdue first.
+final dueClocksProvider = FutureProvider<List<DueClock>>((ref) async {
+  final evaluated = await ref.watch(activeEquipmentClocksProvider.future);
+  final due = <DueClock>[
+    for (final e in evaluated)
+      for (final s in e.statuses)
+        if (s.severity != ServiceClockSeverity.ok) (item: e.item, status: s),
+  ];
+  due.sort((a, b) {
+    if (a.status.severity != b.status.severity) {
+      return b.status.severity.index.compareTo(a.status.severity.index);
+    }
+    final ad = a.status.dueDate, bd = b.status.dueDate;
+    if (ad == null && bd == null) return 0;
+    if (ad == null) return 1;
+    if (bd == null) return -1;
+    return ad.compareTo(bd);
+  });
+  return due;
+});
+
+/// Worst due clock per equipment id (absent = all clocks ok); list badges
+/// read this so they do not run per-row queries. dueClocksProvider is sorted
+/// overdue-first, so the first clock seen per item is its worst.
+final equipmentWorstClockProvider = FutureProvider<Map<String, DueClock>>((
+  ref,
+) async {
+  final due = await ref.watch(dueClocksProvider.future);
+  final worst = <String, DueClock>{};
+  for (final d in due) {
+    worst.putIfAbsent(d.item.id, () => d);
+  }
+  return worst;
+});
+
+/// Most-urgent clock per active equipment id, INCLUDING ok (not-yet-due)
+/// clocks -- unlike [equipmentWorstClockProvider], which only carries due or
+/// overdue clocks. Backs the service-due sort and the Next Service Due table
+/// column so not-yet-due gear still sorts and displays its upcoming date.
+final equipmentServiceUrgencyProvider =
+    FutureProvider<Map<String, ServiceClockStatus>>((ref) async {
+      final evaluated = await ref.watch(activeEquipmentClocksProvider.future);
+      return {
+        for (final e in evaluated)
+          if (e.statuses.isNotEmpty)
+            // Engine returns statuses worst-severity-first, then dueDate asc.
+            e.item.id: e.statuses.first,
+      };
+    });
+
+/// Clocks that block an upcoming trip: date trigger before the trip ends, or
+/// already due/overdue now. Usage triggers are never forecast into the trip.
+/// Only gear on the trip counts (packed, on its cylinder board, or installed
+/// in gear that is): gear left at home never warns on it (issue #2727).
+final tripServiceAlertsProvider = FutureProvider.family<List<DueClock>, String>(
+  (ref, tripId) async {
+    final trip = await ref.watch(tripByIdProvider(tripId).future);
+    if (trip == null) return const [];
+    final onTrip = await ref.watch(tripGearIdsProvider(tripId).future);
+    if (onTrip.isEmpty) return const [];
+
+    final repository = ref.watch(equipmentRepositoryProvider);
+    final validatedDiverId = await ref.watch(
+      validatedCurrentDiverIdProvider.future,
+    );
+    ref.invalidateSelfWhen(repository.watchEquipmentChanges());
+    // Shared gear (issue #2046) comes and goes with a share row.
+    ref.invalidateSelfWhen(
+      ref.read(equipmentShareRepositoryProvider).watchChanges(),
+    );
+    // As for the active locker: a part's install date decides its dives.
+    ref.invalidateSelfWhen(repository.watchAttributeChanges());
+    _invalidateOnServiceLedgerChanges(ref);
+
+    final items = await repository.getActiveEquipment(
+      diverId: validatedDiverId,
+    );
+    final packed = gearOnTrip(items, onTrip);
+    final statuses = await _evaluateItems(ref, packed);
+    final alerts = <DueClock>[
+      for (final item in packed)
+        for (final s in statuses[item.id] ?? const <ServiceClockStatus>[])
+          if (s.severity == ServiceClockSeverity.overdue ||
+              (s.dueDate != null && s.dueDate!.isBefore(trip.endDate)))
+            (item: item, status: s),
+    ];
+    alerts.sort((a, b) {
+      final ad = a.status.dueDate, bd = b.status.dueDate;
+      if (ad == null && bd == null) return 0;
+      if (ad == null) return -1; // usage-overdue first
+      if (bd == null) return 1;
+      return ad.compareTo(bd);
+    });
+    return alerts;
+  },
+);
+
+/// Schedules (raw, unevaluated) for one item -- used by edit surfaces.
+final serviceSchedulesForEquipmentProvider =
+    FutureProvider.family<List<ServiceSchedule>, String>((
+      ref,
+      equipmentId,
+    ) async {
+      final repository = ref.watch(serviceScheduleRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchSchedulesChanges());
+      return repository.getSchedulesForEquipment(equipmentId);
+    });

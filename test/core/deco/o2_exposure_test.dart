@@ -33,4 +33,65 @@ void main() {
       expect(a, isNot(equals(b)));
     });
   });
+
+  group('O2Exposure CNS minimum mark', () {
+    const marked = O2Exposure(
+      cnsStart: 68.0,
+      cnsUnknownDiveAge: Duration(minutes: 20),
+    );
+
+    test('a CNS history is complete by default', () {
+      expect(const O2Exposure().cnsIsMinimum, isFalse);
+    });
+
+    test('an unknown dive in the window makes it a minimum', () {
+      expect(marked.cnsIsMinimum, isTrue);
+    });
+
+    test('copyWith should preserve cnsUnknownDiveAge', () {
+      final copy = marked.copyWith(cnsEnd: 72.0);
+      expect(copy.cnsUnknownDiveAge, const Duration(minutes: 20));
+    });
+
+    test('cnsUnknownDiveAge should be included in props for equality', () {
+      expect(const O2Exposure(cnsStart: 68.0), isNot(equals(marked)));
+    });
+  });
+
+  group('O2Exposure ppO2 thresholds', () {
+    test('defaults keep the 1.4 / 1.6 bar limits', () {
+      const e = O2Exposure(maxPpO2: 1.5);
+      expect(e.warningThreshold, 1.4);
+      expect(e.criticalThreshold, 1.6);
+      expect(e.ppO2Warning, isTrue); // 1.5 > 1.4
+      expect(e.ppO2Critical, isFalse); // 1.5 < 1.6
+    });
+
+    test('a raised working limit clears the warning at the same ppO2', () {
+      const raised = O2Exposure(
+        maxPpO2: 1.5,
+        warningThreshold: 1.6,
+        criticalThreshold: 1.6,
+      );
+      expect(raised.ppO2Warning, isFalse);
+      expect(raised.ppO2Critical, isFalse);
+    });
+
+    test('a lowered limit flags a ppO2 the default would allow', () {
+      const conservative = O2Exposure(
+        maxPpO2: 1.35,
+        warningThreshold: 1.2,
+        criticalThreshold: 1.4,
+      );
+      expect(conservative.ppO2Warning, isTrue); // 1.35 > 1.2
+      expect(conservative.ppO2Critical, isFalse); // 1.35 < 1.4
+    });
+
+    test('thresholds are part of equality and copyWith', () {
+      const a = O2Exposure(maxPpO2: 1.5);
+      const b = O2Exposure(maxPpO2: 1.5, warningThreshold: 1.5);
+      expect(a, isNot(equals(b)));
+      expect(a.copyWith(criticalThreshold: 1.5).criticalThreshold, 1.5);
+    });
+  });
 }

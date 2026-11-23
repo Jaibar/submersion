@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/core/constants/feature_flags.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
-import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
-import 'package:submersion/features/media/presentation/widgets/unavailable_photo_placeholder.dart';
+import 'package:submersion/features/media/presentation/widgets/media_item_view.dart';
+import 'package:submersion/features/trips/domain/entities/trip_media_preview.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_media_providers.dart';
 
 /// Maximum number of thumbnail photos to display in the preview row.
@@ -15,13 +16,25 @@ const int _maxVisibleThumbnails = 5;
 class TripPhotoSection extends ConsumerWidget {
   final String tripId;
   final VoidCallback? onScanPressed;
+  final VoidCallback? onLightroomScanPressed;
 
-  const TripPhotoSection({super.key, required this.tripId, this.onScanPressed});
+  /// Opens the trip's gallery from [context]; null pushes its address, as
+  /// always. A trip page that edits in place hands the gallery its sitting
+  /// this way (issue #4527).
+  final void Function(BuildContext context)? onOpenGallery;
+
+  const TripPhotoSection({
+    super.key,
+    required this.tripId,
+    this.onScanPressed,
+    this.onLightroomScanPressed,
+    this.onOpenGallery,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final mediaCountAsync = ref.watch(mediaCountForTripProvider(tripId));
-    final mediaListAsync = ref.watch(flatMediaListForTripProvider(tripId));
+    final previewAsync = ref.watch(tripMediaPreviewProvider(tripId));
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
@@ -74,16 +87,33 @@ class TripPhotoSection extends ConsumerWidget {
                     tooltip: context.l10n.trips_photos_tooltip_scan,
                     onPressed: onScanPressed,
                   ),
+                // Lightroom scan hidden pending Adobe review
+                // (lightroomUiEnabled).
+                if (lightroomUiEnabled && onLightroomScanPressed != null)
+                  IconButton(
+                    icon: Icon(
+                      Icons.cloud_sync_outlined,
+                      color: colorScheme.primary,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    tooltip: context.l10n.settings_lightroom_scanNow,
+                    onPressed: onLightroomScanPressed,
+                  ),
               ],
             ),
             const SizedBox(height: 16),
             // Content
-            mediaListAsync.when(
-              data: (media) {
-                if (media.isEmpty) {
+            previewAsync.when(
+              data: (preview) {
+                if (preview.mediaCount == 0) {
                   return _EmptyState(onScanPressed: onScanPressed);
                 }
-                return _PhotoRow(tripId: tripId, media: media);
+                return _PhotoRow(
+                  preview: preview,
+                  openGallery:
+                      onOpenGallery ??
+                      (context) => context.push('/trips/$tripId/gallery'),
+                );
               },
               loading: () => const SizedBox(
                 height: 80,
@@ -150,17 +180,16 @@ class _EmptyState extends StatelessWidget {
 
 /// Horizontal scrollable row of photo thumbnails.
 class _PhotoRow extends StatelessWidget {
-  final String tripId;
-  final List<MediaItem> media;
+  final TripMediaPreview preview;
+  final void Function(BuildContext context) openGallery;
 
-  const _PhotoRow({required this.tripId, required this.media});
+  const _PhotoRow({required this.preview, required this.openGallery});
 
   @override
   Widget build(BuildContext context) {
-    final visibleCount = media.length > _maxVisibleThumbnails
-        ? _maxVisibleThumbnails
-        : media.length;
-    final remainingCount = media.length - visibleCount;
+    final media = preview.earliest(_maxVisibleThumbnails);
+    final visibleCount = media.length;
+    final remainingCount = preview.mediaCount - visibleCount;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -179,8 +208,8 @@ class _PhotoRow extends StatelessWidget {
                   itemBuilder: (context, index) {
                     if (index < visibleCount) {
                       return _PhotoThumbnail(
-                        tripId: tripId,
                         item: media[index],
+                        openGallery: openGallery,
                       );
                     }
                     // More indicator
@@ -196,7 +225,7 @@ class _PhotoRow extends StatelessWidget {
         Align(
           alignment: AlignmentDirectional.centerEnd,
           child: TextButton(
-            onPressed: () => context.push('/trips/$tripId/gallery'),
+            onPressed: () => openGallery(context),
             child: Text(context.l10n.trips_photos_viewAll),
           ),
         ),
@@ -206,23 +235,23 @@ class _PhotoRow extends StatelessWidget {
 }
 
 /// Individual photo thumbnail.
-class _PhotoThumbnail extends ConsumerWidget {
-  final String tripId;
+class _PhotoThumbnail extends StatelessWidget {
   final MediaItem item;
+  final void Function(BuildContext context) openGallery;
 
-  const _PhotoThumbnail({required this.tripId, required this.item});
+  const _PhotoThumbnail({required this.item, required this.openGallery});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    final mediaType = item.isVideo ? 'Video' : 'Photo';
+  Widget build(BuildContext context) {
+    final semanticsLabel = item.isVideo
+        ? context.l10n.trips_photos_thumbnail_video
+        : context.l10n.trips_photos_thumbnail_photo;
 
     return Semantics(
       button: true,
-      label: '$mediaType thumbnail. Tap to open gallery',
+      label: semanticsLabel,
       child: GestureDetector(
-        onTap: () => context.push('/trips/$tripId/gallery'),
+        onTap: () => openGallery(context),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: SizedBox(
@@ -231,11 +260,15 @@ class _PhotoThumbnail extends ConsumerWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // Thumbnail
-                if (item.platformAssetId != null)
-                  _buildResolvedThumbnail(ref, colorScheme)
-                else
-                  _buildPlaceholder(colorScheme),
+                // Thumbnail — MediaItemView dispatches to the correct resolver
+                // for the item's sourceType and shows UnavailableMediaPlaceholder
+                // for missing assets.
+                MediaItemView(
+                  item: item,
+                  thumbnail: true,
+                  targetSize: const Size(160, 160),
+                  fit: BoxFit.cover,
+                ),
 
                 // Video icon
                 if (item.isVideo)
@@ -260,47 +293,6 @@ class _PhotoThumbnail extends ConsumerWidget {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildResolvedThumbnail(WidgetRef ref, ColorScheme colorScheme) {
-    final resultAsync = ref.watch(resolvedThumbnailProvider(item));
-
-    return resultAsync.when(
-      data: (result) {
-        if (result.isUnavailable) {
-          return const UnavailablePhotoPlaceholder();
-        }
-        if (result.bytes == null) {
-          return _buildPlaceholder(colorScheme);
-        }
-        return Image.memory(
-          result.bytes!,
-          fit: BoxFit.cover,
-          cacheWidth: 160,
-          cacheHeight: 160,
-          errorBuilder: (context, error, stack) =>
-              _buildPlaceholder(colorScheme),
-        );
-      },
-      loading: () => Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      ),
-      error: (error, stack) => _buildPlaceholder(colorScheme),
-    );
-  }
-
-  Widget _buildPlaceholder(ColorScheme colorScheme) {
-    return Container(
-      color: colorScheme.surfaceContainerHighest,
-      child: Icon(Icons.photo, color: colorScheme.onSurfaceVariant),
     );
   }
 }

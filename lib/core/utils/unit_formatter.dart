@@ -3,12 +3,34 @@ import 'package:intl/intl.dart';
 import 'package:submersion/core/constants/tank_presets.dart';
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/deco/altitude_calculator.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/coordinates/coordinate_formatter.dart'
+    as coords;
+import 'package:submersion/core/utils/number_display.dart';
+import 'package:submersion/core/utils/per_minute.dart' as rate;
+import 'package:submersion/core/utils/unit_formatter_settings.dart';
+import 'package:submersion/core/utils/unit_formatter_whole.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
+export 'package:submersion/core/utils/unit_formatter_whole.dart'
+    show UnitFormatterWhole;
+
+/// The formatter for the diver's settings, for widgets and providers that
+/// show values.
+///
+/// Prefer this to `UnitFormatter(ref.watch(settingsProvider))`, which rebuilds
+/// on every settings edit (issue #3818). This one keeps the same instance
+/// until something the formatter can read changes, so a list row built from
+/// it sits out the edits that have nothing to do with it.
+final unitFormatterProvider = Provider<UnitFormatter>((ref) {
+  ref.watch(settingsProvider.select(unitFormatterSettingsKey));
+  return UnitFormatter(ref.read(settingsProvider));
+});
+
 /// Utility class for formatting values with the correct units based on settings
 class UnitFormatter {
-  final AppSettings settings;
+  final UnitFormatterSettings settings;
 
   const UnitFormatter(this.settings);
 
@@ -20,11 +42,105 @@ class UnitFormatter {
   String formatDepth(double? value, {int decimals = 1}) {
     if (value == null) return '--';
     final converted = DepthUnit.meters.convert(value, settings.depthUnit);
-    return '${converted.toStringAsFixed(decimals)}${settings.depthUnit.symbol}';
+    return '${formatFixedForDisplay(converted, decimals)}${settings.depthUnit.symbol}';
+  }
+
+  /// Format a LIMIT depth (MOD, MND) rounded down in the display unit.
+  ///
+  /// [formatDepth] rounds to nearest, which shows EAN32's 33.75 m MOD as
+  /// 33.8 m, or 34 m at 0 decimals: deeper than the gas may be taken. A limit
+  /// has to err on the safe side, so it is floored after the unit conversion.
+  String formatDepthFloor(double? value, {int decimals = 1}) {
+    if (value == null) return '--';
+    final converted = DepthUnit.meters.convert(value, settings.depthUnit);
+    final floored = floorToFractionDigits(converted, decimals);
+    return '${formatFixedForDisplay(floored, decimals)}${settings.depthUnit.symbol}';
+  }
+
+  /// Format a MINIMUM depth (a hypoxic mix's shallowest depth) rounded UP in
+  /// the display unit, the safe side for a floor rather than a ceiling.
+  String formatDepthCeil(double? value, {int decimals = 1}) {
+    if (value == null) return '--';
+    final converted = DepthUnit.meters.convert(value, settings.depthUnit);
+    final ceiled = -floorToFractionDigits(-converted, decimals);
+    // -0.0 would render as "-0.0".
+    final shown = ceiled == 0 ? 0.0 : ceiled;
+    return '${formatFixedForDisplay(shown, decimals)}${settings.depthUnit.symbol}';
   }
 
   /// Get depth unit symbol
   String get depthSymbol => settings.depthUnit.symbol;
+
+  // ============================================================================
+  // Rates
+  // ============================================================================
+
+  /// The one place a per-minute rate unit is built: "m/min", "psi/min".
+  ///
+  /// The minute part is an untranslated SI-style symbol, like the base
+  /// symbols from the unit enums, so it reads "/min" in every locale. Call
+  /// sites use [depthRateSymbol], [sacSymbol] or [rmvSymbol] rather than
+  /// interpolating "/min" themselves (issue #1932).
+  static String perMinute(String unitSymbol) => rate.perMinute(unitSymbol);
+
+  /// Ascent/descent rate unit: "m/min" or "ft/min".
+  String get depthRateSymbol => perMinute(depthSymbol);
+
+  /// Format a vertical rate given in m/min, in the same style as
+  /// [formatDepth]: "9.0m/min" or "29.5ft/min".
+  String formatDepthRate(double? metersPerMin, {int decimals = 1}) {
+    if (metersPerMin == null) return '--';
+    final converted = DepthUnit.meters.convert(
+      metersPerMin,
+      settings.depthUnit,
+    );
+    return '${formatFixedForDisplay(converted, decimals)}$depthRateSymbol';
+  }
+
+  /// Tide rate unit: "m/hr" or "ft/hr".
+  String get tideRateSymbol => '$depthSymbol/hr';
+
+  /// Format a tide's rate of change given in m/hr, signed so a rising tide
+  /// reads "+0.30m/hr" and a falling one "-0.25m/hr". The sign follows the
+  /// rounded figure, so a rate too small to show reads "0.00m/hr" rather
+  /// than "+0.00" or "-0.00".
+  String formatTideRate(double? metersPerHour, {int decimals = 2}) {
+    if (metersPerHour == null) return '--';
+    final converted = DepthUnit.meters.convert(
+      metersPerHour,
+      settings.depthUnit,
+    );
+    final magnitude = converted.abs().toStringAsFixed(decimals);
+    final shown = double.parse(magnitude);
+    final sign = shown == 0 ? '' : (converted > 0 ? '+' : '-');
+    return '$sign${localiseDecimalText(magnitude)}$tideRateSymbol';
+  }
+
+  // ============================================================================
+  // Coordinates
+  // ============================================================================
+
+  /// Format a coordinate pair in the diver's chosen notation.
+  ///
+  /// Returns the standard '--' placeholder unless both axes are present: half
+  /// a coordinate is not a position.
+  String formatCoordinates(double? latitude, double? longitude) {
+    if (latitude == null || longitude == null) return '--';
+    return coords.formatCoordinates(
+      latitude,
+      longitude,
+      settings.coordinateFormat,
+    );
+  }
+
+  /// Format a single latitude. Grid formats degrade to decimal degrees, since
+  /// one axis of a grid reference means nothing on its own.
+  String formatLatitude(double latitude) =>
+      coords.formatLatitude(latitude, settings.coordinateFormat);
+
+  /// Format a single longitude. See [formatLatitude] on grid formats.
+  String formatLongitude(double longitude) =>
+      coords.formatLongitude(longitude, settings.coordinateFormat);
 
   /// Convert depth from meters to user's preferred unit
   double convertDepth(double meters) {
@@ -36,18 +152,99 @@ class UnitFormatter {
     return settings.depthUnit.convert(value, DepthUnit.meters);
   }
 
+  /// Format a horizontal distance (meters) in the diver's depth unit (m/ft).
+  /// Used for surface drift between GPS entry and exit points.
+  String formatDistance(double meters, {int decimals = 0}) {
+    final converted = DepthUnit.meters.convert(meters, settings.depthUnit);
+    return '${formatFixedForDisplay(converted, decimals)}${settings.depthUnit.symbol}';
+  }
+
+  /// Format a geographic distance (meters) for site lists and pickers.
+  ///
+  /// Unlike [formatDistance] (depth-unit m/ft, for short surface drift), this
+  /// auto-scales across the full range of site distances in the diver's
+  /// distance unit (issue #2030): kilometres -> m under 1 km else km; miles ->
+  /// ft under 1 mile else mi. Unit symbols are latin (m/km/ft/mi),
+  /// consistent with [formatDepth].
+  String formatGeoDistance(double meters) {
+    if (settings.distanceUnit == DistanceUnit.kilometers) {
+      if (meters < 1000) return '${meters.round()} m';
+      final km = meters / 1000;
+      final text = km < 10
+          ? formatFixedForDisplay(km, 1)
+          : km.round().toString();
+      return '$text km';
+    }
+    final miles = DistanceUnit.kilometers.convert(
+      meters / 1000,
+      DistanceUnit.miles,
+    );
+    if (miles < 1) {
+      final feet = DepthUnit.meters.convert(meters, DepthUnit.feet);
+      return '${feet.round()} ft';
+    }
+    final text = miles < 10
+        ? formatFixedForDisplay(miles, 1)
+        : miles.round().toString();
+    return '$text mi';
+  }
+
   // ============================================================================
   // Temperature
   // ============================================================================
 
-  /// Format temperature value with unit symbol
-  String formatTemperature(double? value, {int decimals = 0}) {
+  /// Format temperature value with unit symbol.
+  ///
+  /// Keeps one decimal, then drops it when it is zero: 25.6°C, but 26°C.
+  /// Whole degrees alone lost real precision for divers logging in Celsius
+  /// from an imperial source - 78°F is 25.6°C, which used to render as 26°C
+  /// (#912) - while a trailing ".0" on every reading is just noise.
+  String formatTemperature(double? value, {int decimals = 1}) {
     if (value == null) return '--';
     final converted = TemperatureUnit.celsius.convert(
       value,
       settings.temperatureUnit,
     );
-    return '${converted.toStringAsFixed(decimals)}°${settings.temperatureUnit.symbol}';
+    final text = localiseDecimalText(
+      _trimTrailingZeros(converted.toStringAsFixed(decimals)),
+    );
+    return '$text°${settings.temperatureUnit.symbol}';
+  }
+
+  /// A temperature DIFFERENCE in the diver's unit, from a Celsius delta.
+  ///
+  /// Not [formatTemperature]: a difference scales by 9/5 without the 32-degree
+  /// offset a reading's conversion adds, so 2 C warmer is 3.6 F warmer, never
+  /// 35.6 F. Unsigned; the caller adds the sign it needs.
+  String formatTemperatureDelta(double celsiusDelta, {int decimals = 1}) {
+    final scaled = settings.temperatureUnit == TemperatureUnit.fahrenheit
+        ? celsiusDelta * 9 / 5
+        : celsiusDelta;
+    final text = localiseDecimalText(
+      _trimTrailingZeros(scaled.toStringAsFixed(decimals)),
+    );
+    return '$text°${settings.temperatureUnit.symbol}';
+  }
+
+  /// How many decimals a cylinder's water volume in liters is shown and
+  /// entered at: two below 3 L, where a drysuit's 0.85 L argon bottle must
+  /// not read as 0.8 L (issue #4243), one from 3 L up, where 11.1 L is how a
+  /// cylinder is known.
+  static int tankVolumeLiterDecimals(double liters) => liters < 3 ? 2 : 1;
+
+  /// Strips a fractional part that is all zeros, along with the separator.
+  /// "26.0" -> "26", "25.60" -> "25.6", "26" -> "26".
+  ///
+  /// Matches a literal '.', so it must run on the raw `toStringAsFixed`
+  /// output and hand the result to `localiseDecimalText` afterwards. Run the
+  /// other way round it does nothing under a comma locale, and under a
+  /// grouping locale the '.' it would match is the group separator.
+  static String _trimTrailingZeros(String text) {
+    if (!text.contains('.')) return text;
+    final trimmed = text.replaceFirst(RegExp(r'0+$'), '');
+    return trimmed.endsWith('.')
+        ? trimmed.substring(0, trimmed.length - 1)
+        : trimmed;
   }
 
   /// Get temperature unit symbol
@@ -71,14 +268,14 @@ class UnitFormatter {
   String formatPressure(double? value, {int decimals = 0}) {
     if (value == null) return '--';
     final converted = PressureUnit.bar.convert(value, settings.pressureUnit);
-    return '${converted.toStringAsFixed(decimals)} ${settings.pressureUnit.symbol}';
+    return '${formatFixedForDisplay(converted, decimals)} ${settings.pressureUnit.symbol}';
   }
 
   /// Format pressure value without unit (for ranges like "200 → 50")
   String formatPressureValue(double? value, {int decimals = 0}) {
     if (value == null) return '--';
     final converted = PressureUnit.bar.convert(value, settings.pressureUnit);
-    return converted.toStringAsFixed(decimals);
+    return formatFixedForDisplay(converted, decimals);
   }
 
   /// Get pressure unit symbol
@@ -102,20 +299,54 @@ class UnitFormatter {
   String formatVolume(double? value, {int decimals = 0}) {
     if (value == null) return '--';
     final converted = VolumeUnit.liters.convert(value, settings.volumeUnit);
-    return '${converted.toStringAsFixed(decimals)} ${settings.volumeUnit.symbol}';
+    return '${formatFixedForDisplay(converted, decimals)} ${settings.volumeUnit.symbol}';
   }
 
-  /// Format tank volume - handles gas capacity conversion for imperial units.
+  /// [formatVolume] without the trailing unit symbol, for a table cell whose
+  /// column header already carries it (issue #1876).
+  String formatVolumeValue(double? value, {int decimals = 0}) {
+    if (value == null) return '--';
+    final converted = VolumeUnit.liters.convert(value, settings.volumeUnit);
+    return formatFixedForDisplay(converted, decimals);
+  }
+
+  /// Format a cylinder's size - handles gas capacity conversion for imperial.
   /// Pass [ratedCapacityCuft] (from a preset) for accurate display;
   /// otherwise falls back to ideal-gas calculation from volume and pressure.
+  ///
+  /// Metric shows the cylinder's physical volume in liters with up to one
+  /// decimal and no trailing zero, so a 1.5 L stage stays distinct from the
+  /// 2 L bottle beside it while a 12 L twin still reads as "12 L".
+  ///
+  /// Imperial shows rated gas capacity, rounded to [cuftDecimals]. A tenth of
+  /// a cubic foot is below the accuracy of the ideal-gas fallback, so whole
+  /// numbers are the default there. [cuftDecimals] does not affect metric.
   String formatTankVolume(
     double? volumeLiters,
     double? workingPressureBar, {
     double? ratedCapacityCuft,
-    int decimals = 0,
+    int cuftDecimals = 0,
   }) {
     if (volumeLiters == null) return '--';
+    return '${_formatTankVolumeValue(volumeLiters, workingPressureBar, ratedCapacityCuft: ratedCapacityCuft, cuftDecimals: cuftDecimals)} ${settings.volumeUnit.symbol}';
+  }
 
+  /// [formatTankVolume] without the trailing unit symbol or the leading "~"
+  /// that marks an estimate, for a table cell whose column header already
+  /// carries the unit (issue #1876 follow-up: a saved fill line only ever
+  /// has a bare cylinder size, never a rated capacity or working pressure to
+  /// pair it with).
+  String formatTankVolumeValue(double? volumeLiters) {
+    if (volumeLiters == null) return '--';
+    return _formatTankVolumeValue(volumeLiters, null).replaceFirst('~', '');
+  }
+
+  String _formatTankVolumeValue(
+    double volumeLiters,
+    double? workingPressureBar, {
+    double? ratedCapacityCuft,
+    int cuftDecimals = 0,
+  }) {
     if (settings.volumeUnit == VolumeUnit.cubicFeet) {
       // Try to use manufacturer's rated cuft, either passed directly
       // or by matching volume/pressure against known tank presets
@@ -130,21 +361,25 @@ class UnitFormatter {
         cuft = match?.ratedCapacityCuft;
       }
       if (cuft != null) {
-        return '${cuft.toStringAsFixed(decimals)} ${settings.volumeUnit.symbol}';
+        return formatFixedForDisplay(cuft, cuftDecimals);
       }
       if (workingPressureBar != null && workingPressureBar > 0) {
         // Ideal gas approximation for non-standard tanks
         final calcCuft = (volumeLiters * workingPressureBar) / 28.3168;
-        return '${calcCuft.toStringAsFixed(decimals)} ${settings.volumeUnit.symbol}';
+        return formatFixedForDisplay(calcCuft, cuftDecimals);
       } else {
         // No working pressure - approximate assuming 200 bar
         final calcCuft = (volumeLiters * 200) / 28.3168;
-        return '~${calcCuft.toStringAsFixed(decimals)} ${settings.volumeUnit.symbol}';
+        return '~${formatFixedForDisplay(calcCuft, cuftDecimals)}';
       }
     }
 
-    // For liters, just show physical volume
-    return '${volumeLiters.toStringAsFixed(decimals)} ${settings.volumeUnit.symbol}';
+    // For liters, show the physical volume the cylinder is named by
+    return localiseDecimalText(
+      _trimTrailingZeros(
+        volumeLiters.toStringAsFixed(tankVolumeLiterDecimals(volumeLiters)),
+      ),
+    );
   }
 
   /// Get volume unit symbol
@@ -161,6 +396,49 @@ class UnitFormatter {
   }
 
   // ============================================================================
+  // Gas consumption: SAC (pressure lane) and RMV (volume lane)
+  // ============================================================================
+
+  /// SAC display suffix: "bar/min" or "psi/min".
+  String get sacSymbol => perMinute(pressureSymbol);
+
+  /// RMV display suffix: "L/min" or "cuft/min".
+  String get rmvSymbol => perMinute(volumeSymbol);
+
+  /// Convert a SAC in bar/min (from [Dive.sac]) to the pressure unit.
+  double convertSac(double barPerMin) => convertPressure(barPerMin);
+
+  /// Convert an RMV in L/min (from [Dive.rmvFor]) to the volume unit.
+  double convertRmv(double litersPerMin) => convertVolume(litersPerMin);
+
+  /// Decimals a SAC value is rendered with. psi/min values run in the
+  /// hundreds, so a decimal there is noise. Exposed so a caller that draws
+  /// the bare number (a chart axis) rounds it the same way the labelled
+  /// value does.
+  int get sacDecimals => settings.pressureUnit == PressureUnit.bar ? 1 : 0;
+
+  /// Decimals an RMV value is rendered with. cuft/min values sit below 1, so
+  /// one decimal would render every imperial RMV as 0.5 or 0.6. Exposed for
+  /// the same reason as [sacDecimals].
+  int get rmvDecimals => settings.volumeUnit == VolumeUnit.liters ? 1 : 2;
+
+  /// Decimals a semi-closed loop flow (an SCR injection rate or a VO2) is
+  /// shown and typed with: one place finer than an RMV, since a cuft/min
+  /// step at RMV precision is 0.28 L/min, about 4% of a low-flow nozzle, and
+  /// 1.3 L/min of VO2 would retype as about 1.42 (issue #4660).
+  int get loopFlowDecimals => rmvDecimals + 1;
+
+  /// "1.5 bar/min" or "21 psi/min".
+  String formatSac(double barPerMin) =>
+      '${formatFixedForDisplay(convertSac(barPerMin), sacDecimals)} $sacSymbol';
+
+  /// "16.8 L/min" or "0.59 cuft/min"; [decimals] overrides [rmvDecimals],
+  /// as a loop flow does with [loopFlowDecimals].
+  String formatRmv(double litersPerMin, {int? decimals}) =>
+      '${formatFixedForDisplay(convertRmv(litersPerMin), decimals ?? rmvDecimals)} '
+      '$rmvSymbol';
+
+  // ============================================================================
   // Weight
   // ============================================================================
 
@@ -168,7 +446,7 @@ class UnitFormatter {
   String formatWeight(double? value, {int decimals = 1}) {
     if (value == null) return '--';
     final converted = WeightUnit.kilograms.convert(value, settings.weightUnit);
-    return '${converted.toStringAsFixed(decimals)} ${settings.weightUnit.symbol}';
+    return '${formatFixedForDisplay(converted, decimals)} ${settings.weightUnit.symbol}';
   }
 
   /// Get weight unit symbol
@@ -185,6 +463,57 @@ class UnitFormatter {
   }
 
   // ============================================================================
+  // Height
+  // ============================================================================
+
+  /// Centimeters per inch.
+  static const double _cmPerInch = 2.54;
+
+  /// Whether body height should be shown in metric (cm) rather than imperial
+  /// (feet/inches). There is no dedicated height unit, so this is derived from
+  /// the depth unit, like [formatDistance].
+  bool get heightIsMetric => settings.depthUnit == DepthUnit.meters;
+
+  /// Format a stored height (centimeters) in the diver's preferred units:
+  /// metric renders whole centimeters ("175 cm"); imperial renders feet and
+  /// inches ("5' 9\""), rounding to the nearest whole inch and carrying 12
+  /// inches into the next foot.
+  String formatHeight(double? cm) {
+    if (cm == null) return '--';
+    if (heightIsMetric) return '${cm.round()} cm';
+    final split = cmToFeetInches(cm);
+    return '${split.feet}\' ${split.inches}"';
+  }
+
+  /// Split a stored height (centimeters) into whole feet and inches,
+  /// rounding to the nearest inch and carrying 12 inches into the next foot.
+  ({int feet, int inches}) cmToFeetInches(double cm) {
+    final totalInches = (cm / _cmPerInch).round();
+    return (feet: totalInches ~/ 12, inches: totalInches % 12);
+  }
+
+  /// Build a stored height (centimeters) from imperial feet and inches.
+  double feetInchesToCm(double feet, double inches) =>
+      (feet * 12 + inches) * _cmPerInch;
+
+  // ============================================================================
+  // Short length
+  // ============================================================================
+
+  /// Convert a short length stored in meters (a regulator hose, an SMB) to
+  /// the unit it is sold in: centimeters for a metric diver, inches for an
+  /// imperial one. Keyed off the depth unit, like [heightIsMetric] (#1804).
+  double convertShortLength(double meters) =>
+      heightIsMetric ? meters * 100 : meters * 100 / _cmPerInch;
+
+  /// Convert a short length in the diver's unit back to meters for storage.
+  double shortLengthToMeters(double value) =>
+      heightIsMetric ? value / 100 : value * _cmPerInch / 100;
+
+  /// Symbol for [convertShortLength]'s output.
+  String get shortLengthSymbol => heightIsMetric ? 'cm' : 'in';
+
+  // ============================================================================
   // Altitude
   // ============================================================================
 
@@ -192,9 +521,13 @@ class UnitFormatter {
   String formatAltitude(double? value, {int decimals = 0}) {
     if (value == null) return '--';
     final converted = AltitudeUnit.meters.convert(value, settings.altitudeUnit);
-    final formatted = NumberFormat('#,##0').format(converted.round());
-    return '$formatted ${settings.altitudeUnit.symbol}';
+    return wholeWithSymbol(converted.round(), settings.altitudeUnit.symbol);
   }
+
+  /// An altitude in metres as the number [formatAltitude] shows, without
+  /// its unit: for a range that names its unit once.
+  String formatAltitudeNumber(double meters) =>
+      NumberFormat('#,##0').format(convertAltitude(meters).round());
 
   /// Format altitude with altitude group label
   String formatAltitudeWithGroup(double? value, {int decimals = 0}) {
@@ -208,14 +541,51 @@ class UnitFormatter {
   /// Format barometric pressure
   String formatBarometricPressure(double? bar, {int decimals = 3}) {
     if (bar == null) return '--';
-    return '${bar.toStringAsFixed(decimals)} bar';
+    return '${formatFixedForDisplay(bar, decimals)} bar';
   }
 
   /// Format barometric pressure in millibar
   String formatBarometricPressureMbar(double? bar, {int decimals = 0}) {
     if (bar == null) return '--';
     final mbar = bar * 1000;
-    return '${mbar.toStringAsFixed(decimals)} mbar';
+    return '${formatFixedForDisplay(mbar, decimals)} mbar';
+  }
+
+  /// Inches of mercury per bar.
+  static const double _inHgPerBar = 29.5300;
+
+  /// Barometric pressure symbol.
+  ///
+  /// Metric divers expect mbar, imperial divers expect inHg. Derived from the
+  /// depth unit, consistent with wind speed -- the tank pressure unit
+  /// (bar/psi) measures a different quantity and must not drive this.
+  String get surfacePressureSymbol =>
+      settings.depthUnit == DepthUnit.meters ? 'mbar' : 'inHg';
+
+  /// How many decimals a surface pressure carries in the diver's barometric
+  /// unit: mbar are whole, inHg carry two. An input uses this so it shows the
+  /// number [formatSurfacePressure] shows.
+  int get surfacePressureDecimals =>
+      settings.depthUnit == DepthUnit.meters ? 0 : 2;
+
+  /// A stored surface pressure (bar) in the diver's barometric unit: mbar
+  /// for a metric diver, inHg for an imperial one.
+  double convertSurfacePressure(double bar) =>
+      settings.depthUnit == DepthUnit.meters ? bar * 1000 : bar * _inHgPerBar;
+
+  /// The diver's barometric unit back to bar.
+  double surfacePressureToBar(double value) =>
+      settings.depthUnit == DepthUnit.meters
+      ? value / 1000
+      : value / _inHgPerBar;
+
+  /// Format a surface (barometric) pressure stored in bar.
+  String formatSurfacePressure(double? bar) {
+    if (bar == null) return '--';
+    if (settings.depthUnit == DepthUnit.meters) {
+      return '${formatFixedForDisplay(bar * 1000, 0)} $surfacePressureSymbol';
+    }
+    return '${formatFixedForDisplay(bar * _inHgPerBar, 2)} $surfacePressureSymbol';
   }
 
   /// Get altitude unit symbol
@@ -243,7 +613,7 @@ class UnitFormatter {
   String formatWindSpeed(double? metersPerSecond, {int decimals = 0}) {
     if (metersPerSecond == null) return '--';
     final converted = convertWindSpeed(metersPerSecond);
-    return '${converted.toStringAsFixed(decimals)} $windSpeedSymbol';
+    return '${formatFixedForDisplay(converted, decimals)} $windSpeedSymbol';
   }
 
   /// Convert wind speed from m/s to the user's preferred display unit.
@@ -260,7 +630,42 @@ class UnitFormatter {
   }
 
   /// Wind speed unit symbol.
-  String get windSpeedSymbol => _isMetricWind ? 'km/h' : 'kts';
+  String get windSpeedSymbol => speedSymbol;
+
+  /// Speed unit symbol: km/h in metric, knots in imperial.
+  String get speedSymbol => _isMetricWind ? 'km/h' : 'kts';
+
+  /// Format a speed from m/s in the diver's preferred unit.
+  ///
+  /// Shares [convertWindSpeed]'s conversion rather than adding a second one:
+  /// two speed formatters that disagreed on units would be a bug. The
+  /// imperial branch yields knots, which is also the marine convention for
+  /// boat speed on a GPS surface track.
+  String formatSpeed(double metersPerSecond, {int decimals = 1}) {
+    final converted = convertWindSpeed(metersPerSecond);
+    return '${formatFixedForDisplay(converted, decimals)} $speedSymbol';
+  }
+
+  /// Format an underwater track's (DPV) speed from m/s in the diver's
+  /// preferred unit: m/min in metric, ft/min in imperial -- the
+  /// diving/scooter convention (a dive computer's ascent/descent rate uses
+  /// the same per-minute pacing), not [formatSpeed]'s km/h-or-knots marine
+  /// convention for a GPS surface track's boat speed. Reuses [DepthUnit]'s
+  /// own meters<->feet conversion rather than adding a third one.
+  String formatTrackSpeed(double metersPerSecond, {int decimals = 1}) {
+    final converted = convertTrackSpeed(metersPerSecond);
+    return '${formatFixedForDisplay(converted, decimals)} $trackSpeedSymbol';
+  }
+
+  /// [formatTrackSpeed]'s unit conversion without the string formatting,
+  /// for callers (the track 3D Z axis) that need the numeric value.
+  double convertTrackSpeed(double metersPerSecond) =>
+      convertDepth(metersPerSecond * 60);
+
+  /// [formatTrackSpeed]'s unit symbol on its own: the same per-minute depth
+  /// unit as an ascent rate, so it comes from [depthRateSymbol] rather than
+  /// a second hand-built "/min".
+  String get trackSpeedSymbol => depthRateSymbol;
 
   // ============================================================================
   // Date/Time Formatting
@@ -271,6 +676,23 @@ class UnitFormatter {
   String formatTime(DateTime? dateTime) {
     if (dateTime == null) return '--';
     return DateFormat(settings.timeFormat.pattern).format(dateTime);
+  }
+
+  /// A time of day given as minutes after midnight (a dive center's fill
+  /// hours), in the diver's 12 or 24 hour format.
+  String formatMinutesOfDay(int minutes) =>
+      formatTime(DateTime(2000, 1, 1, minutes ~/ 60, minutes % 60));
+
+  /// Format time to the second, still honouring the 12h/24h preference.
+  /// Example: "2:30:07 PM" or "14:30:07"
+  ///
+  /// Derived from the preference pattern rather than hardcoded so a diver on
+  /// 12-hour time does not get a 24-hour clock wherever seconds matter -
+  /// inspecting an individual GPS fix, for instance.
+  String formatTimeWithSeconds(DateTime? dateTime) {
+    if (dateTime == null) return '--';
+    final pattern = settings.timeFormat.pattern.replaceFirst('mm', 'mm:ss');
+    return DateFormat(pattern).format(dateTime);
   }
 
   /// Format date according to user preference
@@ -296,17 +718,114 @@ class UnitFormatter {
     return '${formatDate(dateTime)} • ${formatTime(dateTime)}';
   }
 
+  /// `DateFormat` pattern for a bare month and day in [dateFormat]'s order.
+  ///
+  /// Static so widgets that thread the bare [DateFormatPreference] down (the
+  /// tide widgets carry it alongside [TimeFormat], with no [AppSettings] to
+  /// hand) share this one definition of the order.
+  static String monthDayPattern(DateFormatPreference dateFormat) =>
+      dateFormat.isDayFirst ? 'd MMM' : 'MMM d';
+
+  /// `DateFormat` pattern for a weekday followed by month and day.
+  /// The weekday leads in both orders: "Mon, Jan 15" or "Mon, 15 Jan".
+  static String weekdayMonthDayPattern(DateFormatPreference dateFormat) =>
+      'EEE, ${monthDayPattern(dateFormat)}';
+
+  /// Narrow all-numeric month and day, in [dateFormat]'s order and with its
+  /// own separator: 'M/d', 'd/M', 'M-d' or 'd.M'.
+  ///
+  /// For the cramped surfaces that cannot afford a spelled month, above all a
+  /// chart axis, where a wide label is what crowds the ticks. Derived from the
+  /// pattern rather than from [DateFormatPreference.isDayFirst], which is also
+  /// true for the ISO preference: reading that flag alone hands an ISO diver a
+  /// day-first '8/10' and drops the dotted preference's dots.
+  static String numericMonthDayPattern(DateFormatPreference dateFormat) =>
+      dateFormat.pattern
+          // The year and the separator that binds it to its neighbour.
+          .replaceFirst(RegExp(r'y+[^A-Za-z]+'), '')
+          .replaceFirst(RegExp(r'[^A-Za-z]+y+$'), '')
+          // Narrowest numeric form of whichever tokens are left.
+          .replaceFirst(RegExp(r'M+'), 'M')
+          .replaceFirst(RegExp(r'd+'), 'd')
+          // A space or comma is what the spelled-out preferences separate
+          // with, and neither reads as a date once the month is a digit.
+          .replaceFirst(RegExp(r'[,\s]+'), '/');
+
+  /// `DateFormat` pattern for a bare month and year in [dateFormat]'s shape.
+  ///
+  /// Derived by dropping the day token and the separator that binds it to its
+  /// neighbour, so every preference keeps its own punctuation and ordering:
+  /// 'MM/dd/yyyy' and 'dd/MM/yyyy' both collapse to 'MM/yyyy', 'yyyy-MM-dd' to
+  /// 'yyyy-MM', and the spelled-out forms to 'MMM yyyy'.
+  static String monthYearPattern(DateFormatPreference dateFormat) => dateFormat
+      .pattern
+      // A day followed by its separator: 'dd/', 'd ', 'd, '.
+      .replaceFirst(RegExp(r'd+[^A-Za-z]+'), '')
+      // Or a trailing day preceded by its separator: '-dd'.
+      .replaceFirst(RegExp(r'[^A-Za-z]+d+$'), '');
+
+  /// Format month and year only, in the diver's date shape.
+  /// Example: "Mar 2026", "03/2026" or "2026-03"
+  String formatMonthYear(DateTime? dateTime) {
+    if (dateTime == null) return '--';
+    return DateFormat(monthYearPattern(settings.dateFormat)).format(dateTime);
+  }
+
+  /// Format the month alone, in the form the diver's date preference uses:
+  /// "03" for the numeric preferences, "Mar" for the spelled-out ones.
+  String formatMonthOnly(DateTime? dateTime) {
+    if (dateTime == null) return '--';
+    final pattern = monthOnlyPattern(monthYearPattern(settings.dateFormat));
+    return DateFormat(pattern).format(dateTime);
+  }
+
+  /// The month token of [monthYearPattern], or 'MMM' if it has none.
+  static String monthOnlyPattern(String monthYearPattern) =>
+      RegExp(r'M+').firstMatch(monthYearPattern)?.group(0) ?? 'MMM';
+
   /// Format month and day only (respects day-first vs month-first preference)
   /// Example: "Jan 15" or "15 Jan"
   String formatMonthDay(DateTime? dateTime) {
     if (dateTime == null) return '--';
-    final pattern = settings.dateFormat.isDayFirst ? 'd MMM' : 'MMM d';
+    return DateFormat(monthDayPattern(settings.dateFormat)).format(dateTime);
+  }
+
+  /// Format weekday with month and day (respects day-first vs month-first)
+  /// Example: "Mon, Jan 15" or "Mon, 15 Jan"
+  String formatWeekdayMonthDay(DateTime? dateTime) {
+    if (dateTime == null) return '--';
+    return DateFormat(
+      weekdayMonthDayPattern(settings.dateFormat),
+    ).format(dateTime);
+  }
+
+  /// Format month and day, adding the year when [dateTime] falls outside the
+  /// year of [relativeTo] (defaults to now). Honors the day-first preference.
+  ///
+  /// Set [shortYear] for the two-digit form the densest list rows use.
+  /// Example: "Jan 15", "15 Jan 2024", "15 Jan '24".
+  String formatMonthDayWithYear(
+    DateTime? dateTime, {
+    bool shortYear = false,
+    DateTime? relativeTo,
+  }) {
+    if (dateTime == null) return '--';
+    final reference = relativeTo ?? DateTime.now();
+    if (dateTime.year == reference.year) return formatMonthDay(dateTime);
+
+    final dayFirst = settings.dateFormat.isDayFirst;
+    final pattern = shortYear
+        ? (dayFirst ? "d MMM ''yy" : "MMM d ''yy")
+        // Month-first spelling takes a comma before the year; day-first does
+        // not ("Mar 15, 2024" vs "15 Mar 2024").
+        : (dayFirst ? 'd MMM yyyy' : 'MMM d, yyyy');
     return DateFormat(pattern).format(dateTime);
   }
 
   /// Format date range for display
   /// Example: "Jan 15 - Jan 20, 2024"
-  /// Pass [l10n] to localize the "Until"/"From" connector words.
+  /// Pass [l10n] to localize an open end ("From Jan 15", "Jan 15から"); the
+  /// language decides where the date sits in it (#4833).
   String formatDateRange(
     DateTime? start,
     DateTime? end, {
@@ -314,12 +833,12 @@ class UnitFormatter {
   }) {
     if (start == null && end == null) return '--';
     if (start == null) {
-      final connector = l10n?.formatter_connector_until ?? 'Until';
-      return '$connector ${formatDate(end)}';
+      final date = formatDate(end);
+      return l10n?.formatter_dateRange_until(date) ?? 'Until $date';
     }
     if (end == null) {
-      final connector = l10n?.formatter_connector_from ?? 'From';
-      return '$connector ${formatDate(start)}';
+      final date = formatDate(start);
+      return l10n?.formatter_dateRange_from(date) ?? 'From $date';
     }
 
     // Same year - abbreviate start date

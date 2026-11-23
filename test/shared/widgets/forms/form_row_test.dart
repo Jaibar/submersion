@@ -1,0 +1,704 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/widgets/forms/form_row.dart';
+import 'package:submersion/shared/widgets/forms/form_style.dart';
+
+// Localized, as the app is: a rating row names its stars for a screen reader.
+Widget _wrap(Widget child) => MaterialApp(
+  locale: const Locale('en'),
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  supportedLocales: AppLocalizations.supportedLocales,
+  home: Scaffold(body: Material(child: child)),
+);
+
+/// Same host, but shrink-wrapped so the row reports its own height rather
+/// than filling the body.
+Widget _wrapIntrinsic(Widget child) => MaterialApp(
+  locale: const Locale('en'),
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  supportedLocales: AppLocalizations.supportedLocales,
+  home: Scaffold(
+    body: Material(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [child]),
+    ),
+  ),
+);
+
+void main() {
+  group('FormRow.text inputValidator (#1900)', () {
+    String? notANumber(String? v) =>
+        (v ?? '').contains('x') ? 'bad number' : null;
+
+    testWidgets('a valid row rests like any other row', (tester) async {
+      final controller = TextEditingController(text: '18');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Depth',
+            controller: controller,
+            inputValidator: notANumber,
+          ),
+        ),
+      );
+      expect(find.byType(TextFormField), findsNothing);
+      expect(find.text('18'), findsOneWidget);
+    });
+
+    testWidgets('invalid text shows the error while typing and stays open '
+        'after focus leaves', (tester) async {
+      final controller = TextEditingController(text: '18');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Depth',
+            controller: controller,
+            inputValidator: notANumber,
+          ),
+        ),
+      );
+      await tester.tap(find.text('18'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '1x');
+      await tester.pump();
+      expect(find.text('bad number'), findsOneWidget);
+
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(find.byType(TextFormField), findsOneWidget);
+      expect(find.text('bad number'), findsOneWidget);
+    });
+
+    testWidgets('keeps focus when the text turns invalid and the parent '
+        'rebuilds mid-typing', (tester) async {
+      final controller = TextEditingController(text: '18');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          StatefulBuilder(
+            builder: (context, setState) => FormRow.text(
+              label: 'Depth',
+              controller: controller,
+              inputValidator: notANumber,
+              // Parents such as the dive edit page setState on every edit.
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('18'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '1x');
+      await tester.pumpAndSettle();
+      final field = tester.widget<EditableText>(find.byType(EditableText));
+      expect(field.focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('an invalid row returns to rest once fixed and left', (
+      tester,
+    ) async {
+      final controller = TextEditingController(text: '1x');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Depth',
+            controller: controller,
+            inputValidator: notANumber,
+          ),
+        ),
+      );
+      await tester.tap(find.byType(TextFormField));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '12');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(find.byType(TextFormField), findsNothing);
+      expect(find.text('12'), findsOneWidget);
+    });
+
+    testWidgets('fixing a row that is open only because it failed keeps the '
+        'field while the parent rebuilds', (tester) async {
+      final controller = TextEditingController(text: '1x');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          StatefulBuilder(
+            builder: (context, setState) => FormRow.text(
+              label: 'Depth',
+              controller: controller,
+              inputValidator: notANumber,
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
+        ),
+      );
+      // Open because it fails, not because the diver tapped the resting row.
+      await tester.tap(find.byType(TextFormField));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '12');
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byType(TextFormField),
+        findsOneWidget,
+        reason: 'the field must not unmount under the cursor mid-typing',
+      );
+      final field = tester.widget<EditableText>(find.byType(EditableText));
+      expect(field.focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('an open invalid row fails Form.validate', (tester) async {
+      final formKey = GlobalKey<FormState>();
+      final controller = TextEditingController(text: '1x');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          Form(
+            key: formKey,
+            child: FormRow.text(
+              label: 'Depth',
+              controller: controller,
+              inputValidator: notANumber,
+            ),
+          ),
+        ),
+      );
+      expect(find.byType(TextFormField), findsOneWidget);
+      expect(formKey.currentState!.validate(), isFalse);
+    });
+  });
+
+  group('FormRow.text', () {
+    testWidgets('resting shows label and value; tap enters inline edit', (
+      tester,
+    ) async {
+      final controller = TextEditingController(text: 'Blue Hole');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(FormRow.text(label: 'Name', controller: controller)),
+      );
+      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Blue Hole'), findsOneWidget);
+      expect(find.byType(TextFormField), findsNothing);
+
+      await tester.tap(find.text('Blue Hole'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextFormField), findsOneWidget);
+
+      await tester.enterText(find.byType(TextFormField), 'Great Blue Hole');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(controller.text, 'Great Blue Hole');
+      expect(find.byType(TextFormField), findsNothing);
+      expect(find.text('Great Blue Hole'), findsOneWidget);
+    });
+
+    testWidgets('empty value shows placeholder', (tester) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Name',
+            controller: controller,
+            placeholder: 'Add name',
+          ),
+        ),
+      );
+      expect(find.text('Add name'), findsOneWidget);
+    });
+
+    testWidgets('alwaysEditing renders persistent field', (tester) async {
+      final controller = TextEditingController(text: 'x');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Name',
+            controller: controller,
+            alwaysEditing: true,
+          ),
+        ),
+      );
+      expect(find.byType(TextFormField), findsOneWidget);
+    });
+  });
+
+  group('FormRow.text calculate affordance', () {
+    testWidgets('shows calculate icon when suggestion differs; tap fires onUse '
+        'without entering edit mode', (tester) async {
+      final controller = TextEditingController(text: '0.0');
+      addTearDown(controller.dispose);
+      var used = 0;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Avg depth',
+            controller: controller,
+            suffixText: 'm',
+            profileSuggestion: ProfileSuggestion(
+              value: '18.5',
+              tooltip: 'Calculate from dive profile',
+              onUse: () => used++,
+            ),
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.calculate_outlined), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.calculate_outlined));
+      await tester.pump();
+      expect(used, 1);
+      expect(find.byType(TextFormField), findsNothing);
+    });
+
+    testWidgets('hides calculate icon when value already matches suggestion', (
+      tester,
+    ) async {
+      final controller = TextEditingController(text: '18.5');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Avg depth',
+            controller: controller,
+            profileSuggestion: ProfileSuggestion(
+              value: '18.5',
+              tooltip: 'Calculate from dive profile',
+              onUse: () {},
+            ),
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.calculate_outlined), findsNothing);
+    });
+
+    testWidgets('no calculate icon without a suggestion', (tester) async {
+      final controller = TextEditingController(text: '0.0');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(FormRow.text(label: 'Avg depth', controller: controller)),
+      );
+      expect(find.byIcon(Icons.calculate_outlined), findsNothing);
+    });
+  });
+
+  group('FormRow.picker', () {
+    testWidgets('shows value, chevron, and fires onTap', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.picker(
+            label: 'Site',
+            value: 'Blue Hole',
+            onTap: () => taps++,
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.chevron_right), findsOneWidget);
+      await tester.tap(find.text('Blue Hole'));
+      expect(taps, 1);
+    });
+
+    testWidgets('null value shows placeholder', (tester) async {
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.picker(
+            label: 'Site',
+            value: null,
+            placeholder: 'Add site',
+            onTap: () {},
+          ),
+        ),
+      );
+      expect(find.text('Add site'), findsOneWidget);
+    });
+  });
+
+  group('other variants', () {
+    testWidgets('display row is not tappable', (tester) async {
+      await tester.pumpWidget(
+        _wrap(const FormRow.display(label: 'Surface interval', value: '1:42')),
+      );
+      expect(find.text('1:42'), findsOneWidget);
+      expect(find.byType(InkWell), findsNothing);
+    });
+
+    // A screen reader, and the web smoke test, find a switch by its name:
+    // the row's label is the switch's, as a SwitchListTile's is.
+    testWidgets('toggle row names its switch', (tester) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.toggle(
+            label: 'Planned dive',
+            helpText: 'No dive number until it is logged.',
+            value: false,
+            onChanged: (_) {},
+          ),
+        ),
+      );
+      expect(
+        tester.getSemantics(find.byType(Switch)),
+        matchesSemantics(
+          label: 'Planned dive\nNo dive number until it is logged.',
+          hasToggledState: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          isFocusable: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+        ),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('toggle row flips switch', (tester) async {
+      var on = false;
+      await tester.pumpWidget(
+        _wrap(
+          StatefulBuilder(
+            builder: (context, setState) => FormRow.toggle(
+              label: 'Shared',
+              value: on,
+              onChanged: (v) => setState(() => on = v),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      expect(on, isTrue);
+    });
+
+    testWidgets('rating row reports tapped star', (tester) async {
+      int? rated;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.rating(
+            label: 'Rating',
+            value: 2,
+            onChanged: (v) => rated = v,
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.star), findsNWidgets(2));
+      expect(find.byIcon(Icons.star_border), findsNWidgets(3));
+      await tester.tap(find.byIcon(Icons.star_border).last);
+      expect(rated, 5);
+    });
+
+    testWidgets('custom row hosts arbitrary child', (tester) async {
+      await tester.pumpWidget(
+        _wrap(const FormRow.custom(label: 'Mode', child: Text('SEGMENTED'))),
+      );
+      expect(find.text('Mode'), findsOneWidget);
+      expect(find.text('SEGMENTED'), findsOneWidget);
+    });
+
+    testWidgets('picker clear affordance fires onClear', (tester) async {
+      var cleared = 0;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.picker(
+            label: 'Site',
+            value: 'Blue Hole',
+            onTap: () {},
+            onClear: () => cleared++,
+          ),
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.clear));
+      expect(cleared, 1);
+    });
+  });
+
+  group('validation hardening', () {
+    testWidgets('row with validator renders persistent field and validates', (
+      tester,
+    ) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      final formKey = GlobalKey<FormState>();
+      await tester.pumpWidget(
+        _wrap(
+          Form(
+            key: formKey,
+            child: FormRow.text(
+              label: 'Name',
+              controller: controller,
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+            ),
+          ),
+        ),
+      );
+      expect(find.byType(TextFormField), findsOneWidget);
+      expect(formKey.currentState!.validate(), isFalse);
+      await tester.pumpAndSettle();
+      expect(find.text('Required'), findsOneWidget);
+    });
+
+    testWidgets('decoration override is honored', (tester) async {
+      final controller = TextEditingController(text: 'x');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Country',
+            controller: controller,
+            alwaysEditing: true,
+            decoration: const InputDecoration(
+              labelText: 'Country',
+              helperText: 'From Site A (1/2)',
+            ),
+          ),
+        ),
+      );
+      expect(find.text('From Site A (1/2)'), findsOneWidget);
+    });
+  });
+
+  group('v2 row-shaped editing', () {
+    testWidgets('text row keeps its label visible while editing', (
+      tester,
+    ) async {
+      final controller = TextEditingController(text: '42');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(FormRow.text(label: 'Max depth', controller: controller)),
+      );
+      await tester.tap(find.text('42'));
+      await tester.pumpAndSettle();
+      // Editing: label still rendered as row text, field is bare (no box).
+      expect(find.text('Max depth'), findsOneWidget);
+      expect(find.byType(TextFormField), findsOneWidget);
+      final input = tester.widget<TextField>(find.byType(TextField));
+      expect(input.decoration!.border, InputBorder.none);
+      expect(input.decoration!.filled, isFalse);
+    });
+
+    testWidgets('validator row stays mounted with label and bare field', (
+      tester,
+    ) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      final formKey = GlobalKey<FormState>();
+      await tester.pumpWidget(
+        _wrap(
+          Form(
+            key: formKey,
+            child: FormRow.text(
+              label: 'Name',
+              controller: controller,
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+            ),
+          ),
+        ),
+      );
+      expect(find.byType(TextFormField), findsOneWidget);
+      expect(find.text('Name'), findsOneWidget);
+      final input = tester.widget<TextField>(find.byType(TextField));
+      expect(input.decoration!.border, InputBorder.none);
+      formKey.currentState!.validate();
+      await tester.pump();
+      expect(find.text('Required'), findsOneWidget);
+    });
+
+    testWidgets('rating row shows clear affordance and clears', (tester) async {
+      var value = 3;
+      await tester.pumpWidget(
+        _wrap(
+          StatefulBuilder(
+            builder: (context, setState) => FormRow.rating(
+              label: 'Rating',
+              value: value,
+              onChanged: (v) => setState(() => value = v),
+              onClear: () => setState(() => value = 0),
+            ),
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.clear), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.clear));
+      await tester.pumpAndSettle();
+      expect(value, 0);
+      expect(find.byIcon(Icons.clear), findsNothing);
+    });
+
+    testWidgets('rating row clears through onChanged without an onClear', (
+      tester,
+    ) async {
+      var value = 3;
+      await tester.pumpWidget(
+        _wrap(
+          StatefulBuilder(
+            builder: (context, setState) => FormRow.rating(
+              label: 'Rating',
+              value: value,
+              onChanged: (v) => setState(() => value = v),
+            ),
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.clear), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.clear));
+      await tester.pumpAndSettle();
+      expect(value, 0);
+      expect(find.byIcon(Icons.clear), findsNothing);
+      expect(find.byIcon(Icons.star), findsNothing);
+      expect(find.byIcon(Icons.star_border), findsNWidgets(5));
+    });
+
+    testWidgets('rating row hides the clear affordance at zero', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _wrap(FormRow.rating(label: 'Rating', value: 0, onChanged: (_) {})),
+      );
+      expect(find.byIcon(Icons.clear), findsNothing);
+    });
+
+    testWidgets('tapping the star that holds the current rating clears it', (
+      tester,
+    ) async {
+      int? rated;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.rating(
+            label: 'Rating',
+            value: 3,
+            onChanged: (v) => rated = v,
+          ),
+        ),
+      );
+      // The third star is the last filled one, so it carries the current value.
+      await tester.tap(find.byIcon(Icons.star).at(2));
+      expect(rated, 0);
+    });
+
+    testWidgets('tapping below the current rating lowers it instead of '
+        'clearing', (tester) async {
+      int? rated;
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.rating(
+            label: 'Rating',
+            value: 3,
+            onChanged: (v) => rated = v,
+          ),
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.star).first);
+      expect(rated, 1);
+    });
+
+    testWidgets('re-tapping the current rating routes through onClear', (
+      tester,
+    ) async {
+      // A caller that passes onClear has bookkeeping of its own to do, so the
+      // gesture it did not anticipate must not bypass it.
+      var cleared = 0;
+      final reported = <int>[];
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.rating(
+            label: 'Rating',
+            value: 3,
+            onChanged: reported.add,
+            onClear: () => cleared++,
+          ),
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.star).at(2));
+      expect(cleared, 1);
+      expect(reported, isEmpty);
+    });
+
+    testWidgets('clear affordance is as tappable as the row band allows', (
+      tester,
+    ) async {
+      // The X is a 16px glyph, so its tap target has to be stated rather than
+      // inherited from the icon. 26 is the star buttons' own height: filling
+      // that band costs the row nothing, while Material's 48 would push every
+      // row carrying a clear icon from 48 to 66.
+      await tester.pumpWidget(
+        _wrapIntrinsic(
+          FormRow.rating(label: 'Rating', value: 3, onChanged: (_) {}),
+        ),
+      );
+      final target = tester.getSize(
+        find
+            .ancestor(
+              of: find.byIcon(Icons.clear),
+              matching: find.byType(InkWell),
+            )
+            .first,
+      );
+      expect(target.width, FormStyle.clearTapTarget);
+      expect(target.height, FormStyle.clearTapTarget);
+      expect(
+        tester.getSize(find.byType(FormRow)).height,
+        48,
+        reason: 'a bigger target must not make the row taller',
+      );
+    });
+
+    testWidgets('clear affordance carries the caller tooltip', (tester) async {
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.rating(
+            label: 'Rating',
+            value: 2,
+            onChanged: (_) {},
+            clearTooltip: 'Clear rating',
+          ),
+        ),
+      );
+      expect(
+        find.byTooltip('Clear rating'),
+        findsOneWidget,
+        reason:
+            'the X is a bare icon, so it needs a name for pointer and '
+            'screen-reader users alike',
+      );
+    });
+  });
+
+  group('FormRow.text textCapitalization', () {
+    TextCapitalization capitalizationOf(WidgetTester tester) =>
+        tester.widget<TextField>(find.byType(TextField)).textCapitalization;
+
+    testWidgets('defaults to none', (tester) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Notes',
+            controller: controller,
+            alwaysEditing: true,
+          ),
+        ),
+      );
+      expect(capitalizationOf(tester), TextCapitalization.none);
+    });
+
+    testWidgets('passes the requested mode to the field', (tester) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          FormRow.text(
+            label: 'Captain',
+            controller: controller,
+            alwaysEditing: true,
+            textCapitalization: TextCapitalization.words,
+          ),
+        ),
+      );
+      expect(capitalizationOf(tester), TextCapitalization.words);
+    });
+  });
+}

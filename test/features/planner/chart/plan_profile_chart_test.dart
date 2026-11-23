@@ -1,0 +1,517 @@
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/domain/entities/mission/scooter_spec.dart';
+import 'package:submersion/features/planner/domain/services/mission/mission_edits.dart';
+import 'package:submersion/features/planner/domain/services/segment_chain.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_chart_edit_controller.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_chart_geometry.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_chart_series_painter.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_profile_chart.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_waypoint_menu.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_results_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../../helpers/planner_results.dart';
+import '../../../helpers/test_app.dart';
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier() : super(const AppSettings());
+
+  @override
+  Future<void> setMapStyle(MapStyle style) async =>
+      state = state.copyWith(mapStyle: style);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// The bottom leg of a plan, found the way the app finds it now: the deepest
+/// level leg of the resolved chain, rather than a segment carrying a declared
+/// bottom type.
+PlanSegment _bottomSegment(List<PlanSegment> segments) {
+  const chain = SegmentChain();
+  final legs = chain.resolve(segments);
+  return legs[chain.bottomLegIndex(legs)!].segment;
+}
+
+void main() {
+  Widget harness() => testApp(
+    overrides: [
+      ...plannerResultsInline(),
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+    ],
+    child: const SizedBox(width: 500, height: 400, child: PlanProfileChart()),
+  );
+
+  PlanChartSeriesPainter seriesPainter(WidgetTester tester) =>
+      tester
+              .widget<CustomPaint>(find.byKey(const Key('planChartSeries')))
+              .painter
+          as PlanChartSeriesPainter;
+
+  testWidgets('renders the empty state with a quick-plan action', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('planChartSeries')), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome), findsOneWidget);
+  });
+
+  testWidgets('empty-state action opens the quick-plan dialog', (tester) async {
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.auto_awesome));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+  });
+
+  testWidgets('renders all three paint layers once a plan exists', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('planChartBackdrop')), findsOneWidget);
+    expect(find.byKey(const Key('planChartSeries')), findsOneWidget);
+    expect(find.byKey(const Key('planChartOverlay')), findsOneWidget);
+  });
+
+  testWidgets('gas switch reaches the painter and scrub shows the readout', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 45, bottomTimeMinutes: 25);
+    notifier.addTank(
+      const DiveTank(
+        id: 'o2',
+        volume: 11.1,
+        startPressure: 207,
+        gasMix: GasMix(o2: 100),
+        role: TankRole.deco,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(seriesPainter(tester).series.gasSwitches, isNotEmpty);
+
+    container.read(scrubTimeProvider.notifier).state = 300;
+    await tester.pumpAndSettle();
+    expect(find.textContaining('RT'), findsOneWidget);
+  });
+
+  testWidgets('dragging on the chart scrubs; releasing clears', (tester) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+
+    // Start the pan in empty chart space (upper-left quadrant, away from
+    // any waypoint handle) so it scrubs rather than dragging a vertex.
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final gesture = await tester.startGesture(
+      rect.topLeft + const Offset(120, 40),
+    );
+    await gesture.moveBy(const Offset(40, 0));
+    await tester.pump();
+    expect(container.read(scrubTimeProvider), isNotNull);
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(container.read(scrubTimeProvider), isNull);
+  });
+
+  testWidgets('tapping selects the segment under the pointer', (tester) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+
+    // Tap at a time that lands squarely inside the bottom segment.
+    final series = container.read(planCanvasSeriesProvider);
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final geometry = PlanChartGeometry(
+      size: rect.size,
+      maxTimeSeconds: series.maxTimeSeconds,
+      maxDepthMeters: series.maxDepth,
+      depthUnitScale: 1,
+    );
+    final bottom = _bottomSegment(
+      container.read(divePlanNotifierProvider).segments,
+    );
+    final midTime = 100 + bottom.durationSeconds / 2;
+    await tester.tapAt(rect.topLeft + Offset(geometry.xFor(midTime), 200));
+    // onDoubleTapDown is registered, so a single tap resolves only after the
+    // double-tap timeout elapses.
+    await tester.pumpAndSettle();
+    expect(container.read(selectedSegmentIdProvider), bottom.id);
+  });
+
+  testWidgets(
+    'hovering within reach of a waypoint locks the scrub onto it (#3775)',
+    (tester) async {
+      await tester.pumpWidget(harness());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlanProfileChart)),
+      );
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+      await tester.pumpAndSettle();
+
+      final series = container.read(planCanvasSeriesProvider);
+      final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+      final geometry = PlanChartGeometry(
+        size: rect.size,
+        maxTimeSeconds: series.maxTimeSeconds,
+        maxDepthMeters: series.maxDepth,
+        depthUnitScale: 1,
+      );
+      // The end of the descent.
+      final waypoint = planVertices(
+        container.read(divePlanNotifierProvider).segments,
+      ).firstWhere((v) => v.draggable);
+      final handle =
+          rect.topLeft + geometry.toPixel(waypoint.timeSeconds, waypoint.depth);
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+
+      // From either side, inside the reach that highlights the handle, the
+      // line sits on the waypoint rather than where the cursor last was.
+      for (final offset in const [Offset(-12, 0), Offset(12, 0)]) {
+        await gesture.moveTo(handle + offset * 3);
+        await tester.pump();
+        await gesture.moveTo(handle + offset);
+        await tester.pump();
+        expect(
+          container.read(scrubTimeProvider),
+          closeTo(waypoint.timeSeconds, 0.001),
+        );
+      }
+
+      // Out of reach again, the line follows the cursor.
+      await gesture.moveTo(handle + const Offset(40, 0));
+      await tester.pump();
+      expect(
+        container.read(scrubTimeProvider),
+        closeTo(geometry.timeAtDx(geometry.xFor(waypoint.timeSeconds) + 40), 1),
+      );
+    },
+  );
+
+  testWidgets('hovering near a deco stop locks the scrub onto it', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+
+    final series = container.read(planCanvasSeriesProvider);
+    expect(series.stopLabels, isNotEmpty);
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final geometry = PlanChartGeometry(
+      size: rect.size,
+      maxTimeSeconds: series.maxTimeSeconds,
+      maxDepthMeters: series.maxDepth,
+      depthUnitScale: 1,
+    );
+    // Where the computed ascent arrives at its first stop: a point of the
+    // deco schedule, not a waypoint the diver placed.
+    final stop = series.stopLabels.first;
+    final arrival =
+        rect.topLeft + geometry.toPixel(stop.timeSeconds, stop.depth);
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await gesture.moveTo(arrival + const Offset(-30, 0));
+    await tester.pump();
+    await gesture.moveTo(arrival + const Offset(-6, -6));
+    await tester.pump();
+
+    expect(container.read(scrubTimeProvider), closeTo(stop.timeSeconds, 0.001));
+  });
+
+  testWidgets('mouse hover scrubs and exit clears', (tester) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await gesture.moveTo(
+      tester.getCenter(find.byKey(const Key('planChartOverlay'))),
+    );
+    await tester.pump();
+    expect(container.read(scrubTimeProvider), isNotNull);
+
+    // (700, 500) is inside the test window but outside the 500x400 chart;
+    // Offset.zero would still be the chart's own top-left corner.
+    await gesture.moveTo(const Offset(700, 500));
+    await tester.pump();
+    expect(container.read(scrubTimeProvider), isNull);
+  });
+
+  testWidgets('double-tap past the plan appends a segment', (tester) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+    final before = container.read(divePlanNotifierProvider).segments.length;
+
+    // Double-tap past the end of the plan (append case): a time beyond the
+    // computed runtime, at a shallow depth.
+    final series = container.read(planCanvasSeriesProvider);
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final geometry = PlanChartGeometry(
+      size: rect.size,
+      maxTimeSeconds: series.maxTimeSeconds,
+      maxDepthMeters: series.maxDepth,
+      depthUnitScale: 1,
+    );
+    final pos =
+        rect.topLeft +
+        Offset(geometry.xFor(series.maxTimeSeconds * 1.02), geometry.yFor(10));
+    await tester.tapAt(pos);
+    await tester.tapAt(pos);
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(divePlanNotifierProvider).segments.length,
+      greaterThan(before),
+    );
+  });
+
+  testWidgets('keyboard deepens then deletes the selected segment', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+
+    final bottom = _bottomSegment(
+      container.read(divePlanNotifierProvider).segments,
+    );
+    container.read(selectedSegmentIdProvider.notifier).state = bottom.id;
+    // Focus the chart's Focus node directly so key events route to it.
+    final focusNode = tester
+        .widget<Focus>(
+          find
+              .descendant(
+                of: find.byType(PlanProfileChart),
+                matching: find.byType(Focus),
+              )
+              .first,
+        )
+        .focusNode!;
+    focusNode.requestFocus();
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    final deepened = container
+        .read(divePlanNotifierProvider)
+        .segments
+        .firstWhere((s) => s.id == bottom.id);
+    expect(deepened.targetDepth, greaterThan(bottom.targetDepth));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+    await tester.pump();
+    expect(
+      container
+          .read(divePlanNotifierProvider)
+          .segments
+          .any((s) => s.id == bottom.id),
+      isFalse,
+    );
+  });
+
+  testWidgets('secondary tap on a handle shows the gas menu', (tester) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 45, bottomTimeMinutes: 20);
+    notifier.addTank(
+      const DiveTank(
+        id: 'o2',
+        volume: 11.1,
+        startPressure: 207,
+        gasMix: GasMix(o2: 100),
+        role: TankRole.deco,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Right-click the bottom vertex handle (end of the bottom segment).
+    final bottom = _bottomSegment(
+      container.read(divePlanNotifierProvider).segments,
+    );
+    final vertices = planVertices(
+      container.read(divePlanNotifierProvider).segments,
+    );
+    final vertex = vertices.firstWhere((v) => v.segmentId == bottom.id);
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final geometry = PlanChartGeometry(
+      size: rect.size,
+      maxTimeSeconds: container.read(planCanvasSeriesProvider).maxTimeSeconds,
+      maxDepthMeters: container.read(planCanvasSeriesProvider).maxDepth,
+      depthUnitScale: 1,
+    );
+    final handleLocal = geometry.toPixel(vertex.timeSeconds, vertex.depth);
+    final gesture = await tester.startGesture(
+      rect.topLeft + handleLocal,
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PopupMenuItem<WaypointMenuAction>), findsWidgets);
+  });
+
+  testWidgets('a DPV mission profile is read-only on the chart', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    final starter = MissionEdits.starter(
+      legId: 'L1',
+      memberId: 'm1',
+      memberName: 'Sam',
+      sacBottom: 15,
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .enableMission(
+          MissionEdits.updateMember(
+            MissionEdits.updateLeg(
+              starter,
+              starter.legs.single.copyWith(distanceM: 300, depthM: 20),
+            ),
+            starter.team.single.copyWith(
+              scooter: const ScooterSpec(
+                name: 'S',
+                ratedSpeedMps: 0.9,
+                burnTimeSeconds: 5400,
+              ),
+            ),
+          ),
+        );
+    await tester.pumpAndSettle();
+    final generated = container.read(divePlanNotifierProvider).segments;
+    expect(generated, isNotEmpty);
+
+    // Double-tap past the plan: would append a segment on an ordinary plan.
+    final series = container.read(planCanvasSeriesProvider);
+    final rect = tester.getRect(find.byKey(const Key('planChartOverlay')));
+    final geometry = PlanChartGeometry(
+      size: rect.size,
+      maxTimeSeconds: series.maxTimeSeconds,
+      maxDepthMeters: series.maxDepth,
+      depthUnitScale: 1,
+    );
+    final pos =
+        rect.topLeft +
+        Offset(geometry.xFor(series.maxTimeSeconds * 1.02), geometry.yFor(10));
+    await tester.tapAt(pos);
+    await tester.tapAt(pos);
+    await tester.pumpAndSettle();
+
+    // Keys on a selected segment: would deepen and delete it.
+    container.read(selectedSegmentIdProvider.notifier).state =
+        generated.first.id;
+    tester
+        .widget<Focus>(
+          find
+              .descendant(
+                of: find.byType(PlanProfileChart),
+                matching: find.byType(Focus),
+              )
+              .first,
+        )
+        .focusNode!
+        .requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+    await tester.pump();
+
+    expect(container.read(divePlanNotifierProvider).segments, generated);
+  });
+
+  testWidgets('a mission with no profile yet offers no quick plan', (
+    tester,
+  ) async {
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanProfileChart)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .enableMission(
+          MissionEdits.starter(
+            legId: 'L1',
+            memberId: 'm1',
+            memberName: 'Sam',
+            sacBottom: 15,
+          ),
+        );
+    await tester.pumpAndSettle();
+    // A quick plan would replace the mission being built.
+    expect(find.text('Quick Plan'), findsNothing);
+    expect(find.byType(FilledButton), findsNothing);
+  });
+}

@@ -2,11 +2,10 @@
 ///
 /// Each template provides a different layout and style for the exported PDF:
 /// - [simple]: High-density table format, 15-20 dives per page
-/// - [detailed]: Card-style entries with full information, 3 dives per page
-/// - [professional]: Formal layout with signature/stamp areas, 2 dives per page
+/// - [detailed]: One dive per page with the full field set and a profile chart
 /// - [padiStyle]: Layout mimicking PADI paper logbook format
 /// - [nauiStyle]: Layout mimicking NAUI paper logbook format
-enum PdfTemplate { simple, detailed, professional, padiStyle, nauiStyle }
+enum PdfTemplate { simple, detailed, padiStyle, nauiStyle }
 
 /// Extension methods for [PdfTemplate].
 extension PdfTemplateExtension on PdfTemplate {
@@ -17,8 +16,6 @@ extension PdfTemplateExtension on PdfTemplate {
         return 'Simple';
       case PdfTemplate.detailed:
         return 'Detailed';
-      case PdfTemplate.professional:
-        return 'Professional';
       case PdfTemplate.padiStyle:
         return 'PADI Style';
       case PdfTemplate.nauiStyle:
@@ -32,9 +29,7 @@ extension PdfTemplateExtension on PdfTemplate {
       case PdfTemplate.simple:
         return 'Compact table format, many dives per page';
       case PdfTemplate.detailed:
-        return 'Full dive information with notes and ratings';
-      case PdfTemplate.professional:
-        return 'Signature and stamp areas for verification';
+        return 'One dive per page with the profile chart and every field';
       case PdfTemplate.padiStyle:
         return 'Layout matching PADI logbook format';
       case PdfTemplate.nauiStyle:
@@ -48,9 +43,7 @@ extension PdfTemplateExtension on PdfTemplate {
       case PdfTemplate.simple:
         return 18;
       case PdfTemplate.detailed:
-        return 3;
-      case PdfTemplate.professional:
-        return 2;
+        return 1;
       case PdfTemplate.padiStyle:
         return 4;
       case PdfTemplate.nauiStyle:
@@ -62,9 +55,7 @@ extension PdfTemplateExtension on PdfTemplate {
   bool get supportsCertificationCards {
     switch (this) {
       case PdfTemplate.simple:
-        return false;
       case PdfTemplate.detailed:
-      case PdfTemplate.professional:
       case PdfTemplate.padiStyle:
       case PdfTemplate.nauiStyle:
         return true;
@@ -108,12 +99,24 @@ class PdfExportOptions {
   /// The page size for the PDF.
   final PdfPageSize pageSize;
 
+  /// Whether to add an official stamp box and large signature blocks.
+  ///
+  /// For a logbook presented to a training agency for verification. Only the
+  /// detailed template renders these.
+  final bool includeVerificationAreas;
+
   /// Whether to include certification card images in the PDF.
   ///
   /// Only applicable for templates that support certification cards.
   /// When enabled, scanned certification card images (front/back) will be
   /// included on a dedicated page after the summary.
   final bool includeCertificationCards;
+
+  /// The language the PDF prints in, as a language code such as `fr` (#2252).
+  ///
+  /// Null means "the app language": the export sheet always sets it, and a
+  /// caller with no sheet resolves null against the language the app shows.
+  final String? languageCode;
 
   /// Creates PDF export options with the specified settings.
   ///
@@ -123,6 +126,8 @@ class PdfExportOptions {
     this.template = PdfTemplate.detailed,
     this.pageSize = PdfPageSize.a4,
     this.includeCertificationCards = false,
+    this.includeVerificationAreas = false,
+    this.languageCode,
   });
 
   /// Creates a copy of this options object with the given fields replaced.
@@ -130,12 +135,17 @@ class PdfExportOptions {
     PdfTemplate? template,
     PdfPageSize? pageSize,
     bool? includeCertificationCards,
+    bool? includeVerificationAreas,
+    String? languageCode,
   }) {
     return PdfExportOptions(
       template: template ?? this.template,
       pageSize: pageSize ?? this.pageSize,
       includeCertificationCards:
           includeCertificationCards ?? this.includeCertificationCards,
+      includeVerificationAreas:
+          includeVerificationAreas ?? this.includeVerificationAreas,
+      languageCode: languageCode ?? this.languageCode,
     );
   }
 
@@ -145,12 +155,20 @@ class PdfExportOptions {
     return other is PdfExportOptions &&
         other.template == template &&
         other.pageSize == pageSize &&
-        other.includeCertificationCards == includeCertificationCards;
+        other.includeCertificationCards == includeCertificationCards &&
+        other.includeVerificationAreas == includeVerificationAreas &&
+        other.languageCode == languageCode;
   }
 
   @override
   int get hashCode {
-    return Object.hash(template, pageSize, includeCertificationCards);
+    return Object.hash(
+      template,
+      pageSize,
+      includeCertificationCards,
+      includeVerificationAreas,
+      languageCode,
+    );
   }
 
   @override
@@ -158,6 +176,8 @@ class PdfExportOptions {
     return 'PdfExportOptions('
         'template: $template, '
         'pageSize: $pageSize, '
-        'includeCertificationCards: $includeCertificationCards)';
+        'includeCertificationCards: $includeCertificationCards, '
+        'includeVerificationAreas: $includeVerificationAreas, '
+        'languageCode: $languageCode)';
   }
 }

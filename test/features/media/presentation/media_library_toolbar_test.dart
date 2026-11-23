@@ -1,0 +1,495 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_library_filter.dart';
+import 'package:submersion/features/media/presentation/providers/media_library_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_library_sort_provider.dart';
+import 'package:submersion/features/media/presentation/providers/media_thumbnail_scale_provider.dart';
+import 'package:submersion/features/media/presentation/widgets/media_library_toolbar.dart';
+import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+
+/// Both the view-mode notifier and the sort notifier read and WRITE app
+/// settings. Without this override they reach the real repository, and the
+/// awaited setMode/setSort calls below throw because no database is open
+/// under flutter test.
+class _FakeSettingsRepo extends AppSettingsRepository {
+  final Map<String, String> values = {};
+
+  @override
+  Future<String?> getRawSetting(String key) async => values[key];
+
+  @override
+  Future<void> setRawSetting(String key, String value) async {
+    values[key] = value;
+  }
+}
+
+void main() {
+  late ProviderContainer container;
+  late SelectionController selection;
+
+  setUp(() {
+    selection = SelectionController();
+    addTearDown(selection.dispose);
+    container = ProviderContainer(
+      overrides: [
+        sitesProvider.overrideWith((ref) async => []),
+        allTripsProvider.overrideWith((ref) async => []),
+        appSettingsRepositoryProvider.overrideWithValue(_FakeSettingsRepo()),
+      ],
+    );
+    addTearDown(container.dispose);
+  });
+
+  Widget host({bool canSelect = true}) => UncontrolledProviderScope(
+    container: container,
+    child: MaterialApp(
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: MediaLibraryToolbar(selection: selection, canSelect: canSelect),
+      ),
+    ),
+  );
+
+  Future<void> pump(WidgetTester tester, {bool canSelect = true}) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host(canSelect: canSelect));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('the filter badge is hidden until something is filtered', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    expect(tester.widget<Badge>(find.byType(Badge)).isLabelVisible, isFalse);
+
+    container.read(mediaLibraryFilterProvider.notifier).state =
+        const MediaLibraryFilter(mediaType: MediaType.photo);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Badge>(find.byType(Badge)).isLabelVisible, isTrue);
+  });
+
+  testWidgets('the sort button opens the sheet and writes the choice', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    await tester.tap(find.byIcon(Icons.sort));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sort media'), findsOneWidget);
+    await tester.tap(find.text('File Name'));
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(mediaLibrarySortProvider).field,
+      MediaSortField.fileName,
+    );
+  });
+
+  testWidgets('the sort button is absent outside grid mode', (tester) async {
+    await pump(tester);
+    expect(find.byIcon(Icons.sort), findsOneWidget);
+
+    await container
+        .read(mediaLibraryViewModeProvider.notifier)
+        .setMode(MediaLibraryViewMode.timeline);
+    await tester.pumpAndSettle();
+
+    // The grouped modes consume an already-date-sorted stream, so offering a
+    // name or size sort there would shred the timeline into one-item groups.
+    expect(find.byIcon(Icons.sort), findsNothing);
+  });
+
+  testWidgets('the filter button opens the filter sheet', (tester) async {
+    await pump(tester);
+
+    await tester.tap(find.byIcon(Icons.filter_list));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Filter media'), findsOneWidget);
+  });
+
+  testWidgets('the Select control enters selection mode with nothing checked', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    await tester.tap(find.byKey(const ValueKey('enter_selection')));
+    await tester.pumpAndSettle();
+
+    expect(selection.value.isActive, isTrue);
+    expect(selection.value.checkedIds, isEmpty);
+    expect(
+      selection.value.enteredExplicitly,
+      isTrue,
+      reason: 'a deliberate entry must survive unchecking the last item',
+    );
+  });
+
+  testWidgets('the Select control is absent when there is nothing to select', (
+    tester,
+  ) async {
+    await pump(tester, canSelect: false);
+
+    expect(find.byKey(const ValueKey('enter_selection')), findsNothing);
+  });
+
+  // Every control in this row is fixed-width, so a new one is spent budget
+  // rather than borrowed space. 320dp is the narrowest phone the app ships
+  // to, and a RenderFlex overflow there is a red banner, not a squeeze.
+  testWidgets('the row still fits the narrowest supported phone', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('enter_selection')), findsOneWidget);
+  });
+
+  testWidgets('a wide row shows four view-mode segments including map', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsOneWidget);
+    expect(find.byIcon(Icons.map), findsOneWidget);
+    expect(find.byType(PopupMenuButton<MediaLibraryViewMode>), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.map));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(mediaLibraryViewModeProvider),
+      MediaLibraryViewMode.map,
+    );
+  });
+
+  testWidgets('a 360dp phone collapses the view modes to make room for the '
+      'thumbnail size button', (tester) async {
+    // MediaLibraryView pads the toolbar by 8dp each side, so a 360dp phone
+    // hands the row 344dp: too narrow for four segments beside four compact
+    // icon buttons (issue #3398).
+    tester.view.physicalSize = const Size(344, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsNothing);
+    expect(find.byType(PopupMenuButton<MediaLibraryViewMode>), findsOneWidget);
+    expect(find.byKey(const ValueKey('thumbnail_size_button')), findsOneWidget);
+  });
+
+  testWidgets('a 375dp phone keeps the four segments beside the thumbnail '
+      'size button', (tester) async {
+    // 375 less MediaLibraryView's 8dp each side.
+    tester.view.physicalSize = const Size(359, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsOneWidget);
+    expect(find.byType(PopupMenuButton<MediaLibraryViewMode>), findsNothing);
+    expect(find.byKey(const ValueKey('thumbnail_size_button')), findsOneWidget);
+  });
+
+  testWidgets('the narrowest row with four segments also holds the size '
+      'button', (tester) async {
+    tester.view.physicalSize = const Size(
+      kMediaToolbarFourSegmentMinWidth,
+      640,
+    );
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsOneWidget);
+    expect(find.byKey(const ValueKey('thumbnail_size_button')), findsOneWidget);
+  });
+
+  testWidgets('one dp short of the four-segment width collapses the view '
+      'modes', (tester) async {
+    tester.view.physicalSize = const Size(
+      kMediaToolbarFourSegmentMinWidth - 1,
+      640,
+    );
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsNothing);
+    expect(find.byType(PopupMenuButton<MediaLibraryViewMode>), findsOneWidget);
+  });
+
+  testWidgets('a 320dp phone collapses the view modes to a menu and does not '
+      'overflow', (tester) async {
+    // A 320dp phone hands the row 304dp after MediaLibraryView's padding.
+    tester.view.physicalSize = const Size(304, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SegmentedButton<MediaLibraryViewMode>), findsNothing);
+    expect(find.byType(PopupMenuButton<MediaLibraryViewMode>), findsOneWidget);
+    expect(find.byKey(const ValueKey('thumbnail_size_button')), findsOneWidget);
+
+    // Review Focus 5: the narrow row, a selection in flight, then map.
+    selection.enterExplicit();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(PopupMenuButton<MediaLibraryViewMode>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Map'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      container.read(mediaLibraryViewModeProvider),
+      MediaLibraryViewMode.map,
+    );
+    expect(selection.value.isActive, isFalse);
+    expect(find.byKey(const ValueKey('enter_selection')), findsNothing);
+  });
+
+  testWidgets('choosing map with a selection active exits selection', (
+    tester,
+  ) async {
+    await pump(tester);
+    selection.enterExplicit();
+    expect(selection.value.isActive, isTrue);
+
+    await tester.tap(find.byIcon(Icons.map));
+    await tester.pumpAndSettle();
+
+    expect(selection.value.isActive, isFalse);
+    expect(
+      container.read(mediaLibraryViewModeProvider),
+      MediaLibraryViewMode.map,
+    );
+  });
+
+  group('thumbnail size slider (issue #3297)', () {
+    final slider = find.byKey(const ValueKey('thumbnail_size_slider'));
+
+    testWidgets('sits just left of the view-mode buttons', (tester) async {
+      await pump(tester);
+
+      final sliderRect = tester.getRect(slider);
+      final modes = tester.getRect(
+        find.byType(SegmentedButton<MediaLibraryViewMode>),
+      );
+      expect(sliderRect.right, lessThanOrEqualTo(modes.left));
+      expect(modes.left - sliderRect.right, lessThan(16));
+      // Nothing else sits between them: every icon button is to its left.
+      for (final button in tester.widgetList(find.byType(IconButton))) {
+        expect(
+          tester.getRect(find.byWidget(button)).right,
+          lessThanOrEqualTo(sliderRect.left),
+        );
+      }
+    });
+
+    testWidgets('has seven stops and opens on the middle one', (tester) async {
+      await pump(tester);
+
+      final widget = tester.widget<Slider>(slider);
+      expect(widget.min, 0);
+      expect(widget.max, 6);
+      expect(widget.divisions, 6);
+      expect(widget.value, 3);
+    });
+
+    testWidgets('names itself to screen readers once, not twice', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pump(tester);
+
+      final node = tester.getSemantics(slider);
+      expect(node.label, 'Thumbnail size');
+      // A tooltip with the same text would be read out after the label.
+      expect(node.tooltip, isEmpty);
+      // Before the test ends, which addTearDown would be too late for.
+      handle.dispose();
+    });
+
+    testWidgets('dragging it to the end picks the largest size', (
+      tester,
+    ) async {
+      await pump(tester);
+
+      await tester.tapAt(
+        tester.getRect(slider).centerRight - const Offset(2, 0),
+      );
+      await tester.pumpAndSettle();
+
+      expect(container.read(mediaThumbnailScaleProvider).step, 6);
+      expect(tester.widget<Slider>(slider).value, 6);
+    });
+
+    testWidgets('is offered in every thumbnail view but not on the map', (
+      tester,
+    ) async {
+      await pump(tester);
+      final notifier = container.read(mediaLibraryViewModeProvider.notifier);
+
+      for (final mode in [
+        MediaLibraryViewMode.grid,
+        MediaLibraryViewMode.byDive,
+        MediaLibraryViewMode.timeline,
+      ]) {
+        await notifier.setMode(mode);
+        await tester.pumpAndSettle();
+        expect(slider, findsOneWidget, reason: mode.name);
+      }
+
+      await notifier.setMode(MediaLibraryViewMode.map);
+      await tester.pumpAndSettle();
+      expect(slider, findsNothing);
+    });
+
+    testWidgets('is left out of a row too narrow to hold it', (tester) async {
+      tester.view.physicalSize = const Size(344, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(slider, findsNothing);
+    });
+
+    testWidgets('fits the narrowest row that shows it', (tester) async {
+      tester.view.physicalSize = const Size(
+        kMediaToolbarThumbnailSliderMinWidth,
+        640,
+      );
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(slider, findsOneWidget);
+      expect(
+        find.byType(SegmentedButton<MediaLibraryViewMode>),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('thumbnail size button on narrow rows (issue #3398)', () {
+    final button = find.byKey(const ValueKey('thumbnail_size_button'));
+    final slider = find.byKey(const ValueKey('thumbnail_size_slider'));
+
+    Future<void> pumpPhone(WidgetTester tester, double width) async {
+      tester.view.physicalSize = Size(width, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('stands in for the slider below the slider width', (
+      tester,
+    ) async {
+      await pumpPhone(tester, kMediaToolbarThumbnailSliderMinWidth - 1);
+
+      expect(button, findsOneWidget);
+      expect(slider, findsNothing);
+    });
+
+    testWidgets('is not shown where the slider fits', (tester) async {
+      await pumpPhone(tester, kMediaToolbarThumbnailSliderMinWidth);
+
+      expect(slider, findsOneWidget);
+      expect(button, findsNothing);
+    });
+
+    testWidgets('opens the slider, which sets the size', (tester) async {
+      await pumpPhone(tester, 344);
+
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(slider, findsOneWidget);
+      expect(tester.widget<Slider>(slider).value, 3);
+
+      await tester.tapAt(
+        tester.getRect(slider).centerRight - const Offset(2, 0),
+      );
+      await tester.pumpAndSettle();
+
+      expect(container.read(mediaThumbnailScaleProvider).step, 6);
+      expect(tester.widget<Slider>(slider).value, 6);
+    });
+
+    testWidgets('opens on the narrowest phone without overflowing', (
+      tester,
+    ) async {
+      await pumpPhone(tester, 304);
+
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(slider, findsOneWidget);
+    });
+
+    testWidgets('is absent on the map', (tester) async {
+      await pumpPhone(tester, 344);
+      expect(button, findsOneWidget);
+
+      await container
+          .read(mediaLibraryViewModeProvider.notifier)
+          .setMode(MediaLibraryViewMode.map);
+      await tester.pumpAndSettle();
+
+      expect(button, findsNothing);
+    });
+  });
+
+  testWidgets('the select control is hidden in map mode', (tester) async {
+    await pump(tester);
+    expect(find.byKey(const ValueKey('enter_selection')), findsOneWidget);
+
+    await container
+        .read(mediaLibraryViewModeProvider.notifier)
+        .setMode(MediaLibraryViewMode.map);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('enter_selection')), findsNothing);
+  });
+}

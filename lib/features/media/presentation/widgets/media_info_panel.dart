@@ -1,0 +1,730 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/services/accounts/account_display_name.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_detail_row.dart';
+import 'package:submersion/features/media/domain/entities/media_dive_window.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_provenance.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_data.dart';
+import 'package:submersion/features/media/domain/value_objects/verify_result.dart';
+import 'package:submersion/features/media/presentation/helpers/elapsed_time_format.dart';
+import 'package:submersion/features/media/presentation/helpers/media_link_replacer.dart';
+import 'package:submersion/features/media/presentation/helpers/set_time_seed.dart';
+import 'package:submersion/features/media/presentation/providers/media_health_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_provenance_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_serving_providers.dart';
+import 'package:submersion/features/media/presentation/providers/photo_access_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/limited_access_actions.dart';
+import 'package:submersion/features/media/presentation/widgets/media_info_tags_section.dart';
+import 'package:submersion/features/media/presentation/widgets/set_media_time_dialog.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/media/domain/entities/photo_record.dart';
+import 'package:submersion/features/dive_log/presentation/providers/open_dive_sitting_provider.dart';
+import 'package:submersion/features/media/presentation/editing/record_media_sitting.dart';
+import 'package:submersion/features/media/presentation/editing/photo_edit_fields.dart';
+import 'package:submersion/features/media/presentation/editing/photo_held_writes.dart';
+import 'package:submersion/features/media/presentation/editing/photo_sitting_shown.dart';
+import 'package:submersion/features/media/presentation/providers/media_repair_providers.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/utils/byte_format.dart';
+import 'package:submersion/shared/utils/file_reveal.dart';
+import 'package:submersion/shared/widgets/detail_row/detail_row_group.dart';
+
+part 'media_info_file_section.dart';
+
+/// Everything the app knows about where one media item came from, whether it
+/// is backed up, and where its bytes are being served from right now.
+///
+/// Each block also offers the fixes relevant to what it reports, so a problem
+/// surfaced here can be acted on here. Those actions are entry points into
+/// machinery that already exists; the only capability added for the panel is
+/// checking a single item's source.
+class MediaInfoPanel extends ConsumerWidget {
+  const MediaInfoPanel({
+    super.key,
+    required this.item,
+    this.scrollController,
+    this.readOnly = false,
+    this.sitting,
+  });
+
+  final MediaItem item;
+
+  /// No action that changes the photo's record (Set time, Locate): the photo
+  /// is locked, or shown where it has no lock of its own (issue #4527).
+  final bool readOnly;
+
+  /// The photo's sitting: Edit tags, Set time and Locate hold what they
+  /// change in it until Save, and are offered only while it is over the
+  /// photo.
+  final EditSession<PhotoRecord>? sitting;
+
+  /// Supplied when hosted in a DraggableScrollableSheet, which owns scrolling.
+  final ScrollController? scrollController;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The sheet is a route of its own, which the viewer's redraws do not
+    // reach: it follows the sitting itself, for a relink held by Locate. One
+    // shape with or without a sitting, so the sheet keeps its place (its
+    // scroll, a check in progress) when the sitting ends under it.
+    final session = sitting;
+    return ListenableBuilder(
+      listenable: session == null || session.isDisposed
+          ? const NoSittingChanges()
+          : session,
+      builder: (context, _) => _panel(context, ref),
+    );
+  }
+
+  Widget _panel(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    // Re-read the row rather than rendering the snapshot handed to the sheet.
+    // mediaProvenanceProvider is keyed by the MediaItem VALUE and derives
+    // everything from it, so invalidating that alone would recompute from the
+    // same stale object: Check now would write isOrphaned to the database and
+    // the Status row would never move. The passed item is the seed and the
+    // fallback for the frame before the read lands.
+    final row = ref.watch(mediaByIdProvider(item.id));
+    final stored = row.value ?? item;
+    // A photo held only in a dive's sitting has no row yet: nothing can be
+    // checked, backed up or relinked until the dive is saved.
+    final rowless = noStoredRow(row);
+    final session = sitting;
+    final inSitting = sittingIsOver(session, stored.id);
+    // The dive's own sitting already relinks this photo (its Media card's
+    // Replace link): a second relink held here would be written over by the
+    // dive's Save.
+    final open = ref.watch(openDiveSittingProvider);
+    final relinkedOnDive =
+        open != null &&
+        sittingMedia(open.session).replaced.containsKey(stored.id);
+    // In a sitting the origin is the file a held relink found.
+    final live = inSitting
+        ? withHeldRelink(
+            session!,
+            stored,
+            thisDevice: ref.watch(currentDeviceIdProvider).value,
+          )
+        : stored;
+    // A relink held for Save queues the upload its bytes need when it is
+    // written; one asked for now would send the stored (old) file.
+    final relinkHeld = inSitting && heldRelink(session!) != null;
+    final provenance = ref.watch(mediaProvenanceProvider(live));
+    final units = ref.watch(unitFormatterProvider);
+
+    return ListView(
+      controller: scrollController,
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text(l10n.media_info_title, style: _titleStyle(context)),
+        const SizedBox(height: 16),
+        MediaInfoTagsSection(item: live, readOnly: readOnly, sitting: sitting),
+        const SizedBox(height: 12),
+        _FileSection(
+          item: live,
+          units: units,
+          readOnly: readOnly,
+          sitting: sitting,
+        ),
+        const SizedBox(height: 12),
+        _OriginSection(
+          item: live,
+          origin: provenance.origin,
+          units: units,
+          // Locate's relink is held in the sitting until Save.
+          locateIn: !readOnly && !rowless && !relinkedOnDive && inSitting
+              ? session
+              : null,
+          canCheck: !rowless,
+          stored: stored,
+        ),
+        const SizedBox(height: 12),
+        _BackupSection(
+          item: live,
+          backup: provenance.backup,
+          units: units,
+          canUpload: !rowless && !relinkHeld,
+        ),
+        const SizedBox(height: 12),
+        _ServingSection(item: live),
+      ],
+    );
+  }
+
+  static TextStyle? _titleStyle(BuildContext context) =>
+      Theme.of(context).textTheme.titleLarge;
+}
+
+/// A titled card of label/value rows, matching the dive detail convention.
+///
+/// [actions] render as a trailing wrap so a block that surfaces a problem
+/// also offers the fix, rather than sending the reader somewhere else.
+class _Section extends StatelessWidget {
+  const _Section({
+    required this.title,
+    required this.children,
+    this.actions = const [],
+  });
+
+  final String title;
+  final List<Widget> children;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        // One label column per section (issue #3678).
+        child: DetailRowGroup(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium),
+              const Divider(),
+              ...children,
+              if (actions.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Wrap(spacing: 8, children: actions),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OriginSection extends ConsumerWidget {
+  const _OriginSection({
+    required this.item,
+    required this.origin,
+    required this.units,
+    required this.locateIn,
+    required this.canCheck,
+    required this.stored,
+  });
+
+  final MediaItem item;
+  final OriginFacts origin;
+  final UnitFormatter units;
+
+  /// The photo's sitting, which holds what Locate finds until Save; null
+  /// offers no Locate.
+  final EditSession<PhotoRecord>? locateIn;
+
+  /// Whether the photo has a row whose file can be checked.
+  final bool canCheck;
+
+  /// The photo as stored: what Check now checks and Locate relinks, while
+  /// [item] may be drawn with a relink the sitting holds.
+  final MediaItem stored;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final deviceId = origin.originDeviceId;
+    final thisDevice = ref.watch(currentDeviceIdProvider).value;
+    // Until this device's own id resolves, "another device" would be a
+    // guess, so an unresolved id reads as this device: the row was stamped
+    // locally in the overwhelmingly common case.
+    final linkedElsewhere =
+        deviceId != null && thisDevice != null && deviceId != thisDevice;
+    final peerName = linkedElsewhere
+        ? ref.watch(originDeviceLabelProvider(deviceId))
+        : null;
+    final pointer = origin.pointer;
+    final isLocalFile = origin.sourceType == MediaSourceType.localFile;
+    // A browser has no file to check or locate (issue #4121).
+    final canEdit = ref.watch(deviceCapabilitiesProvider).mediaAttach;
+    final locateIn = this.locateIn;
+
+    return _Section(
+      title: l10n.media_info_originSection,
+      actions: [
+        if (canEdit && canCheck) _CheckNowButton(item: stored),
+        // Under limited photo access a gallery photo may be outside what the
+        // user allowed (spec 6.3). Offered whenever access is limited: the
+        // panel reads stored facts, not this device's live verdict.
+        if (origin.sourceType == MediaSourceType.platformGallery &&
+            ref.watch(galleryAccessLimitedProvider).value == true)
+          LimitedAccessActions(
+            onChanged: () {
+              ref.invalidate(galleryAccessLimitedProvider);
+              ref.invalidate(mediaByIdProvider(item.id));
+            },
+          ),
+        // The repair engine's file candidate only makes sense for a row that
+        // points at a path, so this is not offered for a missing gallery
+        // asset, where picking a file would relink it to the wrong source
+        // type.
+        if (origin.health == OriginHealth.missing &&
+            isLocalFile &&
+            canEdit &&
+            locateIn != null)
+          _LocateButton(item: stored, sitting: locateIn),
+        if (pointer != null && isLocalFile && canRevealInFileManager)
+          TextButton(
+            // Explicitly unawaited: revealInFileManager swallows its own
+            // failures, so there is nothing to surface and nothing to wait
+            // for before the sheet stays put.
+            onPressed: () => unawaited(revealInFileManager(pointer)),
+            child: Text(l10n.media_info_actionReveal),
+          ),
+        if (pointer != null) _CopyReferenceButton(pointer: pointer),
+        _CopyDiagnosticsButton(item: item),
+      ],
+      children: [
+        DiveDetailRow(
+          label: l10n.media_info_source,
+          value: sourceTypeLabel(l10n, origin.sourceType),
+        ),
+        if (origin.pointer != null)
+          DiveDetailRow(
+            label: l10n.media_info_reference,
+            value: origin.pointer!,
+          ),
+        // Omitted entirely when null. Null means this source type does not
+        // track an origin device, NOT that the link was made here, so
+        // rendering "This device" would state a fact the app never recorded
+        // and would do it on every gallery photo.
+        if (deviceId != null)
+          DiveDetailRow(
+            label: l10n.media_info_linkedOn,
+            value: linkedElsewhere
+                ? (peerName ?? l10n.media_info_otherDevice)
+                : l10n.media_info_thisDevice,
+          ),
+        DiveDetailRow(
+          label: l10n.media_info_status,
+          value: _statusLabel(l10n, linkedElsewhere, peerName),
+        ),
+        if (origin.lastVerifiedAt != null)
+          DiveDetailRow(
+            label: '',
+            value: l10n.media_info_lastChecked(
+              units.formatDateTime(origin.lastVerifiedAt, l10n: l10n),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// The verdict columns sync, and a device that cannot reach another
+  /// device's path records nothing (MediaItemVerifier), so a verdict on a
+  /// row linked elsewhere was recorded over there. Calling it "this device"
+  /// contradicted the Serving block whenever this device fell back to the
+  /// cloud store (issue #2458).
+  String _statusLabel(
+    AppLocalizations l10n,
+    bool linkedElsewhere,
+    String? peerName,
+  ) => switch (origin.health) {
+    OriginHealth.neverVerified => l10n.media_info_statusUnchecked,
+    OriginHealth.healthy when !linkedElsewhere => l10n.media_info_statusFound,
+    OriginHealth.missing when !linkedElsewhere => l10n.media_info_statusMissing,
+    OriginHealth.healthy =>
+      peerName == null
+          ? l10n.media_info_statusFoundElsewhere
+          : l10n.media_info_statusFoundOn(peerName),
+    OriginHealth.missing =>
+      peerName == null
+          ? l10n.media_info_statusMissingElsewhere
+          : l10n.media_info_statusMissingFrom(peerName),
+  };
+}
+
+class _BackupSection extends ConsumerWidget {
+  const _BackupSection({
+    required this.item,
+    required this.backup,
+    required this.units,
+    required this.canUpload,
+  });
+
+  final MediaItem item;
+  final BackupFacts backup;
+  final UnitFormatter units;
+
+  /// Whether the photo has a row to upload.
+  final bool canUpload;
+
+  /// Whether to offer an upload at all.
+  ///
+  /// Hidden while pending or transferring: the answer to "is it uploading"
+  /// is already on screen, and a second nudge would only re-enqueue what is
+  /// already queued.
+  bool get _offerUpload =>
+      canUpload &&
+      backup.eligible &&
+      backup.storeAttached &&
+      backup.tier != BackupTier.full &&
+      backup.queueState != 'pending' &&
+      backup.queueState != 'transferring';
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final identity = ref.watch(mediaStoreIdentityProvider).value;
+
+    return _Section(
+      title: l10n.settings_photos_cloudHeader,
+      actions: [
+        // A browser has no local copy to back up (issue #4121).
+        if (_offerUpload && ref.watch(deviceCapabilitiesProvider).mediaAttach)
+          _BackUpButton(item: item, isRetry: backup.queueState == 'failed'),
+      ],
+      children: [
+        DiveDetailRow(
+          label: l10n.media_info_store,
+          value: identity == null
+              ? l10n.media_info_storeNotConnected
+              : shortStorageLabel(identity.displayHint),
+        ),
+        if (_summary(l10n) case final summary?)
+          DiveDetailRow(label: '', value: summary),
+        if (backup.originalUploadedAt != null)
+          DiveDetailRow(
+            label: '',
+            value: l10n.media_info_uploadedOn(
+              units.formatDateTime(backup.originalUploadedAt, l10n: l10n),
+            ),
+          ),
+        if (_queueLine(l10n) != null)
+          DiveDetailRow(label: '', value: _queueLine(l10n)!),
+      ],
+    );
+  }
+
+  /// Precedence matters: an ineligible source is not "not backed up", it is
+  /// something the pipeline would never carry, and saying otherwise reads as
+  /// a problem the user could fix.
+  /// Null when the row above has already said everything there is to say.
+  ///
+  /// With no store attached the store row falls back to the same
+  /// not-connected string this used to return, so the panel printed the
+  /// identical sentence twice.
+  String? _summary(AppLocalizations l10n) {
+    if (!backup.eligible) return l10n.media_info_notEligible;
+    if (!backup.storeAttached) return null;
+    return switch (backup.tier) {
+      BackupTier.full => l10n.media_info_backupFull,
+      BackupTier.thumbOnly => l10n.media_info_backupThumbOnly,
+      BackupTier.renditionOnly => l10n.media_info_backupRenditionOnly,
+      BackupTier.none => l10n.media_info_backupNone,
+    };
+  }
+
+  /// A settled row says nothing new, so 'done' and an absent row both read as
+  /// no queue line at all.
+  String? _queueLine(AppLocalizations l10n) => switch (backup.queueState) {
+    'pending' => l10n.media_info_queuePending,
+    'transferring' => l10n.media_info_queueTransferring,
+    'failed' => l10n.media_info_queueFailed(
+      backup.queueError ?? l10n.media_info_unknown,
+    ),
+    _ => null,
+  };
+}
+
+class _ServingSection extends ConsumerWidget {
+  const _ServingSection({required this.item});
+
+  final MediaItem item;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final recorder = ref.watch(mediaServingRecorderProvider);
+
+    // Read through a ListenableBuilder rather than a provider. Riverpod 3
+    // auto-pause trips an assertion on providers that self-invalidate from a
+    // listener the framework cannot see, and the repo's fix for that
+    // (Ref.invalidateSelfWhen) takes a Stream, which a ChangeNotifier is not.
+    return ListenableBuilder(
+      listenable: recorder,
+      builder: (context, _) {
+        final facts = ServingFacts.from(
+          recorder.lastFor(item.id, thumbnail: false),
+        );
+        return _Section(
+          title: l10n.media_info_servingSection,
+          children: [
+            DiveDetailRow(label: '', value: _summary(l10n, facts)),
+            if (facts.observed &&
+                facts.storeFallbackUsed &&
+                facts.servedFrom != null)
+              DiveDetailRow(
+                label: '',
+                value: l10n.media_info_servingFallbackNote,
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _summary(AppLocalizations l10n, ServingFacts facts) {
+    if (!facts.observed) return l10n.media_info_servingUnobserved;
+    final from = facts.servedFrom;
+    if (from == null) return l10n.media_info_servingFailed;
+    // Exhaustive with no default arm, so a new ServedFrom value becomes a
+    // compile error rather than a silently wrong label.
+    final source = switch (from) {
+      ServedFrom.localDisk => l10n.media_info_servedLocalDisk,
+      ServedFrom.platformGallery => l10n.media_info_servedGallery,
+      ServedFrom.storeCache => l10n.media_info_servedStoreCache,
+      ServedFrom.storeNetwork => l10n.media_info_servedStoreNetwork,
+      ServedFrom.networkUrl => l10n.media_info_servedNetworkUrl,
+      ServedFrom.connectorCache => l10n.media_info_servedConnectorCache,
+      ServedFrom.connectorNetwork => l10n.media_info_servedConnectorNetwork,
+      ServedFrom.embedded => l10n.media_info_servedEmbedded,
+    };
+    final tier = switch (facts.servedTier) {
+      ServedTier.original => null,
+      ServedTier.thumbnail => l10n.media_info_servingTierThumbnail,
+      ServedTier.rendition => l10n.media_info_servingTierRendition,
+    };
+    return tier == null ? source : '$source ($tier)';
+  }
+}
+
+/// Checks the item's source and reports what it found.
+///
+/// The verifier writes `isOrphaned` and `lastVerifiedAt`, and the panel reads
+/// its origin facts off the row, so the result reaches the display through
+/// the repository rather than through local state.
+class _CheckNowButton extends ConsumerStatefulWidget {
+  const _CheckNowButton({required this.item});
+
+  final MediaItem item;
+
+  @override
+  ConsumerState<_CheckNowButton> createState() => _CheckNowButtonState();
+}
+
+class _CheckNowButtonState extends ConsumerState<_CheckNowButton> {
+  bool _busy = false;
+
+  Future<void> _run() async {
+    // Captured before the await: the messenger and the strings cannot be
+    // read from a context that may have been unmounted by the time the
+    // check returns.
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = context.l10n;
+    setState(() => _busy = true);
+    try {
+      final result = await ref
+          .read(mediaItemVerifierProvider)
+          .verify(widget.item);
+      // The sheet can be dismissed while the check runs. ref after dispose
+      // throws, and there is no one left to show a snack bar to.
+      if (!mounted) return;
+      final message = switch (result) {
+        VerifyResult.available => l10n.media_info_checkFound,
+        VerifyResult.notFound => l10n.media_info_checkMissing,
+        // Everything below is a reachability problem, not data loss, and the
+        // wording has to match what the verifier actually did: none of these
+        // move the orphan flag, so "Source is missing" would tell the user
+        // their photo is gone over a revoked permission, a disconnected
+        // Lightroom account, or a file that lives on their other machine.
+        VerifyResult.unauthenticated ||
+        VerifyResult.fromOtherDevice ||
+        VerifyResult.transientError ||
+        VerifyResult.volumeOffline ||
+        VerifyResult.accessDenied => l10n.media_info_checkUnavailable,
+      };
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+      // Invalidate the ROW, not the provenance provider: provenance is keyed
+      // by the item value, so re-reading the row is what actually re-keys it.
+      ref.invalidate(mediaByIdProvider(widget.item.id));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    onPressed: _busy ? null : _run,
+    child: Text(context.l10n.media_info_actionCheckNow),
+  );
+}
+
+/// Picks a replacement file through the repair engine and holds the relink
+/// in the photo's sitting until Save (issue #4527).
+class _LocateButton extends ConsumerWidget {
+  const _LocateButton({required this.item, required this.sitting});
+
+  final MediaItem item;
+  final EditSession<PhotoRecord> sitting;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => TextButton(
+    onPressed: () async {
+      final service = ref.read(mediaRepairServiceProvider);
+      final files = ref.read(mediaLinkFileSourceProvider);
+      await replaceMediaLink(
+        context,
+        ref,
+        item,
+        onHold: (proposal) {
+          // A sitting that ended while the picker was open takes nothing;
+          // holdRelink also drops it while the sitting is saving.
+          if (!sittingIsOver(sitting, item.id)) return;
+          holdRelink(sitting, proposal, service: service, hashFile: files.hash);
+        },
+      );
+    },
+    child: Text(context.l10n.media_info_actionLocate),
+  );
+}
+
+/// Queues the item for upload, or re-arms a terminally failed row.
+class _BackUpButton extends ConsumerWidget {
+  const _BackUpButton({required this.item, required this.isRetry});
+
+  final MediaItem item;
+
+  /// Only the label differs. `enqueueRepairUpload` is idempotent and already
+  /// re-arms a failed row via retry, so both cases are the same call.
+  final bool isRetry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => TextButton(
+    onPressed: () async {
+      final messenger = ScaffoldMessenger.of(context);
+      final queued = context.l10n.media_info_backupQueued;
+      // Both providers are read before any await, so nothing touches ref
+      // across an async gap that could outlive the sheet.
+      final queue = ref.read(mediaTransferQueueRepositoryProvider);
+      final runtimeFuture = ref.read(mediaStoreRuntimeProvider.future);
+
+      try {
+        await queue.enqueueRepairUpload(mediaId: item.id);
+      } on Object {
+        // Nothing was queued, so there is nothing to report.
+        return;
+      }
+
+      // Kick the worker so a queued row starts moving rather than waiting
+      // for the next incidental drain. Its failure is reported separately
+      // from the enqueue on purpose: building the runtime reads the keychain
+      // and can fail for reasons unrelated to this item, and the row IS
+      // queued at that point. Folding the two together would swallow the
+      // confirmation for work that really did get scheduled.
+      try {
+        final runtime = await runtimeFuture;
+        unawaited(runtime?.worker?.drain() ?? Future<void>.value());
+      } on Object {
+        // The row is durable and the next drain will find it.
+      }
+
+      if (!context.mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text(queued)));
+    },
+    child: Text(
+      isRetry
+          ? context.l10n.media_info_actionRetryUpload
+          : context.l10n.media_info_actionCopyNow,
+    ),
+  );
+}
+
+/// Copies the source pointer, which is often a path a reader wants to paste
+/// into a terminal or a file dialog.
+class _CopyReferenceButton extends StatelessWidget {
+  const _CopyReferenceButton({required this.pointer});
+
+  final String pointer;
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    onPressed: () async {
+      final messenger = ScaffoldMessenger.of(context);
+      final copied = context.l10n.media_info_referenceCopied;
+      await Clipboard.setData(ClipboardData(text: pointer));
+      if (!context.mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text(copied)));
+    },
+    child: Text(context.l10n.media_info_actionCopyPath),
+  );
+}
+
+/// Puts the one-row health report on the clipboard, store header included,
+/// so a support thread gets the synced facts, the cache and resolver
+/// verdicts, the store probe and the queue entry in one paste.
+class _CopyDiagnosticsButton extends ConsumerWidget {
+  const _CopyDiagnosticsButton({required this.item});
+
+  final MediaItem item;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => TextButton(
+    onPressed: () async {
+      final messenger = ScaffoldMessenger.of(context);
+      final l10n = context.l10n;
+      // Guarded like the other two entry points. Unhandled, a report that
+      // throws (a store whose credentials no longer parse, say) left the
+      // button looking dead: no clipboard write, no snack bar, nothing.
+      String message;
+      try {
+        final report = await ref
+            .read(mediaHealthReporterProvider)
+            .forItem(item, probeStore: true);
+        await Clipboard.setData(ClipboardData(text: report.toText()));
+        message = l10n.media_info_diagnosticsCopied;
+      } catch (e) {
+        message = l10n.settings_diagnostics_copyFailed(e);
+      }
+      if (!context.mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+    },
+    child: Text(context.l10n.media_info_actionCopyDiagnostics),
+  );
+}
+
+/// Localized name for a media type.
+///
+/// MediaType.name would render the raw enum identifier, so a signature would
+/// read as "instructorSignature" in every language. MediaType.displayName is
+/// hardcoded English, which is no better in a panel that is localized
+/// everywhere else.
+String mediaTypeLabel(AppLocalizations l10n, MediaType type) => switch (type) {
+  MediaType.photo => l10n.media_info_typePhoto,
+  MediaType.video => l10n.media_info_typeVideo,
+  MediaType.document => l10n.media_info_typeDocument,
+  MediaType.instructorSignature => l10n.media_info_typeSignature,
+};
+
+/// Localized name for a source type.
+///
+/// Reuses the existing media_source_* keys rather than adding a parallel set,
+/// so the panel and the Media console's Sources view can never disagree about
+/// what a source type is called.
+String sourceTypeLabel(AppLocalizations l10n, MediaSourceType type) =>
+    switch (type) {
+      MediaSourceType.platformGallery => l10n.media_source_gallery,
+      MediaSourceType.localFile => l10n.media_source_localFile,
+      MediaSourceType.networkUrl => l10n.media_source_networkUrl,
+      MediaSourceType.manifestEntry => l10n.media_source_manifest,
+      MediaSourceType.serviceConnector => l10n.media_source_connector,
+      MediaSourceType.mediaStore => l10n.media_source_mediaStore,
+      MediaSourceType.signature => l10n.media_source_signature,
+    };

@@ -81,6 +81,11 @@ struct DeviceDescriptor {
   var product: String
   var model: Int64
   var transports: [TransportType]
+  /// Whether this backend hands dives over oldest-first. libdivecomputer is
+  /// newest-first except where the fork reversed a driver (Shearwater
+  /// Petrel, issue #480). Only for such a backend is an interrupted
+  /// download's newest dive a safe resume point (issue #2902).
+  var deliversOldestFirst: Bool
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -89,12 +94,14 @@ struct DeviceDescriptor {
     let product = pigeonVar_list[1] as! String
     let model = pigeonVar_list[2] as! Int64
     let transports = pigeonVar_list[3] as! [TransportType]
+    let deliversOldestFirst = pigeonVar_list[4] as! Bool
 
     return DeviceDescriptor(
       vendor: vendor,
       product: product,
       model: model,
-      transports: transports
+      transports: transports,
+      deliversOldestFirst: deliversOldestFirst
     )
   }
   func toList() -> [Any?] {
@@ -103,6 +110,7 @@ struct DeviceDescriptor {
       product,
       model,
       transports,
+      deliversOldestFirst,
     ]
   }
 }
@@ -154,7 +162,18 @@ struct ProfileSample {
   var temperatureCelsius: Double? = nil
   var pressureBar: Double? = nil
   var tankIndex: Int64? = nil
+  /// Every tank's pressure in bar at this sample, indexed by tank index, with
+  /// null where that tank reported nothing. libdivecomputer fires one pressure
+  /// reading per air-integrated transmitter, so a single sample can carry
+  /// several; [pressureBar]/[tankIndex] hold only the last of them and lose the
+  /// rest (issue #1223). Null when the sample carries no pressure at all, and
+  /// trimmed of trailing nulls, so an ordinary single-transmitter dive costs one
+  /// short list per sample.
+  var tankPressuresBar: [Double?]? = nil
   var heartRate: Int64? = nil
+  /// Compass heading in degrees (0-359) from DC_SAMPLE_BEARING; null when the
+  /// computer does not report bearing samples.
+  var heading: Double? = nil
   var setpoint: Double? = nil
   var ppo2: Double? = nil
   var cns: Double? = nil
@@ -163,6 +182,35 @@ struct ProfileSample {
   var decoTime: Int64? = nil
   var decoDepth: Double? = nil
   var tts: Int64? = nil
+  /// Individual CCR O2 cell ppO2 readings in bar (sensor 1..6), null when that
+  /// cell has no reading. libdivecomputer reports these per-sensor via
+  /// DC_SAMPLE_PPO2; [ppo2] holds the aggregate/computed value.
+  var o2Sensor1: Double? = nil
+  var o2Sensor2: Double? = nil
+  var o2Sensor3: Double? = nil
+  var o2Sensor4: Double? = nil
+  var o2Sensor5: Double? = nil
+  var o2Sensor6: Double? = nil
+  /// Raw O2 cell output in millivolts (sensor 1..6), null when that cell
+  /// reports none. Present even when the cell's ppO2 is unavailable because the
+  /// logged calibration could not be trusted (issue #810).
+  var o2SensorMv1: Int64? = nil
+  var o2SensorMv2: Int64? = nil
+  var o2SensorMv3: Int64? = nil
+  var o2SensorMv4: Int64? = nil
+  var o2SensorMv5: Int64? = nil
+  var o2SensorMv6: Int64? = nil
+  /// Shearwater Avelo mode (issue #4664): the computer's buoyancy figure in
+  /// kilograms (negative is heavy), the Hydrotank's gas remaining in percent,
+  /// and the computer's own respiratory minute volume in litres per minute.
+  /// Null on every sample outside Avelo mode and where the computer logged a
+  /// code instead of a value.
+  var aveloBuoyancy: Double? = nil
+  var aveloGasRemaining: Int64? = nil
+  var computerRmv: Double? = nil
+  /// Active gas mix index at this sample (from DC_SAMPLE_GASMIX), carried forward
+  /// from the most recent gas switch; null if the computer reported no gas.
+  var gasMixIndex: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -172,15 +220,33 @@ struct ProfileSample {
     let temperatureCelsius: Double? = nilOrValue(pigeonVar_list[2])
     let pressureBar: Double? = nilOrValue(pigeonVar_list[3])
     let tankIndex: Int64? = nilOrValue(pigeonVar_list[4])
-    let heartRate: Int64? = nilOrValue(pigeonVar_list[5])
-    let setpoint: Double? = nilOrValue(pigeonVar_list[6])
-    let ppo2: Double? = nilOrValue(pigeonVar_list[7])
-    let cns: Double? = nilOrValue(pigeonVar_list[8])
-    let rbt: Int64? = nilOrValue(pigeonVar_list[9])
-    let decoType: Int64? = nilOrValue(pigeonVar_list[10])
-    let decoTime: Int64? = nilOrValue(pigeonVar_list[11])
-    let decoDepth: Double? = nilOrValue(pigeonVar_list[12])
-    let tts: Int64? = nilOrValue(pigeonVar_list[13])
+    let tankPressuresBar: [Double?]? = nilOrValue(pigeonVar_list[5])
+    let heartRate: Int64? = nilOrValue(pigeonVar_list[6])
+    let heading: Double? = nilOrValue(pigeonVar_list[7])
+    let setpoint: Double? = nilOrValue(pigeonVar_list[8])
+    let ppo2: Double? = nilOrValue(pigeonVar_list[9])
+    let cns: Double? = nilOrValue(pigeonVar_list[10])
+    let rbt: Int64? = nilOrValue(pigeonVar_list[11])
+    let decoType: Int64? = nilOrValue(pigeonVar_list[12])
+    let decoTime: Int64? = nilOrValue(pigeonVar_list[13])
+    let decoDepth: Double? = nilOrValue(pigeonVar_list[14])
+    let tts: Int64? = nilOrValue(pigeonVar_list[15])
+    let o2Sensor1: Double? = nilOrValue(pigeonVar_list[16])
+    let o2Sensor2: Double? = nilOrValue(pigeonVar_list[17])
+    let o2Sensor3: Double? = nilOrValue(pigeonVar_list[18])
+    let o2Sensor4: Double? = nilOrValue(pigeonVar_list[19])
+    let o2Sensor5: Double? = nilOrValue(pigeonVar_list[20])
+    let o2Sensor6: Double? = nilOrValue(pigeonVar_list[21])
+    let o2SensorMv1: Int64? = nilOrValue(pigeonVar_list[22])
+    let o2SensorMv2: Int64? = nilOrValue(pigeonVar_list[23])
+    let o2SensorMv3: Int64? = nilOrValue(pigeonVar_list[24])
+    let o2SensorMv4: Int64? = nilOrValue(pigeonVar_list[25])
+    let o2SensorMv5: Int64? = nilOrValue(pigeonVar_list[26])
+    let o2SensorMv6: Int64? = nilOrValue(pigeonVar_list[27])
+    let aveloBuoyancy: Double? = nilOrValue(pigeonVar_list[28])
+    let aveloGasRemaining: Int64? = nilOrValue(pigeonVar_list[29])
+    let computerRmv: Double? = nilOrValue(pigeonVar_list[30])
+    let gasMixIndex: Int64? = nilOrValue(pigeonVar_list[31])
 
     return ProfileSample(
       timeSeconds: timeSeconds,
@@ -188,7 +254,9 @@ struct ProfileSample {
       temperatureCelsius: temperatureCelsius,
       pressureBar: pressureBar,
       tankIndex: tankIndex,
+      tankPressuresBar: tankPressuresBar,
       heartRate: heartRate,
+      heading: heading,
       setpoint: setpoint,
       ppo2: ppo2,
       cns: cns,
@@ -196,7 +264,23 @@ struct ProfileSample {
       decoType: decoType,
       decoTime: decoTime,
       decoDepth: decoDepth,
-      tts: tts
+      tts: tts,
+      o2Sensor1: o2Sensor1,
+      o2Sensor2: o2Sensor2,
+      o2Sensor3: o2Sensor3,
+      o2Sensor4: o2Sensor4,
+      o2Sensor5: o2Sensor5,
+      o2Sensor6: o2Sensor6,
+      o2SensorMv1: o2SensorMv1,
+      o2SensorMv2: o2SensorMv2,
+      o2SensorMv3: o2SensorMv3,
+      o2SensorMv4: o2SensorMv4,
+      o2SensorMv5: o2SensorMv5,
+      o2SensorMv6: o2SensorMv6,
+      aveloBuoyancy: aveloBuoyancy,
+      aveloGasRemaining: aveloGasRemaining,
+      computerRmv: computerRmv,
+      gasMixIndex: gasMixIndex
     )
   }
   func toList() -> [Any?] {
@@ -206,7 +290,9 @@ struct ProfileSample {
       temperatureCelsius,
       pressureBar,
       tankIndex,
+      tankPressuresBar,
       heartRate,
+      heading,
       setpoint,
       ppo2,
       cns,
@@ -215,6 +301,22 @@ struct ProfileSample {
       decoTime,
       decoDepth,
       tts,
+      o2Sensor1,
+      o2Sensor2,
+      o2Sensor3,
+      o2Sensor4,
+      o2Sensor5,
+      o2Sensor6,
+      o2SensorMv1,
+      o2SensorMv2,
+      o2SensorMv3,
+      o2SensorMv4,
+      o2SensorMv5,
+      o2SensorMv6,
+      aveloBuoyancy,
+      aveloGasRemaining,
+      computerRmv,
+      gasMixIndex,
     ]
   }
 }
@@ -224,6 +326,11 @@ struct GasMix {
   var index: Int64
   var o2Percent: Double
   var hePercent: Double
+  /// Gas usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount); null when the computer reported no usage (DC_USAGE_NONE).
+  /// Set on the gas mix itself, so it is available even when the mix has no
+  /// tank/transmitter record.
+  var usage: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -231,11 +338,13 @@ struct GasMix {
     let index = pigeonVar_list[0] as! Int64
     let o2Percent = pigeonVar_list[1] as! Double
     let hePercent = pigeonVar_list[2] as! Double
+    let usage: Int64? = nilOrValue(pigeonVar_list[3])
 
     return GasMix(
       index: index,
       o2Percent: o2Percent,
-      hePercent: hePercent
+      hePercent: hePercent,
+      usage: usage
     )
   }
   func toList() -> [Any?] {
@@ -243,6 +352,7 @@ struct GasMix {
       index,
       o2Percent,
       hePercent,
+      usage,
     ]
   }
 }
@@ -254,6 +364,15 @@ struct TankInfo {
   var volumeLiters: Double? = nil
   var startPressureBar: Double? = nil
   var endPressureBar: Double? = nil
+  /// Tank usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount, 4=the Avelo Hydrotank, a fork extension); null when the
+  /// computer reported no usage (DC_USAGE_NONE).
+  var usage: Int64? = nil
+  /// Serial number of the air-integration transmitter that reported this
+  /// tank's pressures (`dc_tank_t.serial`, a fork extension); null when the
+  /// computer reported none. Identifies the physical cylinder across
+  /// computers paired to the same transmitter.
+  var transmitterSerial: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -263,13 +382,17 @@ struct TankInfo {
     let volumeLiters: Double? = nilOrValue(pigeonVar_list[2])
     let startPressureBar: Double? = nilOrValue(pigeonVar_list[3])
     let endPressureBar: Double? = nilOrValue(pigeonVar_list[4])
+    let usage: Int64? = nilOrValue(pigeonVar_list[5])
+    let transmitterSerial: Int64? = nilOrValue(pigeonVar_list[6])
 
     return TankInfo(
       index: index,
       gasMixIndex: gasMixIndex,
       volumeLiters: volumeLiters,
       startPressureBar: startPressureBar,
-      endPressureBar: endPressureBar
+      endPressureBar: endPressureBar,
+      usage: usage,
+      transmitterSerial: transmitterSerial
     )
   }
   func toList() -> [Any?] {
@@ -279,6 +402,8 @@ struct TankInfo {
       volumeLiters,
       startPressureBar,
       endPressureBar,
+      usage,
+      transmitterSerial,
     ]
   }
 }
@@ -337,6 +462,11 @@ struct ParsedDive {
   var decoConservatism: Int64? = nil
   var rawData: FlutterStandardTypedData? = nil
   var rawFingerprint: FlutterStandardTypedData? = nil
+  var entryLatitude: Double? = nil
+  var entryLongitude: Double? = nil
+  var exitLatitude: Double? = nil
+  var exitLongitude: Double? = nil
+  var surfacePressureBar: Double? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -365,6 +495,11 @@ struct ParsedDive {
     let decoConservatism: Int64? = nilOrValue(pigeonVar_list[21])
     let rawData: FlutterStandardTypedData? = nilOrValue(pigeonVar_list[22])
     let rawFingerprint: FlutterStandardTypedData? = nilOrValue(pigeonVar_list[23])
+    let entryLatitude: Double? = nilOrValue(pigeonVar_list[24])
+    let entryLongitude: Double? = nilOrValue(pigeonVar_list[25])
+    let exitLatitude: Double? = nilOrValue(pigeonVar_list[26])
+    let exitLongitude: Double? = nilOrValue(pigeonVar_list[27])
+    let surfacePressureBar: Double? = nilOrValue(pigeonVar_list[28])
 
     return ParsedDive(
       fingerprint: fingerprint,
@@ -390,7 +525,12 @@ struct ParsedDive {
       gfHigh: gfHigh,
       decoConservatism: decoConservatism,
       rawData: rawData,
-      rawFingerprint: rawFingerprint
+      rawFingerprint: rawFingerprint,
+      entryLatitude: entryLatitude,
+      entryLongitude: entryLongitude,
+      exitLatitude: exitLatitude,
+      exitLongitude: exitLongitude,
+      surfacePressureBar: surfacePressureBar
     )
   }
   func toList() -> [Any?] {
@@ -419,6 +559,11 @@ struct ParsedDive {
       decoConservatism,
       rawData,
       rawFingerprint,
+      entryLatitude,
+      entryLongitude,
+      exitLatitude,
+      exitLongitude,
+      surfacePressureBar,
     ]
   }
 }
@@ -566,7 +711,7 @@ protocol DiveComputerHostApi {
   func getDeviceDescriptors(completion: @escaping (Result<[DeviceDescriptor], Error>) -> Void)
   func startDiscovery(transport: TransportType, completion: @escaping (Result<Void, Error>) -> Void)
   func stopDiscovery() throws
-  func startDownload(device: DiscoveredDevice, fingerprint: String?, completion: @escaping (Result<Void, Error>) -> Void)
+  func startDownload(device: DiscoveredDevice, fingerprint: String?, syncClock: Bool, completion: @escaping (Result<Void, Error>) -> Void)
   func cancelDownload() throws
   func submitPinCode(pinCode: String) throws
   func getLibdivecomputerVersion() throws -> String
@@ -630,7 +775,8 @@ class DiveComputerHostApiSetup {
         let args = message as! [Any?]
         let deviceArg = args[0] as! DiscoveredDevice
         let fingerprintArg: String? = nilOrValue(args[1])
-        api.startDownload(device: deviceArg, fingerprint: fingerprintArg) { result in
+        let syncClockArg = args[2] as! Bool
+        api.startDownload(device: deviceArg, fingerprint: fingerprintArg, syncClock: syncClockArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -711,7 +857,7 @@ protocol DiveComputerFlutterApiProtocol {
   func onDiscoveryComplete(completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onDownloadProgress(progress progressArg: DownloadProgress, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onDiveDownloaded(dive diveArg: ParsedDive, completion: @escaping (Result<Void, PigeonError>) -> Void)
-  func onDownloadComplete(totalDives totalDivesArg: Int64, serialNumber serialNumberArg: String?, firmwareVersion firmwareVersionArg: String?, completion: @escaping (Result<Void, PigeonError>) -> Void)
+  func onDownloadComplete(totalDives totalDivesArg: Int64, serialNumber serialNumberArg: String?, firmwareVersion firmwareVersionArg: String?, clockSyncStatus clockSyncStatusArg: String?, reportedProduct reportedProductArg: String?, reportedModel reportedModelArg: Int64?, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onError(error errorArg: DiveComputerError, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onPinCodeRequired(deviceAddress deviceAddressArg: String, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onLogEvent(category categoryArg: String, level levelArg: String, message messageArg: String, completion: @escaping (Result<Void, PigeonError>) -> Void)
@@ -798,10 +944,10 @@ class DiveComputerFlutterApi: DiveComputerFlutterApiProtocol {
       }
     }
   }
-  func onDownloadComplete(totalDives totalDivesArg: Int64, serialNumber serialNumberArg: String?, firmwareVersion firmwareVersionArg: String?, completion: @escaping (Result<Void, PigeonError>) -> Void) {
+  func onDownloadComplete(totalDives totalDivesArg: Int64, serialNumber serialNumberArg: String?, firmwareVersion firmwareVersionArg: String?, clockSyncStatus clockSyncStatusArg: String?, reportedProduct reportedProductArg: String?, reportedModel reportedModelArg: Int64?, completion: @escaping (Result<Void, PigeonError>) -> Void) {
     let channelName: String = "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onDownloadComplete\(messageChannelSuffix)"
     let channel = FlutterBasicMessageChannel(name: channelName, binaryMessenger: binaryMessenger, codec: codec)
-    channel.sendMessage([totalDivesArg, serialNumberArg, firmwareVersionArg] as [Any?]) { response in
+    channel.sendMessage([totalDivesArg, serialNumberArg, firmwareVersionArg, clockSyncStatusArg, reportedProductArg, reportedModelArg] as [Any?]) { response in
       guard let listResponse = response as? [Any?] else {
         completion(.failure(createConnectionError(withChannelName: channelName)))
         return

@@ -2,34 +2,30 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/certifications/presentation/pages/certification_edit_routes.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_grouping_providers.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
-import 'package:submersion/features/certifications/presentation/widgets/certification_ecard_stack.dart';
+import 'package:submersion/features/certifications/presentation/utils/certification_grouping.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_ecard_grid.dart';
 import 'package:submersion/features/certifications/presentation/widgets/certification_share_sheet.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_sort_sheet.dart';
+import 'package:submersion/features/certifications/presentation/widgets/certification_view_switch_selector.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 
-/// Full-screen page displaying the certification card stack with navigation
-/// and share functionality.
-class CertificationWalletPage extends ConsumerStatefulWidget {
+/// Full-screen page displaying the certification cards in a vertically
+/// scrolling grid, with per-card share and options actions.
+class CertificationWalletPage extends ConsumerWidget {
   const CertificationWalletPage({super.key});
 
-  @override
-  ConsumerState<CertificationWalletPage> createState() =>
-      _CertificationWalletPageState();
-}
-
-class _CertificationWalletPageState
-    extends ConsumerState<CertificationWalletPage> {
-  int _currentIndex = 0;
-
-  void _onIndexChanged(int index) {
-    setState(() {
-      _currentIndex = index;
-    });
-  }
-
-  void _showOptionsSheet(BuildContext context, Certification certification) {
+  void _showOptionsSheet(
+    BuildContext context,
+    WidgetRef ref,
+    Certification certification,
+  ) {
     showModalBottomSheet<void>(
       context: context,
       builder: (context) {
@@ -42,7 +38,7 @@ class _CertificationWalletPageState
                 title: Text(context.l10n.certifications_wallet_options_share),
                 onTap: () {
                   Navigator.pop(context);
-                  _showShareSheet(context, certification);
+                  _showShareSheet(context, ref, certification);
                 },
               ),
               ListTile(
@@ -60,7 +56,9 @@ class _CertificationWalletPageState
                 title: Text(context.l10n.certifications_wallet_options_edit),
                 onTap: () {
                   Navigator.pop(context);
-                  context.push('/certifications/${certification.id}/edit');
+                  // A card has no lock to tap: Edit opens the
+                  // certification unlocked (issue #4527).
+                  context.push(certificationEditLocation(certification.id));
                 },
               ),
             ],
@@ -70,12 +68,17 @@ class _CertificationWalletPageState
     );
   }
 
-  void _showShareSheet(BuildContext context, Certification certification) {
+  void _showShareSheet(
+    BuildContext context,
+    WidgetRef ref,
+    Certification certification,
+  ) {
     final diverName = ref.read(currentDiverProvider).value?.name ?? 'Diver';
 
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => CertificationShareSheet(
         certification: certification,
         diverName: diverName,
@@ -84,24 +87,38 @@ class _CertificationWalletPageState
   }
 
   @override
-  Widget build(BuildContext context) {
-    final certificationsAsync = ref.watch(certificationListNotifierProvider);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final certificationsAsync = ref.watch(walletCertificationsProvider);
     final diverAsync = ref.watch(currentDiverProvider);
+    // The grid's action rows title custom levels through the catalog, which
+    // can arrive after the first frame (issue #690).
+    ref.watch(certificationCatalogSyncProvider);
+    final sort = ref.watch(certificationSortProvider);
+    final groupBy = ref.watch(certificationGroupByProvider);
 
     return Scaffold(
       appBar: AppBar(
         title: Text(context.l10n.certifications_wallet_appBar_title),
         actions: [
           IconButton(
+            icon: const Icon(Icons.sort),
+            tooltip: context.l10n.certifications_wallet_tooltip_sort,
+            onPressed: () => showCertificationSortSheet(
+              context,
+              ref,
+              currentView: CertificationView.wallet,
+            ),
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
             tooltip: context.l10n.certifications_wallet_tooltip_add,
-            onPressed: () => context.push('/certifications/new'),
+            onPressed: () => openNewCertification(context),
           ),
         ],
       ),
       body: certificationsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => _buildErrorState(context, error),
+        error: (error, stackTrace) => _buildErrorState(context, ref, error),
         data: (certifications) {
           final diverName = diverAsync.when(
             data: (diver) => diver?.name ?? 'Diver',
@@ -109,46 +126,37 @@ class _CertificationWalletPageState
             error: (_, _) => 'Diver',
           );
 
-          // Ensure current index is valid after data changes
-          if (_currentIndex >= certifications.length &&
-              certifications.isNotEmpty) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              setState(() {
-                _currentIndex = certifications.length - 1;
-              });
-            });
-          }
+          // Card order follows the shared sort and grouping (#3359); the
+          // grid itself shows no group headers (stretch goal, not built
+          // here).
+          final ordered = flattenCertificationGroups(
+            groupBy,
+            applyCertificationSorting(
+              certifications,
+              sort,
+              l10n: context.l10n,
+              catalog: context.certificationCatalog,
+            ),
+            l10n: context.l10n,
+            catalog: context.certificationCatalog,
+          );
 
-          return CertificationEcardStack(
-            certifications: certifications,
+          return CertificationEcardGrid(
+            certifications: ordered,
             diverName: diverName,
-            initialIndex: _currentIndex,
-            onIndexChanged: _onIndexChanged,
             onCardLongPress: (certification) =>
-                _showOptionsSheet(context, certification),
+                _showOptionsSheet(context, ref, certification),
+            onShare: (certification) =>
+                _showShareSheet(context, ref, certification),
+            onMoreOptions: (certification) =>
+                _showOptionsSheet(context, ref, certification),
           );
         },
-      ),
-      floatingActionButton: certificationsAsync.when(
-        data: (certifications) {
-          if (certifications.isEmpty) return null;
-
-          return FloatingActionButton(
-            tooltip: context.l10n.certifications_wallet_tooltip_share,
-            onPressed: () {
-              final index = _currentIndex.clamp(0, certifications.length - 1);
-              _showShareSheet(context, certifications[index]);
-            },
-            child: const Icon(Icons.share),
-          );
-        },
-        loading: () => null,
-        error: (_, _) => null,
       ),
     );
   }
 
-  Widget _buildErrorState(BuildContext context, Object error) {
+  Widget _buildErrorState(BuildContext context, WidgetRef ref, Object error) {
     final theme = Theme.of(context);
 
     return Center(
@@ -176,7 +184,7 @@ class _CertificationWalletPageState
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: () {
-                ref.invalidate(certificationListNotifierProvider);
+                ref.invalidate(walletCertificationsProvider);
               },
               icon: const Icon(Icons.refresh),
               label: Text(context.l10n.certifications_wallet_error_retry),

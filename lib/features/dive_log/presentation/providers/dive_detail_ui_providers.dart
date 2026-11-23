@@ -1,3 +1,4 @@
+import 'package:submersion/core/constants/gas_consumption_display.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,6 +14,8 @@ class DiveDetailUiKeys {
   static const String equipmentSectionExpanded =
       'dive_detail_equipment_expanded';
   static const String tideSectionExpanded = 'dive_detail_tide_expanded';
+  static const String surfaceGpsSectionExpanded =
+      'dive_detail_surface_gps_expanded';
 }
 
 /// State class for collapsible section preferences
@@ -22,6 +25,7 @@ class CollapsibleSectionState {
   final bool sacSegmentsExpanded;
   final bool equipmentExpanded;
   final bool tideExpanded;
+  final bool surfaceGpsExpanded;
 
   const CollapsibleSectionState({
     this.decoExpanded = false,
@@ -29,6 +33,7 @@ class CollapsibleSectionState {
     this.sacSegmentsExpanded = true,
     this.equipmentExpanded = true,
     this.tideExpanded = true,
+    this.surfaceGpsExpanded = true,
   });
 
   CollapsibleSectionState copyWith({
@@ -37,6 +42,7 @@ class CollapsibleSectionState {
     bool? sacSegmentsExpanded,
     bool? equipmentExpanded,
     bool? tideExpanded,
+    bool? surfaceGpsExpanded,
   }) {
     return CollapsibleSectionState(
       decoExpanded: decoExpanded ?? this.decoExpanded,
@@ -44,6 +50,7 @@ class CollapsibleSectionState {
       sacSegmentsExpanded: sacSegmentsExpanded ?? this.sacSegmentsExpanded,
       equipmentExpanded: equipmentExpanded ?? this.equipmentExpanded,
       tideExpanded: tideExpanded ?? this.tideExpanded,
+      surfaceGpsExpanded: surfaceGpsExpanded ?? this.surfaceGpsExpanded,
     );
   }
 }
@@ -70,6 +77,8 @@ class CollapsibleSectionNotifier
           _prefs.getBool(DiveDetailUiKeys.equipmentSectionExpanded) ?? true,
       tideExpanded:
           _prefs.getBool(DiveDetailUiKeys.tideSectionExpanded) ?? true,
+      surfaceGpsExpanded:
+          _prefs.getBool(DiveDetailUiKeys.surfaceGpsSectionExpanded) ?? true,
     );
   }
 
@@ -96,6 +105,11 @@ class CollapsibleSectionNotifier
   Future<void> setTideExpanded(bool expanded) async {
     state = state.copyWith(tideExpanded: expanded);
     await _prefs.setBool(DiveDetailUiKeys.tideSectionExpanded, expanded);
+  }
+
+  Future<void> setSurfaceGpsExpanded(bool expanded) async {
+    state = state.copyWith(surfaceGpsExpanded: expanded);
+    await _prefs.setBool(DiveDetailUiKeys.surfaceGpsSectionExpanded, expanded);
   }
 }
 
@@ -133,4 +147,40 @@ final equipmentSectionExpandedProvider = Provider<bool>((ref) {
 
 final tideSectionExpandedProvider = Provider<bool>((ref) {
   return ref.watch(collapsibleSectionProvider.select((s) => s.tideExpanded));
+});
+
+final surfaceGpsSectionExpandedProvider = Provider<bool>((ref) {
+  return ref.watch(
+    collapsibleSectionProvider.select((s) => s.surfaceGpsExpanded),
+  );
+});
+
+/// Whether the Surface GPS map shows the whole recording rather than just
+/// the dive's own window plus margin.
+final surfaceGpsFullTrackProvider = StateProvider<bool>((ref) => false);
+
+/// Whether the dive detail page's "Underwater Track" section
+/// (`DiveDetailSectionId.navTrack`) is expanded.
+///
+/// Session-only, unlike the sections above: those persist through
+/// [CollapsibleSectionState] because the diver's fold choice should survive
+/// reopening the app, but wiring one more boolean through that
+/// SharedPreferences-backed notifier was not worth it for this section in
+/// this pass -- a later change can fold it in the same way if that turns out
+/// to matter.
+final navTrackSectionExpandedProvider = StateProvider<bool>((ref) => true);
+
+/// The lane the consumption-by-segment card renders when the display
+/// preference shows both. Session only: null follows the preference.
+final sacSegmentsLaneOverrideProvider = StateProvider<GasConsumptionLane?>(
+  (ref) => null,
+);
+
+/// The lane the card renders. An override only counts while the preference
+/// still allows that lane, so switching to SAC-only never shows RMV.
+final sacSegmentsLaneProvider = Provider<GasConsumptionLane>((ref) {
+  final display = ref.watch(gasConsumptionDisplayProvider);
+  final override = ref.watch(sacSegmentsLaneOverrideProvider);
+  if (override != null && display.lanes.contains(override)) return override;
+  return display.lanes.first;
 });

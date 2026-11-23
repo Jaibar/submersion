@@ -1,4 +1,7 @@
 import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/domain/visibility/visibility_range.dart';
+import 'package:submersion/core/utils/elapsed_duration_format.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 
 /// Extension providing display string formatting for [DiveField] raw values.
@@ -14,6 +17,13 @@ extension DiveFieldFormatter on DiveField {
       case DiveField.swellHeight:
         return units.formatDepth(value as double?);
 
+      case DiveField.visibility:
+        // Measured dives extract a metric double; pre-v144 dives extract the
+        // legacy bucket's label, which is already display-ready.
+        if (value is double) return units.formatDistance(value);
+        if (value is VisibilityRange) return _compactRange(value, units);
+        return value.toString();
+
       case DiveField.waterTemp:
       case DiveField.airTemp:
         return units.formatTemperature(value as double?);
@@ -28,11 +38,11 @@ extension DiveFieldFormatter on DiveField {
       case DiveField.endPressure:
         return units.formatPressure(value as double?);
 
-      case DiveField.sacRate:
-        if (value is double) {
-          return '${value.toStringAsFixed(1)} ${units.volumeSymbol}/min';
-        }
-        return '--';
+      case DiveField.sac:
+        return value is double ? units.formatSac(value) : '--';
+
+      case DiveField.rmv:
+        return value is double ? units.formatRmv(value) : '--';
 
       case DiveField.gasConsumed:
         return units.formatVolume(value as double?);
@@ -80,8 +90,16 @@ extension DiveFieldFormatter on DiveField {
         return '--';
 
       case DiveField.isFavorite:
+      case DiveField.excludedFromStats:
+      case DiveField.excludedFromGasStats:
         if (value is bool) {
           return value ? 'Yes' : 'No';
+        }
+        return '--';
+
+      case DiveField.scrubberDuration:
+        if (value is int) {
+          return '$value min';
         }
         return '--';
 
@@ -103,21 +121,23 @@ extension DiveFieldFormatter on DiveField {
   }
 }
 
-/// Format a [Duration] value as a human-readable string.
-///
-/// Produces "Xh Ym" for durations >= 1 hour, or "Xmin" otherwise.
+/// Format a [Duration] value as a compact elapsed time ("45min", "1h 15m",
+/// "6d 13h", "1y 35d"), or "--" when missing or under a minute.
 String _formatDuration(dynamic value) {
-  if (value == null) return '--';
-  if (value is! Duration) return '--';
+  if (value is! Duration || value.inMinutes <= 0) return '--';
+  return formatElapsedEnglish(value);
+}
 
-  final totalMinutes = value.inMinutes;
-  if (totalMinutes <= 0) return '--';
-
-  final hours = totalMinutes ~/ 60;
-  final minutes = totalMinutes % 60;
-
-  if (hours > 0) {
-    return '${hours}h ${minutes}m';
-  }
-  return '${minutes}min';
+/// A visibility range for a narrow table cell, unit attached like
+/// [UnitFormatter.formatDistance]: "6-12m", "<2m", "12m+" (issue #3226).
+/// Symbols rather than words, so the cell needs no l10n.
+String _compactRange(VisibilityRange range, UnitFormatter units) {
+  String n(double meters) =>
+      formatFixedForDisplay(units.convertDepth(meters), 0);
+  final unit = units.depthSymbol;
+  final min = range.minM;
+  final max = range.maxM;
+  if (min == null) return '<${n(max!)}$unit';
+  if (max == null) return '${n(min)}$unit+';
+  return '${n(min)}-${n(max)}$unit';
 }

@@ -1,0 +1,1126 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:submersion/features/nav_track/data/services/nav_track_import_service.dart';
+import 'package:submersion/features/universal_import/data/models/detection_result.dart';
+import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
+import 'package:submersion/shared/services/incoming_share.dart';
+import 'package:submersion/shared/services/navigation_ready_gate.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_import_review_page.dart';
+import 'package:submersion/features/nav_track/presentation/providers/nav_track_import_flow_providers.dart';
+import 'package:submersion/features/cylinder_passports/presentation/providers/cylinder_passport_providers.dart';
+import 'package:submersion/features/cylinder_passports/data/services/nfc_tag_service.dart';
+import 'package:submersion/core/services/sync/sync_cleanup_outcome.dart';
+import 'package:submersion/app.dart';
+import 'package:submersion/core/router/app_router.dart';
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/storage/gc/storage_gc_coordinator.dart';
+import 'package:submersion/core/services/sync/library_epoch.dart';
+import 'package:submersion/core/services/sync/sync_initializer.dart'
+    show DeviceIdentityStatus;
+import 'package:submersion/core/services/sync/sync_service.dart'
+    show ConflictResolution;
+import 'package:submersion/features/backup/presentation/pages/restore_complete_page.dart';
+import 'package:submersion/features/cylinder_passports/presentation/services/passport_link_dispatcher.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_service_status_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/dive_deco_status_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_caches_keeper.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/storage_gc_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/features/shared_library/presentation/providers/shared_library_sync_notifier.dart';
+
+import 'helpers/fake_nfc.dart';
+import 'helpers/mock_providers.dart';
+import 'support/fake_nearby_link_manager.dart';
+
+/// A [SyncNotifier] stand-in whose state can be driven directly from a test,
+/// so the app-root `ref.listen` callback can be exercised through real state
+/// transitions without instantiating the database-backed notifier.
+class _DrivableSyncNotifier extends StateNotifier<SyncState>
+    implements SyncNotifier {
+  _DrivableSyncNotifier(super.state);
+
+  /// Push a new state, firing listeners exactly as the real notifier would.
+  void emit(SyncState next) => state = next;
+
+  @override
+  Future<void> performSync({bool auto = false}) async {}
+
+  @override
+  Future<ReplacePreflight> replacePreflight() async =>
+      const ReplacePreflight(localDiveCount: 0, peerFileCount: 0);
+
+  @override
+  Future<void> replaceCloudLibraryFromThisDevice() async {}
+
+  @override
+  Future<void> disableForDatabaseReset() async {}
+
+  @override
+  Future<FirstSyncMergeInfo?> firstSyncMergeInfo() async => null;
+
+  @override
+  Future<LibraryEpochMarker?> libraryReplaceInfo() async => null;
+
+  @override
+  Future<void> adoptReplacedLibrary() async {}
+
+  @override
+  Future<void> acknowledgeMoved() async {}
+
+  @override
+  Future<void> checkLibraryMoved() async {}
+
+  @override
+  Future<void> cleanupOldBackendData() async {}
+
+  @override
+  Future<void> dismissOldBackendCleanup() async {}
+
+  @override
+  Future<void> recordBackendDeparture({
+    required CloudStorageProvider oldProvider,
+    required String toProviderId,
+    String? toProviderName,
+  }) async {}
+
+  @override
+  Future<void> refreshState() async {}
+
+  @override
+  Future<void> resetSyncState() async {}
+
+  @override
+  Future<void> repairSync() async {}
+
+  @override
+  Future<SyncCleanupOutcome> removeThisDeviceCloudFiles({
+    SyncCleanupProgress? onProgress,
+  }) async => const SyncCleanupOutcome();
+
+  @override
+  Future<SyncCleanupOutcome> wipeAllCloudSyncData({
+    SyncCleanupProgress? onProgress,
+  }) async => const SyncCleanupOutcome();
+
+  @override
+  Future<void> rebuildBackendFromThisDevice({
+    SyncCleanupProgress? onProgress,
+    void Function()? onPublishStarted,
+  }) async {}
+
+  @override
+  Future<void> signOut() async {}
+
+  @override
+  Future<void> resolveConflict(
+    String entityType,
+    String recordId,
+    ConflictResolution resolution,
+  ) async {}
+}
+
+/// A sync whose every run waits until the test completes it.
+class _HeldSyncNotifier extends _DrivableSyncNotifier {
+  _HeldSyncNotifier() : super(const SyncState());
+
+  final runs = <Completer<void>>[];
+
+  @override
+  Future<void> performSync({bool auto = false}) {
+    final run = Completer<void>();
+    runs.add(run);
+    return run.future;
+  }
+}
+
+/// Shared libraries with nothing to sync.
+class _IdleLibrarySync extends SharedLibrarySyncNotifier {
+  _IdleLibrarySync(super.ref);
+
+  @override
+  Future<void> syncAll({bool auto = false}) async {}
+}
+
+/// Fixed sync behaviour settings, read once by the app root.
+class _FixedSyncBehavior extends StateNotifier<SyncBehaviorSettings>
+    implements SyncBehaviorNotifier {
+  _FixedSyncBehavior({required bool auto})
+    : super(
+        SyncBehaviorSettings(
+          autoSyncEnabled: auto,
+          syncOnLaunch: true,
+          syncOnResume: true,
+        ),
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Records each storage cleanup pass the app root starts.
+class _RecordingCleanup implements StorageGcCoordinator {
+  final triggers = <StorageGcTrigger>[];
+
+  @override
+  Future<int> run(StorageGcTrigger trigger) async {
+    triggers.add(trigger);
+    return 0;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// A [BackupOperationNotifier] stand-in so a test can drive the app-root
+/// restore-completion listener through real state transitions.
+class _DrivableBackupOp extends StateNotifier<BackupOperationState>
+    implements BackupOperationNotifier {
+  _DrivableBackupOp() : super(const BackupOperationState());
+
+  void emit(BackupOperationState next) => state = next;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// An incoming-link source a test can push links into.
+class _PushableLinks implements IncomingLinkSource {
+  final controller = StreamController<String>.broadcast();
+
+  @override
+  Stream<String> get links => controller.stream;
+}
+
+/// A route import whose parse never finishes, so the review page it opens
+/// stays on its loading state.
+class _PendingNavTrackImport implements NavTrackImportService {
+  @override
+  Future<NavTrackImportPreview> prepare(Uint8List bytes, {String? fileName}) =>
+      Completer<NavTrackImportPreview>().future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// The share sheet exists only on Android and iOS; the handler ignores it
+/// anywhere else, so the share tests pin a mobile platform.
+final _shareSheetPlatform = TargetPlatformVariant.only(TargetPlatform.android);
+
+/// An import that cannot read any file it is handed.
+class _UnreadableImport extends UniversalImportNotifier {
+  _UnreadableImport(super.ref);
+
+  var loads = 0;
+
+  @override
+  Future<DetectionResult> loadFileFromBytes(Uint8List bytes, String fileName) {
+    loads++;
+    return Future.error(const FormatException('unreadable'));
+  }
+}
+
+/// An import that holds each file until [release] completes, standing in
+/// for a slow parse a soft restart can interrupt.
+class _SlowImport extends UniversalImportNotifier {
+  _SlowImport(super.ref, this.release);
+
+  final Future<void> release;
+  var started = false;
+
+  @override
+  Future<DetectionResult> loadFileFromBytes(
+    Uint8List bytes,
+    String fileName,
+  ) async {
+    started = true;
+    await release;
+    return super.loadFileFromBytes(bytes, fileName);
+  }
+}
+
+/// An import that takes any batch of files at once, so a share that
+/// reaches it too early shows up without waiting on real parsing.
+class _InstantBatchImport extends UniversalImportNotifier {
+  _InstantBatchImport(super.ref);
+
+  final loadedBatches = <List<String>>[];
+
+  @override
+  Future<void> loadFilesFromPaths(List<String> paths) async {
+    loadedBatches.add(paths);
+  }
+}
+
+/// Minimal router wired to the real [rootNavigatorKey] so the app-root adopt
+/// dialog (which reads `rootNavigatorKey.currentContext`) can surface.
+GoRouter _testRouter() => GoRouter(
+  navigatorKey: rootNavigatorKey,
+  routes: [
+    GoRoute(
+      path: '/',
+      builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+    ),
+  ],
+);
+
+LibraryEpochMarker _marker() => const LibraryEpochMarker(
+  epochId: 'epoch-1',
+  replacedAt: 1700000000000,
+  deviceId: 'device-1',
+  deviceName: 'Eric Mac',
+);
+
+void main() {
+  /// Builds of the service-due cache writer; stubbed so the app tests never
+  /// evaluate real service clocks.
+  var serviceCacheBuilds = 0;
+
+  /// Builds of the computed deco cache writer; stubbed so the app tests
+  /// never run a library-wide dive analysis.
+  var decoCacheBuilds = 0;
+
+  /// Pumps [SubmersionApp] with the providers its build/launch path reads
+  /// stubbed out, leaving [sync] as the driver for the app-root listener.
+  Future<void> pumpApp(
+    WidgetTester tester,
+    _DrivableSyncNotifier sync, {
+    _DrivableBackupOp? backupOp,
+    List<Override> extraOverrides = const [],
+    IncomingLinkSource? links,
+    GoRouter? router,
+    FakeNfcTagService? nfc,
+    Key? scopeKey,
+    FakeNearbyLinkManager? nearby,
+  }) async {
+    final base = await getBaseOverrides(
+      incomingLinks: links,
+      nfcTagService: nfc,
+      nearbyLinkManager: nearby,
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        key: scopeKey,
+        overrides: [
+          ...base,
+          appRouterProvider.overrideWithValue(router ?? _testRouter()),
+          syncStateProvider.overrideWith((ref) => sync),
+          if (backupOp != null)
+            backupOperationProvider.overrideWith((ref) => backupOp),
+          reconcileDeviceIdentityProvider.overrideWith(
+            (ref) async => DeviceIdentityStatus.unchanged,
+          ),
+          restoreLastProviderProvider.overrideWith((ref) async {}),
+          equipmentServiceStatusCacheProvider.overrideWith((ref) async {
+            serviceCacheBuilds++;
+          }),
+          diveDecoStatusCacheProvider.overrideWith((ref) async {
+            decoCacheBuilds++;
+            return 0;
+          }),
+          ...extraOverrides,
+        ],
+        child: const SubmersionApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('runs the service-due cache writer only on demand (#2365)', (
+    tester,
+  ) async {
+    // The app root keeps the keeper alive, and the keeper starts the
+    // writer only while a filter names serviceDue: with none, launching
+    // the app evaluates no service clocks.
+    serviceCacheBuilds = 0;
+    await pumpApp(tester, _DrivableSyncNotifier(const SyncState()));
+    expect(serviceCacheBuilds, 0);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SubmersionApp)),
+    );
+    expect(container.exists(queryCachesKeeperProvider), isTrue);
+  });
+
+  testWidgets('runs the deco cache writer only on demand (#4461)', (
+    tester,
+  ) async {
+    // As with serviceDue: the app root keeps the keeper alive, and with no
+    // filter naming deco, launching the app analyzes no dives.
+    decoCacheBuilds = 0;
+    await pumpApp(tester, _DrivableSyncNotifier(const SyncState()));
+    expect(decoCacheBuilds, 0);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SubmersionApp)),
+    );
+    expect(container.exists(queryCachesKeeperProvider), isTrue);
+  });
+
+  testWidgets('shows the post-restore syncing notice when sync begins', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(const SyncState());
+    await pumpApp(tester, sync);
+
+    sync.emit(const SyncState(postRestoreSyncing: true));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.text('Syncing your restored library with the cloud…'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('shows the synced notice when the post-restore sync completes', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(
+      const SyncState(postRestoreSyncing: true),
+    );
+    await pumpApp(tester, sync);
+
+    sync.emit(const SyncState(status: SyncStatus.success));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Restored library synced.'), findsOneWidget);
+  });
+
+  testWidgets('also surfaces the synced notice on a conflict outcome', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(
+      const SyncState(postRestoreSyncing: true),
+    );
+    await pumpApp(tester, sync);
+
+    sync.emit(const SyncState(status: SyncStatus.hasConflicts));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Restored library synced.'), findsOneWidget);
+  });
+
+  testWidgets('surfaces the replaced-library banner and adopt dialog', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(const SyncState());
+    await pumpApp(tester, sync);
+
+    sync.emit(
+      SyncState(replaceAwaitingAdoption: true, replaceMarker: _marker()),
+    );
+    await tester.pumpAndSettle();
+
+    // Persistent banner rides across screens.
+    expect(find.textContaining('Sync is paused'), findsOneWidget);
+    // Once-per-session modal auto-opens.
+    expect(find.text('Adopt Restored Library?'), findsOneWidget);
+  });
+
+  testWidgets('does not surface a banner when the replace marker is missing', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(const SyncState());
+    await pumpApp(tester, sync);
+
+    // replaceAwaitingAdoption with no marker is a no-op (guard clause).
+    sync.emit(const SyncState(replaceAwaitingAdoption: true));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Sync is paused'), findsNothing);
+    expect(find.text('Adopt Restored Library?'), findsNothing);
+  });
+
+  testWidgets('clears the banner once adoption is resolved', (tester) async {
+    final sync = _DrivableSyncNotifier(const SyncState());
+    await pumpApp(tester, sync);
+
+    sync.emit(
+      SyncState(replaceAwaitingAdoption: true, replaceMarker: _marker()),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Sync is paused'), findsOneWidget);
+
+    // Dismiss the auto-opened modal, leaving the banner behind.
+    await tester.tap(find.text('Not Now'));
+    await tester.pumpAndSettle();
+
+    sync.emit(const SyncState());
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Sync is paused'), findsNothing);
+  });
+
+  testWidgets('restore completion routes to RestoreCompletePage app-wide', (
+    tester,
+  ) async {
+    // Even though no page-local listener is involved, a restoreComplete
+    // transition on the operation provider must hand off to RestoreCompletePage
+    // from the app root -- so a restore whose triggering page was disposed
+    // still restarts instead of stranding the user on a stale screen.
+    final sync = _DrivableSyncNotifier(const SyncState());
+    final backupOp = _DrivableBackupOp();
+    await pumpApp(tester, sync, backupOp: backupOp);
+
+    expect(find.byType(RestoreCompletePage), findsNothing);
+
+    backupOp.emit(
+      const BackupOperationState(status: BackupOperationStatus.restoreComplete),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(RestoreCompletePage), findsOneWidget);
+  });
+
+  testWidgets('the banner Review action reopens the adopt dialog', (
+    tester,
+  ) async {
+    final sync = _DrivableSyncNotifier(const SyncState());
+    await pumpApp(tester, sync);
+
+    sync.emit(
+      SyncState(replaceAwaitingAdoption: true, replaceMarker: _marker()),
+    );
+    await tester.pumpAndSettle();
+
+    // Close the once-per-session auto modal; the banner persists.
+    await tester.tap(find.text('Not Now'));
+    await tester.pumpAndSettle();
+    expect(find.text('Adopt Restored Library?'), findsNothing);
+
+    // Tapping the banner's Review action reopens the dialog.
+    await tester.tap(find.text('Review'));
+    await tester.pumpAndSettle();
+    expect(find.text('Adopt Restored Library?'), findsOneWidget);
+  });
+
+  testWidgets('a cylinder tag link arriving at the running app is opened', (
+    tester,
+  ) async {
+    final links = _PushableLinks();
+    addTearDown(links.controller.close);
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      links: links,
+      extraOverrides: [
+        diverCountProvider.overrideWith((ref) async => 1),
+        validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+      ],
+    );
+
+    // A tag link with no passport id: it reaches the tag handling, which
+    // refuses it with a message instead of navigating.
+    links.controller.add('submersion://c?f=1');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('That is not a Submersion tag'), findsOneWidget);
+  });
+
+  testWidgets('a tag link during setup waits until setup is left', (
+    tester,
+  ) async {
+    final links = _PushableLinks();
+    addTearDown(links.controller.close);
+    final router = GoRouter(
+      navigatorKey: rootNavigatorKey,
+      initialLocation: '/welcome',
+      routes: [
+        GoRoute(
+          path: '/welcome',
+          builder: (context, state) => const Scaffold(body: Text('wizard')),
+        ),
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+        ),
+      ],
+    );
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      links: links,
+      router: router,
+      extraOverrides: [
+        // The wizard has already written the diver row: divers exist, but
+        // setup is still on screen.
+        diverCountProvider.overrideWith((ref) async => 1),
+        validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+      ],
+    );
+
+    links.controller.add('submersion://c?f=1');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('That is not a Submersion tag'), findsNothing);
+
+    router.go('/');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('That is not a Submersion tag'), findsOneWidget);
+  });
+
+  testWidgets('a tag link before the navigator is built is kept, not lost', (
+    tester,
+  ) async {
+    final links = _PushableLinks();
+    addTearDown(links.controller.close);
+    final gate = Completer<void>();
+    // An async top-level redirect, like the app's own: go_router builds no
+    // Navigator until it resolves.
+    final router = GoRouter(
+      navigatorKey: rootNavigatorKey,
+      redirect: (context, state) async {
+        await gate.future;
+        return null;
+      },
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+        ),
+      ],
+    );
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      links: links,
+      router: router,
+      extraOverrides: [
+        diverCountProvider.overrideWith((ref) async => 1),
+        validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+      ],
+    );
+    expect(rootNavigatorKey.currentContext, isNull);
+
+    links.controller.add('submersion://c?f=1');
+    await tester.pump();
+
+    gate.complete();
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.text('That is not a Submersion tag'), findsOneWidget);
+  });
+
+  group('a file shared through the share sheet', () {
+    /// Hands [files] (name to contents) to the app as the share intent that
+    /// launched it, through the share plugin's own test hook.
+    void shareOnLaunch(Map<String, List<int>> files) {
+      final original = ReceiveSharingIntent.instance;
+      addTearDown(() => ReceiveSharingIntent.instance = original);
+      final dir = Directory.systemTemp.createTempSync('share_intent_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final shared = [
+        for (final MapEntry(key: name, value: bytes) in files.entries)
+          SharedMediaFile(
+            path: (File(p.join(dir.path, name))..writeAsBytesSync(bytes)).path,
+            type: SharedMediaType.file,
+          ),
+      ];
+      // Broadcast, like the plugin's event channel: every app root that
+      // mounts listens to it.
+      final stream = StreamController<List<SharedMediaFile>>.broadcast();
+      addTearDown(stream.close);
+      ReceiveSharingIntent.setMockValues(
+        initialMedia: shared,
+        mediaStream: stream.stream,
+      );
+    }
+
+    /// Lets the share handler's file reads finish. They are real I/O, which
+    /// completes outside the fake clock, and each continuation then needs a
+    /// frame to run in. With [until], keeps going (within a bound) until it
+    /// finds something, so a slow runner does not fail the expectation;
+    /// without it, gives the share a fixed spell to do something it must not.
+    Future<void> settleShare(WidgetTester tester, {Finder? until}) async {
+      for (var i = 0; i < (until == null ? 8 : 100); i++) {
+        if (until != null && until.evaluate().isNotEmpty) return;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+    }
+
+    final encBytes = File(
+      p.join('test', 'fixtures', 'nav_tracks', 'seacraft_enc3_short.csv'),
+    ).readAsBytesSync();
+    final uddfBytes =
+        '<?xml version="1.0"?><uddf version="3.2.0"></uddf>'.codeUnits;
+    final review = find.byType(NavTrackImportReviewPage);
+    final wizard = find.text('import wizard');
+
+    List<Override> withDiver() => [
+      diverCountProvider.overrideWith((ref) async => 1),
+      validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+      // The review page parses on open; a parse that never finishes keeps
+      // it on its loading state, away from the database.
+      navTrackImportServiceProvider.overrideWithValue(_PendingNavTrackImport()),
+    ];
+
+    /// A router whose async top-level redirect waits on [gate], like the
+    /// app's own: go_router builds no Navigator until it resolves, which is
+    /// where a cold start from the share sheet lands.
+    GoRouter coldStartRouter(Completer<void> gate) => GoRouter(
+      navigatorKey: rootNavigatorKey,
+      redirect: (context, state) async {
+        await gate.future;
+        return null;
+      },
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+        ),
+      ],
+    );
+
+    /// A router that starts on first-run setup, with the import wizard to
+    /// go to once setup is left.
+    GoRouter setupRouter() => GoRouter(
+      navigatorKey: rootNavigatorKey,
+      initialLocation: '/welcome',
+      routes: [
+        GoRoute(
+          path: '/welcome',
+          builder: (context, state) => const Scaffold(body: Text('setup')),
+        ),
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+        ),
+        GoRoute(
+          path: '/transfer/import-wizard',
+          builder: (context, state) =>
+              const Scaffold(body: Text('import wizard')),
+        ),
+      ],
+    );
+
+    testWidgets('a Seacraft route opens its review in the running app', (
+      tester,
+    ) async {
+      shareOnLaunch({'005.DAT.csv': encBytes});
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        extraOverrides: withDiver(),
+      );
+      await settleShare(tester, until: review);
+
+      expect(review, findsOneWidget);
+    }, variant: _shareSheetPlatform);
+
+    testWidgets('a soft restart does not open the launch share again', (
+      tester,
+    ) async {
+      shareOnLaunch({'005.DAT.csv': encBytes});
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        extraOverrides: withDiver(),
+      );
+      await settleShare(tester, until: review);
+      expect(review, findsOneWidget);
+
+      // restartApp() swaps the ProviderScope key after a restore, which
+      // mounts a fresh app root that asks the plugin for the launch share.
+      // Unmounted first here, so the old root navigator (a global key) is
+      // not carried over with the review still on it.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        extraOverrides: withDiver(),
+        scopeKey: UniqueKey(),
+      );
+      await settleShare(tester);
+
+      expect(review, findsNothing);
+    }, variant: _shareSheetPlatform);
+
+    testWidgets(
+      'a Seacraft route shared before the navigator is built opens its '
+      'review once it is (#2690)',
+      (tester) async {
+        shareOnLaunch({'005.DAT.csv': encBytes});
+        final gate = Completer<void>();
+        await pumpApp(
+          tester,
+          _DrivableSyncNotifier(const SyncState()),
+          router: coldStartRouter(gate),
+          extraOverrides: withDiver(),
+        );
+        await settleShare(tester);
+        expect(rootNavigatorKey.currentContext, isNull);
+
+        gate.complete();
+        await settleShare(tester, until: review);
+
+        expect(review, findsOneWidget);
+      },
+      variant: _shareSheetPlatform,
+    );
+
+    testWidgets(
+      'a shared file that fails once the navigator is built still says so',
+      (tester) async {
+        shareOnLaunch({'dive.uddf': uddfBytes});
+        final gate = Completer<void>();
+        _UnreadableImport? unreadable;
+        await pumpApp(
+          tester,
+          _DrivableSyncNotifier(const SyncState()),
+          router: coldStartRouter(gate),
+          extraOverrides: [
+            ...withDiver(),
+            universalImportNotifierProvider.overrideWith(
+              (ref) => unreadable = _UnreadableImport(ref),
+            ),
+          ],
+        );
+        await settleShare(tester);
+        // Held: nothing has tried to read it while there is no navigator.
+        expect(unreadable?.loads ?? 0, 0);
+
+        gate.complete();
+        final message = find.text('Could not read file');
+        await settleShare(tester, until: message);
+
+        expect(message, findsOneWidget);
+      },
+      variant: _shareSheetPlatform,
+    );
+
+    testWidgets('a dive log shared during setup opens the import wizard once '
+        'setup is left', (tester) async {
+      shareOnLaunch({'dive.uddf': uddfBytes});
+      final router = setupRouter();
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: router,
+        extraOverrides: [
+          // Setup has just written the diver row but is still on screen.
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+        ],
+      );
+      await settleShare(tester);
+      expect(wizard, findsNothing);
+
+      router.go('/');
+      await settleShare(tester, until: wizard);
+
+      expect(wizard, findsOneWidget);
+    }, variant: _shareSheetPlatform);
+
+    testWidgets('several dive logs shared during setup open the import '
+        'wizard once setup is left', (tester) async {
+      shareOnLaunch({'first.uddf': uddfBytes, 'second.uddf': uddfBytes});
+      final router = setupRouter();
+      late _InstantBatchImport batchImport;
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: router,
+        extraOverrides: [
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          universalImportNotifierProvider.overrideWith(
+            (ref) => batchImport = _InstantBatchImport(ref),
+          ),
+        ],
+      );
+      await settleShare(tester);
+      expect(wizard, findsNothing);
+
+      router.go('/');
+      await settleShare(tester, until: wizard);
+
+      expect(wizard, findsOneWidget);
+      expect(batchImport.loadedBatches.single.map(p.basename), [
+        'first.uddf',
+        'second.uddf',
+      ]);
+    }, variant: _shareSheetPlatform);
+
+    testWidgets('a file being opened when a soft restart replaces the app '
+        'root is opened by the new root', (tester) async {
+      shareOnLaunch({'dive.uddf': uddfBytes});
+      final shares = NavigationReadyGate<IncomingShare>();
+      final release = Completer<void>();
+      _SlowImport? slow;
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: setupRouter()..go('/'),
+        extraOverrides: [
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          incomingShareGateProvider.overrideWithValue(shares),
+          universalImportNotifierProvider.overrideWith(
+            (ref) => slow = _SlowImport(ref, release.future),
+          ),
+        ],
+      );
+      await settleShare(tester);
+      expect(slow?.started, isTrue);
+
+      // restartApp() while the first root is still reading the file.
+      await tester.pumpWidget(const SizedBox.shrink());
+      release.complete();
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: setupRouter()..go('/'),
+        scopeKey: UniqueKey(),
+        extraOverrides: [
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          incomingShareGateProvider.overrideWithValue(shares),
+        ],
+      );
+      await settleShare(tester, until: wizard);
+
+      expect(wizard, findsOneWidget);
+    }, variant: _shareSheetPlatform);
+
+    testWidgets('a file held during setup is opened by the app root that a '
+        'soft restart puts in its place', (tester) async {
+      shareOnLaunch({'dive.uddf': uddfBytes});
+      // One gate for the process, as SubmersionRestart provides it.
+      final shares = NavigationReadyGate<IncomingShare>();
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: setupRouter(),
+        extraOverrides: [
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          incomingShareGateProvider.overrideWithValue(shares),
+        ],
+      );
+      await settleShare(tester);
+      expect(wizard, findsNothing);
+
+      // A restore from the setup wizard ends in restartApp(), which mounts
+      // a fresh app root; the restored library has a diver, so it leaves
+      // setup at once.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await pumpApp(
+        tester,
+        _DrivableSyncNotifier(const SyncState()),
+        router: setupRouter()..go('/'),
+        scopeKey: UniqueKey(),
+        extraOverrides: [
+          diverCountProvider.overrideWith((ref) async => 1),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+          incomingShareGateProvider.overrideWithValue(shares),
+        ],
+      );
+      await settleShare(tester, until: wizard);
+
+      expect(wizard, findsOneWidget);
+    }, variant: _shareSheetPlatform);
+  });
+
+  testWidgets('NFC turned on in the system settings is noticed on return', (
+    tester,
+  ) async {
+    final nfc = FakeNfcTagService(supportValue: NfcSupport.disabled);
+    await pumpApp(tester, _DrivableSyncNotifier(const SyncState()), nfc: nfc);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SubmersionApp)),
+    );
+    final sub = container.listen(nfcSupportProvider, (_, _) {});
+    addTearDown(sub.close);
+    expect(
+      await container.read(nfcSupportProvider.future),
+      NfcSupport.disabled,
+    );
+
+    // The diver follows "Turn it on in the system settings" and comes back.
+    nfc.supportValue = NfcSupport.enabled;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(await container.read(nfcSupportProvider.future), NfcSupport.enabled);
+  });
+
+  group('storage cleanup', () {
+    // An automatic cleanup that starts while a sync runs skips its cloud
+    // part, so started beside the launch or resume sync it never deleted.
+    List<Override> overrides(_RecordingCleanup cleanup, {required bool auto}) =>
+        [
+          storageGcCoordinatorProvider.overrideWithValue(cleanup),
+          syncBehaviorProvider.overrideWith(
+            (ref) => _FixedSyncBehavior(auto: auto),
+          ),
+          sharedLibrarySyncProvider.overrideWith(_IdleLibrarySync.new),
+        ];
+
+    testWidgets('waits for the launch sync to finish', (tester) async {
+      final sync = _HeldSyncNotifier();
+      final cleanup = _RecordingCleanup();
+      await pumpApp(
+        tester,
+        sync,
+        extraOverrides: overrides(cleanup, auto: true),
+      );
+      expect(sync.runs, hasLength(1));
+      expect(cleanup.triggers, isEmpty);
+
+      sync.runs.single.complete();
+      await tester.pump();
+
+      expect(cleanup.triggers, [StorageGcTrigger.launch]);
+    });
+
+    testWidgets('waits for the resume sync to finish', (tester) async {
+      final sync = _HeldSyncNotifier();
+      final cleanup = _RecordingCleanup();
+      await pumpApp(
+        tester,
+        sync,
+        extraOverrides: overrides(cleanup, auto: true),
+      );
+      sync.runs.single.complete();
+      await tester.pump();
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(sync.runs, hasLength(2));
+      expect(cleanup.triggers, [StorageGcTrigger.launch]);
+
+      sync.runs.last.complete();
+      await tester.pump();
+
+      expect(cleanup.triggers, [
+        StorageGcTrigger.launch,
+        StorageGcTrigger.resume,
+      ]);
+    });
+
+    testWidgets('runs at once when auto sync is off', (tester) async {
+      final sync = _HeldSyncNotifier();
+      final cleanup = _RecordingCleanup();
+      await pumpApp(
+        tester,
+        sync,
+        extraOverrides: overrides(cleanup, auto: false),
+      );
+
+      expect(sync.runs, isEmpty);
+      expect(cleanup.triggers, [StorageGcTrigger.launch]);
+    });
+  });
+
+  testWidgets('the nearby link follows the app into the background and back '
+      '(issue #3731)', (tester) async {
+    final nearby = FakeNearbyLinkManager();
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      nearby: nearby,
+    );
+    expect(nearby.foreground, [true], reason: 'started at launch');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    // Each backgrounding step may report; the link only has to end off.
+    expect(nearby.foreground.first, isTrue);
+    expect(nearby.foreground.skip(1), everyElement(isFalse));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(nearby.foreground.last, isTrue);
+  });
+
+  testWidgets('a window that only loses focus keeps the nearby link on '
+      '(issue #3731)', (tester) async {
+    final nearby = FakeNearbyLinkManager();
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      nearby: nearby,
+    );
+    expect(nearby.foreground, [true]);
+
+    // Another app took the focus, or Control Center is pulled down: the
+    // window is still there, and a transfer must not end.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(nearby.foreground, everyElement(isTrue));
+  });
+
+  testWidgets('turning nearby sync off or on re-decides the radio '
+      '(issue #3731)', (tester) async {
+    final nearby = FakeNearbyLinkManager();
+    await pumpApp(
+      tester,
+      _DrivableSyncNotifier(const SyncState()),
+      nearby: nearby,
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SubmersionApp)),
+    );
+    final before = nearby.refreshes;
+    await container
+        .read(syncBehaviorProvider.notifier)
+        .setNearbyAutoEnabled(false);
+    await tester.pump();
+    expect(nearby.refreshes, before + 1);
+  });
+
+  testWidgets('the iOS NFC sheet coming and going is not a return to the app', (
+    tester,
+  ) async {
+    // The sheet makes the app inactive, then resumed. Taken as leaving and
+    // coming back, App Lock set to Immediately would lock after every tag
+    // and every tag would start a sync.
+    final nfc = FakeNfcTagService(supportValue: NfcSupport.disabled);
+    await pumpApp(tester, _DrivableSyncNotifier(const SyncState()), nfc: nfc);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SubmersionApp)),
+    );
+    final sub = container.listen(nfcSupportProvider, (_, _) {});
+    addTearDown(sub.close);
+    expect(
+      await container.read(nfcSupportProvider.future),
+      NfcSupport.disabled,
+    );
+
+    nfc.supportValue = NfcSupport.enabled;
+    nfc.sessionActive = true;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    nfc.sessionActive = false;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    // No resume work ran, so NFC was not checked again.
+    expect(
+      await container.read(nfcSupportProvider.future),
+      NfcSupport.disabled,
+    );
+  });
+}

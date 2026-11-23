@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/import_wizard/domain/models/tag_selection.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/import_tags_field.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 void main() {
@@ -239,8 +241,8 @@ void main() {
       );
 
       // Chip should render with the tag's color
-      final chip = tester.widget<Chip>(find.byType(Chip));
-      expect(chip.side?.color, equals(const Color(0xFFFF0000)));
+      final chip = tester.widget<TagChip>(find.byType(TagChip));
+      expect(chip.color, equals(const Color(0xFFFF0000)));
     });
 
     testWidgets('chip falls back to blue for new tags', (tester) async {
@@ -260,11 +262,11 @@ void main() {
       );
 
       // Falls back to theme's primary color (not hardcoded blue)
-      final chip = tester.widget<Chip>(find.byType(Chip));
+      final chip = tester.widget<TagChip>(find.byType(TagChip));
       final primaryColor = Theme.of(
         tester.element(find.byType(ImportTagsField)),
       ).colorScheme.primary;
-      expect(chip.side?.color, equals(primaryColor));
+      expect(chip.color, equals(primaryColor));
     });
 
     testWidgets('shows autocomplete suggestions matching query', (
@@ -391,6 +393,171 @@ void main() {
       expect(addedTag, isNotNull);
       expect(addedTag!.existingTagId, equals('tag-1'));
       expect(addedTag!.name, equals('Vacation'));
+    });
+
+    testWidgets('arrow keys move the suggestion highlight', (tester) async {
+      final existingTags = [
+        Tag(
+          id: 'tag-1',
+          name: 'Vacation',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+        Tag(
+          id: 'tag-2',
+          name: 'Vacuum test',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: ImportTagsField(
+              tags: const [],
+              existingTags: existingTags,
+              onAdd: (_) {},
+              onRemove: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'Vac');
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, 'Vacation'))
+            .selected,
+        isTrue,
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, 'Vacuum test'))
+            .selected,
+        isTrue,
+      );
+    });
+
+    testWidgets('submitting with suggestions open adds only the highlighted '
+        'tag', (tester) async {
+      final added = <TagSelection>[];
+      final existingTags = [
+        Tag(
+          id: 'tag-1',
+          name: 'Vacation',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: ImportTagsField(
+              tags: const [],
+              existingTags: existingTags,
+              onAdd: added.add,
+              onRemove: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'Vac');
+      await tester.pumpAndSettle();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      // Without the open-list guard this also adds a free-text 'Vac' tag.
+      expect(added, hasLength(1));
+      expect(added.single.existingTagId, equals('tag-1'));
+      expect(added.single.name, equals('Vacation'));
+    });
+
+    testWidgets('submitting with no suggestions still adds the typed tag', (
+      tester,
+    ) async {
+      final added = <TagSelection>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: ImportTagsField(
+              tags: const [],
+              existingTags: const [],
+              onAdd: added.add,
+              onRemove: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'Night dives');
+      await tester.pumpAndSettle();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(added, hasLength(1));
+      expect(added.single.existingTagId, isNull);
+      expect(added.single.name, equals('Night dives'));
+    });
+
+    testWidgets('submitting after dismissing the suggestions adds the typed '
+        'tag', (tester) async {
+      final added = <TagSelection>[];
+      final existingTags = [
+        Tag(
+          id: 'tag-1',
+          name: 'Vacation',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: ImportTagsField(
+              tags: const [],
+              existingTags: existingTags,
+              onAdd: added.add,
+              onRemove: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'Vac');
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ListTile, 'Vacation'), findsOneWidget);
+
+      // Escape closes the overlay, so RawAutocomplete will not commit a
+      // suggestion; the typed text must still be added.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ListTile, 'Vacation'), findsNothing);
+
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(added, hasLength(1));
+      expect(added.single.name, equals('Vac'));
+      expect(added.single.existingTagId, isNull);
     });
   });
 }

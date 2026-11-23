@@ -1,5 +1,7 @@
 #include "dive_computer_host_api_impl.h"
 
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern "C" {
@@ -9,6 +11,8 @@ extern "C" {
 #include "libdc_wrapper.h"
 #include "serial_io_stream.h"
 #include "serial_scanner.h"
+#include "usbhid_enumerator.h"
+#include "usbhid_io_stream.h"
 }
 
 // Context passed as user_data through the VTable.
@@ -17,10 +21,21 @@ struct HostApiContext {
   LibdivecomputerPluginDiveComputerFlutterApi* flutter_api;
   BleScanner* ble_scanner;
   SerialScanner* serial_scanner;
+  // The current download's session and BLE stream, published so Cancel and
+  // the PIN prompt on the main thread can reach them. Each download thread
+  // owns and frees its own; it withdraws them from here only while they are
+  // still current, so a retry started after a cancel is never touched by the
+  // download it replaced. Both are guarded by download_mutex.
+  GMutex download_mutex;
   BleIoStream* ble_stream;
-  SerialIoStream* serial_stream;
   libdc_download_session_t* session;
+  // The newest download thread. The next download joins it before
+  // connecting, so download attempts run one after another.
   GThread* download_thread;
+  // Owners: the method-handler registration and each download thread. The
+  // context is freed when the last of them lets go, so a download still
+  // running at teardown never touches freed memory.
+  gint ref_count;
   // When true, on_dive_downloaded buffers dives instead of dispatching them
   // immediately. Used during multi-port probing to avoid leaking phantom
   // dives from a wrong port to Flutter.
@@ -28,23 +43,16 @@ struct HostApiContext {
   GList* buffered_dives;  // list of LibdivecomputerPluginParsedDive*
 };
 
-static void host_api_context_free(gpointer data) {
-  auto* ctx = static_cast<HostApiContext*>(data);
-  if (ctx->ble_scanner != nullptr) {
-    ble_scanner_free(ctx->ble_scanner);
-  }
-  if (ctx->serial_scanner != nullptr) {
-    serial_scanner_free(ctx->serial_scanner);
-  }
-  if (ctx->ble_stream != nullptr) {
-    ble_io_stream_free(ctx->ble_stream);
-  }
-  if (ctx->serial_stream != nullptr) {
-    serial_io_stream_free(ctx->serial_stream);
-  }
-  if (ctx->session != nullptr) {
-    libdc_download_session_free(ctx->session);
-  }
+static HostApiContext* host_api_context_ref(HostApiContext* ctx) {
+  g_atomic_int_inc(&ctx->ref_count);
+  return ctx;
+}
+
+// Free the context once nothing holds it. The session and streams are not
+// here: they belong to the download thread that opened them.
+static void host_api_context_destroy(HostApiContext* ctx) {
+  if (ctx->download_thread != nullptr) g_thread_unref(ctx->download_thread);
+  g_mutex_clear(&ctx->download_mutex);
   if (ctx->buffered_dives != nullptr) {
     g_list_free_full(ctx->buffered_dives, g_object_unref);
   }
@@ -52,6 +60,50 @@ static void host_api_context_free(gpointer data) {
     g_object_unref(ctx->flutter_api);
   }
   delete ctx;
+}
+
+static gboolean host_api_context_destroy_idle(gpointer data) {
+  host_api_context_destroy(static_cast<HostApiContext*>(data));
+  return G_SOURCE_REMOVE;
+}
+
+static void host_api_context_unref(HostApiContext* ctx) {
+  if (!g_atomic_int_dec_and_test(&ctx->ref_count)) return;
+  // The Flutter objects belong to the main thread, so a download thread that
+  // lets go last hands the free over to it.
+  if (g_main_context_is_owner(g_main_context_default())) {
+    host_api_context_destroy(ctx);
+  } else {
+    g_idle_add(host_api_context_destroy_idle, ctx);
+  }
+}
+
+// The method handlers are being cleared. A download still running keeps its
+// own reference; stop it, and wake a PIN prompt it may be blocked on (an
+// empty PIN reads as cancelled), so it ends and lets go promptly.
+static void host_api_context_free(gpointer data) {
+  auto* ctx = static_cast<HostApiContext*>(data);
+  if (ctx->ble_scanner != nullptr) {
+    ble_scanner_free(ctx->ble_scanner);
+    ctx->ble_scanner = nullptr;
+  }
+  if (ctx->serial_scanner != nullptr) {
+    serial_scanner_free(ctx->serial_scanner);
+    ctx->serial_scanner = nullptr;
+  }
+  g_mutex_lock(&ctx->download_mutex);
+  if (ctx->session != nullptr) libdc_download_cancel(ctx->session);
+  if (ctx->ble_stream != nullptr) ble_io_stream_submit_pin(ctx->ble_stream, "");
+  g_mutex_unlock(&ctx->download_mutex);
+  host_api_context_unref(ctx);
+}
+
+// A reference to the Flutter API for a callback queued to the main thread,
+// which may run after the context has been freed. The callback unrefs it.
+static LibdivecomputerPluginDiveComputerFlutterApi* flutter_api_ref(
+    HostApiContext* ctx) {
+  return static_cast<LibdivecomputerPluginDiveComputerFlutterApi*>(
+      g_object_ref(ctx->flutter_api));
 }
 
 // Converts a libdivecomputer transport bitmask to a Pigeon-compatible FlValue
@@ -65,6 +117,14 @@ static FlValue* transports_to_fl_value(unsigned int transports) {
             129, fl_value_new_int(LIBDIVECOMPUTER_PLUGIN_TRANSPORT_TYPE_BLE),
             (GDestroyNotify)fl_value_unref));
   }
+  // USB HID is reported as USB, which is the cable the user is holding; the
+  // app has no separate HID transfer mode and does not want one.
+  //
+  // It was suppressed until issue #1271, because advertising a transport with
+  // nothing behind it sent HID-only devices (the Suunto EON Steel family) into
+  // the serial path's "No USB serial ports found" dead end (#143).
+  // usbhid_io_stream.c is that missing transport, so the bit can be told the
+  // truth again.
   if (transports & (LIBDC_TRANSPORT_USB | LIBDC_TRANSPORT_USBHID)) {
     fl_value_append_take(
         list,
@@ -106,6 +166,19 @@ static void on_ble_scan_complete(gpointer user_data) {
       ctx->flutter_api, nullptr, nullptr, nullptr);
 }
 
+// Stops and frees the BLE scanner, if any, without reporting completion:
+// Dart marks a scan it stopped as finished itself, and a report from one
+// arrives after the next scan began, where it reads as that scan ending.
+// Stopped before it is freed, or BlueZ keeps discovering for this client
+// and refuses the next StartDiscovery with InProgress.
+static void stop_ble_scanner(HostApiContext* ctx) {
+  if (ctx->ble_scanner == nullptr) return;
+  ctx->ble_scanner->on_complete = nullptr;
+  ble_scanner_stop(ctx->ble_scanner);
+  ble_scanner_free(ctx->ble_scanner);
+  ctx->ble_scanner = nullptr;
+}
+
 // --- Serial scanner callbacks ---
 
 static void on_serial_device_discovered(
@@ -131,13 +204,36 @@ struct DownloadThreadData {
   gchar* address;
   gchar* fingerprint;
   LibdivecomputerPluginTransportType transport;
+  // Set the device clock after a successful download (issue #1216).
+  gboolean sync_clock;
+  // This download's session, created before the thread starts so a cancel
+  // can never arrive before it exists. Freed by download_thread_func.
+  libdc_download_session_t* session;
+  // The download this one replaced, joined before connecting so its
+  // teardown (Disconnect included) cannot reach this download's link.
+  GThread* previous_thread;
 };
+
+// Whether a plugged-in HID device belongs to the model this download selected.
+//
+// Which HID device belongs to which dive computer is libdivecomputer's
+// knowledge, held in the vendor and product id tables inside dc_filter_uwatec
+// and dc_filter_suunto, so the question goes to libdc_usbhid_match rather than
+// to a table kept here (issue #1271).
+static gboolean usbhid_matches_selected_model(unsigned short vendor_id,
+                                              unsigned short product_id,
+                                              gpointer user_data) {
+  auto* td = static_cast<DownloadThreadData*>(user_data);
+  return libdc_usbhid_match(td->vendor, td->product, td->model, vendor_id,
+                            product_id) != 0;
+}
 
 static void download_thread_data_free(DownloadThreadData* data) {
   g_free(data->vendor);
   g_free(data->product);
   g_free(data->address);
   g_free(data->fingerprint);
+  host_api_context_unref(data->ctx);
   delete data;
 }
 
@@ -157,6 +253,7 @@ static gboolean progress_callback_idle(gpointer data) {
     libdivecomputer_plugin_dive_computer_flutter_api_on_download_progress(
         cbd->flutter_api, progress, nullptr, nullptr, nullptr);
     g_object_unref(progress);
+    g_object_unref(cbd->flutter_api);
     delete cbd;
     return G_SOURCE_REMOVE;
 }
@@ -165,7 +262,7 @@ static void on_download_progress(unsigned int current, unsigned int maximum,
                                  void* userdata) {
   auto* ctx = static_cast<HostApiContext*>(userdata);
   auto* cbd = new ProgressCallbackData();
-  cbd->flutter_api = ctx->flutter_api;
+  cbd->flutter_api = flutter_api_ref(ctx);
   cbd->current = (int64_t)current;
   cbd->maximum = (int64_t)maximum;
   g_idle_add(progress_callback_idle, cbd);
@@ -182,6 +279,7 @@ static gboolean dive_callback_idle(gpointer data) {
     libdivecomputer_plugin_dive_computer_flutter_api_on_dive_downloaded(
         cbd->flutter_api, cbd->parsed, nullptr, nullptr, nullptr);
     g_object_unref(cbd->parsed);
+    g_object_unref(cbd->flutter_api);
     delete cbd;
     return G_SOURCE_REMOVE;
 }
@@ -198,7 +296,7 @@ static void on_dive_downloaded(const libdc_parsed_dive_t* dive,
       ctx->buffered_dives = g_list_append(ctx->buffered_dives, parsed);
     } else {
       auto* cbd = new DiveCallbackData();
-      cbd->flutter_api = ctx->flutter_api;
+      cbd->flutter_api = flutter_api_ref(ctx);
       cbd->parsed = parsed;
       g_idle_add(dive_callback_idle, cbd);
     }
@@ -211,7 +309,7 @@ static void flush_buffered_dives(HostApiContext* ctx) {
     for (GList* l = ctx->buffered_dives; l != NULL; l = l->next) {
         auto* parsed = static_cast<LibdivecomputerPluginParsedDive*>(l->data);
         auto* cbd = new DiveCallbackData();
-        cbd->flutter_api = ctx->flutter_api;
+        cbd->flutter_api = flutter_api_ref(ctx);
         cbd->parsed = parsed;
         g_object_ref(parsed);
         g_idle_add(dive_callback_idle, cbd);
@@ -238,6 +336,7 @@ static gboolean pin_callback_idle(gpointer data) {
     libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required(
         cbd->flutter_api, cbd->address, nullptr, nullptr, nullptr);
     g_free(cbd->address);
+    g_object_unref(cbd->flutter_api);
     delete cbd;
     return G_SOURCE_REMOVE;
 }
@@ -245,7 +344,7 @@ static gboolean pin_callback_idle(gpointer data) {
 static void on_pin_code_required(const gchar* address, gpointer user_data) {
     auto* ctx = static_cast<HostApiContext*>(user_data);
     auto* cbd = new PinCallbackData();
-    cbd->flutter_api = ctx->flutter_api;
+    cbd->flutter_api = flutter_api_ref(ctx);
     cbd->address = g_strdup(address);
     g_idle_add(pin_callback_idle, cbd);
 }
@@ -266,6 +365,7 @@ static gboolean error_callback_idle(gpointer data) {
     g_object_unref(error);
     g_free(cbd->code);
     g_free(cbd->message);
+    g_object_unref(cbd->flutter_api);
     delete cbd;
     return G_SOURCE_REMOVE;
 }
@@ -274,25 +374,48 @@ static void send_error_from_thread(HostApiContext* ctx,
                                    const gchar* code,
                                    const gchar* message) {
     auto* cbd = new ErrorCallbackData();
-    cbd->flutter_api = ctx->flutter_api;
+    cbd->flutter_api = flutter_api_ref(ctx);
     cbd->code = g_strdup(code);
     cbd->message = g_strdup(message);
     g_idle_add(error_callback_idle, cbd);
 }
 
-static gpointer download_thread_func(gpointer data) {
-  auto* td = static_cast<DownloadThreadData*>(data);
-  HostApiContext* ctx = td->ctx;
+// Cancel check for the BLE connect wait: reads the cancelled flag that
+// handle_cancel_download sets, before libdc_download_run is reached.
+static gboolean ble_download_cancelled(gpointer user_data) {
+  return libdc_download_is_cancelled(
+             static_cast<const libdc_download_session_t*>(user_data)) != 0;
+}
 
-  // Create download session. The session holds a dc_context_t (logging) and a
-  // cancelled flag. It is intentionally reused across multiple libdc_download_run
-  // calls during multi-port probing — each call creates its own internal state.
-  ctx->session = libdc_download_session_new();
-  if (ctx->session == nullptr) {
-    send_error_from_thread(ctx, "session_error",
-                           "Failed to create download session");
-    download_thread_data_free(td);
-    return nullptr;
+// Publish |stream| as the current download's, for the PIN prompt.
+static void publish_ble_stream(HostApiContext* ctx, BleIoStream* stream) {
+  g_mutex_lock(&ctx->download_mutex);
+  ctx->ble_stream = stream;
+  g_mutex_unlock(&ctx->download_mutex);
+}
+
+// Withdraw |stream| unless a newer download has replaced it, then free it.
+static void release_ble_stream(HostApiContext* ctx, BleIoStream* stream) {
+  g_mutex_lock(&ctx->download_mutex);
+  if (ctx->ble_stream == stream) ctx->ble_stream = nullptr;
+  g_mutex_unlock(&ctx->download_mutex);
+  ble_io_stream_free(stream);
+}
+
+// One download. Every stream it opens is its own and is closed here;
+// |session| belongs to download_thread_func, which frees it afterwards.
+static void run_download(HostApiContext* ctx, DownloadThreadData* td,
+                         libdc_download_session_t* session) {
+  BleIoStream* ble_stream = nullptr;
+
+  // Only the BLE and serial/USB paths below have a byte pipe, and the routing
+  // further down treats everything that is not BLE as serial, so an infrared
+  // device would probe serial ports. Reject it as Android and Darwin do
+  // (issue #2841).
+  if (td->transport == LIBDIVECOMPUTER_PLUGIN_TRANSPORT_TYPE_INFRARED) {
+    send_error_from_thread(ctx, "unsupported_transport",
+                           "Infrared transport is not supported on Linux");
+    return;
   }
 
   // Set up download callbacks.
@@ -303,6 +426,7 @@ static gpointer download_thread_func(gpointer data) {
 
   unsigned int serial_number = 0;
   unsigned int firmware_version = 0;
+  libdc_clock_sync_status_t clock_sync = LIBDC_CLOCK_SYNC_NOT_REQUESTED;
   char error_buf[256] = {0};
 
   // Decode fingerprint from hex string.
@@ -335,30 +459,38 @@ static gpointer download_thread_func(gpointer data) {
     g_autofree gchar* device_path =
         g_strdup_printf("/org/bluez/hci0/dev_%s", addr_underscored);
 
-    ctx->ble_stream = ble_io_stream_new();
-    ble_io_stream_set_device_address(ctx->ble_stream, td->address);
-    ble_io_stream_set_pin_callback(ctx->ble_stream, on_pin_code_required, ctx);
-    if (!ble_io_stream_connect(ctx->ble_stream, device_path)) {
-      send_error_from_thread(ctx, "connect_failed",
-                             "Failed to connect to BLE device");
-      ble_io_stream_free(ctx->ble_stream);
-      ctx->ble_stream = nullptr;
-      libdc_download_session_free(ctx->session);
-      ctx->session = nullptr;
+    ble_stream = ble_io_stream_new();
+    ble_io_stream_set_device_address(ble_stream, td->address);
+    ble_io_stream_set_pin_callback(ble_stream, on_pin_code_required, ctx);
+    ble_io_stream_set_cancel_check(ble_stream, ble_download_cancelled, session);
+    publish_ble_stream(ctx, ble_stream);
+    if (!ble_io_stream_connect(ble_stream, device_path)) {
+      // A cancelled connect is not reported: the app has already left this
+      // download, and a retry's listener must not receive its error.
+      if (!libdc_download_is_cancelled(session)) {
+        // Name the step that broke, so a report says more than "failed".
+        const gchar* reason = ble_io_stream_connect_failure(ble_stream);
+        g_autofree gchar* message =
+            reason != nullptr
+                ? g_strdup_printf("Failed to connect to BLE device: %s", reason)
+                : g_strdup("Failed to connect to BLE device");
+        send_error_from_thread(ctx, "connect_failed", message);
+      }
+      release_ble_stream(ctx, ble_stream);
       g_free(fp_data);
-      download_thread_data_free(td);
-      return nullptr;
+      return;
     }
-    io_callbacks = ble_io_stream_make_callbacks(ctx->ble_stream);
+    io_callbacks = ble_io_stream_make_callbacks(ble_stream);
 
     rc = libdc_download_run(
-        ctx->session,
+        session,
         td->vendor, td->product, td->model,
         transport_flag,
         &io_callbacks,
         fp_data, fp_size,
+        td->sync_clock ? 1 : 0,
         &dl_callbacks,
-        &serial_number, &firmware_version,
+        &serial_number, &firmware_version, &clock_sync,
         error_buf, sizeof(error_buf));
   } else {
     // Serial or USB transport.
@@ -370,26 +502,109 @@ static gpointer download_thread_func(gpointer data) {
     // openable but are not the target dive computer.
     gboolean found = FALSE;
     gchar* probe_msg = NULL;
-    if (g_str_has_prefix(td->address, "/dev/")) {
-      ctx->serial_stream = serial_io_stream_new();
-      if (serial_io_stream_open(ctx->serial_stream, td->address)) {
-        io_callbacks = serial_io_stream_make_callbacks(ctx->serial_stream);
+
+    // USB HID computers first. A HID-only model (the Scubapro G2 family, the
+    // Suunto EON Steel family) has no serial port to find, and probing
+    // unrelated ports before it would write dive-computer handshake bytes at
+    // hardware that is not the target (issue #1271).
+    const unsigned int descriptor_transports =
+        libdc_descriptor_transports(td->vendor, td->product, td->model);
+    const gboolean hid_capable =
+        (descriptor_transports & LIBDC_TRANSPORT_USBHID) != 0;
+    gboolean hid_succeeded = FALSE;
+    g_autoptr(GString) hid_probe_log = g_string_new(NULL);
+
+    if (hid_capable) {
+      g_autoptr(GPtrArray) hid_devices =
+          usb_hid_enumerate_matching(usbhid_matches_selected_model, td);
+      // Buffer dives so a device that answers but is not the target cannot
+      // dispatch phantom dives to Flutter, exactly as the serial probe does.
+      ctx->buffer_dives = TRUE;
+      for (guint i = 0; i < hid_devices->len; i++) {
+        UsbHidDevice* hid =
+            static_cast<UsbHidDevice*>(g_ptr_array_index(hid_devices, i));
+        g_autofree gchar* label = usb_hid_device_display_name(hid);
+        clear_buffered_dives(ctx);
+
+        UsbHidIoStream* usbhid_stream = usbhid_io_stream_new();
+        g_autofree gchar* reason =
+            usbhid_io_stream_open(usbhid_stream, hid);
+        if (reason != NULL) {
+          g_string_append_printf(hid_probe_log, "  %s: %s\n", label, reason);
+          usbhid_io_stream_free(usbhid_stream);
+          continue;
+        }
+
+        io_callbacks = usbhid_io_stream_make_callbacks(usbhid_stream);
+        serial_number = 0;
+        firmware_version = 0;
+        clock_sync = LIBDC_CLOCK_SYNC_NOT_REQUESTED;
+        memset(error_buf, 0, sizeof(error_buf));
+
         rc = libdc_download_run(
-            ctx->session,
+            session,
+            td->vendor, td->product, td->model,
+            LIBDC_TRANSPORT_USBHID,
+            &io_callbacks,
+            fp_data, fp_size,
+            td->sync_clock ? 1 : 0,
+            &dl_callbacks,
+            &serial_number, &firmware_version, &clock_sync,
+            error_buf, sizeof(error_buf));
+
+        usbhid_io_stream_free(usbhid_stream);
+
+        if (rc == 0 || rc == LIBDC_STATUS_CANCELLED) {
+          hid_succeeded = TRUE;
+          break;
+        }
+        g_string_append_printf(hid_probe_log, "  %s: download failed (rc=%d)\n",
+                               label, rc);
+      }
+
+      if (hid_succeeded) {
+        flush_buffered_dives(ctx);
+      } else {
+        clear_buffered_dives(ctx);
+      }
+      ctx->buffer_dives = FALSE;
+    }
+
+    if (hid_succeeded) {
+      found = TRUE;
+    } else if (hid_capable && !(descriptor_transports &
+                                (LIBDC_TRANSPORT_SERIAL | LIBDC_TRANSPORT_USB))) {
+      // HID-only hardware. There is no serial port to fall back to, so the
+      // serial wording would send the user hunting for the wrong thing.
+      if (hid_probe_log->len > 0) {
+        probe_msg = g_strdup_printf("No dive computer found. Tried:\n%s",
+                                    hid_probe_log->str);
+      } else {
+        probe_msg = g_strdup_printf(
+            "No %s found over USB. Is it connected to this computer and "
+            "powered on?",
+            td->product);
+      }
+    } else if (g_str_has_prefix(td->address, "/dev/")) {
+      SerialIoStream* serial_stream = serial_io_stream_new();
+      if (serial_io_stream_open(serial_stream, td->address)) {
+        io_callbacks = serial_io_stream_make_callbacks(serial_stream);
+        rc = libdc_download_run(
+            session,
             td->vendor, td->product, td->model,
             transport_flag,
             &io_callbacks,
             fp_data, fp_size,
+            td->sync_clock ? 1 : 0,
             &dl_callbacks,
-            &serial_number, &firmware_version,
+            &serial_number, &firmware_version, &clock_sync,
             error_buf, sizeof(error_buf));
         found = TRUE;
       } else {
         probe_msg = g_strdup_printf(
             "Failed to open serial port %s", td->address);
       }
-      serial_io_stream_free(ctx->serial_stream);
-      ctx->serial_stream = nullptr;
+      serial_io_stream_free(serial_stream);
     } else {
       g_auto(GStrv) ports = serial_enumerate_ports();
       g_autoptr(GString) probe_log = g_string_new(NULL);
@@ -401,31 +616,31 @@ static gpointer download_thread_func(gpointer data) {
         for (int i = 0; ports[i] != NULL; i++) {
           port_count++;
           clear_buffered_dives(ctx);
-          ctx->serial_stream = serial_io_stream_new();
-          if (!serial_io_stream_open(ctx->serial_stream, ports[i])) {
+          SerialIoStream* serial_stream = serial_io_stream_new();
+          if (!serial_io_stream_open(serial_stream, ports[i])) {
             g_string_append_printf(probe_log, "  %s: failed to open\n", ports[i]);
-            serial_io_stream_free(ctx->serial_stream);
-            ctx->serial_stream = nullptr;
+            serial_io_stream_free(serial_stream);
             continue;
           }
 
-          io_callbacks = serial_io_stream_make_callbacks(ctx->serial_stream);
+          io_callbacks = serial_io_stream_make_callbacks(serial_stream);
           serial_number = 0;
           firmware_version = 0;
+          clock_sync = LIBDC_CLOCK_SYNC_NOT_REQUESTED;
           memset(error_buf, 0, sizeof(error_buf));
 
           rc = libdc_download_run(
-              ctx->session,
+              session,
               td->vendor, td->product, td->model,
               transport_flag,
               &io_callbacks,
               fp_data, fp_size,
+              td->sync_clock ? 1 : 0,
               &dl_callbacks,
-              &serial_number, &firmware_version,
+              &serial_number, &firmware_version, &clock_sync,
               error_buf, sizeof(error_buf));
 
-          serial_io_stream_free(ctx->serial_stream);
-          ctx->serial_stream = nullptr;
+          serial_io_stream_free(serial_stream);
           found = TRUE;
 
           if (rc == 0 || rc == LIBDC_STATUS_CANCELLED) {
@@ -447,11 +662,8 @@ static gpointer download_thread_func(gpointer data) {
         if (port_count == 0) {
           send_error_from_thread(ctx, "no_serial_ports",
               "No USB serial ports found. Is the dive computer connected and powered on?");
-          libdc_download_session_free(ctx->session);
-          ctx->session = nullptr;
           g_free(fp_data);
-          download_thread_data_free(td);
-          return nullptr;
+          return;
         } else {
           probe_msg = g_strdup_printf(
               "No dive computer found. Ports tried:\n%s", probe_log->str);
@@ -465,11 +677,8 @@ static gpointer download_thread_func(gpointer data) {
     if (probe_msg != NULL) {
       send_error_from_thread(ctx, "connect_failed", probe_msg);
       g_free(probe_msg);
-      libdc_download_session_free(ctx->session);
-      ctx->session = nullptr;
       g_free(fp_data);
-      download_thread_data_free(td);
-      return nullptr;
+      return;
     }
   }
 
@@ -488,39 +697,73 @@ static gpointer download_thread_func(gpointer data) {
     gchar* firmware_str = (firmware_version != 0)
         ? g_strdup_printf("%u", firmware_version) : nullptr;
 
+    // Null means no sync was requested, so the Dart side shows no line.
+    gchar* clock_sync_str = (clock_sync != LIBDC_CLOCK_SYNC_NOT_REQUESTED)
+        ? g_strdup(libdc_clock_sync_status_name(clock_sync)) : nullptr;
+
+    // The model the device named about itself (issue #422), read before the
+    // session is freed.
+    char reported_product[64] = {0};
+    unsigned int reported_model = 0;
+    gboolean has_reported = libdc_download_session_reported_device(
+        session, reported_product, sizeof(reported_product),
+        &reported_model) != 0;
+
     struct CompleteData {
         LibdivecomputerPluginDiveComputerFlutterApi* api;
         gchar* serial;
         gchar* firmware;
+        gchar* clock_sync;
+        gchar* reported_product;
+        gboolean has_reported;
+        int64_t reported_model;
     };
-    auto* cd = new CompleteData{ctx->flutter_api,
-                                g_strdup(serial_str), g_strdup(firmware_str)};
+    auto* cd = new CompleteData{flutter_api_ref(ctx),
+                                g_strdup(serial_str), g_strdup(firmware_str),
+                                g_strdup(clock_sync_str),
+                                has_reported ? g_strdup(reported_product)
+                                             : nullptr,
+                                has_reported,
+                                static_cast<int64_t>(reported_model)};
     g_idle_add([](gpointer data) -> gboolean {
         auto* d = static_cast<CompleteData*>(data);
         libdivecomputer_plugin_dive_computer_flutter_api_on_download_complete(
-            d->api, 0, d->serial, d->firmware,
+            d->api, 0, d->serial, d->firmware, d->clock_sync,
+            d->reported_product,
+            d->has_reported ? &d->reported_model : nullptr,
             nullptr, nullptr, nullptr);
         g_free(d->serial);
         g_free(d->firmware);
+        g_free(d->clock_sync);
+        g_free(d->reported_product);
+        g_object_unref(d->api);
         delete d;
         return G_SOURCE_REMOVE;
     }, cd);
+    g_free(clock_sync_str);
 
     g_free(serial_str);
     g_free(firmware_str);
   }
 
-  // Cleanup transport.
-  if (ctx->ble_stream != nullptr) {
-    ble_io_stream_free(ctx->ble_stream);
-    ctx->ble_stream = nullptr;
-  }
-  if (ctx->serial_stream != nullptr) {
-    serial_io_stream_free(ctx->serial_stream);
-    ctx->serial_stream = nullptr;
-  }
-  libdc_download_session_free(ctx->session);
-  ctx->session = nullptr;
+  if (ble_stream != nullptr) release_ble_stream(ctx, ble_stream);
+}
+
+static gpointer download_thread_func(gpointer data) {
+  auto* td = static_cast<DownloadThreadData*>(data);
+  HostApiContext* ctx = td->ctx;
+
+  // Let the download this one replaced finish first: it has been cancelled,
+  // and its teardown disconnects the device this one may be about to use.
+  if (td->previous_thread != nullptr) g_thread_join(td->previous_thread);
+
+  run_download(ctx, td, td->session);
+
+  // Withdraw the session unless a newer download has replaced it, then free it.
+  g_mutex_lock(&ctx->download_mutex);
+  if (ctx->session == td->session) ctx->session = nullptr;
+  g_mutex_unlock(&ctx->download_mutex);
+  libdc_download_session_free(td->session);
 
   download_thread_data_free(td);
   return nullptr;
@@ -547,7 +790,8 @@ static void handle_get_device_descriptors(
     LibdivecomputerPluginDeviceDescriptor* desc =
         libdivecomputer_plugin_device_descriptor_new(
             info.vendor, info.product,
-            static_cast<int64_t>(info.model), transports);
+            static_cast<int64_t>(info.model), transports,
+            info.delivers_oldest_first ? TRUE : FALSE);
     fl_value_unref(transports);
     fl_value_append_take(descriptors,
                          fl_value_new_custom_object(130, G_OBJECT(desc)));
@@ -568,10 +812,8 @@ static void handle_start_discovery(
 
   switch (transport) {
     case LIBDIVECOMPUTER_PLUGIN_TRANSPORT_TYPE_BLE: {
-      // Clean up any previous scanner.
-      if (ctx->ble_scanner != nullptr) {
-        ble_scanner_free(ctx->ble_scanner);
-      }
+      // A new scan replaces a running one.
+      stop_ble_scanner(ctx);
       ctx->ble_scanner = ble_scanner_new();
       ble_scanner_set_callbacks(ctx->ble_scanner,
                                 on_ble_device_discovered,
@@ -617,11 +859,7 @@ static LibdivecomputerPluginDiveComputerHostApiStopDiscoveryResponse*
 handle_stop_discovery(gpointer user_data) {
   auto* ctx = static_cast<HostApiContext*>(user_data);
 
-  if (ctx->ble_scanner != nullptr) {
-    ble_scanner_stop(ctx->ble_scanner);
-    ble_scanner_free(ctx->ble_scanner);
-    ctx->ble_scanner = nullptr;
-  }
+  stop_ble_scanner(ctx);
   if (ctx->serial_scanner != nullptr) {
     serial_scanner_stop(ctx->serial_scanner);
     serial_scanner_free(ctx->serial_scanner);
@@ -634,6 +872,7 @@ handle_stop_discovery(gpointer user_data) {
 static void handle_start_download(
     LibdivecomputerPluginDiscoveredDevice* device,
     const gchar* fingerprint,
+    gboolean sync_clock,
     LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle,
     gpointer user_data) {
   auto* ctx = static_cast<HostApiContext*>(user_data);
@@ -644,7 +883,7 @@ static void handle_start_download(
 
   // Build thread data from the discovered device.
   auto* td = new DownloadThreadData();
-  td->ctx = ctx;
+  td->ctx = host_api_context_ref(ctx);
   td->vendor = g_strdup(
       libdivecomputer_plugin_discovered_device_get_vendor(device));
   td->product = g_strdup(
@@ -656,6 +895,27 @@ static void handle_start_download(
   td->transport =
       libdivecomputer_plugin_discovered_device_get_transport(device);
   td->fingerprint = (fingerprint != NULL) ? g_strdup(fingerprint) : NULL;
+  td->sync_clock = sync_clock;
+
+  // Create the session here, before the thread, so a Cancel that arrives as
+  // soon as the start is acknowledged still has a session to stop. It holds a
+  // dc_context_t (logging) and the cancelled flag, and is reused across the
+  // libdc_download_run calls of a multi-port probe; each call creates its own
+  // internal state.
+  td->session = libdc_download_session_new();
+  if (td->session == nullptr) {
+    send_error_from_thread(ctx, "session_error",
+                           "Failed to create download session");
+    download_thread_data_free(td);
+    return;
+  }
+  // A download still unwinding from a cancel is stopped (again, harmlessly)
+  // and handed to this one to join, so attempts never overlap.
+  g_mutex_lock(&ctx->download_mutex);
+  if (ctx->session != nullptr) libdc_download_cancel(ctx->session);
+  ctx->session = td->session;
+  g_mutex_unlock(&ctx->download_mutex);
+  td->previous_thread = ctx->download_thread;
 
   // Spawn download thread.
   ctx->download_thread = g_thread_new("dc-download", download_thread_func, td);
@@ -665,9 +925,11 @@ static LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse*
 handle_cancel_download(gpointer user_data) {
   auto* ctx = static_cast<HostApiContext*>(user_data);
 
+  g_mutex_lock(&ctx->download_mutex);
   if (ctx->session != nullptr) {
     libdc_download_cancel(ctx->session);
   }
+  g_mutex_unlock(&ctx->download_mutex);
 
   return libdivecomputer_plugin_dive_computer_host_api_cancel_download_response_new();
 }
@@ -677,9 +939,11 @@ handle_submit_pin_code(
     const gchar* pin_code,
     gpointer user_data) {
   auto* ctx = static_cast<HostApiContext*>(user_data);
+  g_mutex_lock(&ctx->download_mutex);
   if (ctx->ble_stream != nullptr) {
     ble_io_stream_submit_pin(ctx->ble_stream, pin_code);
   }
+  g_mutex_unlock(&ctx->download_mutex);
   return libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new();
 }
 
@@ -698,9 +962,52 @@ static void handle_parse_raw_dive_data(
     size_t data_length,
     LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle,
     gpointer user_data) {
-  libdivecomputer_plugin_dive_computer_host_api_respond_error_parse_raw_dive_data(
-      response_handle, "UNSUPPORTED",
-      "Raw dive parsing not yet implemented on Linux", nullptr);
+  // model arrives as an int64 across the Pigeon boundary but libdivecomputer
+  // expects an unsigned int descriptor id. Reject out-of-range values up front
+  // so a corrupt model yields a clear error instead of a silently wrapped cast
+  // and a misleading "no descriptor" failure downstream.
+  if (model < 0 || model > static_cast<int64_t>(UINT_MAX)) {
+    g_autofree gchar* msg = g_strdup_printf(
+        "Invalid dive computer model number: %" G_GINT64_FORMAT, model);
+    libdivecomputer_plugin_dive_computer_host_api_respond_error_parse_raw_dive_data(
+        response_handle, "PARSE_ERROR", msg, nullptr);
+    return;
+  }
+
+  libdc_parsed_dive_t dive = {};
+  char error_buf[256] = {};
+
+  int rc = libdc_parse_raw_dive(
+      vendor, product, static_cast<unsigned int>(model),
+      data, static_cast<unsigned int>(data_length),
+      &dive, error_buf, sizeof(error_buf));
+
+  if (rc != 0) {
+    // Only samples and events are heap-allocated; gasmixes, tanks and
+    // fingerprint are inline arrays.
+    free(dive.samples);
+    free(dive.events);
+    g_autofree gchar* msg =
+        g_strdup_printf("Failed to parse raw dive data: %s", error_buf);
+    libdivecomputer_plugin_dive_computer_host_api_respond_error_parse_raw_dive_data(
+        response_handle, "PARSE_ERROR", msg, nullptr);
+    return;
+  }
+
+  LibdivecomputerPluginParsedDive* parsed = convert_parsed_dive(&dive);
+  free(dive.samples);
+  free(dive.events);
+
+  if (parsed == nullptr) {
+    libdivecomputer_plugin_dive_computer_host_api_respond_error_parse_raw_dive_data(
+        response_handle, "PARSE_ERROR",
+        "Failed to convert parsed dive data", nullptr);
+    return;
+  }
+
+  libdivecomputer_plugin_dive_computer_host_api_respond_parse_raw_dive_data(
+      response_handle, parsed);
+  g_object_unref(parsed);
 }
 
 // --- Public registration ---
@@ -712,10 +1019,11 @@ void dive_computer_host_api_impl_register(FlBinaryMessenger* messenger) {
       libdivecomputer_plugin_dive_computer_flutter_api_new(messenger, nullptr);
   ctx->ble_scanner = nullptr;
   ctx->serial_scanner = nullptr;
+  g_mutex_init(&ctx->download_mutex);
   ctx->ble_stream = nullptr;
-  ctx->serial_stream = nullptr;
   ctx->session = nullptr;
   ctx->download_thread = nullptr;
+  ctx->ref_count = 1;
 
   static const LibdivecomputerPluginDiveComputerHostApiVTable vtable = {
       .get_device_descriptors = handle_get_device_descriptors,

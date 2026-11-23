@@ -1,0 +1,974 @@
+// Issues #3390 and #3394: Settings > Data opens with a facts line and drops
+// every card; since #4561 the four feature rows are the status, each leading
+// with its health symbol, with no strip above them. Issue #3482: the rows
+// read as outcomes with one-sentence statuses under "Your data", and the
+// rarely used rows fold under "Advanced".
+// On a master-detail window its rows open in the detail pane (#3467).
+
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/services/accounts/account_group.dart';
+import 'package:submersion/core/services/accounts/account_kind.dart';
+import 'package:submersion/core/services/accounts/account_provider_adapter.dart';
+import 'package:submersion/core/platform/web_database_status.dart';
+import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/settings/domain/data_health/feature_health.dart';
+import 'package:submersion/features/settings/domain/setup/set_up_progress.dart';
+import 'package:submersion/features/settings/presentation/providers/account_group_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/pending_setup_items_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/set_up_progress_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/sign_in_again_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/web_forget_device_provider.dart';
+import 'package:submersion/features/settings/presentation/pages/data_section_content.dart';
+import 'package:submersion/features/settings/presentation/widgets/data_health/data_facts_line.dart';
+import 'package:submersion/features/settings/presentation/widgets/data_row_tile.dart';
+import 'package:submersion/features/settings/presentation/widgets/set_up_device/set_up_device_card.dart';
+import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
+import 'package:submersion/features/settings/presentation/widgets/data_health/health_symbol.dart';
+import 'package:submersion/features/settings/presentation/widgets/settings_list_content.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_manifest.dart';
+import 'package:submersion/features/demo_mode/presentation/providers/demo_mode_providers.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_enter_dialog.dart';
+import 'package:submersion/features/settings/domain/data_health/data_row_status.dart';
+import 'package:submersion/features/settings/presentation/providers/data_row_status_providers.dart';
+
+import '../../../../helpers/global_test_defaults.dart';
+import '../../../../helpers/mock_providers.dart';
+import '../../set_up_progress_fixture.dart';
+
+void main() {
+  const health = [
+    FeatureHealth(
+      feature: DataFeature.backup,
+      level: HealthLevel.healthy,
+      reason: HealthReason.ok,
+    ),
+    FeatureHealth(
+      feature: DataFeature.sync,
+      level: HealthLevel.healthy,
+      reason: HealthReason.ok,
+    ),
+    FeatureHealth(
+      feature: DataFeature.sharedLibraries,
+      level: HealthLevel.attention,
+      reason: HealthReason.librariesEditsHeld,
+      name: 'Club Sites',
+    ),
+    FeatureHealth(
+      feature: DataFeature.media,
+      level: HealthLevel.notSetUp,
+      reason: HealthReason.notSetUp,
+    ),
+  ];
+
+  Future<GoRouter> pumpData(
+    WidgetTester tester, {
+    List<FeatureHealth> dataHealth = health,
+    DateTime? lastSync,
+    List<String> peers = const [],
+    Size size = const Size(400, 2400),
+    double textScale = 1,
+    bool storeAttachedHere = false,
+    SetUpProgress? setUp,
+    DemoPackage? demoPackage,
+    Future<void> Function()? exitDemo,
+    // A browser (issue #4121): no offline map tiles, no folder to move the
+    // database to, no sample logbook to download.
+    bool browser = false,
+    // What a browser's Forget this device runs (issue #4187).
+    Future<void> Function()? forget,
+    // The account Sign in again offers (issue #3811).
+    AccountGroup? signInGroup,
+    // A row still loading its inputs (#4561 review).
+    DataRowStatus? librariesStatus,
+  }) async {
+    // MediaQuery follows the view, which the layout breakpoints read.
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = size;
+    // The set up card's device word follows the display.
+    tester.view.display.devicePixelRatio = 1;
+    tester.view.display.size = size;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.view.display.reset);
+    final router = GoRouter(
+      initialLocation: '/settings?selected=data',
+      routes: [
+        GoRoute(
+          path: '/settings',
+          builder: (context, state) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(textScale)),
+            child: const SettingsPage(),
+          ),
+        ),
+        for (final path in const [
+          '/settings/import-options',
+          '/settings/data-tools',
+          '/settings/cloud-sync',
+          '/settings/photos-media',
+          '/settings/connected-accounts',
+          '/settings/setup',
+        ])
+          GoRoute(
+            path: path,
+            builder: (context, state) =>
+                Scaffold(body: Text('page ${state.uri}')),
+          ),
+      ],
+    );
+    addTearDown(router.dispose);
+    // The master-detail section list reads debug mode, which needs a log
+    // service.
+    final logDir = Directory.systemTemp.createTempSync('data_pane_test');
+    addTearDown(() => logDir.deleteSync(recursive: true));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...await getBaseOverrides(
+            dataHealth: dataHealth,
+            lastSync: lastSync,
+            syncPeerNames: peers,
+            mediaStoreAttachedHere: storeAttachedHere,
+            demoPackage: demoPackage,
+          ),
+          logFileServiceProvider.overrideWithValue(
+            LogFileService(logDirectory: logDir.path),
+          ),
+          // Null unless a test sets it: no set up card, no again row.
+          setUpProgressProvider.overrideWithValue(setUp),
+          pendingSetupItemsProvider.overrideWith((ref) async => const []),
+          // The flow opened in the pane lists the accounts.
+          accountGroupsProvider.overrideWith((ref) async => const []),
+          if (exitDemo != null)
+            demoExitActionProvider.overrideWithValue(exitDemo),
+          if (browser)
+            deviceCapabilitiesProvider.overrideWithValue(
+              DeviceCapabilities.web,
+            ),
+          if (forget != null) webForgetDeviceProvider.overrideWithValue(forget),
+          for (final feature in DataFeature.values)
+            signInAgainGroupProvider(
+              feature,
+            ).overrideWith((ref) async => signInGroup),
+          if (librariesStatus != null)
+            librariesRowStatusProvider.overrideWithValue(librariesStatus),
+        ],
+        child: MaterialApp.router(
+          locale: const Locale('en'),
+          routerConfig: router,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    return router;
+  }
+
+  Finder markBeside(String title) => find.descendant(
+    of: find.ancestor(of: find.text(title), matching: find.byType(ListTile)),
+    matching: find.byType(HealthSymbol),
+  );
+
+  testWidgets('the Data page has no Card', (tester) async {
+    await pumpData(tester);
+
+    final page = find
+        .ancestor(
+          of: find.text('Your data'),
+          matching: find.byType(SingleChildScrollView),
+        )
+        .first;
+    expect(
+      find.descendant(of: page, matching: find.byType(Card)),
+      findsNothing,
+    );
+  });
+
+  // Issue #4561: no strip and no attention lines; each feature row is its
+  // status, said once.
+  testWidgets('the rows are the status, with no strip above', (tester) async {
+    await pumpData(tester);
+
+    expect(find.byKey(const Key('dataHealth_attentionLine')), findsNothing);
+    final header = tester.getTopLeft(find.text('Your data')).dy;
+    expect(
+      find
+          .byType(HealthSymbol)
+          .evaluate()
+          .where((e) => tester.getTopLeft(find.byWidget(e.widget)).dy < header),
+      isEmpty,
+    );
+  });
+
+  testWidgets('each feature row leads with its status', (tester) async {
+    await pumpData(tester);
+
+    final backupMark = tester.widget<HealthSymbol>(markBeside('Backups'));
+    expect((backupMark.level, backupMark.size), (HealthLevel.healthy, 24));
+    expect(
+      tester.widget<HealthSymbol>(markBeside('Shared site libraries')).level,
+      HealthLevel.attention,
+    );
+    expect(
+      tester.widget<HealthSymbol>(markBeside('Photos & videos')).level,
+      HealthLevel.notSetUp,
+    );
+    expect(markBeside('Database storage'), findsNothing);
+    expect(markBeside('Connected accounts'), findsNothing);
+  });
+
+  // A feature whose inputs are still loading reads as not set up in the
+  // health model; its row says "Checking" and keeps its own icon rather
+  // than showing the hollow not-set-up dash.
+  testWidgets('a row still checking keeps its icon, not the dash', (
+    tester,
+  ) async {
+    await pumpData(
+      tester,
+      dataHealth: [
+        health[0],
+        health[1],
+        const FeatureHealth(
+          feature: DataFeature.sharedLibraries,
+          level: HealthLevel.notSetUp,
+          reason: HealthReason.notSetUp,
+        ),
+        health[3],
+      ],
+      librariesStatus: const DataRowStatus(DataRowStatusKind.checking),
+    );
+
+    expect(markBeside('Shared site libraries'), findsNothing);
+    expect(
+      find.descendant(
+        of: find.ancestor(
+          of: find.text('Shared site libraries'),
+          matching: find.byType(ListTile),
+        ),
+        matching: find.byIcon(Icons.groups_outlined),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an amber row says why', (tester) async {
+    await pumpData(tester);
+
+    expect(find.text('Club Sites: your edits are on hold'), findsOneWidget);
+  });
+
+  group('Sign in again in its row (#3811, #4561)', () {
+    const google = AccountGroup(
+      key: 'googledrive',
+      kind: AccountKind.googledrive,
+      label: 'Google Drive',
+      address: '',
+      rows: [],
+      status: AccountStatus.needsSignIn,
+      usages: [],
+      usagesKnown: true,
+      locations: {},
+      roles: {},
+      usageRoles: {},
+      rowStatuses: {},
+    );
+
+    List<FeatureHealth> withSync(HealthReason reason) => [
+      health[0],
+      FeatureHealth(
+        feature: DataFeature.sync,
+        level: HealthLevel.failing,
+        reason: reason,
+      ),
+      health[2],
+      health[3],
+    ];
+
+    Finder inRow(String title, Finder f) => find.descendant(
+      of: find.ancestor(of: find.text(title), matching: find.byType(ListTile)),
+      matching: f,
+    );
+
+    testWidgets('a signed-out sync row offers it beside its reason', (
+      tester,
+    ) async {
+      await pumpData(
+        tester,
+        dataHealth: withSync(HealthReason.syncSignedOut),
+        signInGroup: google,
+      );
+
+      expect(
+        inRow('Sync between devices', find.text('Sign in again')),
+        findsOneWidget,
+      );
+      expect(find.text('Sync paused: sign in again'), findsOneWidget);
+    });
+
+    testWidgets('a row sign-in would not fix does not', (tester) async {
+      await pumpData(
+        tester,
+        dataHealth: withSync(HealthReason.syncFailed),
+        signInGroup: google,
+      );
+
+      expect(find.text('Sign in again'), findsNothing);
+    });
+
+    testWidgets('it fits a narrow phone at large text', (tester) async {
+      await pumpData(
+        tester,
+        dataHealth: withSync(HealthReason.syncSignedOut),
+        signInGroup: google,
+        size: const Size(320, 3200),
+        textScale: 2,
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Sign in again'), findsOneWidget);
+    });
+  });
+
+  testWidgets('sync row names the only peer', (tester) async {
+    await pumpData(
+      tester,
+      lastSync: DateTime.now().subtract(const Duration(minutes: 12)),
+      peers: const ["Eric's iPhone"],
+    );
+
+    expect(find.text("In step with Eric's iPhone, 12m ago"), findsOneWidget);
+  });
+
+  testWidgets('sync row counts several peers', (tester) async {
+    await pumpData(
+      tester,
+      lastSync: DateTime.now().subtract(const Duration(minutes: 12)),
+      peers: const ["Eric's iPhone", 'Dive Laptop', 'iPad'],
+    );
+
+    expect(find.text('In step with 3 devices, 12m ago'), findsOneWidget);
+  });
+
+  testWidgets('sync row reads off with no provider and offers set up', (
+    tester,
+  ) async {
+    // Signing out keeps the last sync timestamp, so the row must follow
+    // health, not the timestamp; amber, it says why (#4561).
+    await pumpData(
+      tester,
+      dataHealth: [
+        health[0],
+        const FeatureHealth(
+          feature: DataFeature.sync,
+          level: HealthLevel.attention,
+          reason: HealthReason.syncOff,
+        ),
+        health[2],
+        health[3],
+      ],
+      lastSync: DateTime.now().subtract(const Duration(days: 12)),
+      peers: const ["Eric's iPhone"],
+    );
+
+    expect(find.text('Recommended: turn on cloud sync'), findsOneWidget);
+    expect(find.textContaining('In step'), findsNothing);
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(
+          of: find.text('Recommended: turn on cloud sync'),
+          matching: find.byType(ListTile),
+        ),
+        matching: find.text('Set up'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // No account chosen yet: Set up starts from the account step.
+    expect(find.text('page /settings/setup?step=account'), findsOneWidget);
+  });
+
+  // Sync offers Set up only while it is off, so step 2 would have no
+  // account to read even when a backup copy or photos name one.
+  testWidgets('with another feature naming an account, Sync still starts '
+      'from the account step', (tester) async {
+    await pumpData(
+      tester,
+      dataHealth: [
+        health[0],
+        const FeatureHealth(
+          feature: DataFeature.sync,
+          level: HealthLevel.attention,
+          reason: HealthReason.syncOff,
+        ),
+        health[2],
+        health[3],
+      ],
+      setUp: setUpProgressOf(accountHere: true),
+    );
+
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(
+          of: find.text('Recommended: turn on cloud sync'),
+          matching: find.byType(ListTile),
+        ),
+        matching: find.text('Set up'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('page /settings/setup?step=account'), findsOneWidget);
+  });
+
+  testWidgets('photos row offers set up when copies are not kept', (
+    tester,
+  ) async {
+    await pumpData(tester);
+
+    expect(find.text('Copies are not kept in the cloud'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(
+          of: find.text('Copies are not kept in the cloud'),
+          matching: find.byType(ListTile),
+        ),
+        matching: find.text('Set up'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('page /settings/setup?step=photos'), findsOneWidget);
+  });
+
+  testWidgets('advanced rows push their pages', (tester) async {
+    await pumpData(tester);
+    await tester.tap(find.text('Import options'));
+    await tester.pumpAndSettle();
+    expect(find.text('page /settings/import-options'), findsOneWidget);
+
+    await pumpData(tester);
+    await tester.tap(find.text('Data tools'));
+    await tester.pumpAndSettle();
+    expect(find.text('page /settings/data-tools'), findsOneWidget);
+  });
+
+  testWidgets('tool rows and import controls left the page', (tester) async {
+    await pumpData(tester);
+
+    expect(find.text('Fix dive times'), findsNothing);
+    expect(find.text('Auto site matching'), findsNothing);
+    expect(find.text('Tag imports automatically'), findsNothing);
+  });
+
+  testWidgets('only the dashboard sits above the Your data header', (
+    tester,
+  ) async {
+    await pumpData(tester);
+
+    final header = tester.getTopLeft(find.text('Your data')).dy;
+    for (final title in const [
+      'Backups',
+      'Sync between devices',
+      'Photos & videos',
+      'Shared site libraries',
+      'Connected accounts',
+      'Database storage',
+      'Offline maps',
+      'Import options',
+      'Data tools',
+    ]) {
+      expect(
+        tester.getTopLeft(find.widgetWithText(ListTile, title)).dy,
+        greaterThan(header),
+        reason: title,
+      );
+    }
+    expect(
+      tester.getTopLeft(find.text('Advanced')).dy,
+      greaterThan(
+        tester
+            .getTopLeft(find.widgetWithText(ListTile, 'Connected accounts'))
+            .dy,
+      ),
+    );
+  });
+
+  testWidgets(
+    'a long subtitle with a Set up button fits a 320 px phone at 2x text',
+    (tester) async {
+      await pumpData(
+        tester,
+        size: const Size(320, 3200),
+        textScale: 2.0,
+        dataHealth: [
+          health[0],
+          const FeatureHealth(
+            feature: DataFeature.sync,
+            level: HealthLevel.attention,
+            reason: HealthReason.syncOff,
+          ),
+          health[2],
+          health[3],
+        ],
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Set up'), findsNWidgets(2));
+    },
+  );
+
+  testWidgets('a resume picks up a backup outcome written in the background', (
+    tester,
+  ) async {
+    await pumpData(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(DataSectionContent)),
+    );
+    expect(
+      container.read(backupSettingsProvider).lastScheduledFailureAt,
+      isNull,
+    );
+
+    // The WorkManager job writes through its own preferences while the
+    // page stays open behind the app switcher.
+    final prefs = await SharedPreferences.getInstance();
+    await BackupPreferences(
+      prefs,
+    ).setLastScheduledFailure(DateTime(2026, 10, 17, 3), 'disk full');
+    // Background and back, through the transitions Flutter allows; it ends
+    // resumed, the state every test starts in.
+    for (final state in const [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(backupSettingsProvider).lastScheduledFailureMessage,
+      'disk full',
+    );
+  });
+
+  testWidgets('on a master-detail window a row opens in the pane (#3467)', (
+    tester,
+  ) async {
+    final router = await pumpData(tester, size: const Size(1400, 2400));
+    final importPage = find.widgetWithText(AppBar, 'Import options');
+
+    await tester.tap(find.widgetWithText(ListTile, 'Import options'));
+    await tester.pumpAndSettle();
+
+    expect(
+      router.routerDelegate.currentConfiguration.uri.toString(),
+      '/settings?selected=data&dataPage=import-options',
+    );
+    expect(importPage, findsOneWidget);
+    // The section list is still beside it.
+    expect(find.byType(SettingsListContent), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+
+    expect(
+      router.routerDelegate.currentConfiguration.uri.toString(),
+      '/settings?selected=data',
+    );
+    expect(importPage, findsNothing);
+    expect(find.text('Your data'), findsOneWidget);
+  });
+
+  testWidgets('on a phone a row still pushes its page', (tester) async {
+    final router = await pumpData(tester);
+
+    await tester.tap(find.text('Import options'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('page /settings/import-options'), findsOneWidget);
+    expect(router.canPop(), isTrue);
+    expect(find.text('Your data'), findsNothing);
+  });
+
+  Finder inDataPage(Finder f) =>
+      find.descendant(of: find.byType(DataSectionContent), matching: f);
+
+  group('the set up card', () {
+    testWidgets('sits above the facts line', (tester) async {
+      await pumpData(tester, setUp: setUpProgressOf(accountHere: true));
+
+      final card = inDataPage(find.byType(SetUpDeviceCard));
+      expect(card, findsOneWidget);
+      expect(tester.widget<SetUpDeviceCard>(card).compact, isFalse);
+      expect(
+        tester.getTopLeft(card).dy,
+        lessThan(tester.getTopLeft(find.byType(DataFactsLine)).dy),
+      );
+    });
+
+    testWidgets('on a phone Continue pushes the next step', (tester) async {
+      await pumpData(tester, setUp: setUpProgressOf(accountHere: true));
+
+      await tester.tap(inDataPage(find.text('Continue')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('page /settings/setup?step=sync'), findsOneWidget);
+    });
+
+    testWidgets('on a master-detail window Continue opens the step in the '
+        'Data pane', (tester) async {
+      final router = await pumpData(
+        tester,
+        size: const Size(1400, 2400),
+        setUp: setUpProgressOf(accountHere: true),
+      );
+
+      await tester.tap(inDataPage(find.text('Continue')));
+      await tester.pumpAndSettle();
+
+      expect(router.routerDelegate.currentConfiguration.uri.queryParameters, {
+        'selected': 'data',
+        'dataPage': 'setup?step=sync',
+      });
+      expect(find.byType(SettingsListContent), findsOneWidget);
+    });
+  });
+
+  group('Set up this device again', () {
+    testWidgets('is not offered while the card shows its steps', (
+      tester,
+    ) async {
+      await pumpData(tester, setUp: setUpProgressOf(accountHere: true));
+      expect(find.text('Set up this phone again'), findsNothing);
+    });
+
+    testWidgets('is offered under Advanced once setup is complete', (
+      tester,
+    ) async {
+      await pumpData(tester, setUp: setUpProgressOf(everything: true));
+
+      expect(find.text('Set up this phone again'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Advanced')).dy,
+        lessThan(tester.getTopLeft(find.text('Set up this phone again')).dy),
+      );
+    });
+
+    // The flow opened afresh shows a hidden card again (its own test).
+    testWidgets('on a hidden card, opens the flow afresh', (tester) async {
+      await pumpData(tester, setUp: setUpProgressOf(hidden: true));
+
+      await tester.tap(find.text('Set up this phone again'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('page /settings/setup?again=true'), findsOneWidget);
+    });
+  });
+
+  testWidgets('a Lightroom-only photos row reads as not set up', (
+    tester,
+  ) async {
+    // Lightroom alone makes media health healthy, but no copies are kept;
+    // a tick beside "Copies are not kept in the cloud" would contradict it.
+    await pumpData(
+      tester,
+      dataHealth: [
+        health[0],
+        health[1],
+        health[2],
+        const FeatureHealth(
+          feature: DataFeature.media,
+          level: HealthLevel.healthy,
+          reason: HealthReason.ok,
+        ),
+      ],
+    );
+
+    expect(find.text('Copies are not kept in the cloud'), findsOneWidget);
+    expect(
+      tester.widget<HealthSymbol>(markBeside('Photos & videos')).level,
+      HealthLevel.notSetUp,
+    );
+  });
+
+  group('demo mode (#3708)', () {
+    final package = DemoPackage(
+      schemaVersion: 1,
+      url: Uri.parse('https://example.com/demo.zip'),
+      sha256: 'a' * 64,
+      size: 10,
+      generatedAt: DateTime.utc(2026, 10, 20),
+    );
+
+    tearDown(applyGlobalTestDefaults);
+
+    testWidgets(
+      'shows Explore with sample data when available and not in demo mode',
+      (tester) async {
+        await pumpData(tester, demoPackage: package);
+
+        expect(find.text('Explore with sample data'), findsOneWidget);
+        expect(find.text('Exit demo'), findsNothing);
+      },
+    );
+
+    testWidgets('Explore with sample data sits under Advanced', (tester) async {
+      await pumpData(tester, demoPackage: package);
+
+      expect(
+        tester.getTopLeft(find.text('Explore with sample data')).dy,
+        greaterThan(tester.getTopLeft(find.text('Advanced')).dy),
+      );
+    });
+
+    testWidgets('Explore with sample data is the last row, below Set up '
+        'again', (tester) async {
+      await pumpData(
+        tester,
+        demoPackage: package,
+        setUp: setUpProgressOf(everything: true),
+      );
+
+      expect(
+        tester.getTopLeft(find.text('Explore with sample data')).dy,
+        greaterThan(tester.getTopLeft(find.text('Set up this phone again')).dy),
+      );
+    });
+
+    testWidgets('Explore with sample data asks before downloading', (
+      tester,
+    ) async {
+      await pumpData(tester, demoPackage: package);
+
+      await tester.tap(find.text('Explore with sample data'));
+      await tester.pumpAndSettle();
+      expect(find.text('Explore with sample data?'), findsOneWidget);
+      // The available package's own size, in the wording for a user whose
+      // logbook is set aside.
+      expect(find.textContaining('10 B'), findsOneWidget);
+      expect(
+        find.textContaining('set aside, untouched, until you exit demo mode'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Explore with sample data?'), findsNothing);
+      expect(find.byType(DemoEnterDialog), findsNothing);
+    });
+
+    testWidgets('in demo mode Exit demo sits under Advanced', (tester) async {
+      DemoModeGate.instance.debugActive = true;
+
+      await pumpData(tester, demoPackage: package);
+
+      expect(
+        tester.getTopLeft(find.text('Exit demo')).dy,
+        greaterThan(tester.getTopLeft(find.text('Advanced')).dy),
+      );
+    });
+
+    testWidgets('hides it when no sample logbook is available', (tester) async {
+      await pumpData(tester);
+
+      expect(find.text('Explore with sample data'), findsNothing);
+    });
+
+    testWidgets(
+      'in demo mode shows Exit demo, and the sealed rows are disabled with '
+      'the note',
+      (tester) async {
+        DemoModeGate.instance.debugActive = true;
+
+        await pumpData(tester, demoPackage: package);
+
+        expect(find.text('Exit demo'), findsOneWidget);
+        expect(find.text('Explore with sample data'), findsNothing);
+        for (final title in [
+          'Backups',
+          'Sync between devices',
+          'Photos & videos',
+          'Shared site libraries',
+          'Connected accounts',
+          'Database storage',
+        ]) {
+          final tile = tester.widget<ListTile>(
+            find.ancestor(
+              of: find.text(title),
+              matching: find.byType(ListTile),
+            ),
+          );
+          expect(tile.enabled, isFalse, reason: title);
+        }
+        expect(find.text('Unavailable in demo mode'), findsNWidgets(6));
+        expect(find.byType(SetUpDeviceCard), findsNothing);
+        // No status for the user's real data while demo data shows.
+        expect(find.byType(HealthSymbol), findsNothing);
+      },
+    );
+
+    testWidgets('Exit demo asks for confirmation and exits only on confirm', (
+      tester,
+    ) async {
+      DemoModeGate.instance.debugActive = true;
+      var exits = 0;
+      await pumpData(
+        tester,
+        demoPackage: package,
+        exitDemo: () async => exits++,
+      );
+
+      await tester.tap(find.text('Exit demo'));
+      await tester.pumpAndSettle();
+      expect(find.text('Exit demo mode?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(exits, 0);
+
+      await tester.tap(find.text('Exit demo'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Exit demo').last);
+      await tester.pumpAndSettle();
+      expect(exits, 1);
+    });
+  });
+
+  group('in a browser (#4121)', () {
+    final package = DemoPackage(
+      schemaVersion: 1,
+      url: Uri.parse('https://example.com/demo.zip'),
+      sha256: 'a' * 64,
+      size: 10,
+      generatedAt: DateTime.utc(2026, 10, 20),
+    );
+
+    testWidgets('natively offline maps and the storage folder are offered', (
+      tester,
+    ) async {
+      await pumpData(tester);
+      expect(find.text('Offline maps'), findsOneWidget);
+      final storage = tester.widget<DataRowTile>(
+        find.widgetWithText(DataRowTile, 'Database storage'),
+      );
+      expect(storage.enabled, isTrue);
+    });
+
+    testWidgets('offline maps are gone and the storage row only informs', (
+      tester,
+    ) async {
+      await pumpData(tester, browser: true);
+      expect(find.text('Offline maps'), findsNothing);
+      final storageRow = find.widgetWithText(DataRowTile, 'Database storage');
+      final storage = tester.widget<DataRowTile>(storageRow);
+      expect(storage.route, isNull);
+      expect(storage.onTap, isNull);
+      expect(storage.enabled, isTrue);
+      expect(find.text('App default location'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: storageRow,
+          matching: find.byIcon(Icons.chevron_right),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the storage row says the dives stay until the device is '
+        'forgotten (#4187)', (tester) async {
+      WebDatabaseStatusHolder.record(
+        const WebDatabaseStatus(storage: WebDatabaseStorage.opfsLocks),
+      );
+      addTearDown(WebDatabaseStatusHolder.clear);
+      await pumpData(tester, browser: true);
+      final en = lookupAppLocalizations(const Locale('en'));
+      expect(
+        find.widgetWithText(DataRowTile, en.web_storage_opfs),
+        findsOneWidget,
+      );
+      expect(find.text('App default location'), findsNothing);
+    });
+
+    testWidgets('the storage row warns when nothing outlives the tab '
+        '(#4187)', (tester) async {
+      WebDatabaseStatusHolder.record(
+        const WebDatabaseStatus(storage: WebDatabaseStorage.inMemory),
+      );
+      addTearDown(WebDatabaseStatusHolder.clear);
+      await pumpData(tester, browser: true);
+      final en = lookupAppLocalizations(const Locale('en'));
+      final row = find.widgetWithText(
+        DataRowTile,
+        en.web_storage_memoryWarning,
+      );
+      expect(row, findsOneWidget);
+      expect(
+        find.descendant(of: row, matching: find.byIcon(Icons.warning_amber)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('natively there is no Forget this device row (#4187)', (
+      tester,
+    ) async {
+      await pumpData(tester);
+      expect(find.text('Forget this device'), findsNothing);
+    });
+
+    testWidgets('Forget this device sits under Advanced and asks first '
+        '(#4187)', (tester) async {
+      var forgets = 0;
+      await pumpData(tester, browser: true, forget: () async => forgets++);
+      final row = find.widgetWithText(DataRowTile, 'Forget this device');
+      expect(row, findsOneWidget);
+      expect(
+        tester.getTopLeft(row).dy,
+        greaterThan(tester.getTopLeft(find.text('Database storage')).dy),
+      );
+      final en = lookupAppLocalizations(const Locale('en'));
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(find.text(en.web_forgetDevice_confirmBody), findsOneWidget);
+      await tester.tap(find.text(en.common_action_cancel));
+      await tester.pumpAndSettle();
+      expect(forgets, 0);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(en.web_forgetDevice_confirm));
+      await tester.pumpAndSettle();
+      expect(forgets, 1);
+    });
+
+    testWidgets('Forget this device is unavailable in demo mode (#4187)', (
+      tester,
+    ) async {
+      DemoModeGate.instance.debugActive = true;
+      addTearDown(applyGlobalTestDefaults);
+      await pumpData(tester, browser: true, forget: () async {});
+      final row = tester.widget<DataRowTile>(
+        find.widgetWithText(DataRowTile, 'Forget this device'),
+      );
+      expect(row.enabled, isFalse);
+    });
+
+    testWidgets('the sample logbook is offered when the site ships one', (
+      tester,
+    ) async {
+      await pumpData(tester, browser: true, demoPackage: package);
+      expect(find.text('Explore with sample data'), findsOneWidget);
+    });
+  });
+}

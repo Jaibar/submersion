@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/features/backup/domain/entities/backup_type.dart';
+import 'package:submersion/features/backup/domain/entities/extra_cloud_copy.dart';
 
 /// Where a backup is stored
 enum BackupLocation { local, cloud, both }
@@ -23,6 +24,29 @@ class BackupRecord extends Equatable {
   final int? toSchemaVersion;
   final bool pinned;
 
+  /// Optional text the diver typed when making the backup. Also stored inside
+  /// the file itself (see backup_note_stamp.dart), so it survives without
+  /// this record.
+  final String? note;
+
+  /// The roster row of the account the cloud copy went to; null for a record
+  /// made before accounts were noted, or with no cloud copy.
+  final String? cloudAccountId;
+
+  /// The copies this backup also made in other accounts (issue #3782),
+  /// beside the main cloud copy. [location] says nothing about them.
+  final List<ExtraCloudCopy> extraCloudCopies;
+
+  /// Set on a cloud row another device has pinned (issue #3503), from that
+  /// device's marker in the folder. Display only: never stored, since the
+  /// marker is the truth and another device can remove it at any time.
+  final bool pinnedOnAnotherDevice;
+
+  /// Set on a row whose cloud copy the page's folder listing showed (issue
+  /// #3503), so the folder's footprint needs no second listing. Display only:
+  /// never stored.
+  final bool cloudCopyListed;
+
   const BackupRecord({
     required this.id,
     required this.filename,
@@ -39,6 +63,11 @@ class BackupRecord extends Equatable {
     this.fromSchemaVersion,
     this.toSchemaVersion,
     this.pinned = false,
+    this.note,
+    this.cloudAccountId,
+    this.extraCloudCopies = const [],
+    this.pinnedOnAnotherDevice = false,
+    this.cloudCopyListed = false,
   });
 
   BackupRecord copyWith({
@@ -57,6 +86,11 @@ class BackupRecord extends Equatable {
     int? fromSchemaVersion,
     int? toSchemaVersion,
     bool? pinned,
+    String? note,
+    String? cloudAccountId,
+    List<ExtraCloudCopy>? extraCloudCopies,
+    bool? pinnedOnAnotherDevice,
+    bool? cloudCopyListed,
   }) {
     return BackupRecord(
       id: id ?? this.id,
@@ -74,8 +108,56 @@ class BackupRecord extends Equatable {
       fromSchemaVersion: fromSchemaVersion ?? this.fromSchemaVersion,
       toSchemaVersion: toSchemaVersion ?? this.toSchemaVersion,
       pinned: pinned ?? this.pinned,
+      note: note ?? this.note,
+      cloudAccountId: cloudAccountId ?? this.cloudAccountId,
+      extraCloudCopies: extraCloudCopies ?? this.extraCloudCopies,
+      pinnedOnAnotherDevice:
+          pinnedOnAnotherDevice ?? this.pinnedOnAnotherDevice,
+      cloudCopyListed: cloudCopyListed ?? this.cloudCopyListed,
     );
   }
+
+  /// This record once its cloud copy is gone: kept on this device only.
+  /// copyWith cannot clear the cloud fields, so they are dropped here.
+  BackupRecord withoutCloudCopy() => BackupRecord(
+    id: id,
+    filename: filename,
+    timestamp: timestamp,
+    sizeBytes: sizeBytes,
+    location: BackupLocation.local,
+    diveCount: diveCount,
+    siteCount: siteCount,
+    localPath: localPath,
+    isAutomatic: isAutomatic,
+    type: type,
+    appVersion: appVersion,
+    fromSchemaVersion: fromSchemaVersion,
+    toSchemaVersion: toSchemaVersion,
+    pinned: pinned,
+    note: note,
+    extraCloudCopies: extraCloudCopies,
+  );
+
+  /// This record once its local copy is gone: kept in the cloud only.
+  BackupRecord withoutLocalCopy() => BackupRecord(
+    id: id,
+    filename: filename,
+    timestamp: timestamp,
+    sizeBytes: sizeBytes,
+    location: BackupLocation.cloud,
+    diveCount: diveCount,
+    siteCount: siteCount,
+    cloudFileId: cloudFileId,
+    isAutomatic: isAutomatic,
+    type: type,
+    appVersion: appVersion,
+    fromSchemaVersion: fromSchemaVersion,
+    toSchemaVersion: toSchemaVersion,
+    pinned: pinned,
+    note: note,
+    cloudAccountId: cloudAccountId,
+    extraCloudCopies: extraCloudCopies,
+  );
 
   /// Formatted file size for display (e.g., "2.3 MB")
   String get formattedSize {
@@ -103,6 +185,10 @@ class BackupRecord extends Equatable {
       'fromSchemaVersion': fromSchemaVersion,
       'toSchemaVersion': toSchemaVersion,
       'pinned': pinned,
+      'note': note,
+      'cloudAccountId': cloudAccountId,
+      if (extraCloudCopies.isNotEmpty)
+        'extraCloudCopies': [for (final c in extraCloudCopies) c.toJson()],
     };
   }
 
@@ -123,8 +209,18 @@ class BackupRecord extends Equatable {
       fromSchemaVersion: json['fromSchemaVersion'] as int?,
       toSchemaVersion: json['toSchemaVersion'] as int?,
       pinned: json['pinned'] as bool? ?? false,
+      note: json['note'] as String?,
+      cloudAccountId: json['cloudAccountId'] as String?,
+      extraCloudCopies: _parseExtraCopies(json['extraCloudCopies']),
     );
   }
+
+  /// Entries a newer or damaged history wrote that do not parse are skipped:
+  /// one bad copy must not lose the whole record.
+  static List<ExtraCloudCopy> _parseExtraCopies(Object? value) => [
+    if (value is List)
+      for (final entry in value) ?ExtraCloudCopy.fromJson(entry),
+  ];
 
   static BackupType _parseType(String? value) {
     if (value == null) return BackupType.manual;
@@ -148,5 +244,10 @@ class BackupRecord extends Equatable {
     fromSchemaVersion,
     toSchemaVersion,
     pinned,
+    note,
+    cloudAccountId,
+    extraCloudCopies,
+    pinnedOnAnotherDevice,
+    cloudCopyListed,
   ];
 }

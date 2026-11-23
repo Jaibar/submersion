@@ -31,6 +31,17 @@ void main() {
       expect(restored.isPinned, isTrue);
     });
 
+    test('fromJson resolves the legacy sacRate name to sac', () {
+      // Layouts saved before SAC and RMV were split (discussions #354, #803)
+      // still carry the old name, and one can arrive by sync at any time.
+      final config = TableColumnConfig.fromJson({
+        'field': 'sacRate',
+        'width': 100.0,
+        'isPinned': false,
+      });
+      expect(config.field, equals(DiveField.sac));
+    });
+
     test('fromJson falls back to diveNumber for unknown field name', () {
       final json = {'field': 'unknownField', 'width': 100.0, 'isPinned': false};
       final restored = TableColumnConfig.fromJson(json);
@@ -78,7 +89,7 @@ void main() {
   group('TableViewConfig', () {
     test('defaultConfig has expected columns', () {
       final config = TableViewConfig.defaultConfig();
-      expect(config.columns.length, equals(22));
+      expect(config.columns.length, equals(24));
       expect(config.columns[0].field, equals(DiveField.diveNumber));
       expect(config.columns[0].isPinned, isTrue);
       expect(config.columns[1].field, equals(DiveField.siteName));
@@ -86,16 +97,18 @@ void main() {
       // Core fields
       expect(config.columns[2].field, equals(DiveField.dateTime));
       expect(config.columns[3].field, equals(DiveField.diveTypeName));
-      expect(config.columns[6].field, equals(DiveField.runtime));
+      expect(config.columns[4].field, equals(DiveField.diveMode));
+      expect(config.columns[7].field, equals(DiveField.runtime));
       // Gas/Tank fields
-      expect(config.columns[8].field, equals(DiveField.primaryGas));
-      expect(config.columns[11].field, equals(DiveField.sacRate));
+      expect(config.columns[9].field, equals(DiveField.primaryGas));
+      expect(config.columns[12].field, equals(DiveField.sac));
+      expect(config.columns[13].field, equals(DiveField.rmv));
       // Environment fields
-      expect(config.columns[12].field, equals(DiveField.waterTemp));
+      expect(config.columns[14].field, equals(DiveField.waterTemp));
       // People fields
-      expect(config.columns[16].field, equals(DiveField.buddy));
+      expect(config.columns[18].field, equals(DiveField.buddy));
       // Metadata fields
-      expect(config.columns[21].field, equals(DiveField.notes));
+      expect(config.columns[23].field, equals(DiveField.notes));
       expect(config.sortField, isNull);
       expect(config.sortAscending, isTrue);
     });
@@ -136,6 +149,15 @@ void main() {
       };
       final config = TableViewConfig.fromJson(json);
       expect(config.sortAscending, isTrue);
+    });
+
+    test('fromJson resolves a legacy sortField name', () {
+      final config = TableViewConfig.fromJson({
+        'columns': <dynamic>[],
+        'sortField': 'sacRate',
+        'sortAscending': true,
+      });
+      expect(config.sortField, equals(DiveField.sac));
     });
 
     test('fromJson handles unknown sortField name gracefully', () {
@@ -214,6 +236,12 @@ void main() {
       expect(slot.field, equals(DiveField.maxDepth));
     });
 
+    test('fromJson resolves the legacy sacRate name to sac', () {
+      final json = {'slotId': 'stat1', 'field': 'sacRate'};
+      final slot = CardSlotConfig.fromJson(json);
+      expect(slot.field, equals(DiveField.sac));
+    });
+
     test('fromJson falls back to diveNumber for unknown field', () {
       final json = {'slotId': 'stat1', 'field': 'unknownField'};
       final slot = CardSlotConfig.fromJson(json);
@@ -237,6 +265,25 @@ void main() {
     test('defaultDenseConfig has 4 slots', () {
       final config = CardViewConfig.defaultDense();
       expect(config.slots.length, equals(4));
+    });
+
+    // Every card layout shows the dive time by default, not the derived
+    // bottom time (issue #4640).
+    test('every default card config shows the runtime, not bottom time', () {
+      final configs = [
+        CardViewConfig.defaultCompact(),
+        CardViewConfig.defaultDense(),
+        CardViewConfig.defaultDetailed(),
+      ];
+      for (final config in configs) {
+        final fields = config.slots.map((s) => s.field).toList();
+        expect(fields, contains(DiveField.runtime), reason: '${config.mode}');
+        expect(
+          fields,
+          isNot(contains(DiveField.bottomTime)),
+          reason: '${config.mode}',
+        );
+      }
     });
 
     test('defaultDetailedConfig has empty extraFields', () {
@@ -275,6 +322,16 @@ void main() {
       };
       final config = CardViewConfig.fromJson(json);
       expect(config.extraFields, isEmpty);
+    });
+
+    test('fromJson resolves a legacy extra field name', () {
+      final json = {
+        'mode': 'compact',
+        'slots': <dynamic>[],
+        'extraFields': ['sacRate'],
+      };
+      final config = CardViewConfig.fromJson(json);
+      expect(config.extraFields, equals([DiveField.sac]));
     });
 
     test('fromJson filters out unknown extra field names', () {
@@ -603,11 +660,11 @@ void main() {
   });
 
   group('FieldPreset edge cases', () {
-    test('Standard preset has 22 columns with category grouping', () {
+    test('Standard preset has 23 columns with category grouping', () {
       final presets = FieldPreset.builtInTablePresets();
       final standard = presets.firstWhere((p) => p.name == 'Standard');
       final config = TableViewConfig.fromJson(standard.configJson);
-      expect(config.columns.length, equals(22));
+      expect(config.columns.length, equals(24));
       final fields = config.columns.map((c) => c.field).toList();
       // Verify key fields from each category are present
       expect(fields, contains(DiveField.waterTemp));

@@ -1,0 +1,772 @@
+import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/features/import_wizard/data/adapters/import_connection_recorder.dart';
+import 'package:submersion/features/dive_computer/presentation/providers/dive_computer_connection_providers.dart';
+import 'package:submersion/features/dive_computer/domain/entities/dive_computer_connection.dart';
+import 'package:submersion/features/dive_computer/data/repositories/dive_computer_connection_repository.dart';
+import 'package:submersion/core/constants/enums.dart' show WeightType;
+import 'package:submersion/core/domain/models/incoming_dive_data.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/garmin_connect/garmin_connect_client.dart';
+import 'package:submersion/core/services/garmin_connect/garmin_dive_mapper.dart';
+import 'package:submersion/core/services/garmin_connect/garmin_session_store.dart';
+import 'package:submersion/features/data_quality/data/services/quality_scan_service.dart';
+import 'package:submersion/features/dive_computer/data/services/dive_import_service.dart';
+import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart'
+    hide DiveMatchResult;
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart';
+import 'package:submersion/features/dive_log/domain/services/unreadable_series_exception.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+import 'package:submersion/features/import_wizard/data/adapters/cloud_computer_identity.dart';
+import 'package:submersion/features/import_wizard/data/adapters/dive_number_conflict_notice.dart';
+import 'package:submersion/features/import_wizard/domain/adapters/import_source_adapter.dart';
+import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_cancellation_token.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_phase.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_notice.dart';
+import 'package:submersion/features/import_wizard/domain/models/unified_import_result.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/garmin_cloud_adapter_steps.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/garmin_cloud_dive_list.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/transmitters/data/services/transmitter_auto_registrar.dart';
+import 'package:submersion/shared/widgets/wizard/wizard_step_def.dart';
+
+/// Signals that the sign-in step can advance (a usable session was obtained).
+final garminCloudSignedInProvider = StateProvider<bool>((ref) => false);
+
+/// The keychain-backed session cache the sign-in step reads and writes.
+/// Injected rather than constructed inline so a widget test can supply an
+/// in-memory store instead of hitting the platform keychain.
+final garminSessionStoreProvider = Provider<GarminSessionStore>(
+  (ref) => GarminSessionStore(),
+);
+
+/// Builds the client the sign-in step authenticates with. Injected for the
+/// same reason as [garminSessionStoreProvider]: overriding it keeps a test
+/// from ever reaching connect.garmin.com.
+final garminConnectClientFactoryProvider =
+    Provider<GarminConnectClient Function()>((ref) => GarminConnectClient.new);
+
+/// Signals that the fetch step can advance (dives have been downloaded and
+/// converted).
+final garminCloudDivesFetchedProvider = StateProvider<bool>((ref) => false);
+
+/// Outcome of a single `GarminCloudAdapter._consolidateDive` call. Mirrors
+/// `DiveComputerAdapter`'s outcome type -- see that class for the rationale.
+enum _ConsolidateOutcome {
+  consolidated,
+  skippedSameComputer,
+  keptStandalone,
+  failed,
+}
+
+/// What a `_consolidateDive` call did, plus the id of the standalone dive it
+/// left behind (only [_ConsolidateOutcome.keptStandalone] leaves one).
+typedef _ConsolidateResult = ({_ConsolidateOutcome outcome, String? diveId});
+
+/// Import source adapter for dives pulled from a Garmin Connect account, via
+/// the undocumented Garmin Connect mobile API.
+///
+/// Three acquisition steps: sign in (email/password, with a cached-session
+/// fast path and an MFA follow-up when Garmin challenges the account), then
+/// fetch (list + download + parse every diving/apnea activity's FIT file).
+/// From there this behaves like [DiveComputerAdapter]: dives are converted
+/// into [DownloadedDive] so tanks, gas switches, and duplicate/consolidation
+/// handling are shared with a real dive-computer download -- the only
+/// difference is that a single cloud account can span *several* distinct
+/// physical computers over the years, so the owning [DiveComputer] is
+/// resolved per-dive (by device model + serial number) instead of once per
+/// session.
+class GarminCloudAdapter implements ImportSourceAdapter {
+  static final _log = LoggerService.forClass(GarminCloudAdapter);
+
+  GarminCloudAdapter({
+    required DiveImportService importService,
+    required DiveComputerRepository computerRepository,
+    required DiveRepository diveRepository,
+    required DiveConsolidationService consolidationService,
+    required String diverId,
+    WidgetRef? ref,
+    DiveComputerConnectionRepository? connectionRepository,
+    Future<void> Function(Iterable<String> diveIds) settleTransmitters =
+        settleTransmittersForDives,
+  }) : _importService = importService,
+       _connectionRepository = connectionRepository,
+       _settleTransmitters = settleTransmitters,
+       _computerRepository = computerRepository,
+       _diveRepository = diveRepository,
+       _consolidationService = consolidationService,
+       _diverId = diverId,
+       _ref = ref;
+
+  final DiveImportService _importService;
+  final DiveComputerRepository _computerRepository;
+  final DiveRepository _diveRepository;
+  final DiveConsolidationService _consolidationService;
+  final String _diverId;
+  final WidgetRef? _ref;
+
+  /// Where each computer's Garmin Connect connection is recorded (issue
+  /// #3106); read from [_ref] when not given.
+  final DiveComputerConnectionRepository? _connectionRepository;
+
+  /// Registers the transmitter serials on the dives an import wrote and fills
+  /// any setup the diver gave them, as a file import does (issue #4419).
+  final Future<void> Function(Iterable<String> diveIds) _settleTransmitters;
+
+  List<GarminParsedDive> _parsedDives = [];
+
+  /// Resolved/created [DiveComputer] records, keyed by serial number (or by
+  /// device model name when no serial was reported).
+  final Map<String, DiveComputer> _computersByKey = {};
+
+  /// The authenticated client obtained by the sign-in step, reused by the
+  /// fetch step to list and download dives.
+  GarminConnectClient? _client;
+
+  /// Set by the sign-in step widget once a session has been established
+  /// (either from a cached session or a fresh login).
+  void setClient(GarminConnectClient client) {
+    _client = client;
+  }
+
+  /// The account the sign-in step signed in with, shown on the Review step
+  /// (issue #161).
+  String? _account;
+
+  /// Set by the sign-in step alongside [setClient].
+  void setAccount(String? account) {
+    _account = account;
+  }
+
+  /// The authenticated client set by the sign-in step. Only meaningful once
+  /// the sign-in acquisition step has completed.
+  GarminConnectClient? get client => _client;
+
+  /// Load the list of fetched+converted dives into this adapter.
+  ///
+  /// Called internally by the fetch step widget after downloading from
+  /// Garmin Connect.
+  void setParsedDives(List<GarminParsedDive> dives) {
+    _parsedDives = List.unmodifiable(dives);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ImportSourceAdapter interface
+  // ---------------------------------------------------------------------------
+
+  @override
+  void resetState() {
+    _computersByKey.clear();
+    _client = null;
+    _account = null;
+    _parsedDives = [];
+    final ref = _ref;
+    if (ref == null) return;
+    ref.invalidate(garminCloudSignedInProvider);
+    ref.invalidate(garminCloudDivesFetchedProvider);
+  }
+
+  @override
+  ImportSourceType get sourceType => ImportSourceType.garminCloud;
+
+  @override
+  String get displayName => 'Garmin Connect';
+
+  @override
+  String get defaultTagName {
+    final now = DateTime.now();
+    final date =
+        '${now.year}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    return 'Garmin Connect Import $date';
+  }
+
+  @override
+  Set<DuplicateAction> get supportedDuplicateActions => const {
+    DuplicateAction.skip,
+    DuplicateAction.importAsNew,
+    DuplicateAction.consolidate,
+    DuplicateAction.replaceSource,
+  };
+
+  /// A Garmin Connect import only ever produces dives, so there is no entity
+  /// type that needs a narrower set than the adapter-wide one.
+  @override
+  Set<DuplicateAction> duplicateActionsFor(ImportEntityType type) =>
+      supportedDuplicateActions;
+
+  @override
+  List<WizardStepDef> get acquisitionSteps => [
+    WizardStepDef(
+      label: 'Sign In',
+      icon: Icons.login,
+      builder: (context) => GarminCloudSignInStep(
+        onSignedIn: setClient,
+        onAccountSignedIn: setAccount,
+      ),
+      canAdvance: garminCloudSignedInProvider,
+      autoAdvance: true,
+    ),
+    WizardStepDef(
+      label: 'Fetch',
+      icon: Icons.cloud_download,
+      builder: (context) =>
+          GarminCloudFetchStep(client: _client, onDivesFetched: setParsedDives),
+      canAdvance: garminCloudDivesFetchedProvider,
+      // Not auto-advance: the fetch step lets the diver move on as soon as
+      // the newest page of dives is ready without waiting for the rest of a
+      // large account's history, via an explicit Load More button. Auto-
+      // advancing on that same canAdvance flip would whisk the diver away
+      // the instant it turns true, before they ever see that button.
+      autoAdvance: false,
+    ),
+  ];
+
+  @override
+  Future<ImportBundle> buildBundle() async {
+    await _ensureComputers();
+
+    final items = _parsedDives.map(_diveToEntityItem).toList();
+
+    return ImportBundle(
+      source: ImportSourceInfo(
+        type: ImportSourceType.garminCloud,
+        displayName: displayName,
+        details: ImportSourceDetails(
+          account: _account,
+          deviceModels: _deviceModels(),
+        ),
+      ),
+      groups: {ImportEntityType.dives: EntityGroup(items: items)},
+    );
+  }
+
+  @override
+  Future<ImportBundle> checkDuplicates(ImportBundle bundle) async {
+    final diveGroup = bundle.groups[ImportEntityType.dives];
+    if (diveGroup == null || diveGroup.items.isEmpty) return bundle;
+
+    final duplicateIndices = <int>{};
+    final matchResults = <int, DiveMatchResult>{};
+
+    final sourceKeysCache = await _diveRepository.getSourceKeysByDiveId(
+      diverId: _diverId,
+    );
+
+    for (var i = 0; i < _parsedDives.length; i++) {
+      final result = await _importService.detectDuplicate(
+        _parsedDives[i].dive,
+        diverId: _diverId,
+        sourceKeysCache: sourceKeysCache,
+      );
+
+      if (result.isDuplicate && result.score >= 0.5) {
+        duplicateIndices.add(i);
+        final matchedComputerId = await _diveRepository.getComputerIdForDive(
+          result.matchingDiveId!,
+        );
+        matchResults[i] = DiveMatchResult(
+          diveId: result.matchingDiveId!,
+          score: result.score,
+          timeDifferenceMs: (result.timeDifferenceSeconds ?? 0) * 1000,
+          depthDifferenceMeters: result.depthDifferenceMeters,
+          durationDifferenceSeconds: null,
+          matchedComputerId: matchedComputerId,
+          matchedExistingSource: result.matchedExistingSource,
+        );
+      }
+    }
+
+    return ImportBundle(
+      source: bundle.source,
+      groups: {
+        ...bundle.groups,
+        ImportEntityType.dives: EntityGroup(
+          items: diveGroup.items,
+          duplicateIndices: duplicateIndices,
+          matchResults: matchResults,
+        ),
+      },
+    );
+  }
+
+  @override
+  Future<UnifiedImportResult> performImport(
+    ImportBundle bundle,
+    Map<ImportEntityType, Set<int>> selections,
+    Map<ImportEntityType, Map<int, DuplicateAction>> duplicateActions, {
+    bool retainSourceDiveNumbers = false,
+    ImportProgressCallback? onProgress,
+    ImportCancellationToken? cancelToken,
+  }) async {
+    final baseSelections = Set<int>.from(
+      selections[ImportEntityType.dives] ?? <int>{},
+    );
+    final diveActions = duplicateActions[ImportEntityType.dives] ?? {};
+
+    final indicesToImport = <int>{};
+    final indicesToConsolidate = <int>{};
+    final indicesToReplaceSource = <int>{};
+    var skipped = 0;
+
+    for (final index in baseSelections) {
+      final action = diveActions[index];
+      if (action == DuplicateAction.skip) {
+        skipped++;
+      } else if (action == DuplicateAction.consolidate) {
+        indicesToConsolidate.add(index);
+      } else if (action == DuplicateAction.replaceSource) {
+        indicesToReplaceSource.add(index);
+      } else {
+        indicesToImport.add(index);
+      }
+    }
+
+    for (final entry in diveActions.entries) {
+      if (entry.value == DuplicateAction.importAsNew) {
+        indicesToImport.add(entry.key);
+      } else if (entry.value == DuplicateAction.consolidate &&
+          !baseSelections.contains(entry.key)) {
+        indicesToConsolidate.add(entry.key);
+      } else if (entry.value == DuplicateAction.replaceSource &&
+          !baseSelections.contains(entry.key)) {
+        indicesToReplaceSource.add(entry.key);
+      } else if (entry.value == DuplicateAction.skip &&
+          !baseSelections.contains(entry.key)) {
+        skipped++;
+      }
+    }
+
+    // Merge and sort by startTime (oldest first) so sequential dive number
+    // assignment produces correct chronological numbering.
+    final allIndices =
+        {
+          ...indicesToImport,
+          ...indicesToConsolidate,
+          ...indicesToReplaceSource,
+        }.toList()..sort((a, b) {
+          final aTime = _parsedDives[a].dive.startTime;
+          final bTime = _parsedDives[b].dive.startTime;
+          return aTime.compareTo(bTime);
+        });
+    final total = allIndices.length;
+    var imported = 0;
+    var consolidated = 0;
+    var updated = 0;
+    var importedWithoutProfile = 0;
+    final importedCountByComputerId = <String, int>{};
+    final importedDiveIds = <String>[];
+    // Dives already in the log that a download was merged into.
+    final updatedExistingDiveIds = <String>[];
+    // The subset of those a download was folded into. A Replace source is
+    // settled by the import service itself, so only these need it here.
+    final consolidatedDiveIds = <String>[];
+
+    for (var i = 0; i < allIndices.length; i++) {
+      if (cancelToken?.isCancelled ?? false) break;
+
+      final index = allIndices[i];
+      if (index >= _parsedDives.length) continue;
+
+      final parsed = _parsedDives[index];
+      final comp = await _resolveComputer(parsed);
+
+      if (indicesToConsolidate.contains(index)) {
+        final diveGroup = bundle.groups[ImportEntityType.dives];
+        final matchResult = diveGroup?.matchResults?[index];
+        if (matchResult != null) {
+          final result = await _consolidateDive(
+            parsed,
+            matchResult.diveId,
+            comp,
+            // A dive the fold refuses is kept standalone, so it must carry
+            // the same number an import-as-new would have given it.
+            retainSourceDiveNumber: retainSourceDiveNumbers,
+          );
+          switch (result.outcome) {
+            case _ConsolidateOutcome.consolidated:
+              consolidated++;
+              updatedExistingDiveIds.add(matchResult.diveId);
+              consolidatedDiveIds.add(matchResult.diveId);
+              importedCountByComputerId[comp.id] =
+                  (importedCountByComputerId[comp.id] ?? 0) + 1;
+              // The fold keeps the target's own header, so Connect's notes
+              // and weight go onto the target, not the folded-away download.
+              await _applyConnectExtras(matchResult.diveId, parsed);
+            case _ConsolidateOutcome.keptStandalone:
+              // The fold refused, but the download survived as its own dive,
+              // so it counts as imported rather than skipped.
+              imported++;
+              if (parsed.profileMissing) importedWithoutProfile++;
+              final keptId = result.diveId;
+              if (keptId != null) {
+                importedDiveIds.add(keptId);
+                await _applyConnectExtras(keptId, parsed);
+              }
+              importedCountByComputerId[comp.id] =
+                  (importedCountByComputerId[comp.id] ?? 0) + 1;
+            case _ConsolidateOutcome.skippedSameComputer:
+            case _ConsolidateOutcome.failed:
+              skipped++;
+          }
+        }
+      } else if (indicesToReplaceSource.contains(index)) {
+        final diveGroup = bundle.groups[ImportEntityType.dives];
+        final matchResult = diveGroup?.matchResults?[index];
+        if (matchResult != null) {
+          final conflict = ImportConflict(
+            downloaded: parsed.dive,
+            existingDiveId: matchResult.diveId,
+            duplicateResult: DuplicateResult(
+              matchingDiveId: matchResult.diveId,
+              confidence: DuplicateConfidence.exact,
+              score: matchResult.score,
+            ),
+          );
+          await _importService.resolveConflict(
+            conflict,
+            ConflictResolution.replaceSource,
+            comp.id,
+            diverId: _diverId,
+            descriptorVendor: 'Garmin',
+            descriptorProduct: parsed.deviceModel,
+          );
+          updated++;
+          updatedExistingDiveIds.add(matchResult.diveId);
+          // The replaced source is the summary's, with no profile.
+          if (parsed.profileMissing) importedWithoutProfile++;
+          await _applyConnectExtras(matchResult.diveId, parsed);
+        }
+      } else {
+        final diveId = await _importService.importSingleDiveAsNew(
+          parsed.dive,
+          computerId: comp.id,
+          diverId: _diverId,
+          descriptorVendor: 'Garmin',
+          descriptorProduct: parsed.deviceModel,
+          retainSourceDiveNumber: retainSourceDiveNumbers,
+        );
+        imported++;
+        if (parsed.profileMissing) importedWithoutProfile++;
+        importedDiveIds.add(diveId);
+        await _applyConnectExtras(diveId, parsed);
+        importedCountByComputerId[comp.id] =
+            (importedCountByComputerId[comp.id] ?? 0) + 1;
+      }
+
+      onProgress?.call(ImportPhase.dives, i + 1, total);
+    }
+
+    for (final entry in importedCountByComputerId.entries) {
+      await _computerRepository.incrementDiveCount(entry.key, by: entry.value);
+      await _computerRepository.updateLastDownload(entry.key);
+    }
+    // Every computer the fetched dives came from was reached through
+    // Garmin Connect this time, including one whose dives were all skipped
+    // as duplicates or replaced in place (issue #3106).
+    for (final computerId in {for (final c in _computersByKey.values) c.id}) {
+      await recordImportConnection(
+        _connectionRepository ??
+            _ref?.read(diveComputerConnectionRepositoryProvider),
+        computerId: computerId,
+        kind: DiveComputerConnectionKind.cloud,
+        detail: 'garminConnect',
+        log: _log,
+      );
+    }
+
+    // Each T2 transmitter gets its Transmitter item and joins its dives, as
+    // a download's or a FIT file's does (issue #4419). A folded-in dive's
+    // tanks now live on the dive it joined, so that dive is settled too.
+    final written = {...importedDiveIds, ...consolidatedDiveIds};
+    if (written.isNotEmpty) await _settleTransmitters(written);
+
+    scheduleQualityScan(importedDiveIds);
+    scheduleSensorSummaryRefresh(importedDiveIds);
+    scheduleDerivedMetricsRefresh(importedDiveIds);
+
+    final numberConflict = await diveNumberConflictNotice(
+      retainSourceDiveNumbers: retainSourceDiveNumbers,
+      diveRepository: _diveRepository,
+      importedDiveIds: importedDiveIds,
+    );
+    return UnifiedImportResult(
+      importedCounts: {ImportEntityType.dives: imported},
+      consolidatedCount: consolidated,
+      updatedCount: updated,
+      skippedCount: skipped,
+      importedDiveIds: importedDiveIds,
+      updatedExistingDiveIds: updatedExistingDiveIds,
+      notices: [
+        if (importedWithoutProfile > 0)
+          ImportNotice(
+            kind: ImportNoticeKind.profileUnreadable,
+            count: importedWithoutProfile,
+          ),
+        ?numberConflict,
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers -- what the diver added in Connect
+  // ---------------------------------------------------------------------------
+
+  /// Brings the notes and weight the diver entered in Connect onto [diveId]
+  /// (issue #2410), each only where the dive has none, so nothing written in
+  /// Submersion is overwritten.
+  ///
+  /// The dive itself is already saved by now, so a failure here is logged
+  /// rather than thrown: losing the notes must not fail the import or stop
+  /// the dives after this one. Each write is tried on its own, so one that
+  /// fails does not cost the dive the other.
+  Future<void> _applyConnectExtras(
+    String diveId,
+    GarminParsedDive parsed,
+  ) async {
+    final notes = parsed.notes;
+    if (notes != null) {
+      await _tryExtra(
+        'notes',
+        diveId,
+        () => _diveRepository.fillNotesIfEmpty(diveId, notes),
+      );
+    }
+    final weightKg = parsed.weightKg;
+    if (weightKg != null) {
+      await _tryExtra(
+        'weight',
+        diveId,
+        () => _diveRepository.addWeightIfNone(
+          diveId,
+          // Connect does not say what kind of weight it is; a belt is the
+          // plainest reading, and the diver can change it.
+          DiveWeight(
+            id: '',
+            diveId: diveId,
+            weightType: WeightType.belt,
+            amountKg: weightKg,
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _tryExtra(
+    String what,
+    String diveId,
+    Future<void> Function() write,
+  ) async {
+    try {
+      await write();
+    } catch (e, st) {
+      _log.error(
+        'Could not bring Garmin Connect $what onto dive $diveId',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers -- dive computer resolution
+  // ---------------------------------------------------------------------------
+
+  /// The models of the devices that recorded the fetched dives, each once,
+  /// in the order the dives list them.
+  List<String> _deviceModels() => {
+    for (final parsed in _parsedDives)
+      ?parsed.profileMissing
+          ? null
+          : normalizedIdentityPart(parsed.deviceModel),
+  }.toList();
+
+  Future<void> _ensureComputers() async {
+    for (final parsed in _parsedDives) {
+      await _resolveComputer(parsed);
+    }
+  }
+
+  /// Cache key for [_connectComputerModel], which no watch can collide with:
+  /// a real key is a serial or a model name, neither of which has a colon.
+  static const _connectComputerKey = ':garmin-connect';
+
+  /// The model of the one record every dive without a FIT file is filed
+  /// under, shown as "Garmin Connect". Such a dive, often entered by hand,
+  /// names no watch, and minting a nameless device per import would leave a
+  /// new placeholder in the computer list every time.
+  static const _connectComputerModel = 'Connect';
+
+  String _computerCacheKey(GarminParsedDive parsed) => parsed.profileMissing
+      ? _connectComputerKey
+      : normalizedIdentityPart(parsed.serialNumber) ??
+            normalizedIdentityPart(parsed.deviceModel) ??
+            'Garmin';
+
+  DiveComputer? _computerFor(GarminParsedDive parsed) =>
+      _computersByKey[_computerCacheKey(parsed)];
+
+  /// Finds or creates the [DiveComputer] record for [parsed]'s reporting
+  /// device, matching on hardware identity (manufacturer/model/serial) the
+  /// same way [DiveComputerAdapter.ensureComputer] does for a freshly
+  /// discovered BLE/USB device.
+  Future<DiveComputer> _resolveComputer(GarminParsedDive parsed) async {
+    final cacheKey = _computerCacheKey(parsed);
+    final cached = _computersByKey[cacheKey];
+    if (cached != null) return cached;
+
+    if (parsed.profileMissing) {
+      // Serial-less, so matched on manufacturer + model: every import finds
+      // the same row rather than adding another.
+      final connect = await _computerRepository.findOrRegisterImportedComputer(
+        model: _connectComputerModel,
+        manufacturer: 'Garmin',
+        diverId: _diverId,
+      );
+      if (connect != null) {
+        _computersByKey[cacheKey] = connect;
+        return connect;
+      }
+    }
+
+    final model = normalizedIdentityPart(parsed.deviceModel) ?? 'Garmin';
+    final serial = normalizedIdentityPart(parsed.serialNumber);
+
+    if (serial != null) {
+      final existing = await _computerRepository.findByHardwareIdentity(
+        manufacturer: 'Garmin',
+        model: model,
+        serialNumber: serial,
+        diverId: _diverId,
+      );
+      if (existing != null) {
+        _computersByKey[cacheKey] = existing;
+        return existing;
+      }
+    }
+
+    final created = await _computerRepository.createComputer(
+      DiveComputer.create(
+        id: const Uuid().v4(),
+        name: model,
+        diverId: _diverId,
+        manufacturer: 'Garmin',
+        model: model,
+      ).copyWith(
+        serialNumber: serial,
+        firmwareVersion: normalizedIdentityPart(parsed.firmwareVersion),
+        connectionType: 'cloud',
+      ),
+    );
+    _computersByKey[cacheKey] = created;
+    return created;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers -- entity item conversion
+  // ---------------------------------------------------------------------------
+
+  EntityItem _diveToEntityItem(GarminParsedDive parsed) {
+    final settings = _ref?.read(settingsProvider) ?? const AppSettings();
+    final summary = formatGarminDiveSummary(parsed, settings);
+
+    final diveData = IncomingDiveData.fromDownloadedDive(
+      parsed.dive,
+      computer: _computerFor(parsed),
+    );
+
+    return EntityItem(
+      title: summary.title,
+      subtitle: summary.subtitle,
+      diveData: diveData,
+      // A stand-in time places the dive in no trip (#3022).
+      hasSourceTime: parsed.dive.startTimeReported,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers -- consolidation
+  // ---------------------------------------------------------------------------
+
+  /// Consolidate a downloaded dive as a secondary computer reading on an
+  /// existing dive. Mirrors `DiveComputerAdapter._consolidateDive` -- see
+  /// that method's doc comment for the failure modes it guards against.
+  Future<_ConsolidateResult> _consolidateDive(
+    GarminParsedDive parsed,
+    String targetDiveId,
+    DiveComputer comp, {
+    required bool retainSourceDiveNumber,
+  }) async {
+    final targetComputerId = await _diveRepository.getComputerIdForDive(
+      targetDiveId,
+    );
+    if (targetComputerId != null && targetComputerId == comp.id) {
+      return (outcome: _ConsolidateOutcome.skippedSameComputer, diveId: null);
+    }
+
+    String? newDiveId;
+    try {
+      newDiveId = await _importService.importSingleDiveAsNew(
+        parsed.dive,
+        computerId: comp.id,
+        diverId: _diverId,
+        descriptorVendor: 'Garmin',
+        descriptorProduct: parsed.deviceModel,
+        retainSourceDiveNumber: retainSourceDiveNumber,
+      );
+      await _consolidationService.apply(
+        targetDiveId: targetDiveId,
+        secondaryDiveIds: [newDiveId],
+      );
+      return (outcome: _ConsolidateOutcome.consolidated, diveId: newDiveId);
+    } on UnreadableSeriesException catch (e) {
+      // The refusal is about the PRE-EXISTING target dive's stored series,
+      // not about this download, so the download is kept as its own dive
+      // instead of being compensated away.
+      final keptId = newDiveId;
+      if (keptId != null) {
+        _log.warning(
+          'Kept downloaded dive $keptId standalone instead of folding it '
+          'into $targetDiveId: that dive holds ${e.seriesIds.length} '
+          'series this build cannot decode',
+        );
+        return (outcome: _ConsolidateOutcome.keptStandalone, diveId: keptId);
+      }
+      // Nothing was imported, so there is nothing to keep or compensate.
+      _log.error('Consolidation fold refused for $targetDiveId', error: e);
+      return (outcome: _ConsolidateOutcome.failed, diveId: null);
+    } catch (e, st) {
+      _log.error(
+        'Consolidation fold failed for dive into $targetDiveId',
+        error: e,
+        stackTrace: st,
+      );
+      if (newDiveId != null) {
+        try {
+          await _diveRepository.bulkDeleteDives([newDiveId]);
+        } catch (deleteError, deleteStack) {
+          // The compensating delete failed too; fall through rather than
+          // rethrow, so the import loop still processes the remaining dives
+          // instead of aborting on a stranded standalone dive.
+          _log.error(
+            'Compensating delete failed for orphaned dive $newDiveId',
+            error: deleteError,
+            stackTrace: deleteStack,
+          );
+        }
+      }
+      return (outcome: _ConsolidateOutcome.failed, diveId: null);
+    }
+  }
+}

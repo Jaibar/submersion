@@ -1,0 +1,708 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/forms/form_field_semantics.dart';
+import 'package:submersion/shared/widgets/forms/form_style.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_editing.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_field.dart';
+
+/// A value derived from the dive profile, offered as a one-tap fill on a
+/// [FormRow.text] row. When [value] differs from the row's current text, the
+/// resting row shows a calculate icon (tooltip [tooltip]) that calls [onUse].
+class ProfileSuggestion {
+  const ProfileSuggestion({
+    required this.value,
+    required this.onUse,
+    required this.tooltip,
+  });
+
+  /// Already formatted in the diver's units (e.g. "18.5").
+  final String value;
+  final VoidCallback onUse;
+  final String tooltip;
+}
+
+enum _RowKind { text, picker, display, toggle, rating, custom }
+
+/// Label-left / value-right row used inside [FormSection] groups.
+///
+/// Variants:
+/// - [FormRow.text]: tap expands inline into a real TextFormField
+///   (styled by the app InputDecorationTheme); commits on done/unfocus.
+/// - [FormRow.picker]: formatted value + chevron, opens a picker sheet.
+/// - [FormRow.display]: muted, non-tappable (auto-computed values).
+/// - [FormRow.toggle], [FormRow.rating], [FormRow.custom].
+class FormRow extends StatefulWidget {
+  const FormRow.text({
+    super.key,
+    required this.label,
+    required this.controller,
+    this.placeholder,
+    this.suffixText,
+    this.keyboardType,
+    this.textCapitalization = TextCapitalization.none,
+    this.inputFormatters,
+    this.maxLines = 1,
+    this.alwaysEditing = false,
+    this.validator,
+    this.inputValidator,
+    this.onChanged,
+    this.decoration,
+    this.profileSuggestion,
+    this.markdown = false,
+    this.onAnnotate,
+  }) : assert(
+         !markdown ||
+             (suffixText == null &&
+                 keyboardType == null &&
+                 inputFormatters == null &&
+                 inputValidator == null &&
+                 profileSuggestion == null),
+         'A Markdown notes row edits free multi-line text: it takes no '
+         'suffix, keyboard type, input formatters, live input validator or '
+         'profile suggestion',
+       ),
+       _kind = _RowKind.text,
+       enabled = true,
+       helpText = null,
+       value = null,
+       onTap = null,
+       onClear = null,
+       clearTooltip = null,
+       boolValue = null,
+       onBoolChanged = null,
+       intValue = null,
+       onIntChanged = null,
+       child = null;
+
+  const FormRow.picker({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.onTap,
+    this.placeholder,
+    this.onClear,
+    this.clearTooltip,
+  }) : _kind = _RowKind.picker,
+       enabled = true,
+       helpText = null,
+       profileSuggestion = null,
+       decoration = null,
+       controller = null,
+       suffixText = null,
+       keyboardType = null,
+       textCapitalization = TextCapitalization.none,
+       inputFormatters = null,
+       maxLines = 1,
+       alwaysEditing = false,
+       markdown = false,
+       onAnnotate = null,
+       validator = null,
+       inputValidator = null,
+       onChanged = null,
+       boolValue = null,
+       onBoolChanged = null,
+       intValue = null,
+       onIntChanged = null,
+       child = null;
+
+  const FormRow.display({super.key, required this.label, required this.value})
+    : _kind = _RowKind.display,
+      enabled = true,
+      helpText = null,
+      profileSuggestion = null,
+      decoration = null,
+      controller = null,
+      inputFormatters = null,
+      onClear = null,
+      clearTooltip = null,
+      placeholder = null,
+      suffixText = null,
+      keyboardType = null,
+      textCapitalization = TextCapitalization.none,
+      maxLines = 1,
+      alwaysEditing = false,
+      markdown = false,
+      onAnnotate = null,
+      validator = null,
+      inputValidator = null,
+      onChanged = null,
+      onTap = null,
+      boolValue = null,
+      onBoolChanged = null,
+      intValue = null,
+      onIntChanged = null,
+      child = null;
+
+  /// Set [enabled] to false to render the switch in its current position but
+  /// inert, for a value that is implied by another control rather than freely
+  /// chosen. Prefer this over silently overriding what the user picked.
+  const FormRow.toggle({
+    super.key,
+    required this.label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    this.enabled = true,
+    this.helpText,
+  }) : _kind = _RowKind.toggle,
+       profileSuggestion = null,
+       decoration = null,
+       inputFormatters = null,
+       onClear = null,
+       clearTooltip = null,
+       boolValue = value,
+       onBoolChanged = onChanged,
+       controller = null,
+       value = null,
+       placeholder = null,
+       suffixText = null,
+       keyboardType = null,
+       textCapitalization = TextCapitalization.none,
+       maxLines = 1,
+       alwaysEditing = false,
+       markdown = false,
+       onAnnotate = null,
+       validator = null,
+       inputValidator = null,
+       onChanged = null,
+       onTap = null,
+       intValue = null,
+       onIntChanged = null,
+       child = null;
+
+  const FormRow.rating({
+    super.key,
+    required this.label,
+    required int value,
+    required ValueChanged<int> onChanged,
+    this.onClear,
+    this.clearTooltip,
+  }) : _kind = _RowKind.rating,
+       enabled = true,
+       helpText = null,
+       profileSuggestion = null,
+       decoration = null,
+       inputFormatters = null,
+       intValue = value,
+       onIntChanged = onChanged,
+       controller = null,
+       value = null,
+       placeholder = null,
+       suffixText = null,
+       keyboardType = null,
+       textCapitalization = TextCapitalization.none,
+       maxLines = 1,
+       alwaysEditing = false,
+       markdown = false,
+       onAnnotate = null,
+       validator = null,
+       inputValidator = null,
+       onChanged = null,
+       onTap = null,
+       boolValue = null,
+       onBoolChanged = null,
+       child = null;
+
+  const FormRow.custom({super.key, required this.label, required this.child})
+    : _kind = _RowKind.custom,
+      enabled = true,
+      helpText = null,
+      profileSuggestion = null,
+      decoration = null,
+      controller = null,
+      inputFormatters = null,
+      onClear = null,
+      clearTooltip = null,
+      value = null,
+      placeholder = null,
+      suffixText = null,
+      keyboardType = null,
+      textCapitalization = TextCapitalization.none,
+      maxLines = 1,
+      alwaysEditing = false,
+      markdown = false,
+      onAnnotate = null,
+      validator = null,
+      inputValidator = null,
+      onChanged = null,
+      onTap = null,
+      boolValue = null,
+      onBoolChanged = null,
+      intValue = null,
+      onIntChanged = null;
+
+  /// Toggle rows only: false renders the switch inert.
+  final bool enabled;
+
+  /// Optional explanatory line rendered under the row, for a control whose
+  /// label cannot carry the whole meaning on its own.
+  final String? helpText;
+
+  final _RowKind _kind;
+  final String label;
+  final TextEditingController? controller;
+  final String? value;
+  final String? placeholder;
+  final String? suffixText;
+  final TextInputType? keyboardType;
+
+  /// How the keyboard capitalizes typed text. Text rows only.
+  final TextCapitalization textCapitalization;
+  final List<TextInputFormatter>? inputFormatters;
+  final int maxLines;
+  final bool alwaysEditing;
+
+  /// A Markdown notes row (#3683): editing shows the notes editor with its
+  /// formatting bar under the label, and the resting row shows plain words.
+  final bool markdown;
+
+  /// Answers the notes editor's pin on a Markdown row (#4109); null hides
+  /// the pin.
+  final Future<AnnotationRequestResult?> Function(String selectedWords)?
+  onAnnotate;
+  final String? Function(String?)? validator;
+
+  /// A validator for what the diver types, as opposed to [validator], which
+  /// also covers a blank required field and so keeps the row open always.
+  ///
+  /// The row rests normally while its text passes, and stays open, showing
+  /// the error, only while the text fails. That keeps Form.validate() able to
+  /// see every failing row without turning every numeric row into a bare
+  /// field that hides its profile suggestion (#1900).
+  final String? Function(String?)? inputValidator;
+  final ValueChanged<String>? onChanged;
+  final InputDecoration? decoration;
+  final VoidCallback? onTap;
+  final VoidCallback? onClear;
+
+  /// Names the clear affordance for pointer and screen-reader users. Passed
+  /// in already localized: this widget sits below the l10n layer, and
+  /// reaching for it here would throw in every consumer test that pumps a
+  /// bare MaterialApp.
+  final String? clearTooltip;
+  final bool? boolValue;
+  final ValueChanged<bool>? onBoolChanged;
+  final int? intValue;
+  final ValueChanged<int>? onIntChanged;
+  final Widget? child;
+  final ProfileSuggestion? profileSuggestion;
+
+  @override
+  State<FormRow> createState() => _FormRowState();
+}
+
+class _FormRowState extends State<FormRow> {
+  bool _editing = false;
+
+  /// A Markdown row previewing its notes has no focused field, but is still
+  /// being edited: focus loss must not rest it.
+  bool _previewing = false;
+
+  /// A Markdown row whose annotation sheet is open (#4109) has handed focus
+  /// to the sheet; resting it would unmount the field the answer lands in.
+  bool _annotating = false;
+
+  Future<AnnotationRequestResult?> _annotate(String selectedWords) async {
+    _annotating = true;
+    try {
+      return await widget.onAnnotate!(selectedWords);
+    } finally {
+      _annotating = false;
+    }
+  }
+
+  /// A row with a validator must keep its field mounted, or Form.validate()
+  /// cannot see it.
+  bool get _persistent => _alwaysMounted || _failsInputValidator;
+
+  /// Mounted whatever the text. Only these rows hand focus to the field's
+  /// own node: a row kept open by [FormRow.inputValidator] still owns
+  /// [_focusNode], so turning invalid mid-typing never swaps the node (and
+  /// drops the keyboard) and leaving it can bring the row back to rest.
+  bool get _alwaysMounted => widget.alwaysEditing || widget.validator != null;
+
+  bool get _failsInputValidator =>
+      widget.inputValidator?.call(widget.controller?.text) != null;
+  final _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      if (_focusNode.hasFocus) {
+        // Focus can arrive without a tap on the resting row: a row held open
+        // because its text fails is edited in place. Count it as editing, or
+        // fixing the text rests the row and unmounts the field mid-typing.
+        if (!_editing) setState(() => _editing = true);
+      } else if (_previewing || _annotating) {
+        return;
+      } else if (_editing || widget.inputValidator != null) {
+        setState(() => _editing = false);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  TextStyle _labelTextStyle(BuildContext context) =>
+      Theme.of(context).textTheme.bodyMedium!;
+
+  TextStyle _valueTextStyle(BuildContext context, {required bool muted}) {
+    final theme = Theme.of(context);
+    return theme.textTheme.bodyMedium!.copyWith(
+      color: muted
+          ? theme.colorScheme.onSurfaceVariant
+          : theme.colorScheme.onSurface,
+    );
+  }
+
+  InputDecoration _bareDecoration(BuildContext context) {
+    return InputDecoration(
+      isDense: true,
+      filled: false,
+      border: InputBorder.none,
+      enabledBorder: InputBorder.none,
+      focusedBorder: InputBorder.none,
+      errorBorder: InputBorder.none,
+      focusedErrorBorder: InputBorder.none,
+      disabledBorder: InputBorder.none,
+      contentPadding: EdgeInsets.zero,
+      hintText: widget.placeholder,
+      suffixText: widget.suffixText,
+    );
+  }
+
+  /// Opens a resting row and moves focus into its field.
+  ///
+  /// The field's autofocus is not enough: it applies only while nothing else
+  /// in the focus scope has focus. In a browser the control a screen reader
+  /// last activated keeps focus (the web engine reports DOM focus on a
+  /// semantics node as framework focus), so the field opened unfocused and
+  /// typing went nowhere (issue #4166). A node that is not mounted yet takes
+  /// the request when its field mounts.
+  void _open() {
+    setState(() => _editing = true);
+    _focusNode.requestFocus();
+  }
+
+  /// The row's label beside an open field, which carries the same words.
+  Widget _visibleLabel(BuildContext context) =>
+      visibleFormLabel(widget.label, style: _labelTextStyle(context));
+
+  Widget _shell(
+    BuildContext context, {
+    required Widget trailing,
+    VoidCallback? onTap,
+  }) {
+    final row = Padding(
+      padding: FormStyle.rowPadding,
+      child: Row(
+        children: [
+          Text(widget.label, style: _labelTextStyle(context)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Align(alignment: Alignment.centerRight, child: trailing),
+          ),
+        ],
+      ),
+    );
+    final help = widget.helpText;
+    final content = help == null
+        ? row
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              row,
+              Padding(
+                padding: EdgeInsets.only(
+                  left: FormStyle.rowPadding.left,
+                  right: FormStyle.rowPadding.right,
+                  bottom: FormStyle.rowPadding.bottom,
+                ),
+                child: Text(
+                  help,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          );
+    if (onTap == null) return content;
+    return InkWell(onTap: onTap, child: content);
+  }
+
+  /// The open Markdown row: label above, notes editor below (the formatting
+  /// bar needs the width). While typing, the row rests when focus leaves, as
+  /// a plain row does; a previewing row has no focused field to lose, so a
+  /// tap outside it rests it instead.
+  Widget _markdownEditor(BuildContext context) {
+    return TapRegion(
+      onTapOutside: (_) {
+        if (!_previewing) return;
+        setState(() {
+          _previewing = false;
+          _editing = false;
+        });
+      },
+      child: Padding(
+        padding: FormStyle.rowPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _visibleLabel(context),
+            const SizedBox(height: 4),
+            MarkdownNotesField(
+              controller: widget.controller!,
+              focusNode: _alwaysMounted ? null : _focusNode,
+              autofocus: _editing && !_alwaysMounted,
+              maxLines: widget.maxLines,
+              validator: widget.validator ?? widget.inputValidator,
+              onChanged: widget.onChanged,
+              textCapitalization: widget.textCapitalization,
+              style: Theme.of(context).textTheme.bodyMedium,
+              decoration: widget.decoration ?? _bareDecoration(context),
+              onPreviewChanged: (on) => _previewing = on,
+              onAnnotate: widget.onAnnotate == null ? null : _annotate,
+              semanticsLabel: widget.label,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    switch (widget._kind) {
+      case _RowKind.text:
+        if (widget.markdown && (_persistent || _editing)) {
+          return _markdownEditor(context);
+        }
+        if (_persistent || _editing) {
+          return Padding(
+            padding: FormStyle.rowPadding,
+            child: Row(
+              crossAxisAlignment: widget.maxLines > 1
+                  ? CrossAxisAlignment.start
+                  : CrossAxisAlignment.center,
+              children: [
+                _visibleLabel(context),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: namedFormField(
+                    widget.label,
+                    TextFormField(
+                      controller: widget.controller,
+                      focusNode: _alwaysMounted ? null : _focusNode,
+                      autofocus: _editing && !_alwaysMounted,
+                      maxLines: widget.maxLines,
+                      keyboardType: widget.keyboardType,
+                      textCapitalization: widget.textCapitalization,
+                      inputFormatters: widget.inputFormatters,
+                      validator: widget.validator ?? widget.inputValidator,
+                      autovalidateMode: widget.inputValidator != null
+                          ? AutovalidateMode.onUserInteraction
+                          : null,
+                      onChanged: widget.onChanged,
+                      textAlign: widget.maxLines > 1
+                          ? TextAlign.start
+                          : TextAlign.end,
+                      style: theme.textTheme.bodyMedium,
+                      decoration: widget.decoration ?? _bareDecoration(context),
+                      onFieldSubmitted: _alwaysMounted
+                          ? null
+                          : (_) => setState(() => _editing = false),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+        return AnimatedBuilder(
+          animation: widget.controller!,
+          builder: (context, _) {
+            final text = widget.markdown
+                ? markdownToPlainText(widget.controller!.text)
+                : widget.controller!.text;
+            final empty = text.isEmpty;
+            final shown = empty
+                ? (widget.placeholder ?? '')
+                : (widget.suffixText == null
+                      ? text
+                      : '$text ${widget.suffixText}');
+            final valueText = Text(
+              shown,
+              style: _valueTextStyle(context, muted: empty),
+              maxLines: widget.maxLines > 1 ? 2 : 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+            );
+            final suggestion = widget.profileSuggestion;
+            final showCalc = suggestion != null && suggestion.value != text;
+            return _shell(
+              context,
+              onTap: _open,
+              trailing: showCalc
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(child: valueText),
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: suggestion.tooltip,
+                          child: InkWell(
+                            onTap: suggestion.onUse,
+                            borderRadius: BorderRadius.circular(10),
+                            child: Padding(
+                              padding: const EdgeInsets.all(2),
+                              child: Icon(
+                                Icons.calculate_outlined,
+                                size: 18,
+                                color: theme.colorScheme.primary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : valueText,
+            );
+          },
+        );
+
+      case _RowKind.picker:
+        final empty = widget.value == null || widget.value!.isEmpty;
+        return _shell(
+          context,
+          onTap: widget.onTap,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  empty ? (widget.placeholder ?? '') : widget.value!,
+                  style: _valueTextStyle(context, muted: empty),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (widget.onClear != null && !empty) ...[
+                const SizedBox(width: 4),
+                _clearAffordance(context, widget.onClear!),
+              ],
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ],
+          ),
+        );
+
+      case _RowKind.display:
+        return _shell(
+          context,
+          trailing: Text(
+            widget.value ?? '',
+            style: _valueTextStyle(context, muted: true),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        );
+
+      case _RowKind.toggle:
+        // One node, as a SwitchListTile is: the switch is named by the row's
+        // label (and help), not heard as an unnamed switch.
+        return MergeSemantics(
+          child: _shell(
+            context,
+            trailing: Switch(
+              value: widget.boolValue!,
+              onChanged: widget.enabled ? widget.onBoolChanged : null,
+            ),
+          ),
+        );
+
+      case _RowKind.rating:
+        final rating = widget.intValue!;
+        // Zero stars is a real answer, not the absence of one, so the row keeps
+        // two ways back to it: re-tapping the star that already holds the
+        // rating (what divers reach for first), and the explicit clear icon.
+        // Both go through the same callback, so a caller whose onClear does
+        // extra bookkeeping cannot have it skipped by the gesture it did not
+        // anticipate.
+        final clear = widget.onClear ?? () => widget.onIntChanged!(0);
+        return _shell(
+          context,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ...List.generate(5, (i) {
+                final stars = i + 1;
+                final filled = i < rating;
+                // Named for a screen reader, which otherwise meets five
+                // unnamed buttons, and selected as the fill shows, so the
+                // rating is heard as well as seen (issue #4166).
+                return Semantics(
+                  label: context.l10n.diveSites_edit_rating_starTooltip(stars),
+                  selected: filled,
+                  child: InkWell(
+                    onTap: () =>
+                        stars == rating ? clear() : widget.onIntChanged!(stars),
+                    borderRadius: BorderRadius.circular(12),
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: Icon(
+                        filled ? Icons.star : Icons.star_border,
+                        size: 22,
+                        color: filled
+                            ? Colors.amber
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+              if (rating > 0) ...[
+                const SizedBox(width: 4),
+                _clearAffordance(context, clear),
+              ],
+            ],
+          ),
+        );
+
+      case _RowKind.custom:
+        return _shell(context, trailing: widget.child!);
+    }
+  }
+
+  /// The bare X shared by the picker and rating rows. Wrapped in a [Tooltip]
+  /// only when the caller named it, so rows that never supplied a label keep
+  /// rendering exactly as before.
+  Widget _clearAffordance(BuildContext context, VoidCallback onTap) {
+    final button = InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(FormStyle.clearTapTarget / 2),
+      child: SizedBox(
+        width: FormStyle.clearTapTarget,
+        height: FormStyle.clearTapTarget,
+        child: Icon(
+          Icons.clear,
+          size: 16,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+    final tooltip = widget.clearTooltip;
+    return tooltip == null ? button : Tooltip(message: tooltip, child: button);
+  }
+}

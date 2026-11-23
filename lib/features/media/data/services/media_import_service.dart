@@ -1,9 +1,27 @@
+import 'package:uuid/uuid.dart';
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+import 'package:submersion/core/constants/app_directories.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/equipment/data/repositories/gear_photo_repository.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/services/cloud_identifier_source.dart';
 import 'package:submersion/features/media/data/services/enrichment_service.dart';
+import 'package:submersion/features/media/data/services/linked_gallery_assets.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+
+/// A row prepared for a dive and not yet written, with its enrichment.
+typedef PreparedMedia = ({MediaItem item, MediaEnrichment? enrichment});
 
 /// Result of a media import operation.
 class ImportResult {
@@ -30,6 +48,10 @@ class ImportResult {
   bool get allSucceeded => failures.isEmpty;
 }
 
+/// Where the OCR scan flow files its logbook-page copies, relative to
+/// [kAppDocumentsFolder].
+const String kScannedLogsSubdirectory = 'scanned_logs';
+
 /// Service for importing photos from the device gallery into the app.
 ///
 /// Handles the full import flow:
@@ -44,8 +66,158 @@ class MediaImportService {
   MediaImportService({
     required MediaRepository mediaRepository,
     required EnrichmentService enrichmentService,
+    Future<Directory> Function()? documentsDirectory,
+    this.onMediaCreated,
+    LinkedGalleryAssets linkedGalleryAssets = const LinkedGalleryAssets(),
+    CloudIdentifierSource? cloudIdentifiers,
+    GearPhotoRepository? gearPhotos,
+    Future<DateTime?> Function(String diveId)? primarySourceEntry,
   }) : _mediaRepository = mediaRepository,
-       _enrichmentService = enrichmentService;
+       _gearPhotos = gearPhotos,
+       _primarySourceEntry = primarySourceEntry,
+       _enrichmentService = enrichmentService,
+       _documentsDirectory =
+           documentsDirectory ?? getApplicationDocumentsDirectory,
+       _linkedGalleryAssets = linkedGalleryAssets,
+       _cloudIdentifiers = cloudIdentifiers;
+
+  final Future<Directory> Function() _documentsDirectory;
+
+  /// When a dive's primary computer began recording, the instant its profile
+  /// counts from (`DiveRepository.getPrimarySourceEntry`, issue #4539).
+  /// Without one a photo is placed from the dive's own start.
+  final Future<DateTime?> Function(String diveId)? _primarySourceEntry;
+
+  /// Gear photo dedupe reads (issue #3355); the default reads the database.
+  final GearPhotoRepository? _gearPhotos;
+
+  /// Decides which picked gallery assets are already linked. The default
+  /// consults nothing on this device and only recognises assets by the
+  /// synced id; production passes one backed by the asset resolver so a
+  /// photo linked on another device is recognised too (#885).
+  final LinkedGalleryAssets _linkedGalleryAssets;
+
+  /// Looks up each picked gallery asset's iCloud identifier, recorded on
+  /// the row so another device sharing the library finds the exact photo
+  /// (spec 6.2). Null where there is none to ask; the photo_manager source
+  /// production passes answers nothing off Apple platforms.
+  final CloudIdentifierSource? _cloudIdentifiers;
+
+  /// The cloud id of each gallery asset in [assets], in one lookup. Empty
+  /// when there is no source or the lookup fails: the id is a hint for
+  /// other devices, and a link without one resolves by metadata as before.
+  Future<Map<String, String>> _cloudIdsFor(List<AssetInfo> assets) async {
+    final source = _cloudIdentifiers;
+    final gallery = [
+      for (final a in assets)
+        if (a.filePath == null || a.filePath!.isEmpty) a.id,
+    ];
+    if (source == null || gallery.isEmpty) return const {};
+    try {
+      return await source.cloudIdentifiers(gallery);
+    } on Object catch (e, stackTrace) {
+      _log.warning(
+        'Could not read cloud ids for ${gallery.length} picked assets',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return const {};
+    }
+  }
+
+  /// Invoked after every successful createMedia so the media store can
+  /// enqueue an upload. Null when no store is configured.
+  final void Function(String mediaId)? onMediaCreated;
+
+  /// The directory [importLocalFileForDive] writes into for [subdirectory]:
+  /// `<documents>/Submersion/<subdirectory>`, the same [kAppDocumentsFolder]
+  /// the database lives in.
+  ///
+  /// Public so the one-time folder migration can name the same destination
+  /// without a second copy of the layout.
+  static Directory destinationDirectory(
+    Directory documents,
+    String subdirectory,
+  ) => Directory(p.join(documents.path, kAppDocumentsFolder, subdirectory));
+
+  /// Copies [sourceFile] into the app's own folder under the documents
+  /// directory (see [destinationDirectory]) and creates a localFile media
+  /// row linked to [diveId].
+  ///
+  /// [subdirectory] defaults to [kScannedLogsSubdirectory] for the OCR scan
+  /// flow that introduced this method; file imports pass their own so an
+  /// imported logbook's photos are not filed as scanned pages.
+  ///
+  /// [latitude] and [longitude] are the photo's own coordinates when the
+  /// source recorded them, which is not the same as the dive site's.
+  Future<MediaItem> importLocalFileForDive({
+    required File sourceFile,
+    required String diveId,
+    DateTime? takenAt,
+    double? latitude,
+    double? longitude,
+    String subdirectory = kScannedLogsSubdirectory,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.mediaImport);
+    final prepared = await prepareLocalFileForDive(
+      sourceFile: sourceFile,
+      diveId: diveId,
+      takenAt: takenAt,
+      latitude: latitude,
+      longitude: longitude,
+      subdirectory: subdirectory,
+    );
+    final created = await _mediaRepository.createMedia(
+      prepared.item.copyWith(id: ''),
+    );
+    onMediaCreated?.call(created.id);
+    return created;
+  }
+
+  /// What [importLocalFileForDive] writes, without the write: the file is
+  /// copied into the app's folder and its row built under a fresh id, for a
+  /// new dive's sitting to hold and write at Save (issue #4527, plan 8).
+  Future<PreparedMedia> prepareLocalFileForDive({
+    required File sourceFile,
+    required String diveId,
+    DateTime? takenAt,
+    double? latitude,
+    double? longitude,
+    String subdirectory = kScannedLogsSubdirectory,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.mediaImport);
+    final docs = await _documentsDirectory();
+    final dir = destinationDirectory(docs, subdirectory);
+    await dir.create(recursive: true);
+    final sourceExt = p.extension(sourceFile.path);
+    final ext = sourceExt.isEmpty ? '.jpg' : sourceExt;
+    // A millisecond stamp alone collides when a batch import copies two
+    // photos inside the same millisecond, and the second copy would
+    // overwrite the first. Disambiguate with a counter.
+    var destName = '${DateTime.now().millisecondsSinceEpoch}$ext';
+    var destPath = p.join(dir.path, destName);
+    var counter = 1;
+    while (File(destPath).existsSync()) {
+      destName = '${DateTime.now().millisecondsSinceEpoch}_${counter++}$ext';
+      destPath = p.join(dir.path, destName);
+    }
+    final dest = await sourceFile.copy(destPath);
+    final now = DateTime.now();
+    final item = MediaItem(
+      id: const Uuid().v4(),
+      diveId: diveId,
+      mediaType: MediaType.photo,
+      sourceType: MediaSourceType.localFile,
+      filePath: dest.path,
+      originalFilename: p.basename(sourceFile.path),
+      latitude: latitude,
+      longitude: longitude,
+      takenAt: takenAt ?? now,
+      createdAt: now,
+      updatedAt: now,
+    );
+    return (item: item, enrichment: null);
+  }
 
   /// Import selected assets for a dive.
   ///
@@ -57,6 +229,7 @@ class MediaImportService {
     required List<AssetInfo> selectedAssets,
     required Dive dive,
   }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.mediaImport);
     final List<MediaItem> imported = [];
     final Map<String, String> failures = {};
 
@@ -64,25 +237,57 @@ class MediaImportService {
       'Starting import of ${selectedAssets.length} assets for dive ${dive.id}',
     );
 
-    // Fetch already-linked asset IDs for this dive
-    final existingAssetIds = await _mediaRepository.getLinkedAssetIdsForDive(
-      dive.id,
-    );
+    // Two dedupe keys, one per origin. Gallery picks are checked against the
+    // dive's linked rows as this device sees them (see [_unlinkedGalleryIds]);
+    // desktop picks are localFile rows with a null platform_asset_id (see
+    // [_createMediaItemFromAsset]), invisible to that check, so they are
+    // matched on the path instead.
+    //
+    // Each lookup only feeds one branch of the filter below, so query a
+    // lookup only when the selection actually contains that kind of asset:
+    // a mobile pick has no paths to compare and a desktop pick has no
+    // gallery ids, and either way the unused lookup would be dead work.
+    bool hasPath(AssetInfo a) => a.filePath != null && a.filePath!.isNotEmpty;
+    final anyPaths = selectedAssets.any(hasPath);
+    final gallery = selectedAssets.where((a) => !hasPath(a)).toList();
+
+    final newGalleryIds = gallery.isEmpty
+        ? const <String>{}
+        : await _unlinkedGalleryIds(
+            gallery,
+            await _mediaRepository.getGalleryLinksForDive(dive.id),
+          );
+    final existingPaths = anyPaths
+        ? await _mediaRepository.getLinkedLocalPathsForDive(dive.id)
+        : const <String>{};
 
     // Filter out duplicates before processing
-    final newAssets = selectedAssets
-        .where((a) => !existingAssetIds.contains(a.id))
-        .toList();
+    final newAssets = selectedAssets.where((a) {
+      if (hasPath(a)) return !existingPaths.contains(a.filePath);
+      return newGalleryIds.contains(a.id);
+    }).toList();
     final skippedCount = selectedAssets.length - newAssets.length;
 
     if (skippedCount > 0) {
       _log.info('Skipped $skippedCount duplicate assets for dive ${dive.id}');
     }
 
+    final cloudIds = await _cloudIdsFor(newAssets);
+    // One read for the whole pick; a dive with no profile places nothing.
+    final clock = dive.profile.isEmpty || newAssets.isEmpty
+        ? null
+        : DiveMediaClock.forDive(
+            dive,
+            primarySourceEntry: await _readPrimarySourceEntry(dive.id),
+          );
     for (final asset in newAssets) {
       try {
         // Create MediaItem
-        final mediaItem = _createMediaItemFromAsset(asset, dive.id);
+        final mediaItem = _createMediaItemFromAsset(
+          asset,
+          diveId: dive.id,
+          cloudAssetId: cloudIds[asset.id],
+        );
 
         // Save to database
         final saved = await _mediaRepository.createMedia(mediaItem);
@@ -91,6 +296,7 @@ class MediaImportService {
         final enrichment = _calculateEnrichment(
           asset: asset,
           dive: dive,
+          clock: clock,
           mediaId: saved.id,
         );
 
@@ -100,6 +306,7 @@ class MediaImportService {
         }
 
         imported.add(saved);
+        onMediaCreated?.call(saved.id);
         _log.info('Imported asset ${asset.id} as media ${saved.id}');
       } catch (e, stackTrace) {
         _log.error(
@@ -122,18 +329,348 @@ class MediaImportService {
     );
   }
 
-  MediaItem _createMediaItemFromAsset(AssetInfo asset, String diveId) {
+  /// What [importPhotosForDive] would write for [selectedAssets], for a
+  /// sitting on the dive that holds it until Save (issue #4527): the
+  /// duplicates left out the same way, each row under a fresh id of its
+  /// own, with its enrichment worked out. Writes nothing.
+  Future<List<PreparedMedia>> prepareForDive({
+    required List<AssetInfo> selectedAssets,
+    required Dive dive,
+  }) async {
+    bool hasPath(AssetInfo a) => a.filePath != null && a.filePath!.isNotEmpty;
+    final gallery = selectedAssets.where((a) => !hasPath(a)).toList();
+    final newGalleryIds = gallery.isEmpty
+        ? const <String>{}
+        : await _unlinkedGalleryIds(
+            gallery,
+            await _mediaRepository.getGalleryLinksForDive(dive.id),
+          );
+    final existingPaths = selectedAssets.any(hasPath)
+        ? await _mediaRepository.getLinkedLocalPathsForDive(dive.id)
+        : const <String>{};
+    final newAssets = selectedAssets.where((a) {
+      if (hasPath(a)) return !existingPaths.contains(a.filePath);
+      return newGalleryIds.contains(a.id);
+    }).toList();
+    final cloudIds = await _cloudIdsFor(newAssets);
+    final clock = dive.profile.isEmpty || newAssets.isEmpty
+        ? null
+        : DiveMediaClock.forDive(
+            dive,
+            primarySourceEntry: await _readPrimarySourceEntry(dive.id),
+          );
+    return [
+      for (final asset in newAssets)
+        _prepared(
+          asset,
+          dive: dive,
+          clock: clock,
+          cloudAssetId: cloudIds[asset.id],
+        ),
+    ];
+  }
+
+  PreparedMedia _prepared(
+    AssetInfo asset, {
+    required Dive dive,
+    required DiveMediaClock? clock,
+    required String? cloudAssetId,
+  }) {
+    final item = _createMediaItemFromAsset(
+      asset,
+      diveId: dive.id,
+      cloudAssetId: cloudAssetId,
+    ).copyWith(id: const Uuid().v4());
+    return (
+      item: item,
+      enrichment: _calculateEnrichment(
+        asset: asset,
+        dive: dive,
+        clock: clock,
+        mediaId: item.id,
+      ),
+    );
+  }
+
+  /// Writes [prepared] as [importPhotosForDive] writes each row: the row,
+  /// then its enrichment. Throws on the first failure, so a sitting's save
+  /// writes all or none of them. Queues no upload: that waits for the
+  /// sitting's write to commit. Returns the rows written.
+  Future<List<MediaItem>> writePrepared(List<PreparedMedia> prepared) async {
+    final written = <MediaItem>[];
+    for (final p in prepared) {
+      final saved = await _mediaRepository.createMedia(p.item);
+      final enrichment = p.enrichment;
+      if (enrichment != null) {
+        await _mediaRepository.saveEnrichment(enrichment);
+      }
+      written.add(saved);
+    }
+    return written;
+  }
+
+  /// Import selected assets as direct site attachments. Same dedupe
+  /// contract as [importPhotosForDive]; no enrichment (sites have no
+  /// profile to position photos on).
+  Future<ImportResult> importPhotosForSite({
+    required List<AssetInfo> selectedAssets,
+    required String siteId,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.mediaImport);
+    return _importOwned(
+      selectedAssets: selectedAssets,
+      owner: 'site $siteId',
+      galleryLinks: () => _mediaRepository.getGalleryLinksForSite(siteId),
+      localPaths: () => _mediaRepository.getLinkedLocalPathsForSite(siteId),
+      link: (item) => item.copyWith(siteId: siteId),
+    );
+  }
+
+  /// Links [selectedAssets] to gear item [equipmentId] (issue #3355), and to
+  /// check-in [observationId] when the photos back one up. Like a site
+  /// attachment: no dive window, no enrichment, and picks already linked to
+  /// the item are skipped.
+  Future<ImportResult> importPhotosForEquipment({
+    required List<AssetInfo> selectedAssets,
+    required String equipmentId,
+    String? observationId,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.mediaImport);
+    final gearPhotos = _gearPhotos ?? GearPhotoRepository();
+    return _importOwned(
+      selectedAssets: selectedAssets,
+      owner: 'equipment $equipmentId',
+      galleryLinks: () => gearPhotos.galleryLinksFor(equipmentId),
+      localPaths: () => gearPhotos.linkedLocalPathsFor(equipmentId),
+      link: (item) =>
+          item.copyWith(equipmentId: equipmentId, observationId: observationId),
+    );
+  }
+
+  /// What [importPhotosForEquipment] would write for [selectedAssets], for
+  /// a sitting on the gear item that holds it until Save (issue #4527, phase
+  /// 3, plan 6): the photos already on the item left out the same way, each
+  /// row under a fresh id of its own, with no enrichment. Writes nothing.
+  ///
+  /// [ignoringMediaIds] are rows the sitting has unlinked, gallery photos
+  /// and local files alike: not on the item once it is saved, so a pick of
+  /// the same photo is taken back.
+  Future<List<PreparedMedia>> prepareForEquipment({
+    required List<AssetInfo> selectedAssets,
+    required String equipmentId,
+    String? observationId,
+    Set<String> ignoringMediaIds = const {},
+  }) async {
+    final gearPhotos = _gearPhotos ?? GearPhotoRepository();
+    final newAssets = await _unlinkedOwnedAssets(
+      selectedAssets,
+      galleryLinks: () async => [
+        for (final row in await gearPhotos.galleryLinksFor(equipmentId))
+          if (!ignoringMediaIds.contains(row.id)) row,
+      ],
+      localPaths: () => gearPhotos.linkedLocalPathsFor(
+        equipmentId,
+        ignoring: ignoringMediaIds,
+      ),
+    );
+    final cloudIds = await _cloudIdsFor(newAssets);
+    return [
+      for (final asset in newAssets)
+        (
+          item:
+              _createMediaItemFromAsset(
+                asset,
+                cloudAssetId: cloudIds[asset.id],
+              ).copyWith(
+                id: const Uuid().v4(),
+                equipmentId: equipmentId,
+                observationId: observationId,
+              ),
+          enrichment: null,
+        ),
+    ];
+  }
+
+  /// What [importPhotosForSite] would write for [selectedAssets], for a
+  /// sitting on the site that holds it until Save (issue #4527, phase 2):
+  /// the photos already on the site left out the same way, each row under a
+  /// fresh id of its own, with no enrichment. Writes nothing.
+  ///
+  /// [ignoringMediaIds] are rows the sitting has unlinked: not on the site
+  /// once it is saved, so a pick of the same photo is taken back.
+  Future<List<PreparedMedia>> prepareForSite({
+    required List<AssetInfo> selectedAssets,
+    required String siteId,
+    Set<String> ignoringMediaIds = const {},
+  }) async {
+    final newAssets = await _unlinkedOwnedAssets(
+      selectedAssets,
+      galleryLinks: () async => [
+        for (final row in await _mediaRepository.getGalleryLinksForSite(siteId))
+          if (!ignoringMediaIds.contains(row.id)) row,
+      ],
+      localPaths: ignoringMediaIds.isEmpty
+          ? () => _mediaRepository.getLinkedLocalPathsForSite(siteId)
+          : () async => {
+              for (final row in await _mediaRepository.getMediaForSite(siteId))
+                if (!ignoringMediaIds.contains(row.id)) ?row.localPath,
+            },
+    );
+    final cloudIds = await _cloudIdsFor(newAssets);
+    return [
+      for (final asset in newAssets)
+        (
+          item: _createMediaItemFromAsset(
+            asset,
+            cloudAssetId: cloudIds[asset.id],
+          ).copyWith(id: const Uuid().v4(), siteId: siteId),
+          enrichment: null,
+        ),
+    ];
+  }
+
+  /// The dive import's two-key dedupe for an owner: gallery picks against
+  /// the owner's linked rows, desktop picks on the path.
+  Future<List<AssetInfo>> _unlinkedOwnedAssets(
+    List<AssetInfo> selectedAssets, {
+    required Future<List<MediaItem>> Function() galleryLinks,
+    required Future<Set<String>> Function() localPaths,
+  }) async {
+    bool hasPath(AssetInfo a) => a.filePath != null && a.filePath!.isNotEmpty;
+    final gallery = selectedAssets.where((a) => !hasPath(a)).toList();
+    final newGalleryIds = gallery.isEmpty
+        ? const <String>{}
+        : await _unlinkedGalleryIds(gallery, await galleryLinks());
+    final existingPaths = selectedAssets.any(hasPath)
+        ? await localPaths()
+        : const <String>{};
+    return selectedAssets.where((a) {
+      if (hasPath(a)) return !existingPaths.contains(a.filePath);
+      return newGalleryIds.contains(a.id);
+    }).toList();
+  }
+
+  /// The shared body of an import owned outright by one entity (a site or a
+  /// gear item): the dive import's two-key dedupe (gallery picks against the
+  /// owner's linked rows, desktop picks on the path), then one linked row per
+  /// new asset, with no dive window and no enrichment.
+  Future<ImportResult> _importOwned({
+    required List<AssetInfo> selectedAssets,
+    required String owner,
+    required Future<List<MediaItem>> Function() galleryLinks,
+    required Future<Set<String>> Function() localPaths,
+    required MediaItem Function(MediaItem) link,
+  }) async {
+    final List<MediaItem> imported = [];
+    final Map<String, String> failures = {};
+    _log.info('Starting import of ${selectedAssets.length} assets for $owner');
+
+    final newAssets = await _unlinkedOwnedAssets(
+      selectedAssets,
+      galleryLinks: galleryLinks,
+      localPaths: localPaths,
+    );
+    final skippedCount = selectedAssets.length - newAssets.length;
+
+    final cloudIds = await _cloudIdsFor(newAssets);
+    for (final asset in newAssets) {
+      try {
+        final saved = await _mediaRepository.createMedia(
+          link(
+            _createMediaItemFromAsset(asset, cloudAssetId: cloudIds[asset.id]),
+          ),
+        );
+        imported.add(saved);
+        onMediaCreated?.call(saved.id);
+      } catch (e, stackTrace) {
+        _log.error(
+          'Failed to import asset ${asset.id} for $owner',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        failures[asset.id] = e.toString();
+      }
+    }
+
+    _log.info(
+      'Import for $owner complete: ${imported.length} succeeded, '
+      '${failures.length} failed, $skippedCount skipped',
+    );
+    return ImportResult(
+      imported: imported,
+      failures: failures,
+      skippedDuplicates: skippedCount,
+    );
+  }
+
+  /// Ids of the [gallery] assets that none of [linked] already stands for.
+  ///
+  /// Not a plain id comparison: a synced row carries the asset id of the
+  /// device that linked it, which is a different id on every other device
+  /// (#885). [LinkedGalleryAssets] also counts what each row resolves to
+  /// here, so re-picking or re-scanning a photo linked elsewhere skips it
+  /// instead of inserting a duplicate row.
+  Future<Set<String>> _unlinkedGalleryIds(
+    List<AssetInfo> gallery,
+    List<MediaItem> linked,
+  ) async {
+    final unlinked = await _linkedGalleryAssets.withoutLinked(
+      candidates: gallery,
+      linked: linked,
+    );
+    return {for (final a in unlinked) a.id};
+  }
+
+  MediaItem _createMediaItemFromAsset(
+    AssetInfo asset, {
+    String? diveId,
+    String? cloudAssetId,
+  }) {
     final now = DateTime.now();
+
+    // Windows / Linux have no platform photo library: the picker opens a file
+    // dialog and the asset's id is a synthetic key into an in-memory map on
+    // the picker service. Persisting such a row with the default
+    // platformGallery sourceType left every path column blank and sent
+    // display through PlatformGalleryResolver -> photo_manager, which has no
+    // desktop-Windows backend, so the photo rendered "File not found" and the
+    // pointer died with the process. When the picker hands us a real path,
+    // store a localFile row instead: LocalFileResolver reads localPath
+    // straight off disk on every desktop platform and survives a restart.
+    final path = asset.filePath;
+    final isLocalFile = path != null && path.isNotEmpty;
 
     return MediaItem(
       id: '',
       diveId: diveId,
-      platformAssetId: asset.id,
+      // Deliberately null for a localFile row. The desktop picker's asset id
+      // is a synthetic in-memory key, and several features gate purely on
+      // `platformAssetId != null` -- MediaItem.isGalleryPhoto,
+      // PhotoViewerPage's write-metadata action, resolvedFilePathProvider's
+      // gallery fast path -- so carrying it would route a Windows file
+      // through photo_manager, which has no backend there. Duplicate
+      // detection for these rows keys on localPath instead.
+      platformAssetId: isLocalFile ? null : asset.id,
+      cloudAssetId: isLocalFile ? null : cloudAssetId,
       originalFilename: asset.filename,
       mediaType: asset.isVideo ? MediaType.video : MediaType.photo,
+      sourceType: isLocalFile
+          ? MediaSourceType.localFile
+          : MediaSourceType.platformGallery,
+      localPath: isLocalFile ? path : null,
       latitude: asset.latitude,
       longitude: asset.longitude,
-      takenAt: asset.createDateTime,
+      // AssetInfo.createDateTime is contractually LOCAL (photo_manager's
+      // convention on mobile; the desktop picker mirrors it by reinterpreting
+      // the file's wall-clock capture digits as a local DateTime). MediaItem
+      // .takenAt is wall-clock-UTC -- MediaRepository persists
+      // `takenAt.millisecondsSinceEpoch` verbatim and hydrates it back with
+      // `isUtc: true`. Storing the local value would bake the host's UTC
+      // offset into that number, and the fullscreen viewer's metadata overlay,
+      // which formats the hydrated UTC value directly, would show a capture
+      // time shifted by that offset. The gallery-scan write path
+      // (TripMediaScanner) already normalises the same way.
+      takenAt: TripMediaScanner.toWallClockUtc(asset.createDateTime),
       width: asset.width,
       height: asset.height,
       durationSeconds: asset.durationSeconds,
@@ -142,23 +679,41 @@ class MediaImportService {
     );
   }
 
+  /// The dive's primary source entry, or null when it cannot be read.
+  ///
+  /// Placing a photo is secondary to linking it. A read that fails costs the
+  /// seconds the entry would have restored, which the next backfill puts
+  /// back, and never the import itself.
+  Future<DateTime?> _readPrimarySourceEntry(String diveId) async {
+    try {
+      return await _primarySourceEntry?.call(diveId);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to read primary source entry for dive $diveId; '
+        'placing its new media from the dive start',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
   MediaEnrichment? _calculateEnrichment({
     required AssetInfo asset,
     required Dive dive,
+    required DiveMediaClock? clock,
     required String mediaId,
   }) {
-    // Need dive start time and profile (use effectiveEntryTime which handles the fallback)
-    final diveStartTime = dive.effectiveEntryTime;
     final profile = dive.profile;
 
-    if (profile.isEmpty) {
+    if (profile.isEmpty || clock == null) {
       _log.info('No profile data for dive ${dive.id}, skipping enrichment');
       return null;
     }
 
     final result = _enrichmentService.calculateEnrichment(
       profile: profile,
-      diveStartTime: diveStartTime,
+      diveStartTime: clock.countsFrom,
       photoTime: asset.createDateTime,
     );
 

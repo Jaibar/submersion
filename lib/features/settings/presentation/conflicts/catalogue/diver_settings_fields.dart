@@ -1,0 +1,886 @@
+import 'package:submersion/features/settings/presentation/conflicts/conflict_enum_labels.dart';
+import 'package:submersion/features/settings/presentation/conflicts/catalogue/profile_color_fields.dart';
+import 'package:submersion/features/settings/presentation/conflicts/conflict_field.dart';
+
+/// Conflict labels and value kinds for the diver's settings (#694). Generated from a
+/// reviewed column list; the coverage guard in
+/// test/features/settings/presentation/conflicts/ keeps it complete.
+final Map<String, ConflictField> diverSettingsFields = {
+  'accentListIcons': ConflictField(
+    (l) => l.settings_conflict_field_accentListIcons,
+    FieldKind.boolean,
+  ),
+  'accentNavIcons': ConflictField(
+    (l) => l.settings_conflict_field_accentNavIcons,
+    FieldKind.boolean,
+  ),
+  'accentSectionHeaders': ConflictField(
+    (l) => l.settings_conflict_field_accentSectionHeaders,
+    FieldKind.boolean,
+  ),
+  'altitudeUnit': ConflictField(
+    (l) => l.settings_conflict_field_altitudeUnit,
+    FieldKind.enumValue,
+    enumLabel: altitudeUnitLabeler,
+  ),
+  'applyDefaultTankToImports': ConflictField(
+    (l) => l.settings_conflict_field_applyDefaultTankToImports,
+    FieldKind.boolean,
+  ),
+  'ascentGasSet': ConflictField(
+    (l) => l.settings_conflict_field_ascentGasSet,
+    FieldKind.number,
+  ),
+  'ascentRateCritical': ConflictField(
+    (l) => l.settings_conflict_field_ascentRateCritical,
+    FieldKind.ascentRate,
+  ),
+  'ascentRateWarning': ConflictField(
+    (l) => l.settings_conflict_field_ascentRateWarning,
+    FieldKind.ascentRate,
+  ),
+  'autoColorCorrection': ConflictField(
+    (l) => l.settings_conflict_field_autoColorCorrection,
+    FieldKind.boolean,
+  ),
+  'autoTagImports': ConflictField(
+    (l) => l.settings_conflict_field_autoTagImports,
+    FieldKind.boolean,
+  ),
+  'buddyListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_buddyListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'cardColorAttribute': ConflictField(
+    (l) => l.settings_appearance_cardColorAttribute,
+    FieldKind.enumValue,
+    enumLabel: cardColorAttributeLabeler,
+  ),
+  'cardColorGradientEnd': ConflictField(
+    (l) => l.settings_conflict_field_cardColorGradientEnd,
+    FieldKind.opaque,
+  ),
+  'cardColorGradientPreset': ConflictField(
+    (l) => l.settings_conflict_field_cardColorGradientPreset,
+    FieldKind.shortText,
+  ),
+  'cardColorGradientStart': ConflictField(
+    (l) => l.settings_conflict_field_cardColorGradientStart,
+    FieldKind.opaque,
+  ),
+  'ccrDiluentModPpO2': ConflictField(
+    (l) => l.settings_conflict_field_ccrDiluentModPpO2,
+    FieldKind.partialPressure,
+  ),
+  'ccrSetpointHigh': ConflictField(
+    (l) => l.settings_conflict_field_ccrSetpointHigh,
+    FieldKind.partialPressure,
+  ),
+  'ccrSetpointLow': ConflictField(
+    (l) => l.settings_conflict_field_ccrSetpointLow,
+    FieldKind.partialPressure,
+  ),
+  'certificationListViewMode': ConflictField(
+    (l) => l.settings_appearance_listView_certifications,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'cnsCalculationMethod': ConflictField(
+    (l) => l.settings_decompression_cnsMethodTitle,
+    FieldKind.enumValue,
+    enumLabel: cnsCalculationMethodLabeler,
+  ),
+  'cnsWarningThreshold': ConflictField(
+    (l) => l.settings_conflict_field_cnsWarningThreshold,
+    FieldKind.percent,
+  ),
+  'coldWaterThresholdC': ConflictField(
+    (l) => l.settings_conflict_field_coldWaterThresholdC,
+    FieldKind.temperature,
+  ),
+  'conditionDisabledRules': ConflictField(
+    (l) => l.settings_conflict_field_conditionDisabledRules,
+    FieldKind.opaque,
+  ),
+  'conditionEngineEnabled': ConflictField(
+    (l) => l.settings_conflict_field_conditionEngineEnabled,
+    FieldKind.boolean,
+  ),
+  'coordinateFormat': ConflictField(
+    (l) => l.settings_conflict_field_coordinateFormat,
+    FieldKind.enumValue,
+    enumLabel: coordinateFormatLabeler,
+  ),
+  'courseListViewMode': ConflictField(
+    (l) => l.settings_appearance_listView_courses,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'dateFormat': ConflictField(
+    (l) => l.settings_conflict_field_dateFormat,
+    FieldKind.enumValue,
+    enumLabel: dateFormatLabeler,
+  ),
+  'decoStopIncrement': ConflictField(
+    (l) => l.settings_conflict_field_decoStopIncrement,
+    FieldKind.depth,
+  ),
+  'deepDiveThresholdM': ConflictField(
+    (l) => l.settings_conflict_field_deepDiveThresholdM,
+    FieldKind.depth,
+  ),
+  'defaultCeilingSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultCeilingSource,
+    FieldKind.number,
+  ),
+  'defaultCnsSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultCnsSource,
+    FieldKind.number,
+  ),
+  'defaultDecoStopSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultDecoStopSource,
+    FieldKind.number,
+  ),
+  'defaultDiveType': ConflictField(
+    (l) => l.settings_conflict_field_defaultDiveType,
+    FieldKind.shortText,
+  ),
+  'defaultGtrSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultGtrSource,
+    FieldKind.number,
+  ),
+  'defaultNdlSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultNdlSource,
+    FieldKind.number,
+  ),
+  'defaultPlannerWaterType': ConflictField(
+    (l) => l.settings_conflict_field_defaultPlannerWaterType,
+    FieldKind.enumValue,
+    enumLabel: plannerWaterTypeLabeler,
+  ),
+  'defaultRightAxisMetric': ConflictField(
+    (l) => l.settings_conflict_field_defaultRightAxisMetric,
+    FieldKind.enumValue,
+    enumLabel: profileRightAxisMetricLabeler,
+  ),
+  'defaultShowAscentRateLine': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowAscentRateLine,
+    FieldKind.boolean,
+  ),
+  'defaultShowCns': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowCns,
+    FieldKind.boolean,
+  ),
+  'defaultShowEstimatedTankPressure': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowEstimatedTankPressure,
+    FieldKind.boolean,
+  ),
+  'defaultShowEvents': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowEvents,
+    FieldKind.boolean,
+  ),
+  'defaultShowLateGasSwitches': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowLateGasSwitches,
+    FieldKind.boolean,
+  ),
+  'defaultShowGasDensity': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowGasDensity,
+    FieldKind.boolean,
+  ),
+  'defaultShowGasSwitchMarkers': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowGasSwitchMarkers,
+    FieldKind.boolean,
+  ),
+  'defaultShowGasTimeline': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowGasTimeline,
+    FieldKind.boolean,
+  ),
+  'defaultShowGf': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowGf,
+    FieldKind.boolean,
+  ),
+  'defaultShowGtr': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowGtr,
+    FieldKind.boolean,
+  ),
+  'defaultShowHeartRate': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowHeartRate,
+    FieldKind.boolean,
+  ),
+  'defaultShowMeanDepth': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowMeanDepth,
+    FieldKind.boolean,
+  ),
+  'defaultShowCounterdiffusion': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowCounterdiffusion,
+    FieldKind.boolean,
+  ),
+  'defaultShowBuoyancy': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowBuoyancy,
+    FieldKind.boolean,
+  ),
+  'defaultShowAveloBuoyancy': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowAveloBuoyancy,
+    FieldKind.boolean,
+  ),
+  'defaultShowAveloGasRemaining': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowAveloGasRemaining,
+    FieldKind.boolean,
+  ),
+  'defaultShowComputerRmv': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowComputerRmv,
+    FieldKind.boolean,
+  ),
+  'defaultShowO2CellMv': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowO2CellMv,
+    FieldKind.boolean,
+  ),
+  'defaultShowOtu': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowOtu,
+    FieldKind.boolean,
+  ),
+  'defaultShowPhotoMarkers': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowPhotoMarkers,
+    FieldKind.boolean,
+  ),
+  'defaultShowPpHe': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowPpHe,
+    FieldKind.boolean,
+  ),
+  'defaultShowPpN2': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowPpN2,
+    FieldKind.boolean,
+  ),
+  'defaultShowPpO2': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowPpO2,
+    FieldKind.boolean,
+  ),
+  'defaultShowPressure': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowPressure,
+    FieldKind.boolean,
+  ),
+  'defaultShowSac': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowSac,
+    FieldKind.boolean,
+  ),
+  'defaultShowSurfaceGf': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowSurfaceGf,
+    FieldKind.boolean,
+  ),
+  'defaultShowTemperature': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowTemperature,
+    FieldKind.boolean,
+  ),
+  'defaultShowTts': ConflictField(
+    (l) => l.settings_conflict_field_defaultShowTts,
+    FieldKind.boolean,
+  ),
+  'defaultStartPressure': ConflictField(
+    (l) => l.settings_conflict_field_defaultStartPressure,
+    FieldKind.pressure,
+  ),
+  'defaultTankPreset': ConflictField(
+    (l) => l.settings_conflict_field_defaultTankPreset,
+    FieldKind.shortText,
+  ),
+  'defaultTankVolume': ConflictField(
+    (l) => l.settings_conflict_field_defaultTankVolume,
+    FieldKind.volume,
+  ),
+  'defaultTtsSource': ConflictField(
+    (l) => l.settings_conflict_field_defaultTtsSource,
+    FieldKind.number,
+  ),
+  'depthUnit': ConflictField(
+    (l) => l.settings_conflict_field_depthUnit,
+    FieldKind.enumValue,
+    enumLabel: depthUnitLabeler,
+  ),
+  'distanceUnit': ConflictField(
+    (l) => l.settings_conflict_field_distanceUnit,
+    FieldKind.enumValue,
+    enumLabel: distanceUnitLabeler,
+  ),
+  'diveCenterListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_diveCenterListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'diveDetailLayout': ConflictField(
+    (l) => l.settings_conflict_field_diveDetailLayout,
+    FieldKind.enumValue,
+    enumLabel: diveDetailLayoutLabeler,
+  ),
+  'diveDetailSections': ConflictField(
+    (l) => l.settings_conflict_field_diveDetailSections,
+    FieldKind.opaque,
+  ),
+  'diveListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_diveListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'downloadsFollowComputerOwner': ConflictField(
+    (l) => l.settings_conflict_field_downloadsFollowComputerOwner,
+    FieldKind.boolean,
+  ),
+  'emergencyRegion': ConflictField(
+    (l) => l.settings_conflict_field_emergencyRegion,
+    FieldKind.shortText,
+  ),
+  'endLimit': ConflictField(
+    (l) => l.settings_conflict_field_endLimit,
+    FieldKind.depth,
+  ),
+  'equipmentDefaultStatuses': ConflictField(
+    (l) => l.settings_conflict_field_equipmentDefaultStatuses,
+    FieldKind.enumValue,
+    enumLabel: equipmentDefaultStatusesLabeler,
+  ),
+  'equipmentListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_equipmentListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'firstDayOfWeek': ConflictField(
+    (l) => l.settings_conflict_field_firstDayOfWeek,
+    FieldKind.enumValue,
+    enumLabel: firstDayOfWeekLabeler,
+  ),
+  'gasConsumptionDisplay': ConflictField(
+    (l) => l.settings_conflict_field_gasConsumptionDisplay,
+    FieldKind.enumValue,
+    enumLabel: gasConsumptionDisplayLabeler,
+  ),
+  'gasModel': ConflictField(
+    (l) => l.settings_units_gasModel,
+    FieldKind.enumValue,
+    enumLabel: gasModelLabeler,
+  ),
+  'groupTripsInDiveList': ConflictField(
+    (l) => l.settings_conflict_field_groupTripsInDiveList,
+    FieldKind.boolean,
+  ),
+  // How the diver left each list (issue #3748), synced under
+  // listArrangementHlc.
+  'diveListSort': ConflictField(
+    (l) => l.settings_conflict_field_diveListSort,
+    FieldKind.enumValue,
+    enumLabel: diveListSortLabeler,
+  ),
+  'divePlanListSort': ConflictField(
+    (l) => l.settings_conflict_field_divePlanListSort,
+    FieldKind.enumValue,
+    enumLabel: divePlanListSortLabeler,
+  ),
+  'tripListSort': ConflictField(
+    (l) => l.settings_conflict_field_tripListSort,
+    FieldKind.enumValue,
+    enumLabel: tripListSortLabeler,
+  ),
+  'courseListSort': ConflictField(
+    (l) => l.settings_conflict_field_courseListSort,
+    FieldKind.enumValue,
+    enumLabel: courseListSortLabeler,
+  ),
+  'buddyListSort': ConflictField(
+    (l) => l.settings_conflict_field_buddyListSort,
+    FieldKind.enumValue,
+    enumLabel: buddyListSortLabeler,
+  ),
+  'diveCenterListSort': ConflictField(
+    (l) => l.settings_conflict_field_diveCenterListSort,
+    FieldKind.enumValue,
+    enumLabel: diveCenterListSortLabeler,
+  ),
+  'siteListSort': ConflictField(
+    (l) => l.settings_conflict_field_siteListSort,
+    FieldKind.enumValue,
+    enumLabel: siteListSortLabeler,
+  ),
+  'certificationListSort': ConflictField(
+    (l) => l.settings_conflict_field_certificationListSort,
+    FieldKind.enumValue,
+    enumLabel: certificationListSortLabeler,
+  ),
+  'equipmentListSort': ConflictField(
+    (l) => l.settings_conflict_field_equipmentListSort,
+    FieldKind.enumValue,
+    enumLabel: equipmentListSortLabeler,
+  ),
+  'siteListGroupBy': ConflictField(
+    (l) => l.settings_conflict_field_siteListGroupBy,
+    FieldKind.enumValue,
+    enumLabel: siteListGroupByLabeler,
+  ),
+  'certificationListGroupBy': ConflictField(
+    (l) => l.settings_conflict_field_certificationListGroupBy,
+    FieldKind.enumValue,
+    enumLabel: certificationListGroupByLabeler,
+  ),
+  'equipmentArrangement': ConflictField(
+    (l) => l.settings_conflict_field_equipmentArrangement,
+    FieldKind.opaque,
+  ),
+  'equipmentGroupByLocation': ConflictField(
+    (l) => l.settings_conflict_field_equipmentGroupByLocation,
+    FieldKind.boolean,
+  ),
+  'equipmentCollapsedGroups': ConflictField(
+    (l) => l.settings_conflict_field_equipmentCollapsedGroups,
+    FieldKind.opaque,
+  ),
+  'recentEquipmentColors': ConflictField(
+    (l) => l.settings_conflict_field_recentEquipmentColors,
+    FieldKind.opaque,
+  ),
+  'listArrangementHlc': ConflictField(
+    (l) => l.settings_conflict_field_listArrangementHlc,
+    FieldKind.opaque,
+  ),
+  'gtrReservePressure': ConflictField(
+    (l) => l.settings_conflict_field_gtrReservePressure,
+    FieldKind.pressure,
+  ),
+  'hasAcceptedPlanningDisclaimer': ConflictField(
+    (l) => l.settings_conflict_field_hasAcceptedPlanningDisclaimer,
+    FieldKind.boolean,
+  ),
+  'favouriteDiveTypeIds': ConflictField(
+    (l) => l.settings_conflict_field_favouriteDiveTypeIds,
+    FieldKind.opaque,
+  ),
+  'hiddenBuiltInIds': ConflictField(
+    (l) => l.settings_conflict_field_hiddenBuiltInIds,
+    FieldKind.opaque,
+  ),
+  'hiddenChamberIds': ConflictField(
+    (l) => l.settings_conflict_field_hiddenChamberIds,
+    FieldKind.opaque,
+  ),
+  'hiddenTankPresetIds': ConflictField(
+    (l) => l.settings_conflict_field_hiddenTankPresetIds,
+    FieldKind.opaque,
+  ),
+  'highO2ThresholdPercent': ConflictField(
+    (l) => l.settings_conflict_field_highO2ThresholdPercent,
+    FieldKind.percent,
+  ),
+  'icdWarningsEnabled': ConflictField(
+    (l) => l.settings_conflict_field_icdWarningsEnabled,
+    FieldKind.boolean,
+  ),
+  'insightsMutedObservationRules': ConflictField(
+    (l) => l.settings_conflict_field_insightsMutedObservationRules,
+    FieldKind.opaque,
+  ),
+  'locale': ConflictField(
+    (l) => l.settings_conflict_field_locale,
+    FieldKind.shortText,
+  ),
+  'mapStyle': ConflictField(
+    (l) => l.settings_appearance_mapStyle,
+    FieldKind.enumValue,
+    enumLabel: mapStyleLabeler,
+  ),
+  'maxO2DepthEnabled': ConflictField(
+    (l) => l.settings_conflict_field_maxO2DepthEnabled,
+    FieldKind.boolean,
+  ),
+  'maxO2DepthMeters': ConflictField(
+    (l) => l.settings_conflict_field_maxO2DepthMeters,
+    FieldKind.depth,
+  ),
+  'noFlyPreset': ConflictField(
+    (l) => l.settings_conflict_field_noFlyPreset,
+    FieldKind.enumValue,
+    enumLabel: noFlyPresetLabeler,
+  ),
+  'notificationsEnabled': ConflictField(
+    (l) => l.settings_conflict_field_notificationsEnabled,
+    FieldKind.boolean,
+  ),
+  'omitUnusedOcGases': ConflictField(
+    (l) => l.settings_conflict_field_omitUnusedOcGases,
+    FieldKind.boolean,
+  ),
+  'placeNameLanguage': ConflictField(
+    (l) => l.settings_conflict_field_placeNameLanguage,
+    FieldKind.shortText,
+  ),
+  // The planner Setup-accordion global defaults (issue #3552): a new plan's
+  // fields resolve against these unless the plan overrides them itself.
+  'plannerAirBreakBreakSeconds': ConflictField(
+    (l) => l.divePlanner_label_airBreaksBreak,
+    FieldKind.durationSeconds,
+  ),
+  'plannerAirBreakO2Seconds': ConflictField(
+    (l) => l.divePlanner_label_airBreaksOnO2,
+    FieldKind.durationSeconds,
+  ),
+  'plannerAscentRate': ConflictField(
+    (l) => l.plannerCanvas_rates_ascent,
+    FieldKind.ascentRate,
+  ),
+  'plannerBatteryReserveFraction': ConflictField(
+    (l) => l.plannerMission_settings_batteryReserve,
+    FieldKind.fraction,
+  ),
+  'plannerBestMixEndMeters': ConflictField(
+    (l) => l.divePlanner_gasOptions_bestMixEnd,
+    FieldKind.depth,
+  ),
+  'plannerBuddyFactor': ConflictField(
+    (l) => l.divePlanner_gasOptions_sacFactor,
+    FieldKind.number,
+  ),
+  'plannerDescentRate': ConflictField(
+    (l) => l.plannerCanvas_rates_descent,
+    FieldKind.ascentRate,
+  ),
+  'plannerDeviationDepthDelta': ConflictField(
+    (l) => l.plannerCanvas_contingency_depthDelta,
+    FieldKind.depth,
+  ),
+  'plannerDeviationTimeMinutes': ConflictField(
+    (l) => l.plannerCanvas_contingency_timeDelta,
+    FieldKind.durationMinutes,
+  ),
+  'plannerFinalAscentRate': ConflictField(
+    (l) => l.settings_decompression_rates_finalAscent,
+    FieldKind.ascentRate,
+  ),
+  'plannerGasSwitchStopSeconds': ConflictField(
+    (l) => l.divePlanner_gasOptions_gasSwitchStopSeconds,
+    FieldKind.durationSeconds,
+  ),
+  'plannerHypercapniaEnabled': ConflictField(
+    (l) => l.settings_decompression_hypercapniaDialog_enabledToggle,
+    FieldKind.boolean,
+  ),
+  'plannerHypercapniaFactor': ConflictField(
+    (l) => l.settings_decompression_hypercapniaDialog_factorLabel,
+    FieldKind.number,
+  ),
+  'plannerHypercapniaMinutes': ConflictField(
+    (l) => l.settings_decompression_hypercapniaDialog_minutesLabel,
+    FieldKind.durationMinutes,
+  ),
+  'plannerIntermediateAscentRate': ConflictField(
+    (l) => l.plannerCanvas_rates_intermediateAscent,
+    FieldKind.ascentRate,
+  ),
+  'plannerProblemSolvingMinutes': ConflictField(
+    (l) => l.divePlanner_gasOptions_problemSolvingMinutes,
+    FieldKind.durationMinutes,
+  ),
+  'plannerReservePressure': ConflictField(
+    (l) => l.divePlanner_label_reserve,
+    FieldKind.pressure,
+  ),
+  'plannerSacBottom': ConflictField(
+    (l) => l.divePlanner_gasOptions_sacBottom,
+    FieldKind.rmv,
+  ),
+  'plannerSacDeco': ConflictField(
+    (l) => l.divePlanner_gasOptions_sacDeco,
+    FieldKind.rmv,
+  ),
+  'plannerSacStressedFactor': ConflictField(
+    (l) => l.divePlanner_gasOptions_sacStressedFactor,
+    FieldKind.number,
+  ),
+  'plannerShallowAscentRate': ConflictField(
+    (l) => l.plannerCanvas_rates_shallowAscent,
+    FieldKind.ascentRate,
+  ),
+  'plannerTurnPressureFraction': ConflictField(
+    (l) => l.plannerCanvas_contingency_turnFraction,
+    FieldKind.fraction,
+  ),
+  'plannerTurnPressureRule': ConflictField(
+    (l) => l.plannerCanvas_contingency_turnRule,
+    FieldKind.enumValue,
+    enumLabel: turnPressureRuleLabeler,
+  ),
+  'plannerWalkSpeedMps': ConflictField(
+    (l) => l.plannerMission_settings_walkSpeed,
+    FieldKind.speed,
+  ),
+  'plannerScrInjectionRate': ConflictField(
+    (l) => l.plannerCanvas_scr_injectionRate,
+    FieldKind.rmv,
+  ),
+  // VO2 reads as the logged dive's assumedVo2 does (FieldKind.number).
+  'plannerScrVo2': ConflictField(
+    (l) => l.plannerCanvas_scr_vo2,
+    FieldKind.number,
+  ),
+  'plannerPscrVo2': ConflictField(
+    (l) => l.plannerCanvas_pscr_vo2,
+    FieldKind.number,
+  ),
+  'ppO2DecoBand1': ConflictField(
+    (l) => l.settings_conflict_field_ppO2DecoBand1,
+    FieldKind.partialPressure,
+  ),
+  'ppO2DecoBand2': ConflictField(
+    (l) => l.settings_conflict_field_ppO2DecoBand2,
+    FieldKind.partialPressure,
+  ),
+  'ppO2DecoBand3': ConflictField(
+    (l) => l.settings_conflict_field_ppO2DecoBand3,
+    FieldKind.partialPressure,
+  ),
+  'ppO2DecoBandsEnabled': ConflictField(
+    (l) => l.settings_conflict_field_ppO2DecoBandsEnabled,
+    FieldKind.boolean,
+  ),
+  'ppO2MaxDeco': ConflictField(
+    (l) => l.settings_conflict_field_ppO2MaxDeco,
+    FieldKind.partialPressure,
+  ),
+  'ppO2MaxWorking': ConflictField(
+    (l) => l.settings_conflict_field_ppO2MaxWorking,
+    FieldKind.partialPressure,
+  ),
+  'pressureUnit': ConflictField(
+    (l) => l.settings_conflict_field_pressureUnit,
+    FieldKind.enumValue,
+    enumLabel: pressureUnitLabeler,
+  ),
+  'profileMetricsFollowViewport': ConflictField(
+    (l) => l.settings_appearance_metricsFollowViewport,
+    FieldKind.boolean,
+  ),
+  'pscrRatio': ConflictField(
+    (l) => l.plannerCanvas_pscr_ratio,
+    FieldKind.number,
+  ),
+  'reminderTime': ConflictField(
+    (l) => l.settings_conflict_field_reminderTime,
+    FieldKind.shortText,
+  ),
+  'safetyReviewDisabledRules': ConflictField(
+    (l) => l.settings_conflict_field_safetyReviewDisabledRules,
+    FieldKind.opaque,
+  ),
+  'safetyReviewEnabled': ConflictField(
+    (l) => l.settings_conflict_field_safetyReviewEnabled,
+    FieldKind.boolean,
+  ),
+  'seascapeAppearance': ConflictField(
+    (l) => l.settings_conflict_field_seascapeAppearance,
+    FieldKind.opaque,
+  ),
+  'seascapeVerticalExaggerationOverrides': ConflictField(
+    (l) => l.settings_conflict_field_seascapeVerticalExaggerationOverrides,
+    FieldKind.opaque,
+  ),
+  'serviceReminderDays': ConflictField(
+    (l) => l.settings_conflict_field_serviceReminderDays,
+    FieldKind.opaque,
+  ),
+  'showAscentRateColors': ConflictField(
+    (l) => l.settings_conflict_field_showAscentRateColors,
+    FieldKind.boolean,
+  ),
+  'showCeilingOnProfile': ConflictField(
+    (l) => l.settings_conflict_field_showCeilingOnProfile,
+    FieldKind.boolean,
+  ),
+  'showDataSourceBadges': ConflictField(
+    (l) => l.settings_conflict_field_showDataSourceBadges,
+    FieldKind.boolean,
+  ),
+  'showDecoStopsOnProfile': ConflictField(
+    (l) => l.settings_conflict_field_showDecoStopsOnProfile,
+    FieldKind.boolean,
+  ),
+  'showDepthColoredDiveCards': ConflictField(
+    (l) => l.settings_conflict_field_showDepthColoredDiveCards,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneBuddies': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneBuddies,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneCertifications': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneCertifications,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneCourses': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneCourses,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneDiveCenters': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneDiveCenters,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneDives': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneDives,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneEquipment': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneEquipment,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneSites': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneSites,
+    FieldKind.boolean,
+  ),
+  'showDetailsPaneTrips': ConflictField(
+    (l) => l.settings_conflict_field_showDetailsPaneTrips,
+    FieldKind.boolean,
+  ),
+  'showDiveFigure': ConflictField(
+    (l) => l.settings_conflict_field_showDiveFigure,
+    FieldKind.boolean,
+  ),
+  'showMapBackgroundOnDiveCards': ConflictField(
+    (l) => l.settings_conflict_field_showMapBackgroundOnDiveCards,
+    FieldKind.boolean,
+  ),
+  'showPhotoBackgroundOnDiveCards': ConflictField(
+    (l) => l.settings_conflict_field_showPhotoBackgroundOnDiveCards,
+    FieldKind.boolean,
+  ),
+  'cardPhotoOverlayDark': ConflictField(
+    (l) => l.settings_conflict_field_cardPhotoOverlayDark,
+    FieldKind.fraction,
+  ),
+  'cardPhotoOverlayLight': ConflictField(
+    (l) => l.settings_conflict_field_cardPhotoOverlayLight,
+    FieldKind.fraction,
+  ),
+  'showMapBackgroundOnSiteCards': ConflictField(
+    (l) => l.settings_conflict_field_showMapBackgroundOnSiteCards,
+    FieldKind.boolean,
+  ),
+  'showCountryFlags': ConflictField(
+    (l) => l.settings_conflict_field_showCountryFlags,
+    FieldKind.boolean,
+  ),
+  'showMaxDepthMarker': ConflictField(
+    (l) => l.settings_conflict_field_showMaxDepthMarker,
+    FieldKind.boolean,
+  ),
+  'pinProfileOnScroll': ConflictField(
+    (l) => l.settings_conflict_field_pinProfileOnScroll,
+    FieldKind.boolean,
+  ),
+  'showNdlOnProfile': ConflictField(
+    (l) => l.settings_conflict_field_showNdlOnProfile,
+    FieldKind.boolean,
+  ),
+  'showPressureThresholdMarkers': ConflictField(
+    (l) => l.settings_conflict_field_showPressureThresholdMarkers,
+    FieldKind.boolean,
+  ),
+  'showProfilePanelInTableView': ConflictField(
+    (l) => l.settings_conflict_field_showProfilePanelInTableView,
+    FieldKind.boolean,
+  ),
+  'siteDetailLayout': ConflictField(
+    (l) => l.settings_conflict_field_siteDetailLayout,
+    FieldKind.enumValue,
+    enumLabel: diveDetailLayoutLabeler,
+  ),
+  'siteDetailSections': ConflictField(
+    (l) => l.settings_conflict_field_siteDetailSections,
+    FieldKind.opaque,
+  ),
+  'siteListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_siteListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'siteMatchSensitivity': ConflictField(
+    (l) => l.settings_siteMatch_title,
+    FieldKind.enumValue,
+    enumLabel: siteMatchSensitivityLabeler,
+  ),
+  'temperatureUnit': ConflictField(
+    (l) => l.settings_conflict_field_temperatureUnit,
+    FieldKind.enumValue,
+    enumLabel: temperatureUnitLabeler,
+  ),
+  'themeMode': ConflictField(
+    (l) => l.settings_conflict_field_themeMode,
+    FieldKind.enumValue,
+    enumLabel: themeModeLabeler,
+  ),
+  'themePreset': ConflictField(
+    (l) => l.settings_conflict_field_themePreset,
+    FieldKind.shortText,
+  ),
+  'timeFormat': ConflictField(
+    (l) => l.settings_conflict_field_timeFormat,
+    FieldKind.enumValue,
+    enumLabel: timeFormatLabeler,
+  ),
+  'tissueColorScheme': ConflictField(
+    (l) => l.settings_conflict_field_tissueColorScheme,
+    FieldKind.enumValue,
+    enumLabel: tissueColorSchemeLabeler,
+  ),
+  'tissueVizMode': ConflictField(
+    (l) => l.settings_conflict_field_tissueVizMode,
+    FieldKind.enumValue,
+    enumLabel: tissueVizModeLabeler,
+  ),
+  'trimTankPressureAtSurfacing': ConflictField(
+    (l) => l.settings_conflict_field_trimTankPressureAtSurfacing,
+    FieldKind.boolean,
+  ),
+  'tripListViewMode': ConflictField(
+    (l) => l.settings_conflict_field_tripListViewMode,
+    FieldKind.enumValue,
+    enumLabel: listViewModeLabeler,
+  ),
+  'tripServiceLeadDays': ConflictField(
+    (l) => l.settings_conflict_field_tripServiceLeadDays,
+    FieldKind.number,
+  ),
+  'trendGapCollapseMonths': ConflictField(
+    (l) => l.settings_conflict_field_trendGapCollapseMonths,
+    FieldKind.enumValue,
+    enumLabel: trendGapThresholdLabeler,
+  ),
+  'useDiveComputerCnsData': ConflictField(
+    (l) => l.settings_conflict_field_useDiveComputerCnsData,
+    FieldKind.boolean,
+  ),
+  'visibilityScaleExcellentM': ConflictField(
+    (l) => l.settings_conflict_field_visibilityScaleExcellentM,
+    FieldKind.distance,
+  ),
+  'visibilityScaleGoodM': ConflictField(
+    (l) => l.settings_conflict_field_visibilityScaleGoodM,
+    FieldKind.distance,
+  ),
+  'visibilityScaleModerateM': ConflictField(
+    (l) => l.settings_conflict_field_visibilityScaleModerateM,
+    FieldKind.distance,
+  ),
+  'visibilityScalePreset': ConflictField(
+    (l) => l.settings_visibilityScale_title,
+    FieldKind.enumValue,
+    enumLabel: visibilityScalePresetLabeler,
+  ),
+  'volumeUnit': ConflictField(
+    (l) => l.settings_conflict_field_volumeUnit,
+    FieldKind.enumValue,
+    enumLabel: volumeUnitLabeler,
+  ),
+  'weightUnit': ConflictField(
+    (l) => l.settings_conflict_field_weightUnit,
+    FieldKind.enumValue,
+    enumLabel: weightUnitLabeler,
+  ),
+  ...profileColorConflictFields,
+};
+
+/// Columns whose meaning depends on the entity, keyed `entity.column`.
+final Map<String, ConflictField> diverSettingsOverrides = {};

@@ -1,7 +1,10 @@
 #include "ble_io_stream.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "ble_services_wait.h"
 
 // Known GATT UUIDs for dive computer communication (same as macOS/Windows).
 // PREFERRED_SERVICE_UUID is unused on Linux (BlueZ enumerates all
@@ -11,6 +14,58 @@ static const char* PREFERRED_WRITE_UUID =
     "6606ab42-89d5-4a00-a8ce-4eb5e1414ee0";
 static const char* PREFERRED_NOTIFY_UUID =
     "a60b8e5c-b267-44d7-9764-837caf96489e";
+// Halcyon Symbios device-centric Tx/Rx endpoints. The app WRITES commands to
+// the device's Rx (00000101) and READS replies (indications) from its Tx
+// (00000201) -- matching Subsurface's qt-ble.cpp. Both chars advertise
+// read+write+indicate and tie on raw score, so these biases pick the pair.
+// PR #356 biased them backwards (wrote to Tx) and the device never answered
+// (issue #288).
+static const char* HALCYON_SYMBIOS_TX_UUID =
+    "00000201-8c3b-4f2c-a59e-8c08224f3253";
+static const char* HALCYON_SYMBIOS_RX_UUID =
+    "00000101-8c3b-4f2c-a59e-8c08224f3253";
+
+// Telit/Stollmann Terminal I/O (TIO), service 0xFEFB.
+//
+// Heinrichs Weikamp computers built on the Telit (formerly Stollmann)
+// BlueMod+SR module -- the OSTC 2/3/4/Sport/cR/Plus family -- expose their
+// serial bridge behind this service with credit-based flow control (Telit
+// "TIO Implementation Guide" r04). The module carries no UART data until the
+// client subscribes to UART Credits TX and grants initial credits on UART
+// Credits RX, and it spends one credit per notification, so the balance must
+// also be topped up while a transfer runs. Without the handshake the first
+// command write fails and libdivecomputer reports "Failed to send the
+// command" (issue #923, OSTC4).
+//
+// Subsurface implements the same handshake in core/qt-ble.cpp across the two
+// Heinrichs Weikamp module families, and both are handled here: Telit (0xFEFB,
+// four characteristics, credits mandatory) and the u-blox serial service
+// (...d701, two characteristics, credits optional -- the OSTC nano downloads
+// today with no handshake at all, #280/#394, so a rejected grant there falls
+// back to running without flow control instead of failing a working device).
+// Mirrors darwin's BleCharacteristicSelector + TerminalIoCreditPolicy.
+static const char* TIO_DATA_RX_UUID = "00000001-0000-1000-8000-008025000000";
+static const char* TIO_DATA_TX_UUID = "00000002-0000-1000-8000-008025000000";
+static const char* TIO_CREDITS_RX_UUID = "00000003-0000-1000-8000-008025000000";
+static const char* TIO_CREDITS_TX_UUID = "00000004-0000-1000-8000-008025000000";
+
+// u-blox serial service: one characteristic carries data in both directions
+// and one carries credits in both directions.
+static const char* UBLOX_DATA_UUID = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
+static const char* UBLOX_CREDITS_UUID = "2456e1b9-26e2-8f83-e744-f34f01e9d704";
+
+// Read-poll service (issue #1454, libdivecomputer 415778c): the Seac Tablet's
+// one Rx/Tx characteristic can be read and written but can neither notify nor
+// indicate. An allowlist: Generic Access's Device Name is read+write on some
+// peripherals and must never be mistaken for a serial channel.
+static const char* SEAC_SERVICE_UUID = "84968ffe-d26d-478a-b953-5010bcf58bca";
+static const char* SEAC_DATA_UUID = "43c620c2-1b09-4951-bc1e-9c75298cddeb";
+
+// Opening credit grant. 0xFF is reserved by the TIO protocol, so 254 is the
+// largest value that means "credits" rather than a control code.
+#define TIO_INITIAL_GRANT 254
+// Balance at or below which the client tops the module back up.
+#define TIO_REFILL_THRESHOLD 32
 
 static const guint32 BLE_IOCTL_TYPE = 'b';
 static const guint32 BLE_IOCTL_GET_NAME = 0;
@@ -18,11 +73,14 @@ static const guint32 BLE_IOCTL_GET_PINCODE_NR = 1;
 static const guint32 BLE_IOCTL_ACCESSCODE_NR = 2;
 static const guint32 DIRECTION_INPUT = 1;
 
+static struct BleCreditBalance* credit_balance_new(void);
+static void credit_balance_unref(struct BleCreditBalance* balance);
+
 BleIoStream* ble_io_stream_new(void) {
     BleIoStream* stream = g_new0(BleIoStream, 1);
     g_mutex_init(&stream->read_mutex);
     g_cond_init(&stream->read_cond);
-    stream->read_buffer = g_byte_array_new();
+    stream->read_chunks = g_queue_new();
     stream->timeout_ms = 10000;
     g_mutex_init(&stream->pin_mutex);
     g_cond_init(&stream->pin_cond);
@@ -30,8 +88,35 @@ BleIoStream* ble_io_stream_new(void) {
     stream->pin_ready = FALSE;
     stream->device_address = NULL;
     stream->on_pin_code_required = NULL;
+    stream->characteristic_paths = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, g_free);
+    stream->suppress_notify_echo = NULL;
+    stream->suppress_echo_deadline = 0;
+    stream->chunks_pushed = 0;
     stream->pin_callback_data = NULL;
+    stream->credits = credit_balance_new();
     return stream;
+}
+
+// Get a property from a BlueZ D-Bus object, unwrapped from its variant, or
+// NULL if it cannot be read within |timeout_ms| (-1 for the D-Bus default).
+// The caller unrefs the result.
+static GVariant* get_property(GDBusConnection* conn, const gchar* path,
+                              const gchar* interface, const gchar* property,
+                              gint timeout_ms) {
+    g_autoptr(GError) error = NULL;
+    GVariant* result = g_dbus_connection_call_sync(
+        conn, "org.bluez", path,
+        "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", interface, property),
+        G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NONE, timeout_ms, NULL, &error);
+    if (!result) return NULL;
+
+    GVariant* value = NULL;
+    g_variant_get(result, "(v)", &value);
+    g_variant_unref(result);
+    return value;
 }
 
 // Get a string property from a BlueZ D-Bus object.
@@ -39,18 +124,8 @@ static gchar* get_string_property(GDBusConnection* conn,
                                   const gchar* path,
                                   const gchar* interface,
                                   const gchar* property) {
-    g_autoptr(GError) error = NULL;
-    GVariant* result = g_dbus_connection_call_sync(
-        conn, "org.bluez", path,
-        "org.freedesktop.DBus.Properties", "Get",
-        g_variant_new("(ss)", interface, property),
-        G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (!result) return NULL;
-
-    GVariant* value = NULL;
-    g_variant_get(result, "(v)", &value);
-    g_variant_unref(result);
+    GVariant* value = get_property(conn, path, interface, property, -1);
+    if (!value) return NULL;
 
     const gchar* str = g_variant_get_string(value, NULL);
     gchar* ret = g_strdup(str);
@@ -58,21 +133,185 @@ static gchar* get_string_property(GDBusConnection* conn,
     return ret;
 }
 
+// Read a boolean org.bluez.Device1 property. FALSE when it cannot be read
+// within |timeout_ms|, which is the answer a dropped link or a wedged BlueZ
+// gives.
+static gboolean device_flag(GDBusConnection* conn, const gchar* device_path,
+                            const gchar* property, gint timeout_ms) {
+    GVariant* value = get_property(conn, device_path, "org.bluez.Device1",
+                                   property, timeout_ms);
+    if (!value) return FALSE;
+
+    gboolean set = g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN) &&
+                   g_variant_get_boolean(value);
+    g_variant_unref(value);
+    return set;
+}
+
+// Whether BlueZ still reports the device connected.
+static gboolean device_connected(GDBusConnection* conn,
+                                 const gchar* device_path, gint timeout_ms) {
+    return device_flag(conn, device_path, "Connected", timeout_ms);
+}
+
+// Call a no-argument org.bluez method and wait for its reply. FALSE, with
+// |error| set when it is non-NULL, if the call fails. The reply is freed here:
+// g_dbus_connection_call_sync hands back a tuple the caller owns even when the
+// method returns nothing, so dropping it leaks.
+static gboolean call_bluez_method(GDBusConnection* conn, const gchar* path,
+                                  const gchar* interface, const gchar* method,
+                                  gint timeout_ms, GError** error) {
+    GVariant* reply = g_dbus_connection_call_sync(
+        conn, "org.bluez", path, interface, method, NULL, NULL,
+        G_DBUS_CALL_FLAGS_NONE, timeout_ms, NULL, error);
+    if (!reply) return FALSE;
+    g_variant_unref(reply);
+    return TRUE;
+}
+
+static gboolean connect_failed(BleIoStream* stream, const gchar* format, ...)
+    G_GNUC_PRINTF(2, 3);
+
+// Log why ble_io_stream_connect failed and keep the reason for the diagnostic
+// details the diver sees, so a report names the step that broke rather than a
+// bare "Failed to connect". Returns FALSE so a failure path can end with
+// `return connect_failed(...)`.
+static gboolean connect_failed(BleIoStream* stream, const gchar* format, ...) {
+    va_list args;
+    va_start(args, format);
+    gchar* reason = g_strdup_vprintf(format, args);
+    va_end(args);
+
+    g_warning("BleIoStream: %s", reason);
+    g_free(stream->connect_failure);
+    stream->connect_failure = reason;
+    return FALSE;
+}
+
+// Device1.Connect's timeout: how long BlueZ may take to bring the LE link up.
+#define BLUEZ_CONNECT_TIMEOUT_MS 30000
+// How long to wait for BlueZ to resolve the device's GATT services after
+// Connect has returned. Service discovery over a 100 ms connection interval
+// takes a few seconds; it gets the same budget as Connect.
+#define SERVICES_RESOLVED_TIMEOUT_MS BLUEZ_CONNECT_TIMEOUT_MS
+
+// The longest one property read may block during that wait, so a wedged BlueZ
+// is noticed quickly.
+#define SERVICES_RESOLVED_READ_TIMEOUT_MS 2000
+
+// The pause between two polls of ServicesResolved.
+#define SERVICES_RESOLVED_POLL_INTERVAL_MS 100
+
+// The D-Bus timeout for one property read given |left_us| of the wait: the
+// time left, rounded down to a whole millisecond so the read cannot outlast
+// the deadline, at most SERVICES_RESOLVED_READ_TIMEOUT_MS. ble_services_wait
+// never hands a read less than BLE_SERVICES_WAIT_MIN_READ_US, so this is
+// always at least 1.
+static gint read_timeout_ms(int64_t left_us) {
+    int64_t left_ms = left_us / G_TIME_SPAN_MILLISECOND;
+    return (gint)MIN(left_ms, SERVICES_RESOLVED_READ_TIMEOUT_MS);
+}
+
+// ble_services_wait probes backed by BlueZ. |userdata| is the stream.
+static int probe_services_resolved(void* userdata, int64_t timeout_us) {
+    const BleIoStream* stream = userdata;
+    return device_flag(stream->connection, stream->device_path,
+                       "ServicesResolved", read_timeout_ms(timeout_us));
+}
+
+static int probe_connected(void* userdata, int64_t timeout_us) {
+    const BleIoStream* stream = userdata;
+    return device_connected(stream->connection, stream->device_path,
+                            read_timeout_ms(timeout_us));
+}
+
+static int probe_cancelled(void* userdata) {
+    const BleIoStream* stream = userdata;
+    return stream->is_cancelled != NULL &&
+           stream->is_cancelled(stream->cancel_data);
+}
+
+static int64_t probe_now_us(void* userdata) {
+    (void)userdata;
+    return g_get_monotonic_time();
+}
+
+static void probe_sleep_us(void* userdata, int64_t duration_us) {
+    (void)userdata;
+    g_usleep((gulong)duration_us);
+}
+
+// Block until ServicesResolved is TRUE, the link drops, the download is
+// cancelled, or the timeout passes. Device1.Connect returns as soon as the LE
+// link is up, not when GATT discovery is done (observed on BlueZ 5.88 with a
+// Shearwater Perdix 2: ServicesResolved became TRUE about two seconds after
+// Connect returned), so enumerating characteristics right after Connect finds
+// none and the download fails with "No suitable GATT characteristics found".
+// Android and darwin wait for their platforms' service-discovery callbacks;
+// this is the BlueZ equivalent. The loop itself lives in ble_services_wait.c,
+// free of GLib, so test/native can pin it.
+static gboolean wait_for_services_resolved(BleIoStream* stream) {
+    const ble_services_wait_ops_t ops = {
+        .services_resolved = probe_services_resolved,
+        .connected = probe_connected,
+        .cancelled = probe_cancelled,
+        .now_us = probe_now_us,
+        .sleep_us = probe_sleep_us,
+        .userdata = stream,
+    };
+    switch (ble_services_wait(
+        &ops, (int64_t)SERVICES_RESOLVED_TIMEOUT_MS * G_TIME_SPAN_MILLISECOND,
+        (int64_t)SERVICES_RESOLVED_POLL_INTERVAL_MS * G_TIME_SPAN_MILLISECOND)) {
+        case BLE_SERVICES_WAIT_RESOLVED:
+            return TRUE;
+        case BLE_SERVICES_WAIT_CANCELLED:
+            return connect_failed(stream,
+                                  "cancelled while waiting for GATT services");
+        case BLE_SERVICES_WAIT_LINK_DROPPED:
+            return connect_failed(
+                stream, "link dropped before GATT services were resolved");
+        case BLE_SERVICES_WAIT_TIMED_OUT:
+            break;
+    }
+    return connect_failed(stream, "GATT services not resolved within %d ms",
+                          SERVICES_RESOLVED_TIMEOUT_MS);
+}
+
+// Best write and notify characteristic under one GATT service. BlueZ lists
+// characteristics flat, so pairs are kept per parent service path and the
+// Seac service's own pair is looked up once every service UUID is known.
+typedef struct {
+    int write_score;
+    gchar* write_path;
+    int notify_score;
+    gchar* notify_path;
+} ServicePair;
+
+static void service_pair_free(gpointer data) {
+    ServicePair* pair = data;
+    g_free(pair->write_path);
+    g_free(pair->notify_path);
+    g_free(pair);
+}
+
+static ServicePair* service_pair_for(GHashTable* pairs,
+                                     const gchar* service_path) {
+    ServicePair* pair = g_hash_table_lookup(pairs, service_path);
+    if (!pair) {
+        pair = g_new0(ServicePair, 1);
+        pair->write_score = -1;
+        pair->notify_score = -1;
+        g_hash_table_insert(pairs, g_strdup(service_path), pair);
+    }
+    return pair;
+}
+
 // Check if a characteristic has a specific flag (e.g., "write", "notify").
 static gboolean has_flag(GDBusConnection* conn, const gchar* char_path,
                          const gchar* flag) {
-    g_autoptr(GError) error = NULL;
-    GVariant* result = g_dbus_connection_call_sync(
-        conn, "org.bluez", char_path,
-        "org.freedesktop.DBus.Properties", "Get",
-        g_variant_new("(ss)", "org.bluez.GattCharacteristic1", "Flags"),
-        G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (!result) return FALSE;
-
-    GVariant* value = NULL;
-    g_variant_get(result, "(v)", &value);
-    g_variant_unref(result);
+    GVariant* value = get_property(conn, char_path,
+                                   "org.bluez.GattCharacteristic1", "Flags", -1);
+    if (!value) return FALSE;
 
     gboolean found = FALSE;
     GVariantIter iter;
@@ -86,6 +325,191 @@ static gboolean has_flag(GDBusConnection* conn, const gchar* char_path,
     }
     g_variant_unref(value);
     return found;
+}
+
+// Credit balance shared between the stream and any in-flight grant
+// completion. Refcounted because a grant issued moments before teardown
+// completes after the stream is gone, and the callback must still be able to
+// settle the balance without touching freed memory.
+// The balance is reached from two thread contexts: the download thread runs
+// the opening grant and teardown, while the PropertiesChanged handler and the
+// grant completion are dispatched on whichever thread iterates the main
+// context. The mutex covers every access, and the decrement/check/claim
+// sequence is taken as a unit so two packets cannot both start a grant.
+struct BleCreditBalance {
+    gint ref_count;
+    GMutex mutex;
+    gint credits;
+    gboolean grant_in_flight;
+    // Set once the opening grant is confirmed. Top-ups stay suppressed until
+    // then: notifications go live before that write is issued, and a refill
+    // requested in the window would put a second credit write on the wire
+    // beside it and count both grants.
+    gboolean open;
+};
+
+static struct BleCreditBalance* credit_balance_new(void) {
+    struct BleCreditBalance* balance = g_new0(struct BleCreditBalance, 1);
+    balance->ref_count = 1;
+    g_mutex_init(&balance->mutex);
+    return balance;
+}
+
+static struct BleCreditBalance* credit_balance_ref(
+    struct BleCreditBalance* balance) {
+    g_atomic_int_inc(&balance->ref_count);
+    return balance;
+}
+
+static void credit_balance_unref(struct BleCreditBalance* balance) {
+    if (g_atomic_int_dec_and_test(&balance->ref_count)) {
+        g_mutex_clear(&balance->mutex);
+        g_free(balance);
+    }
+}
+
+// Set the balance to a known value, for setup and teardown.
+static void credit_balance_set(struct BleCreditBalance* balance, gint credits,
+                               gboolean open) {
+    g_mutex_lock(&balance->mutex);
+    balance->credits = credits;
+    balance->grant_in_flight = FALSE;
+    balance->open = open;
+    g_mutex_unlock(&balance->mutex);
+}
+
+// Build the (ay, a{sv}) argument tuple for GattCharacteristic1.WriteValue
+// carrying a single byte and no options.
+static GVariant* make_single_byte_write_args(guint8 byte) {
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("ay"));
+    g_variant_builder_add(&builder, "y", byte);
+
+    GVariantBuilder opts;
+    g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
+
+    return g_variant_new("(@aya{sv})", g_variant_builder_end(&builder), &opts);
+}
+
+// Give up on credit flow control and run the connection without it.
+//
+// Only reachable for u-blox, whose serial service treats flow control as
+// optional and already works with no handshake at all (#280, #394). A Telit
+// bridge carries nothing without credits, so its failures are fatal.
+static void abandon_credit_flow_control(BleIoStream* stream,
+                                        const gchar* reason) {
+    g_warning("BleIoStream: Terminal I/O: %s; "
+              "continuing without credit flow control", reason);
+
+    // Closing the balance is what stops replenish_credits, and it is done
+    // under the balance mutex. credits_write_path is deliberately NOT freed
+    // here: this runs on the download thread while replenish_credits may be
+    // reading that pointer on the thread dispatching PropertiesChanged, so
+    // freeing it would be a use-after-free. It costs one short string to keep
+    // it until ble_io_stream_free, which runs after everything has stopped.
+    stream->credits_abandoned = TRUE;
+    credit_balance_set(stream->credits, 0, FALSE);
+
+    // Unsubscribe rather than merely ignoring the credit indications, so the
+    // module stops transmitting on a channel we have given up on and its
+    // airtime goes to the data stream instead.
+    if (stream->connection && stream->credits_notify_path) {
+        g_dbus_connection_call(
+            stream->connection, "org.bluez", stream->credits_notify_path,
+            "org.bluez.GattCharacteristic1", "StopNotify",
+            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        g_clear_pointer(&stream->credits_notify_path, g_free);
+    }
+}
+
+// Write the opening credit grant to Credits RX. A no-op (success) on devices
+// with no credit characteristics, or where the fallback has already been
+// taken.
+static gboolean grant_initial_credits(BleIoStream* stream) {
+    if (!stream->credits_write_path || stream->credits_abandoned) return TRUE;
+
+    g_autoptr(GError) error = NULL;
+    GVariant* result = g_dbus_connection_call_sync(
+        stream->connection, "org.bluez", stream->credits_write_path,
+        "org.bluez.GattCharacteristic1", "WriteValue",
+        make_single_byte_write_args(TIO_INITIAL_GRANT),
+        NULL, G_DBUS_CALL_FLAGS_NONE, stream->timeout_ms, NULL, &error);
+    if (error) {
+        if (stream->credits_required) {
+            return connect_failed(stream,
+                                  "Terminal I/O initial credit grant failed: %s",
+                                  error->message);
+        }
+        abandon_credit_flow_control(stream, error->message);
+        return TRUE;
+    }
+    if (result) g_variant_unref(result);
+
+    credit_balance_set(stream->credits, TIO_INITIAL_GRANT, TRUE);
+    return TRUE;
+}
+
+// Account for one received packet and top the module back up when its balance
+// runs low, so a multi-thousand-notification logbook dump does not stall once
+// the opening grant is spent.
+// Settle a grant once BlueZ reports whether the module received it.
+static void on_credit_grant_complete(GObject* source, GAsyncResult* result,
+                                     gpointer user_data) {
+    struct BleCreditBalance* balance = (struct BleCreditBalance*)user_data;
+    g_autoptr(GError) error = NULL;
+    GVariant* reply = g_dbus_connection_call_finish(
+        G_DBUS_CONNECTION(source), result, &error);
+
+    g_mutex_lock(&balance->mutex);
+    balance->grant_in_flight = FALSE;
+    if (!error) balance->credits += TIO_INITIAL_GRANT - TIO_REFILL_THRESHOLD;
+    g_mutex_unlock(&balance->mutex);
+
+    if (error) {
+        // Leave the balance uncredited so the next packet retries.
+        g_warning("BleIoStream: Terminal I/O credit grant not acknowledged: %s",
+                  error->message);
+    }
+    if (reply) g_variant_unref(reply);
+    credit_balance_unref(balance);
+}
+
+static void replenish_credits(BleIoStream* stream) {
+    struct BleCreditBalance* balance = stream->credits;
+
+    // The mutex-guarded `open` flag is the only gate, checked before
+    // credits_write_path is touched at all. Testing the pointer first would
+    // race the download thread, which is why that pointer is never freed
+    // while a connection is live -- see abandon_credit_flow_control.
+    //
+    // Take the decrement, the check and the claim as one unit, so two packets
+    // arriving together cannot both start a grant.
+    g_mutex_lock(&balance->mutex);
+    if (!balance->open) {
+        g_mutex_unlock(&balance->mutex);
+        return;
+    }
+    if (balance->credits > 0) balance->credits--;
+    if (balance->grant_in_flight || balance->credits > TIO_REFILL_THRESHOLD) {
+        g_mutex_unlock(&balance->mutex);
+        return;
+    }
+    balance->grant_in_flight = TRUE;
+    g_mutex_unlock(&balance->mutex);
+
+    const guint8 grant = TIO_INITIAL_GRANT - TIO_REFILL_THRESHOLD;
+    // Asynchronous: this runs on the thread dispatching PropertiesChanged, and
+    // a synchronous call here would stall notification delivery during a bulk
+    // logbook dump. The balance is credited in the completion rather than
+    // here, because counting credits the module never received leaves the
+    // balance permanently above the refill threshold -- the module falls
+    // silent, no packets arrive to decrement it, and the transfer stalls.
+    g_dbus_connection_call(
+        stream->connection, "org.bluez", stream->credits_write_path,
+        "org.bluez.GattCharacteristic1", "WriteValue",
+        make_single_byte_write_args(grant),
+        NULL, G_DBUS_CALL_FLAGS_NONE, stream->timeout_ms, NULL,
+        on_credit_grant_complete, credit_balance_ref(balance));
 }
 
 // PropertiesChanged signal handler for GATT notifications.
@@ -131,9 +555,28 @@ static void on_properties_changed(GDBusConnection* connection,
 
     if (n_bytes > 0 && bytes) {
         g_mutex_lock(&stream->read_mutex);
-        g_byte_array_append(stream->read_buffer, bytes, (guint)n_bytes);
+        GByteArray* echo = stream->suppress_notify_echo;
+        if (echo != NULL && echo->len == n_bytes &&
+            g_get_monotonic_time() < stream->suppress_echo_deadline &&
+            memcmp(echo->data, bytes, n_bytes) == 0) {
+            // The PropertiesChanged BlueZ emits for our own ReadValue on the
+            // notify characteristic, not a packet (issue #422).
+            g_byte_array_unref(echo);
+            stream->suppress_notify_echo = NULL;
+            g_mutex_unlock(&stream->read_mutex);
+            g_variant_unref(value_var);
+            return;
+        }
+        GByteArray* chunk = g_byte_array_sized_new((guint)n_bytes);
+        g_byte_array_append(chunk, bytes, (guint)n_bytes);
+        g_queue_push_tail(stream->read_chunks, chunk);
+        stream->chunks_pushed++;
         g_cond_signal(&stream->read_cond);
         g_mutex_unlock(&stream->read_mutex);
+
+        // Each packet the module sends costs it one credit; top it back up
+        // before the balance runs out or the transfer stalls part-way.
+        replenish_credits(stream);
     }
 
     g_variant_unref(value_var);
@@ -142,25 +585,35 @@ static void on_properties_changed(GDBusConnection* connection,
 gboolean ble_io_stream_connect(BleIoStream* stream,
                                const gchar* device_path) {
     g_autoptr(GError) error = NULL;
+    g_clear_pointer(&stream->connect_failure, g_free);
 
     stream->connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
     if (!stream->connection) {
-        g_warning("BleIoStream: Failed to connect to system bus: %s",
-                  error->message);
-        return FALSE;
+        return connect_failed(stream, "Failed to connect to system bus: %s",
+                              error->message);
     }
 
     stream->device_path = g_strdup(device_path);
+    g_hash_table_remove_all(stream->characteristic_paths);
 
     // Connect the device.
-    g_dbus_connection_call_sync(
-        stream->connection, "org.bluez", device_path,
-        "org.bluez.Device1", "Connect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
-    if (error) {
-        g_warning("BleIoStream: Connect failed: %s", error->message);
+    if (!call_bluez_method(stream->connection, device_path,
+                           "org.bluez.Device1", "Connect",
+                           BLUEZ_CONNECT_TIMEOUT_MS, &error)) {
+        return connect_failed(stream, "Connect failed: %s", error->message);
+    }
+
+    // Connect returned when the link came up; the characteristics enumerated
+    // below only exist once discovery is done.
+    if (!wait_for_services_resolved(stream)) {
         return FALSE;
     }
+
+    // Note: BlueZ exposes no simple per-connection priority/interval API on
+    // org.bluez.Device1 (unlike Android's requestConnectionPriority or
+    // Windows' preferred connection parameters), so high-rate dumps (e.g. the
+    // OSTC nano logbook, #280) rely on the device pacing itself plus the
+    // hw_ostc3 read fix; transient notification loss is covered by a retry.
 
     // Get the device name.
     stream->device_name = get_string_property(
@@ -174,9 +627,8 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
         NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
         G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
     if (!managed) {
-        g_warning("BleIoStream: GetManagedObjects failed: %s",
-                  error->message);
-        return FALSE;
+        return connect_failed(stream, "GetManagedObjects failed: %s",
+                              error->message);
     }
 
     GVariant* objects = NULL;
@@ -187,6 +639,29 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
     int best_notify_score = -1;
     gchar* best_write_path = NULL;
     gchar* best_notify_path = NULL;
+    // Telit Terminal I/O members, if this device exposes them. BlueZ lists
+    // characteristics flat under the device path rather than grouped by
+    // service, so they are matched by UUID across the whole device.
+    gchar* tio_data_rx_path = NULL;
+    gchar* tio_data_tx_path = NULL;
+    gchar* tio_credits_rx_path = NULL;
+    gchar* tio_credits_tx_path = NULL;
+    gchar* ublox_data_path = NULL;
+    gchar* ublox_credits_path = NULL;
+    // Every characteristic carrying the Seac data UUID, with the object path
+    // of its service. BlueZ lists services and characteristics as separate
+    // objects, so parents can only be checked after the walk, and a GATT table
+    // may reuse a characteristic UUID across services: all are kept, and the
+    // first under the Seac service wins.
+    GPtrArray* read_poll_candidates = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray* read_poll_parents = g_ptr_array_new_with_free_func(g_free);
+    gchar* read_poll_path = NULL;
+    // Best write/notify pair per parent service path, so the Seac service's
+    // own pair can win over a higher-scoring pair elsewhere on the device.
+    GHashTable* service_pairs = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, service_pair_free);
+    GHashTable* service_uuids =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
     GVariantIter obj_iter;
     g_variant_iter_init(&obj_iter, objects);
@@ -199,6 +674,19 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
         if (!g_str_has_prefix(obj_path, device_path)) {
             g_variant_unref(ifaces);
             continue;
+        }
+
+        GVariant* service_props = g_variant_lookup_value(
+            ifaces, "org.bluez.GattService1", G_VARIANT_TYPE_VARDICT);
+        if (service_props) {
+            GVariant* service_uuid = g_variant_lookup_value(
+                service_props, "UUID", G_VARIANT_TYPE_STRING);
+            if (service_uuid) {
+                g_hash_table_insert(service_uuids, g_strdup(obj_path),
+                                    g_variant_dup_string(service_uuid, NULL));
+                g_variant_unref(service_uuid);
+            }
+            g_variant_unref(service_props);
         }
 
         GVariant* char_props = g_variant_lookup_value(
@@ -218,6 +706,37 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
             continue;
         }
         const gchar* uuid = g_variant_get_string(uuid_var, NULL);
+        GVariant* parent_var = g_variant_lookup_value(
+            char_props, "Service", G_VARIANT_TYPE_OBJECT_PATH);
+        const gchar* parent_path =
+            parent_var ? g_variant_get_string(parent_var, NULL) : NULL;
+        g_hash_table_replace(stream->characteristic_paths,
+                             g_ascii_strdown(uuid, -1), g_strdup(obj_path));
+
+        if (g_ascii_strcasecmp(uuid, TIO_DATA_RX_UUID) == 0) {
+            g_free(tio_data_rx_path);
+            tio_data_rx_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, TIO_DATA_TX_UUID) == 0) {
+            g_free(tio_data_tx_path);
+            tio_data_tx_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, TIO_CREDITS_RX_UUID) == 0) {
+            g_free(tio_credits_rx_path);
+            tio_credits_rx_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, TIO_CREDITS_TX_UUID) == 0) {
+            g_free(tio_credits_tx_path);
+            tio_credits_tx_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, UBLOX_DATA_UUID) == 0) {
+            g_free(ublox_data_path);
+            ublox_data_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, UBLOX_CREDITS_UUID) == 0) {
+            g_free(ublox_credits_path);
+            ublox_credits_path = g_strdup(obj_path);
+        } else if (g_ascii_strcasecmp(uuid, SEAC_DATA_UUID) == 0) {
+            if (parent_path) {
+                g_ptr_array_add(read_poll_candidates, g_strdup(obj_path));
+                g_ptr_array_add(read_poll_parents, g_strdup(parent_path));
+            }
+        }
 
         // Score as write candidate.
         gboolean can_write = has_flag(stream->connection, obj_path, "write");
@@ -227,13 +746,26 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
             int ws = 0;
             if (can_write_no_rsp) ws += 4;
             if (can_write) ws += 2;
-            if (g_ascii_strcasecmp(uuid, PREFERRED_WRITE_UUID) == 0) {
+            // Telit UART Data RX is pinned so commands can never land on UART
+            // Credits RX, which would swallow them silently.
+            if (g_ascii_strcasecmp(uuid, PREFERRED_WRITE_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, HALCYON_SYMBIOS_RX_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, TIO_DATA_RX_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, UBLOX_DATA_UUID) == 0) {
                 ws += 1000;
             }
             if (ws > best_write_score) {
                 g_free(best_write_path);
                 best_write_path = g_strdup(obj_path);
                 best_write_score = ws;
+            }
+            if (parent_path) {
+                ServicePair* pair = service_pair_for(service_pairs, parent_path);
+                if (ws > pair->write_score) {
+                    g_free(pair->write_path);
+                    pair->write_path = g_strdup(obj_path);
+                    pair->write_score = ws;
+                }
             }
         }
 
@@ -245,7 +777,12 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
             int ns = 0;
             if (can_notify) ns += 4;
             if (can_indicate) ns += 2;
-            if (g_ascii_strcasecmp(uuid, PREFERRED_NOTIFY_UUID) == 0) {
+            // Telit UART Data TX is pinned so the data stream is never taken
+            // from UART Credits TX (see the write side above).
+            if (g_ascii_strcasecmp(uuid, PREFERRED_NOTIFY_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, HALCYON_SYMBIOS_TX_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, TIO_DATA_TX_UUID) == 0 ||
+                g_ascii_strcasecmp(uuid, UBLOX_DATA_UUID) == 0) {
                 ns += 1000;
             }
             if (ns > best_notify_score) {
@@ -253,23 +790,142 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
                 best_notify_path = g_strdup(obj_path);
                 best_notify_score = ns;
             }
+            if (parent_path) {
+                ServicePair* pair = service_pair_for(service_pairs, parent_path);
+                if (ns > pair->notify_score) {
+                    g_free(pair->notify_path);
+                    pair->notify_path = g_strdup(obj_path);
+                    pair->notify_score = ns;
+                }
+            }
         }
 
+        if (parent_var) g_variant_unref(parent_var);
         g_variant_unref(uuid_var);
         g_variant_unref(char_props);
         g_variant_unref(ifaces);
     }
     g_variant_unref(objects);
 
-    if (!best_write_path || !best_notify_path) {
-        g_warning("BleIoStream: No suitable GATT characteristics found");
+    // Keep the first candidate that sits under the allowlisted service and
+    // can be both read and written.
+    for (guint i = 0; i < read_poll_candidates->len && !read_poll_path; i++) {
+        const gchar* candidate = g_ptr_array_index(read_poll_candidates, i);
+        const gchar* parent_uuid = g_hash_table_lookup(
+            service_uuids, g_ptr_array_index(read_poll_parents, i));
+        if (parent_uuid &&
+            g_ascii_strcasecmp(parent_uuid, SEAC_SERVICE_UUID) == 0 &&
+            has_flag(stream->connection, candidate, "read") &&
+            (has_flag(stream->connection, candidate, "write") ||
+             has_flag(stream->connection, candidate,
+                      "write-without-response"))) {
+            read_poll_path = g_strdup(candidate);
+        }
+    }
+    g_ptr_array_unref(read_poll_candidates);
+    g_ptr_array_unref(read_poll_parents);
+    // The Seac service is the computer's serial channel whatever else the
+    // device advertises (issue #1454), matching BleCharacteristicSelector on
+    // Android and darwin and DiscoverCharacteristics on Windows: its own
+    // write/notify pair if firmware ever adds one, otherwise the read tier.
+    // The flat notify pass above spans every service, so without this a pair
+    // elsewhere (Battery Level, a DFU service) would shadow it, or a write
+    // from another service could be paired with a Seac notify.
+    gchar* seac_write_path = NULL;
+    gchar* seac_notify_path = NULL;
+    GHashTableIter pair_iter;
+    gpointer pair_service_path;
+    gpointer pair_value;
+    g_hash_table_iter_init(&pair_iter, service_pairs);
+    while (g_hash_table_iter_next(&pair_iter, &pair_service_path,
+                                  &pair_value)) {
+        const ServicePair* pair = pair_value;
+        const gchar* service_uuid =
+            g_hash_table_lookup(service_uuids, pair_service_path);
+        if (service_uuid &&
+            g_ascii_strcasecmp(service_uuid, SEAC_SERVICE_UUID) == 0 &&
+            pair->write_path && pair->notify_path) {
+            seac_write_path = g_strdup(pair->write_path);
+            seac_notify_path = g_strdup(pair->notify_path);
+            break;
+        }
+    }
+    g_hash_table_unref(service_pairs);
+    g_hash_table_unref(service_uuids);
+
+    // Only run the handshake on a complete known layout, so every other device
+    // keeps today's plain write/notify behaviour. Telit needs all four UART
+    // characteristics; u-blox needs its data and credits pair, and uses the
+    // same characteristic for both credit directions.
+    if (tio_data_rx_path && tio_data_tx_path && tio_credits_rx_path &&
+        tio_credits_tx_path) {
+        stream->credits_write_path = g_steal_pointer(&tio_credits_rx_path);
+        stream->credits_notify_path = g_steal_pointer(&tio_credits_tx_path);
+        stream->credits_required = TRUE;
+    } else if (ublox_data_path && ublox_credits_path) {
+        stream->credits_write_path = g_strdup(ublox_credits_path);
+        stream->credits_notify_path = g_strdup(ublox_credits_path);
+        stream->credits_required = FALSE;
+    }
+    g_free(tio_data_rx_path);
+    g_free(tio_data_tx_path);
+    g_free(tio_credits_rx_path);
+    g_free(tio_credits_tx_path);
+    g_free(ublox_data_path);
+    g_free(ublox_credits_path);
+
+    if (seac_write_path) {
         g_free(best_write_path);
         g_free(best_notify_path);
-        return FALSE;
+        best_write_path = seac_write_path;
+        best_notify_path = seac_notify_path;
+    } else if (read_poll_path) {
+        // Read-poll tier (issue #1454): the computer cannot push its replies,
+        // so there is no StartNotify, no PropertiesChanged subscription and no
+        // credit handshake; the poller reads the characteristic whenever
+        // libdivecomputer wants bytes. Commands go to the same characteristic.
+        g_free(best_write_path);
+        g_free(best_notify_path);
+        stream->write_path = g_steal_pointer(&read_poll_path);
+        stream->read_poller =
+            ble_read_poller_new(stream->connection, stream->write_path);
+        g_message("BleIoStream: read-poll tier selected: service=%s "
+                  "characteristic=%s", SEAC_SERVICE_UUID, stream->write_path);
+        return TRUE;
+    }
+    g_free(read_poll_path);
+
+    if (!best_write_path || !best_notify_path) {
+        g_free(best_write_path);
+        g_free(best_notify_path);
+        return connect_failed(stream,
+                              "No suitable GATT characteristics found, and "
+                              "no known read-poll service matched");
     }
 
     stream->write_path = best_write_path;
     stream->notify_path = best_notify_path;
+
+    // Terminal I/O subscribes to UART Credits TX before UART Data TX (Telit
+    // TIO Implementation Guide r04 sections 6.4 and 6.2, and the same order in
+    // Subsurface's qt-ble.cpp). The indications are never consumed -- no
+    // PropertiesChanged subscription is registered for this path -- but the
+    // module keeps the UART bridge closed until StartNotify has been called.
+    if (stream->credits_notify_path) {
+        g_clear_error(&error);
+        if (!call_bluez_method(stream->connection, stream->credits_notify_path,
+                               "org.bluez.GattCharacteristic1", "StartNotify",
+                               -1, &error)) {
+            if (stream->credits_required) {
+                return connect_failed(
+                    stream, "Terminal I/O credits StartNotify failed: %s",
+                    error->message);
+            }
+            // The subscription never came up, so there is nothing to stop.
+            g_clear_pointer(&stream->credits_notify_path, g_free);
+            abandon_credit_flow_control(stream, error->message);
+        }
+    }
 
     // Subscribe to PropertiesChanged on the notify characteristic.
     stream->properties_sub = g_dbus_connection_signal_subscribe(
@@ -281,16 +937,17 @@ gboolean ble_io_stream_connect(BleIoStream* stream,
 
     // Enable notifications via StartNotify.
     g_clear_error(&error);
-    g_dbus_connection_call_sync(
-        stream->connection, "org.bluez", stream->notify_path,
-        "org.bluez.GattCharacteristic1", "StartNotify",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (error) {
-        g_warning("BleIoStream: StartNotify failed: %s", error->message);
-        return FALSE;
+    if (!call_bluez_method(stream->connection, stream->notify_path,
+                           "org.bluez.GattCharacteristic1", "StartNotify", -1,
+                           &error)) {
+        return connect_failed(stream, "StartNotify failed: %s",
+                              error->message);
     }
 
-    return TRUE;
+    // A Terminal I/O module keeps its UART bridge closed until the client
+    // grants initial credits, so the first command write would fail outright
+    // without this (issue #923).
+    return grant_initial_credits(stream);
 }
 
 // -- C callback implementations --
@@ -305,6 +962,11 @@ static int ble_read(void* userdata, void* data, size_t size,
                     size_t* actual) {
     BleIoStream* stream = (BleIoStream*)userdata;
 
+    if (stream->read_poller) {
+        return ble_read_poller_read(stream->read_poller, data, size, actual,
+                                    stream->timeout_ms);
+    }
+
     g_mutex_lock(&stream->read_mutex);
 
     gint64 deadline = (stream->timeout_ms == G_MAXINT32)
@@ -312,7 +974,7 @@ static int ble_read(void* userdata, void* data, size_t size,
                           : g_get_monotonic_time() +
                                 (gint64)stream->timeout_ms * 1000;
 
-    while (stream->read_buffer->len == 0) {
+    while (g_queue_is_empty(stream->read_chunks)) {
         if (stream->timeout_ms == G_MAXINT32) {
             g_cond_wait(&stream->read_cond, &stream->read_mutex);
         } else {
@@ -325,10 +987,20 @@ static int ble_read(void* userdata, void* data, size_t size,
         }
     }
 
-    size_t bytes_to_read = MIN(size, stream->read_buffer->len);
-    memcpy(data, stream->read_buffer->data, bytes_to_read);
-    g_byte_array_remove_range(stream->read_buffer, 0,
-                              (guint)bytes_to_read);
+    // Return bytes from at most one notification per read: the packet
+    // parsers size each read from the packet header and would silently
+    // drop a second packet coalesced into the same read (lost FLAG_LAST
+    // ack -> spurious timeout). A partially consumed notification stays
+    // at the head of the queue.
+    GByteArray* chunk = (GByteArray*)g_queue_peek_head(stream->read_chunks);
+    size_t bytes_to_read = MIN(size, chunk->len);
+    memcpy(data, chunk->data, bytes_to_read);
+    if (bytes_to_read < chunk->len) {
+        g_byte_array_remove_range(chunk, 0, (guint)bytes_to_read);
+    } else {
+        g_queue_pop_head(stream->read_chunks);
+        g_byte_array_unref(chunk);
+    }
     g_mutex_unlock(&stream->read_mutex);
 
     if (actual) *actual = bytes_to_read;
@@ -352,7 +1024,7 @@ static int ble_write(void* userdata, const void* data, size_t size,
     g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
 
     g_autoptr(GError) error = NULL;
-    g_dbus_connection_call_sync(
+    GVariant* reply = g_dbus_connection_call_sync(
         stream->connection, "org.bluez", stream->write_path,
         "org.bluez.GattCharacteristic1", "WriteValue",
         g_variant_new("(@aya{sv})",
@@ -360,6 +1032,23 @@ static int ble_write(void* userdata, const void* data, size_t size,
                       &opts),
         NULL, G_DBUS_CALL_FLAGS_NONE,
         stream->timeout_ms, NULL, &error);
+    if (reply) g_variant_unref(reply);
+
+    // A read-poll computer's reply is fetched by a read whatever the write
+    // completion said, so a rejection on a live link is reported as sent and
+    // the read decides (issue #1454). The Seac Tablet answers its 7-byte
+    // commands with ATT 0x0D, and Subsurface, the only client known to
+    // download it over BLE, never looks at a write's status. Mirrors
+    // ReadPollPolicy.writeOutcome on Android and darwin.
+    if (error && stream->read_poller &&
+        device_connected(stream->connection, stream->device_path,
+                         MIN(stream->timeout_ms, 10000))) {
+        g_warning("BleIoStream: the computer rejected a %zu-byte command (%s); "
+                  "treating it as sent and reading the reply",
+                  size, error->message);
+        if (actual) *actual = size;
+        return LIBDC_STATUS_SUCCESS;
+    }
 
     if (error) {
         g_warning("BleIoStream: WriteValue failed: %s", error->message);
@@ -513,14 +1202,107 @@ static int ble_ioctl(void* userdata, unsigned int request,
         }
     }
 
+    // Characteristic reads (issue #422): the Cressi Goa backend reads its
+    // version block from three extra characteristics.
+    {
+        char uuid[LIBDC_BLE_UUID_STRING_SIZE];
+        size_t value_size = 0;
+        int decoded = libdc_ble_characteristic_read_decode(
+            request, data, size, uuid, &value_size);
+        if (decoded == LIBDC_BLE_CHAR_READ_INVALID) {
+            return LIBDC_STATUS_INVALIDARGS;
+        }
+        if (decoded == LIBDC_BLE_CHAR_READ_OK) {
+            const gchar* path =
+                g_hash_table_lookup(stream->characteristic_paths, uuid);
+            if (path == NULL) {
+                g_warning("BleIoStream: characteristic %s not found", uuid);
+                return LIBDC_STATUS_NOACCESS;
+            }
+            GVariantBuilder opts;
+            g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
+            g_autoptr(GError) error = NULL;
+            g_mutex_lock(&stream->read_mutex);
+            const guint64 pushed_before = stream->chunks_pushed;
+            g_mutex_unlock(&stream->read_mutex);
+            GVariant* reply = g_dbus_connection_call_sync(
+                stream->connection, "org.bluez", path,
+                "org.bluez.GattCharacteristic1", "ReadValue",
+                g_variant_new("(a{sv})", &opts), G_VARIANT_TYPE("(ay)"),
+                G_DBUS_CALL_FLAGS_NONE, MIN(stream->timeout_ms, 10000),
+                NULL, &error);
+            if (error != NULL || reply == NULL) {
+                g_warning("BleIoStream: ReadValue %s failed: %s", uuid,
+                          error ? error->message : "no reply");
+                return LIBDC_STATUS_IO;
+            }
+            GVariant* bytes_var = g_variant_get_child_value(reply, 0);
+            gsize n_bytes = 0;
+            const guint8* bytes = g_variant_get_fixed_array(
+                bytes_var, &n_bytes, sizeof(guint8));
+            if (n_bytes < value_size) {
+                // libdivecomputer reports a short value only as "Failed to
+                // read the characteristic" (issue #422).
+                g_warning("BleIoStream: ReadValue %s returned %" G_GSIZE_FORMAT
+                          " bytes, expected %" G_GSIZE_FORMAT,
+                          uuid, n_bytes, (gsize)value_size);
+            }
+            int status = libdc_ble_characteristic_read_fill(
+                data, size, bytes, n_bytes);
+            if (status == LIBDC_STATUS_SUCCESS &&
+                g_strcmp0(path, stream->notify_path) == 0) {
+                // BlueZ may deliver the echo before or after the method
+                // reply, on another thread. Only a chunk queued while this
+                // read was in flight can be its echo: libdc is blocked in
+                // this ioctl, so nothing was consumed meanwhile and those
+                // chunks are the queue's tail. Otherwise arm a one-shot
+                // filter that expires one second from now.
+                g_mutex_lock(&stream->read_mutex);
+                gboolean dropped = FALSE;
+                guint64 arrived = stream->chunks_pushed - pushed_before;
+                for (GList* link = g_queue_peek_tail_link(stream->read_chunks);
+                     link != NULL && arrived > 0;
+                     link = link->prev, arrived--) {
+                    GByteArray* chunk = (GByteArray*)link->data;
+                    if (chunk->len == n_bytes &&
+                        memcmp(chunk->data, bytes, n_bytes) == 0) {
+                        g_queue_delete_link(stream->read_chunks, link);
+                        g_byte_array_unref(chunk);
+                        dropped = TRUE;
+                        break;
+                    }
+                }
+                if (stream->suppress_notify_echo) {
+                    g_byte_array_unref(stream->suppress_notify_echo);
+                    stream->suppress_notify_echo = NULL;
+                }
+                if (!dropped) {
+                    stream->suppress_echo_deadline =
+                        g_get_monotonic_time() + G_TIME_SPAN_SECOND;
+                    stream->suppress_notify_echo =
+                        g_byte_array_sized_new((guint)n_bytes);
+                    g_byte_array_append(stream->suppress_notify_echo, bytes,
+                                        (guint)n_bytes);
+                }
+                g_mutex_unlock(&stream->read_mutex);
+            }
+            g_variant_unref(bytes_var);
+            g_variant_unref(reply);
+            return status;
+        }
+    }
+
     return LIBDC_STATUS_UNSUPPORTED;
 }
 
 static int ble_poll(void* userdata, int timeout) {
     BleIoStream* stream = (BleIoStream*)userdata;
+    if (stream->read_poller) {
+        return ble_read_poller_poll(stream->read_poller, timeout);
+    }
     g_mutex_lock(&stream->read_mutex);
 
-    if (stream->read_buffer->len > 0) {
+    if (!g_queue_is_empty(stream->read_chunks)) {
         g_mutex_unlock(&stream->read_mutex);
         return LIBDC_STATUS_SUCCESS;
     }
@@ -530,15 +1312,22 @@ static int ble_poll(void* userdata, int timeout) {
         return LIBDC_STATUS_TIMEOUT;
     }
 
-    gboolean signaled;
+    // GCond waits can wake spuriously; re-check the predicate in a loop.
+    gboolean signaled = TRUE;
     if (timeout < 0) {
-        g_cond_wait(&stream->read_cond, &stream->read_mutex);
-        signaled = TRUE;
+        while (g_queue_is_empty(stream->read_chunks)) {
+            g_cond_wait(&stream->read_cond, &stream->read_mutex);
+        }
     } else {
         gint64 deadline =
             g_get_monotonic_time() + (gint64)timeout * 1000;
-        signaled = g_cond_wait_until(
-            &stream->read_cond, &stream->read_mutex, deadline);
+        while (g_queue_is_empty(stream->read_chunks)) {
+            if (!g_cond_wait_until(&stream->read_cond,
+                                   &stream->read_mutex, deadline)) {
+                signaled = FALSE;
+                break;
+            }
+        }
     }
 
     g_mutex_unlock(&stream->read_mutex);
@@ -548,8 +1337,18 @@ static int ble_poll(void* userdata, int timeout) {
 static int ble_purge(void* userdata, unsigned int direction) {
     if ((direction & DIRECTION_INPUT) == 0) return LIBDC_STATUS_SUCCESS;
     BleIoStream* stream = (BleIoStream*)userdata;
+    if (stream->read_poller) ble_read_poller_purge(stream->read_poller);
     g_mutex_lock(&stream->read_mutex);
-    g_byte_array_set_size(stream->read_buffer, 0);
+    GByteArray* chunk;
+    while ((chunk = g_queue_pop_head(stream->read_chunks)) != NULL) {
+        g_byte_array_unref(chunk);
+    }
+    // A pending read echo must never outlive the data it was guarding
+    // against, or it could swallow a later real packet (issue #422).
+    if (stream->suppress_notify_echo) {
+        g_byte_array_unref(stream->suppress_notify_echo);
+        stream->suppress_notify_echo = NULL;
+    }
     g_mutex_unlock(&stream->read_mutex);
     return LIBDC_STATUS_SUCCESS;
 }
@@ -571,13 +1370,24 @@ libdc_io_callbacks_t ble_io_stream_make_callbacks(BleIoStream* stream) {
 void ble_io_stream_close(BleIoStream* stream) {
     if (!stream) return;
 
+    // Fail a read-poll reader; the poller itself is freed with the stream.
+    if (stream->read_poller) ble_read_poller_close(stream->read_poller);
+
     // Stop notifications.
     if (stream->connection && stream->notify_path) {
-        g_dbus_connection_call_sync(
-            stream->connection, "org.bluez", stream->notify_path,
-            "org.bluez.GattCharacteristic1", "StopNotify",
-            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+        call_bluez_method(stream->connection, stream->notify_path,
+                          "org.bluez.GattCharacteristic1", "StopNotify", -1,
+                          NULL);
     }
+
+    if (stream->connection && stream->credits_notify_path) {
+        call_bluez_method(stream->connection, stream->credits_notify_path,
+                          "org.bluez.GattCharacteristic1", "StopNotify", -1,
+                          NULL);
+    }
+    credit_balance_set(stream->credits, 0, FALSE);
+    stream->credits_required = FALSE;
+    stream->credits_abandoned = FALSE;
 
     if (stream->connection && stream->properties_sub > 0) {
         g_dbus_connection_signal_unsubscribe(
@@ -587,10 +1397,8 @@ void ble_io_stream_close(BleIoStream* stream) {
 
     // Disconnect the device.
     if (stream->connection && stream->device_path) {
-        g_dbus_connection_call_sync(
-            stream->connection, "org.bluez", stream->device_path,
-            "org.bluez.Device1", "Disconnect",
-            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+        call_bluez_method(stream->connection, stream->device_path,
+                          "org.bluez.Device1", "Disconnect", -1, NULL);
     }
 }
 
@@ -601,15 +1409,32 @@ void ble_io_stream_free(BleIoStream* stream) {
 
     g_mutex_clear(&stream->read_mutex);
     g_cond_clear(&stream->read_cond);
-    if (stream->read_buffer) g_byte_array_unref(stream->read_buffer);
+    if (stream->read_chunks) {
+        GByteArray* chunk;
+        while ((chunk = g_queue_pop_head(stream->read_chunks)) != NULL) {
+            g_byte_array_unref(chunk);
+        }
+        g_queue_free(stream->read_chunks);
+    }
+    if (stream->read_poller) ble_read_poller_unref(stream->read_poller);
     g_free(stream->device_path);
     g_free(stream->write_path);
     g_free(stream->notify_path);
+    g_free(stream->credits_write_path);
+    g_free(stream->credits_notify_path);
+    if (stream->credits) credit_balance_unref(stream->credits);
     g_free(stream->device_name);
+    if (stream->characteristic_paths) {
+        g_hash_table_unref(stream->characteristic_paths);
+    }
+    if (stream->suppress_notify_echo) {
+        g_byte_array_unref(stream->suppress_notify_echo);
+    }
     g_mutex_clear(&stream->pin_mutex);
     g_cond_clear(&stream->pin_cond);
     g_free(stream->pending_pin);
     g_free(stream->device_address);
+    g_free(stream->connect_failure);
     if (stream->connection) g_object_unref(stream->connection);
     g_free(stream);
 }
@@ -635,4 +1460,15 @@ void ble_io_stream_set_pin_callback(
     gpointer user_data) {
     stream->on_pin_code_required = callback;
     stream->pin_callback_data = user_data;
+}
+
+void ble_io_stream_set_cancel_check(BleIoStream* stream,
+                                    gboolean (*is_cancelled)(gpointer user_data),
+                                    gpointer user_data) {
+    stream->is_cancelled = is_cancelled;
+    stream->cancel_data = user_data;
+}
+
+const gchar* ble_io_stream_connect_failure(const BleIoStream* stream) {
+    return stream->connect_failure;
 }

@@ -1,0 +1,803 @@
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/data_quality/data/services/quality_context_builder.dart';
+import 'package:submersion/features/data_quality/domain/detectors/clock_offset_detector.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/codecs/tank_pressure_series_codec.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/transmitters/data/repositories/transmitter_repository.dart';
+import 'package:submersion/features/transmitters/domain/entities/transmitter.dart';
+
+import '../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository diveRepo;
+  late ProfileSeriesRepository profileSeries;
+  late TankPressureSeriesRepository tankSeries;
+  late QualityContextBuilder builder;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    diveRepo = DiveRepository();
+    profileSeries = ProfileSeriesRepository();
+    tankSeries = TankPressureSeriesRepository();
+    builder = QualityContextBuilder();
+  });
+  tearDown(tearDownTestDatabase);
+
+  Future<String> seedDive({
+    required String id,
+    required DateTime entry,
+    Duration runtime = const Duration(minutes: 40),
+    String? serial,
+    String? diverId,
+    List<domain.DiveProfilePoint> profile = const [],
+    List<domain.DiveTank> tanks = const [],
+  }) async {
+    final dive = domain.Dive(
+      id: id,
+      dateTime: entry,
+      entryTime: entry,
+      runtime: runtime,
+      maxDepth: 30.0,
+      diveComputerSerial: serial,
+      diverId: diverId,
+      profile: profile,
+      tanks: tanks,
+    );
+    await diveRepo.createDive(dive);
+    return id;
+  }
+
+  group("each source's own samples (#4296)", () {
+    Future<void> seedSource(String id, {required bool isPrimary}) => db
+        .into(db.diveDataSources)
+        .insert(
+          DiveDataSourcesCompanion.insert(
+            id: id,
+            diveId: 'd5',
+            importedAt: DateTime.utc(2026, 7, 1),
+            createdAt: DateTime.utc(2026, 7, 1),
+          ).copyWith(isPrimary: Value(isPrimary)),
+        );
+
+    test("carries a non-primary source's samples where the dive places "
+        'them', () async {
+      await seedDive(id: 'd5', entry: DateTime.utc(2026, 7, 1, 10));
+      await seedSource('src-p', isPrimary: true);
+      await seedSource('src-s', isPrimary: false);
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        sourceId: 'src-p',
+        samples: const [
+          ProfileSample(timestamp: 0, depth: 0),
+          ProfileSample(timestamp: 10, depth: 5),
+        ],
+      );
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        sourceId: 'src-s',
+        isPrimary: false,
+        samples: const [
+          ProfileSample(timestamp: -1200, depth: 0),
+          ProfileSample(timestamp: -1190, depth: double.nan),
+          ProfileSample(timestamp: -1180, depth: 4),
+        ],
+      );
+      // Names no source and no computer: nobody's to check.
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        isPrimary: false,
+        samples: const [ProfileSample(timestamp: 0, depth: 3)],
+      );
+
+      final ctx = (await builder.buildAll(['d5'])).single;
+      expect(ctx.sourceSamples.keys, ['src-s']);
+      expect(ctx.sourceSamples['src-s']!.map((q) => q.t), [-1200, -1180]);
+    });
+
+    test('a combined dive carries none of its halves: each one is part of '
+        'the primary trace, not placed against it', () async {
+      // A Combine keeps every half's series primary and no source flagged
+      // primary. Two halves that look alike would otherwise read the second
+      // as the first one misplaced, and its repair would collapse them.
+      List<ProfileSample> half(int start) => [
+        for (var t = 0; t <= 2400; t += 10)
+          ProfileSample(
+            timestamp: start + t,
+            depth: t < 120
+                ? t / 6
+                : t < 1200
+                ? 20 - (t - 120) / 135
+                : t < 2280
+                ? 12 - (t - 1200) / 216
+                : 7 - (t - 2280) / 120 * 7,
+          ),
+      ];
+      await seedDive(id: 'd5', entry: DateTime.utc(2026, 7, 1, 10));
+      await seedSource('src-h1', isPrimary: false);
+      await seedSource('src-h2', isPrimary: false);
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        sourceId: 'src-h1',
+        samples: half(0),
+      );
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        sourceId: 'src-h2',
+        samples: half(3000),
+      );
+
+      final ctx = (await builder.buildAll(['d5'])).single;
+      expect(ctx.sourceSamples, isEmpty);
+      expect(
+        const ClockOffsetDetector()
+            .detect(ctx)
+            .where((f) => f.params.containsKey('profileOffsetSeconds')),
+        isEmpty,
+      );
+    });
+
+    test('a dive with one source carries none', () async {
+      await seedDive(id: 'd5', entry: DateTime.utc(2026, 7, 1, 10));
+      await seedSource('src-p', isPrimary: true);
+      await profileSeries.insertSeries(
+        diveId: 'd5',
+        sourceId: 'src-p',
+        samples: const [ProfileSample(timestamp: 0, depth: 0)],
+      );
+
+      final ctx = (await builder.buildAll(['d5'])).single;
+      expect(ctx.sourceSamples, isEmpty);
+    });
+  });
+
+  test('builds context with sanitized sorted samples', () async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await seedDive(
+      id: 'd1',
+      entry: entry,
+      profile: [
+        const domain.DiveProfilePoint(timestamp: 10, depth: 5.0),
+        const domain.DiveProfilePoint(timestamp: 0, depth: 0.0),
+      ],
+    );
+    // A second primary series carrying a non-finite depth sample: the
+    // builder must drop it.
+    await profileSeries.insertSeries(
+      diveId: 'd1',
+      samples: const [ProfileSample(timestamp: 20, depth: double.infinity)],
+    );
+    final ctx = (await builder.buildAll(['d1'])).single;
+    expect(ctx.primarySamples.map((s) => s.t), [0, 10]); // sorted, bad dropped
+    expect(ctx.dive.id, 'd1');
+  });
+
+  group('ppO2MaxBar', () {
+    test('defaults to the fixed ceiling with no diver settings', () async {
+      await seedDive(id: 'd1', entry: DateTime.utc(2026, 7, 1, 10));
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.ppO2MaxBar, 1.6);
+    });
+
+    test("uses the diver's configured maximum ppO2", () async {
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-1',
+              name: 'Alex Diver',
+              createdAt: 1000,
+              updatedAt: 1000,
+            ),
+          );
+      await DiverSettingsRepository().createSettingsForDiver(
+        'diver-1',
+        settings: const AppSettings(ppO2MaxDeco: 1.4),
+      );
+      await seedDive(
+        id: 'd1',
+        entry: DateTime.utc(2026, 7, 1, 10),
+        diverId: 'diver-1',
+      );
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.ppO2MaxBar, 1.4);
+    });
+  });
+
+  test(
+    'collapses identical samples from same-identity unioned series',
+    () async {
+      // Two devices packing the same unattributed profile union two primary
+      // series of one identity (null computer, null source) after sync. The
+      // builder must read them the way the merged profile read does: each
+      // duplicated sample counts once, so detectors see no doubled points.
+      final entry = DateTime.utc(2026, 7, 2, 10);
+      await seedDive(id: 'd2', entry: entry);
+      const samples = [
+        ProfileSample(timestamp: 0, depth: 0.0),
+        ProfileSample(timestamp: 10, depth: 8.0),
+      ];
+      await profileSeries.insertSeries(diveId: 'd2', samples: samples);
+      await profileSeries.insertSeries(diveId: 'd2', samples: samples);
+
+      final ctx = (await builder.buildAll(['d2'])).single;
+      expect(ctx.primarySamples.map((s) => s.t), [0, 10]);
+    },
+  );
+
+  test(
+    'builds tank pressures (dropping non-finite) and gas switches',
+    () async {
+      final entry = DateTime.utc(2026, 7, 1, 10);
+      // tank_pressure_series.tankId and gas_switches.tankId both FK to
+      // dive_tanks, so the referenced tanks must exist first.
+      await diveRepo.createDive(
+        domain.Dive(
+          id: 'dP',
+          dateTime: entry,
+          entryTime: entry,
+          tanks: const [
+            domain.DiveTank(
+              id: 'tankA',
+              gasMix: domain.GasMix(o2: 21),
+              order: 0,
+            ),
+            domain.DiveTank(
+              id: 'tankB',
+              gasMix: domain.GasMix(o2: 50),
+              order: 1,
+            ),
+          ],
+        ),
+      );
+      await tankSeries.insertSeries(
+        diveId: 'dP',
+        tankId: 'tankA',
+        samples: const [TankPressureSample(timestamp: 0, pressure: 200.0)],
+      );
+      // Non-finite pressure must be dropped by the sanitizing loop.
+      await tankSeries.insertSeries(
+        diveId: 'dP',
+        tankId: 'tankA',
+        samples: const [
+          TankPressureSample(timestamp: 10, pressure: double.infinity),
+        ],
+      );
+      await db
+          .into(db.gasSwitches)
+          .insert(
+            GasSwitchesCompanion.insert(
+              id: 'gs1',
+              diveId: 'dP',
+              timestamp: 300,
+              tankId: 'tankB',
+              depth: const Value(20.0),
+              createdAt: DateTime.utc(2026).millisecondsSinceEpoch,
+            ),
+          );
+
+      final ctx = (await builder.buildAll(['dP'])).single;
+      expect(ctx.pressuresByTankId['tankA'], hasLength(1)); // infinite dropped
+      expect(ctx.pressuresByTankId['tankA']!.single.bar, 200.0);
+      expect(ctx.gasSwitches.single.tankId, 'tankB');
+      expect(ctx.gasSwitches.single.timestamp, 300);
+    },
+  );
+
+  // #3307: two computers on one transmitter each logged its pressure; a
+  // tank whose role was read off the transmitter's name is judged on its own
+  // computer's reading, and only such tanks get one.
+  test('keeps each name-derived tank\'s own computer\'s series', () async {
+    final entry = DateTime.utc(2026, 7, 3, 10);
+    for (final id in ['c1', 'c2']) {
+      await db
+          .into(db.diveComputers)
+          .insert(
+            DiveComputersCompanion(
+              id: Value(id),
+              name: Value('Computer $id'),
+              createdAt: const Value(0),
+              updatedAt: const Value(0),
+            ),
+          );
+    }
+    await diveRepo.createDive(
+      domain.Dive(
+        id: 'dC',
+        dateTime: entry,
+        entryTime: entry,
+        tanks: const [
+          domain.DiveTank(
+            id: 'tx',
+            order: 0,
+            role: TankRole.oxygenSupply,
+            roleSource: TankRoleSource.transmitterName,
+            computerId: 'c1',
+          ),
+          domain.DiveTank(id: 'bo', order: 1, role: TankRole.bailout),
+        ],
+      ),
+    );
+    for (final (computer, end) in [('c1', 190.0), ('c2', 150.0)]) {
+      await tankSeries.insertSeries(
+        diveId: 'dC',
+        tankId: 'tx',
+        computerId: computer,
+        samples: [
+          const TankPressureSample(timestamp: 0, pressure: 200.0),
+          TankPressureSample(timestamp: 60, pressure: end),
+        ],
+      );
+    }
+    await tankSeries.insertSeries(
+      diveId: 'dC',
+      tankId: 'bo',
+      samples: const [TankPressureSample(timestamp: 0, pressure: 200.0)],
+    );
+
+    final ctx = (await builder.buildAll(['dC'])).single;
+    expect(ctx.ownComputerPressuresByTankId['tx']!.map((s) => s.bar), [
+      200.0,
+      190.0,
+    ]);
+    expect(ctx.ownComputerPressuresByTankId.containsKey('bo'), isFalse);
+  });
+
+  // Issue #3652: a loop cylinder is judged against its own computer's switch
+  // timeline, so it needs its own computer's reading too, whoever set the
+  // role.
+  test("keeps a diver-set loop tank's own computer's series", () async {
+    final entry = DateTime.utc(2026, 7, 4, 10);
+    for (final id in ['c1', 'c2']) {
+      await db
+          .into(db.diveComputers)
+          .insert(
+            DiveComputersCompanion(
+              id: Value(id),
+              name: Value('Computer $id'),
+              createdAt: const Value(0),
+              updatedAt: const Value(0),
+            ),
+          );
+    }
+    await diveRepo.createDive(
+      domain.Dive(
+        id: 'dL',
+        dateTime: entry,
+        entryTime: entry,
+        tanks: const [
+          domain.DiveTank(
+            id: 'o2',
+            order: 0,
+            role: TankRole.oxygenSupply,
+            computerId: 'c1',
+          ),
+          domain.DiveTank(id: 'bo', order: 1, role: TankRole.bailout),
+          domain.DiveTank(id: 'dil', order: 2, role: TankRole.diluent),
+        ],
+      ),
+    );
+    for (final (computer, end) in [('c1', 190.0), ('c2', 150.0)]) {
+      await tankSeries.insertSeries(
+        diveId: 'dL',
+        tankId: 'o2',
+        computerId: computer,
+        samples: [
+          const TankPressureSample(timestamp: 0, pressure: 200.0),
+          TankPressureSample(timestamp: 60, pressure: end),
+        ],
+      );
+    }
+
+    await tankSeries.insertSeries(
+      diveId: 'dL',
+      tankId: 'dil',
+      samples: const [TankPressureSample(timestamp: 0, pressure: 200.0)],
+    );
+
+    final ctx = (await builder.buildAll(['dL'])).single;
+    expect(ctx.ownComputerPressuresByTankId['o2']!.map((s) => s.bar), [
+      200.0,
+      190.0,
+    ]);
+    expect(ctx.ownComputerPressuresByTankId.containsKey('bo'), isFalse);
+    // No computer owns the diluent: the merged series already is its own.
+    expect(ctx.ownComputerPressuresByTankId.containsKey('dil'), isFalse);
+  });
+
+  test("a neighbor's last depth matches the merged profile on an end-timestamp "
+      'tie', () async {
+    // Two primary series of one dive sharing an end timestamp: the sync
+    // union of the same profile from two devices, and the shape the
+    // neighbor query's tie-break has to agree with. Series order is
+    // (start_timestamp, id), so the LATER-starting series carries the
+    // merged profile's last sample even though its id sorts first.
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await seedDive(id: 'dA', entry: entry, serial: 'SN-1');
+    await seedDive(
+      id: 'dB',
+      entry: entry.add(const Duration(hours: 1)),
+      serial: 'SN-1',
+    );
+    await profileSeries.insertSeries(
+      diveId: 'dB',
+      id: 'zz-earlier-start',
+      samples: const [
+        ProfileSample(timestamp: 0, depth: 4.0),
+        ProfileSample(timestamp: 600, depth: 9.0),
+      ],
+    );
+    await profileSeries.insertSeries(
+      diveId: 'dB',
+      id: 'aa-later-start',
+      samples: const [
+        ProfileSample(timestamp: 300, depth: 7.0),
+        ProfileSample(timestamp: 600, depth: 2.0),
+      ],
+    );
+
+    final merged = await diveRepo.getMergedProfile('dB');
+    final ctx = (await builder.buildAll(['dA'])).single;
+
+    expect(
+      ctx.neighbors.single.lastSampleDepth,
+      merged.last.depth,
+      reason: 'the neighbor query must agree with the merged read',
+    );
+    expect(ctx.neighbors.single.firstSampleDepth, merged.first.depth);
+  });
+
+  test('reports both sides of a pair from the stored sample counts', () async {
+    // The duplicate detector picks the richer of two same-computer
+    // recordings by sample count, and the pair has ONE canonical finding
+    // written by whichever side the scan reached last. Both counts must
+    // therefore come from the same stored column: the scanned dive's from
+    // its primary series rows, the neighbor's from a subquery over the same
+    // table. A non-primary series never counts on either side.
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await seedDive(
+      id: 'dA',
+      entry: entry,
+      serial: 'SN-1',
+      profile: [
+        for (var t = 0; t < 5; t++)
+          domain.DiveProfilePoint(timestamp: t * 10, depth: 3.0),
+      ],
+    );
+    await seedDive(
+      id: 'dB',
+      entry: entry.add(const Duration(minutes: 1)),
+      serial: 'SN-1',
+      profile: [
+        for (var t = 0; t < 3; t++)
+          domain.DiveProfilePoint(timestamp: t * 10, depth: 2.0),
+      ],
+    );
+    await profileSeries.insertSeries(
+      diveId: 'dB',
+      isPrimary: false,
+      samples: const [
+        ProfileSample(timestamp: 0, depth: 1.0),
+        ProfileSample(timestamp: 10, depth: 1.0),
+        ProfileSample(timestamp: 20, depth: 1.0),
+        ProfileSample(timestamp: 30, depth: 1.0),
+      ],
+    );
+
+    final ctxA = (await builder.buildAll(['dA'])).single;
+    expect(ctxA.primarySampleCount, 5);
+    expect(ctxA.neighbors.single.sampleCount, 3);
+
+    final ctxB = (await builder.buildAll(['dB'])).single;
+    expect(ctxB.primarySampleCount, 3);
+    expect(ctxB.neighbors.single.sampleCount, 5);
+  });
+
+  test('a dive with no primary series has an unknown sample count', () async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await seedDive(id: 'dA', entry: entry, serial: 'SN-1');
+    await seedDive(
+      id: 'dB',
+      entry: entry.add(const Duration(minutes: 1)),
+      serial: 'SN-1',
+    );
+    final ctx = (await builder.buildAll(['dA'])).single;
+    expect(ctx.primarySampleCount, isNull);
+    expect(ctx.neighbors.single.sampleCount, isNull);
+  });
+
+  test(
+    'finds same-diver neighbors within the window with edge depths',
+    () async {
+      final entry = DateTime.utc(2026, 7, 1, 10);
+      await seedDive(id: 'dA', entry: entry, serial: 'SN-1');
+      await seedDive(
+        id: 'dB',
+        entry: entry.add(const Duration(hours: 1)),
+        serial: 'SN-1',
+        profile: [
+          const domain.DiveProfilePoint(timestamp: 0, depth: 4.0),
+          const domain.DiveProfilePoint(timestamp: 60, depth: 1.5),
+        ],
+      );
+      await seedDive(
+        id: 'dFar',
+        entry: entry.add(const Duration(days: 2)),
+        serial: 'SN-1',
+      );
+      final ctx = (await builder.buildAll(['dA'])).single;
+      expect(ctx.neighbors.map((n) => n.id), ['dB']);
+      expect(ctx.neighbors.single.computerSerial, 'SN-1');
+      expect(ctx.neighbors.single.firstSampleDepth, 4.0);
+      expect(ctx.neighbors.single.lastSampleDepth, 1.5);
+    },
+  );
+
+  // Issue #1720. The delete-duplicate verdict deletes a whole dive, so it has
+  // to know whether the copy it names holds anything the diver put there.
+  // Both sides of a pair are measured by the same SQL so the answer cannot
+  // depend on which dive the scan reached first.
+  group('carriesDiverData', () {
+    Future<void> seedGearOn(String diveId) async {
+      const item = EquipmentItem(
+        id: 'e1',
+        name: 'My BCD',
+        type: EquipmentType.bcd,
+      );
+      await db
+          .into(db.equipment)
+          .insert(
+            EquipmentCompanion.insert(
+              id: item.id,
+              name: item.name,
+              type: item.type.name,
+              createdAt: 0,
+              updatedAt: 0,
+            ),
+          );
+      await db
+          .into(db.diveEquipment)
+          .insert(
+            DiveEquipmentCompanion.insert(diveId: diveId, equipmentId: item.id),
+          );
+    }
+
+    test('false for a dive nothing but the computer has touched', () async {
+      await seedDive(id: 'd1', entry: DateTime.utc(2026, 7, 1, 10));
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.carriesDiverData, isFalse);
+    });
+
+    test('true once the dive carries a gear link', () async {
+      await seedDive(id: 'd1', entry: DateTime.utc(2026, 7, 1, 10));
+      await seedGearOn('d1');
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.carriesDiverData, isTrue);
+    });
+
+    test('true for notes, a rating, or a site link', () async {
+      final entry = DateTime.utc(2026, 7, 1, 10);
+      await seedDive(id: 'dNotes', entry: entry);
+      await (db.update(db.dives)..where((t) => t.id.equals('dNotes'))).write(
+        const DivesCompanion(notes: Value('viz was poor')),
+      );
+      expect(
+        (await builder.buildAll(['dNotes'])).single.carriesDiverData,
+        isTrue,
+      );
+
+      await seedDive(id: 'dRating', entry: entry.add(const Duration(days: 5)));
+      await (db.update(db.dives)..where((t) => t.id.equals('dRating'))).write(
+        const DivesCompanion(rating: Value(4)),
+      );
+      expect(
+        (await builder.buildAll(['dRating'])).single.carriesDiverData,
+        isTrue,
+      );
+    });
+
+    // Whitespace is not an entry: a blank notes column must not make a
+    // pristine download look annotated and withhold the repair for nothing.
+    test('blank notes do not count as diver data', () async {
+      await seedDive(id: 'd1', entry: DateTime.utc(2026, 7, 1, 10));
+      await (db.update(db.dives)..where((t) => t.id.equals('d1'))).write(
+        const DivesCompanion(notes: Value('   ')),
+      );
+      expect((await builder.buildAll(['d1'])).single.carriesDiverData, isFalse);
+    });
+
+    // The tanks and dive types every download produces say nothing about
+    // whether a human has worked on the dive, so they are excluded.
+    test('a downloaded dive with tanks still reads as untouched', () async {
+      await seedDive(
+        id: 'd1',
+        entry: DateTime.utc(2026, 7, 1, 10),
+        tanks: [const domain.DiveTank(id: 't1', name: 'AL80')],
+      );
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.tanks, hasLength(1));
+      expect(ctx.carriesDiverData, isFalse);
+    });
+
+    test('reported for a neighbor from the same query', () async {
+      final entry = DateTime.utc(2026, 7, 1, 10);
+      await seedDive(id: 'dA', entry: entry, serial: 'SN-1');
+      await seedDive(
+        id: 'dB',
+        entry: entry.add(const Duration(hours: 1)),
+        serial: 'SN-1',
+      );
+      await seedGearOn('dB');
+      final ctx = (await builder.buildAll(['dA'])).single;
+      expect(ctx.carriesDiverData, isFalse);
+      expect(ctx.neighbors.single.id, 'dB');
+      expect(ctx.neighbors.single.carriesDiverData, isTrue);
+    });
+  });
+
+  group('mismatchedTransmitterSerials', () {
+    setUp(() async {
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-1',
+              name: 'Alex Diver',
+              createdAt: 1000,
+              updatedAt: 1000,
+            ),
+          );
+    });
+
+    // A tank carrying the registry serial: the builder only resolves the
+    // mismatch set for a dive the detector could flag.
+    domain.DiveTank serialTank() => const domain.DiveTank(
+      id: 't1',
+      gasMix: domain.GasMix(o2: 21, he: 0),
+      transmitterSerial: '555',
+    );
+
+    Future<void> seedTransmitterGear(
+      String id, {
+      String? serialNumber,
+    }) => db.customStatement(
+      "INSERT INTO equipment (id, diver_id, name, type, serial_number, "
+      "created_at, updated_at) VALUES ('$id', 'diver-1', 'Tx', "
+      "'transmitter', ${serialNumber == null ? 'NULL' : "'$serialNumber'"}, "
+      "1, 1)",
+    );
+
+    Future<void> seedTransmitter({
+      required String id,
+      required String serial,
+      required String transmitterEquipmentId,
+    }) {
+      final now = DateTime.utc(2026, 9, 1);
+      return TransmitterRepository().create(
+        Transmitter(
+          id: id,
+          diverId: 'diver-1',
+          transmitterSerial: serial,
+          label: 'Main',
+          transmitterEquipmentId: transmitterEquipmentId,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+    }
+
+    test('flags the serial when the linked gear item carries a different '
+        'one', () async {
+      await seedTransmitterGear('tx', serialNumber: '999');
+      await seedTransmitter(
+        id: 'e1',
+        serial: '555',
+        transmitterEquipmentId: 'tx',
+      );
+      await seedDive(
+        id: 'd1',
+        entry: DateTime.utc(2026, 7, 1),
+        diverId: 'diver-1',
+        tanks: [serialTank()],
+      );
+
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.mismatchedTransmitterSerials, {'555'});
+    });
+
+    test(
+      'is empty when the linked gear item carries the same serial',
+      () async {
+        await seedTransmitterGear('tx', serialNumber: '555');
+        await seedTransmitter(
+          id: 'e1',
+          serial: '555',
+          transmitterEquipmentId: 'tx',
+        );
+        await seedDive(
+          id: 'd1',
+          entry: DateTime.utc(2026, 7, 1),
+          diverId: 'diver-1',
+          tanks: [serialTank()],
+        );
+
+        final ctx = (await builder.buildAll(['d1'])).single;
+        expect(ctx.mismatchedTransmitterSerials, isEmpty);
+      },
+    );
+
+    test(
+      'is empty when the linked gear item has no serial of its own',
+      () async {
+        await seedTransmitterGear('tx');
+        await seedTransmitter(
+          id: 'e1',
+          serial: '555',
+          transmitterEquipmentId: 'tx',
+        );
+        await seedDive(
+          id: 'd1',
+          entry: DateTime.utc(2026, 7, 1),
+          diverId: 'diver-1',
+          tanks: [serialTank()],
+        );
+
+        final ctx = (await builder.buildAll(['d1'])).single;
+        expect(ctx.mismatchedTransmitterSerials, isEmpty);
+      },
+    );
+
+    test('is empty for a registry entry with no linked transmitter gear '
+        'item', () async {
+      final now = DateTime.utc(2026, 9, 1);
+      await TransmitterRepository().create(
+        Transmitter(
+          id: 'e1',
+          diverId: 'diver-1',
+          transmitterSerial: '555',
+          label: 'Main',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await seedDive(
+        id: 'd1',
+        entry: DateTime.utc(2026, 7, 1),
+        diverId: 'diver-1',
+        tanks: [serialTank()],
+      );
+
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.mismatchedTransmitterSerials, isEmpty);
+    });
+
+    test('is empty for a dive with no transmitter serial on any tank, '
+        'without resolving the mismatch', () async {
+      await seedTransmitterGear('tx', serialNumber: '999');
+      await seedTransmitter(
+        id: 'e1',
+        serial: '555',
+        transmitterEquipmentId: 'tx',
+      );
+      await seedDive(
+        id: 'd1',
+        entry: DateTime.utc(2026, 7, 1),
+        diverId: 'diver-1',
+      );
+
+      final ctx = (await builder.buildAll(['d1'])).single;
+      expect(ctx.mismatchedTransmitterSerials, isEmpty);
+    });
+  });
+}

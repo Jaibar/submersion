@@ -2,10 +2,17 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/app_sql_functions.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/tag_scope_tables.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/features/media/data/repositories/smart_album_tag_repoint.dart';
+import 'package:submersion/features/tags/data/mappers/tag_row_mapper.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart' as domain;
 
 class TagRepository {
@@ -18,18 +25,42 @@ class TagRepository {
   // CRUD Operations
   // ============================================================================
 
-  /// Get all tags, ordered by name
-  Future<List<domain.Tag>> getAllTags({String? diverId}) async {
+  /// Emits whenever the `tags` table changes so list providers can
+  /// refresh after a sync or any other write.
+  Stream<void> watchTagsChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.tags));
+
+  /// Emits when any tag link changes, on every junction in the tag scope
+  /// registry, since each moves a count in [getTagStatistics] (#1765, #1942).
+  Stream<void> watchTagLinkChanges() => _db.tableUpdates(
+    TableUpdateQuery.onAllTables([
+      for (final junction in tagScopeTables) _table(junction.junctionTable),
+    ]),
+  );
+
+  /// Get all tags, ordered by name. [scope] limits the list to tags offered
+  /// in that scope (issues #1765, #1942); null returns every tag.
+  Future<List<domain.Tag>> getAllTags({
+    String? diverId,
+    domain.TagScope? scope,
+  }) async {
     try {
       final query = _db.select(_db.tags)
-        ..orderBy([(t) => OrderingTerm.asc(t.name)]);
+        ..orderBy([(t) => OrderingTerm.asc(t.name.collate(Collate.noCase))]);
 
       if (diverId != null) {
         query.where((t) => t.diverId.equals(diverId));
       }
+      if (scope != null) {
+        final column = scope.table.scopeColumn;
+        query.where(
+          (t) =>
+              (t.columnsByName[column]! as GeneratedColumn<bool>).equals(true),
+        );
+      }
 
       final rows = await query.get();
-      return rows.map(_mapRowToTag).toList();
+      return sortedByText(rows, (r) => r.name).map(_mapRowToTag).toList();
     } catch (e, stackTrace) {
       _log.error('Failed to get all tags', error: e, stackTrace: stackTrace);
       rethrow;
@@ -52,15 +83,31 @@ class TagRepository {
     }
   }
 
-  /// Get a tag by name (case-insensitive)
+  /// Get a tag by name (case-insensitive, whitespace-insensitive)
+  ///
+  /// Normalizes both sides as `idx_tags_diver_name_unique` does
+  /// (`lower(trim(name))`), with unicode_lower also folding the non-ASCII
+  /// capitals the index's lower() leaves alone (#3032), so a lookup can
+  /// never miss a row the index considers the same tag.
+  ///
+  /// Deliberately takes the lowest id rather than asserting a single match:
+  /// an unscoped lookup legitimately spans two divers who both use "Wreck",
+  /// and `getSingleOrNull()` threw "too many elements" there -- which is what
+  /// the import wizard reported as "tagging failed" (#1032). Ordering by id
+  /// makes the winner the same row the uniqueness collapse keeps.
   Future<domain.Tag?> getTagByName(String name, {String? diverId}) async {
     try {
       final query = _db.select(_db.tags)
-        ..where((t) => t.name.lower().equals(name.toLowerCase()));
+        ..where(
+          (t) => t.name.trim().unicodeLower().equals(name.trim().toLowerCase()),
+        );
 
       if (diverId != null) {
         query.where((t) => t.diverId.equals(diverId));
       }
+      query
+        ..orderBy([(t) => OrderingTerm.asc(t.id)])
+        ..limit(1);
 
       final row = await query.getSingleOrNull();
       return row != null ? _mapRowToTag(row) : null;
@@ -74,25 +121,100 @@ class TagRepository {
     }
   }
 
-  /// Create a new tag
-  Future<domain.Tag> createTag(domain.Tag tag) async {
+  /// The tag occupying [name]'s uniqueness slot in [diverId]'s scope, if any.
+  ///
+  /// Mirrors `idx_tags_diver_name_unique` -- (COALESCE(diver_id, ''),
+  /// lower(trim(name))) -- except that the name is folded by unicode_lower,
+  /// which also folds non-ASCII capitals the index's lower() leaves alone
+  /// (#3032). Folding more than the index never misses a row the index would
+  /// reject, so a caller that checks here can never be surprised by it. A
+  /// NULL `diverId` is the shared "unassigned" scope, not a scope of its own
+  /// per row.
+  Future<domain.Tag?> _tagOccupying(String name, String? diverId) async {
+    final rows =
+        await (_db.select(_db.tags)
+              ..where(
+                (t) =>
+                    t.name.trim().unicodeLower().equals(
+                      name.trim().toLowerCase(),
+                    ) &
+                    coalesce([
+                      t.diverId,
+                      const Constant(''),
+                    ]).equals(diverId ?? ''),
+              )
+              ..orderBy([(t) => OrderingTerm.asc(t.id)])
+              ..limit(1))
+            .get();
+    return rows.isEmpty ? null : _mapRowToTag(rows.first);
+  }
+
+  /// Create a new tag, or return the one already holding the name.
+  ///
+  /// `tags` is uniquely indexed on (diver scope, case-folded name) since v149,
+  /// so inserting a second row for a name the scope already has would throw.
+  /// Returning the incumbent keeps every caller's contract ("a tag with this
+  /// name now exists and here it is") while never creating the duplicate that
+  /// made a dive show one tag twice (#1032).
+  ///
+  /// The incumbent is widened to [widenExistingTo] (issue #1765): the name
+  /// index allows only one tag, and the diver meant the same tag in both
+  /// places. It widens nothing by default, since a new tag's scopes default
+  /// to every scope and a tag narrowed on purpose must not be widened to all
+  /// of them by accident (issue #4407); a caller asks for what it needs,
+  /// such as the scope it is about to link the tag in.
+  Future<domain.Tag> createTag(
+    domain.Tag tag, {
+    Set<domain.TagScope> widenExistingTo = const {},
+  }) async {
+    final incumbentScopes = widenExistingTo;
     try {
-      _log.info('Creating tag: ${tag.name}');
+      _requireScope(tag);
+      final incumbent = await _tagOccupying(tag.name, tag.diverId);
+      if (incumbent != null) {
+        _log.info('Tag "${tag.name}" already exists as ${incumbent.id}');
+        return await _widenTo(incumbent, incumbentScopes);
+      }
+
+      // Store the SAME normalization the index and every lookup key on.
+      // Persisting the raw value while matching on a trimmed one is what let
+      // " Wreck" and "Wreck" coexist as two rows (PR #1033 review).
+      final name = tag.name.trim();
+      _log.info('Creating tag: $name');
       final id = tag.id.isEmpty ? _uuid.v4() : tag.id;
       final now = DateTime.now().millisecondsSinceEpoch;
 
-      await _db
+      // Conflict-aware rather than a bare insert. The incumbent check above is
+      // an `await`, so two callers can both pass it and the loser would then
+      // throw on idx_tags_diver_name_unique -- failing an operation whose whole
+      // contract is "a tag with this name now exists" (PR #1033 review). A null
+      // return means someone won the race; fall back to reading their row,
+      // which is the same answer the incumbent check would have given.
+      final created = await _db
           .into(_db.tags)
-          .insert(
-            TagsCompanion(
-              id: Value(id),
-              diverId: Value(tag.diverId),
-              name: Value(tag.name),
-              color: Value(tag.colorHex),
-              createdAt: Value(now),
-              updatedAt: Value(now),
-            ),
+          .insertReturningOrNull(
+            RawValuesInsertable<Tag>({
+              ...TagsCompanion(
+                id: Value(id),
+                diverId: Value(tag.diverId),
+                name: Value(name),
+                color: Value(tag.colorHex),
+                createdAt: Value(now),
+                updatedAt: Value(now),
+              ).toColumns(false),
+              ...tagScopeColumns(tag.scopes),
+            }),
+            onConflict: DoNothing<$TagsTable, Tag>(target: const []),
           );
+      if (created == null) {
+        final winner = await _tagOccupying(name, tag.diverId);
+        _log.info('Tag "$name" was created concurrently as ${winner?.id}');
+        if (winner != null) return await _widenTo(winner, incumbentScopes);
+        // Vanishingly unlikely: the conflicting row was deleted between the
+        // insert and this read. Surfacing it beats returning a tag id that
+        // does not exist.
+        throw StateError('Tag "$name" conflicted but could not be read back');
+      }
 
       await _syncRepository.markRecordPending(
         entityType: 'tags',
@@ -102,37 +224,42 @@ class TagRepository {
       SyncEventBus.notifyLocalChange();
 
       _log.info('Created tag with id: $id');
-      return tag.copyWith(id: id);
+      return tag.copyWith(id: id, name: name);
     } catch (e, stackTrace) {
       _log.error('Failed to create tag', error: e, stackTrace: stackTrace);
       rethrow;
     }
   }
 
-  /// Create a tag or get existing if name already exists
+  /// Create a tag or get existing if name already exists. The tag comes back
+  /// offered in [scope]: an existing tag lacking it is widened to [scope]
+  /// alone (issue #1765), so a tag narrowed on purpose stays narrow. A new
+  /// tag is offered everywhere, so it can be reused on any kind of item
+  /// (issue #4407); a caller wanting it narrower uses [createTag].
   Future<domain.Tag> getOrCreateTag(
     String name, {
     String? colorHex,
     String? diverId,
+    domain.TagScope scope = domain.TagScope.dives,
   }) async {
     try {
       // Check if tag with this name exists for this diver
       final existing = await getTagByName(name, diverId: diverId);
       if (existing != null) {
-        return existing;
+        return await _widen(existing, scope);
       }
 
-      // Create new tag
-      final now = DateTime.now();
-      return createTag(
-        domain.Tag(
+      // Create new tag. A tag created concurrently under the same name is
+      // an existing tag too, so it is widened to [scope] alone.
+      return await createTag(
+        domain.Tag.create(
           id: _uuid.v4(),
           diverId: diverId,
           name: name.trim(),
           colorHex: colorHex,
-          createdAt: now,
-          updatedAt: now,
+          scopes: domain.TagScope.everywhere,
         ),
+        widenExistingTo: {scope},
       );
     } catch (e, stackTrace) {
       _log.error(
@@ -144,24 +271,64 @@ class TagRepository {
     }
   }
 
-  /// Update an existing tag
+  /// Update an existing tag.
+  ///
+  /// Renaming onto a name the scope already uses folds the two tags together
+  /// rather than throwing on `idx_tags_diver_name_unique`: the user asked for
+  /// one tag by that name, and every dive on either side keeps it. This is the
+  /// same outcome the tag merge sheet produces, so it reuses [mergeTags].
+  ///
+  /// Scope (issues #1765, #1942): turning off a scope for a tag also removes
+  /// it from every item of that scope carrying it, each link tombstoned, so a
+  /// link always implies its scope. The UI confirms before doing that.
   Future<void> updateTag(domain.Tag tag) async {
     try {
+      _requireScope(tag);
+      // Normalized before both the uniqueness check and the write, so a rename
+      // cannot store a spelling the index would key differently.
+      final name = tag.name.trim();
+      final incumbent = await _tagOccupying(name, tag.diverId);
+      if (incumbent != null && incumbent.id != tag.id) {
+        _log.info(
+          'Renaming ${tag.id} onto "$name" merges into ${incumbent.id}',
+        );
+        await mergeTags(
+          sourceTagIds: [tag.id],
+          survivingTagId: incumbent.id,
+          name: name,
+          colorHex: tag.colorHex,
+        );
+        return;
+      }
+
       _log.info('Updating tag: ${tag.id}');
       final now = DateTime.now().millisecondsSinceEpoch;
 
-      await (_db.update(_db.tags)..where((t) => t.id.equals(tag.id))).write(
-        TagsCompanion(
-          name: Value(tag.name),
-          color: Value(tag.colorHex),
-          updatedAt: Value(now),
-        ),
-      );
-      await _syncRepository.markRecordPending(
-        entityType: 'tags',
-        recordId: tag.id,
-        localUpdatedAt: now,
-      );
+      await _db.transaction(() async {
+        final stored = await getTagById(tag.id);
+        await (_db.update(_db.tags)..where((t) => t.id.equals(tag.id))).write(
+          RawValuesInsertable<Tag>({
+            ...TagsCompanion(
+              name: Value(name),
+              color: Value(tag.colorHex),
+              updatedAt: Value(now),
+            ).toColumns(false),
+            ...tagScopeColumns(tag.scopes),
+          }),
+        );
+        await _syncRepository.markRecordPending(
+          entityType: 'tags',
+          recordId: tag.id,
+          localUpdatedAt: now,
+        );
+        if (stored != null) {
+          for (final scope in domain.TagScope.values) {
+            if (stored.appliesTo(scope) && !tag.appliesTo(scope)) {
+              await _unlinkAll(scope.table, tag.id);
+            }
+          }
+        }
+      });
       SyncEventBus.notifyLocalChange();
       _log.info('Updated tag: ${tag.id}');
     } catch (e, stackTrace) {
@@ -174,8 +341,172 @@ class TagRepository {
     }
   }
 
+  // ============================================================================
+  // Scope (issues #1765, #1942)
+  // ============================================================================
+
+  void _requireScope(domain.Tag tag) {
+    if (tag.scopes.isEmpty) {
+      throw ArgumentError(
+        'A tag must apply to at least one of: '
+        '${domain.TagScope.values.map((s) => s.name).join(', ')}',
+      );
+    }
+  }
+
+  /// Sets the colour of the tag [id] alone, leaving its name and every
+  /// scope flag as stored: unlike [updateTag], it cannot narrow a tag or
+  /// undo a widening that landed after the caller read it (issue #4407).
+  Future<void> setTagColor(String id, String? colorHex) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(_db.tags)..where((t) => t.id.equals(id))).write(
+      TagsCompanion(color: Value(colorHex), updatedAt: Value(now)),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'tags',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// [tag] widened to also cover every scope in [scopes], in one write and
+  /// one sync mark; returns [tag] with those scopes added. Never narrows it,
+  /// and never clears a flag another widening set meanwhile.
+  Future<domain.Tag> widenTag(domain.Tag tag, Set<domain.TagScope> scopes) =>
+      _widenTo(tag, scopes);
+
+  /// [tag] widened to also cover every scope in [wanted], in one write.
+  /// [notify] false for a caller that notifies once itself.
+  Future<domain.Tag> _widenTo(
+    domain.Tag tag,
+    Set<domain.TagScope> wanted, {
+    bool notify = true,
+  }) async {
+    final missing = wanted.difference(tag.scopes);
+    if (missing.isEmpty) return tag;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // Only the flags being added, each set true: widening never clears one,
+    // so a widening from a stale snapshot cannot undo another that landed
+    // since it was read.
+    await (_db.update(_db.tags)..where((t) => t.id.equals(tag.id))).write(
+      RawValuesInsertable<Tag>({
+        for (final scope in missing)
+          scope.table.scopeColumn: const Variable<bool>(true),
+        ...TagsCompanion(updatedAt: Value(now)).toColumns(false),
+      }),
+    );
+    // Not re-read: the stored flags are right whatever else landed, and a
+    // logbook rule widening many tags keeps to one read each (#3513).
+    final widened = tag.copyWith(scopes: {...tag.scopes, ...missing});
+    await _syncRepository.markRecordPending(
+      entityType: 'tags',
+      recordId: tag.id,
+      localUpdatedAt: now,
+    );
+    if (notify) SyncEventBus.notifyLocalChange();
+    _log.info(
+      'Widened tag ${tag.id} to ${missing.map((s) => s.name).join(', ')}',
+    );
+    return widened;
+  }
+
+  /// Adds [scope] to [tag] if it lacks it, returning the stored result.
+  /// [notify] false for a caller that notifies once itself.
+  Future<domain.Tag> _widen(
+    domain.Tag tag,
+    domain.TagScope scope, {
+    bool notify = true,
+  }) => _widenTo(tag, {scope}, notify: notify);
+
+  /// Adds [scope] to each of [tagIds] that lacks it, before they are linked
+  /// there, so a link keeps implying its scope (#1765). A logbook rule
+  /// (#3513) passes [notify] false: its run notifies once, its preview never.
+  Future<void> widenScope(
+    Iterable<String> tagIds,
+    domain.TagScope scope, {
+    bool notify = true,
+  }) async {
+    for (final id in tagIds.toSet()) {
+      if (await getTagById(id) case final tag?) {
+        await _widen(tag, scope, notify: notify);
+      }
+    }
+  }
+
+  /// The Drift table called [name], so a registry-driven write tells Drift
+  /// what it touched and stream queries over that table refresh.
+  TableInfo<Table, dynamic> _table(String name) =>
+      _db.allTables.firstWhere((t) => t.actualTableName == name);
+
+  /// Every link of [tagId] in [junction], as (link id, linked item id).
+  Future<List<({String id, String parentId})>> _linksOf(
+    TagScopeTable junction,
+    String tagId,
+  ) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT id, ${junction.parentColumn} AS parent_id '
+          'FROM ${junction.junctionTable} WHERE tag_id = ?',
+          variables: [Variable.withString(tagId)],
+        )
+        .get();
+    return [
+      for (final row in rows)
+        (id: row.read<String>('id'), parentId: row.read<String>('parent_id')),
+    ];
+  }
+
+  /// Removes [tagId] from every item in [junction], tombstoning each link.
+  /// No parent is re-stamped, dives included: narrowing never did, and site
+  /// links are clockless children (#1769).
+  Future<void> _unlinkAll(TagScopeTable junction, String tagId) async {
+    final links = await _linksOf(junction, tagId);
+    if (links.isEmpty) return;
+    await _db.customUpdate(
+      'DELETE FROM ${junction.junctionTable} WHERE tag_id = ?',
+      variables: [Variable.withString(tagId)],
+      updates: {_table(junction.junctionTable)},
+      updateKind: UpdateKind.delete,
+    );
+    for (final link in links) {
+      await _syncRepository.logDeletion(
+        entityType: junction.syncEntity,
+        recordId: link.id,
+      );
+    }
+  }
+
+  /// How many items of each scope carry [tagId]; the scope editor confirms
+  /// with these before narrowing a tag. Every registry scope has an entry.
+  Future<Map<domain.TagScope, int>> getTagUsage(String tagId) async {
+    final counts = [
+      for (final scope in domain.TagScope.values)
+        '(SELECT COUNT(*) FROM ${scope.table.junctionTable} '
+            'WHERE tag_id = ?1) AS ${scope.name}',
+    ];
+    final row = await _db
+        .customSelect(
+          // stats-scope-exempt: usage indicator for the scope editor. Must see
+          // every dive carrying the tag, excluded ones included.
+          'SELECT ${counts.join(', ')}',
+          variables: [Variable.withString(tagId)],
+        )
+        .getSingle();
+    return {
+      for (final scope in domain.TagScope.values)
+        scope: row.read<int>(scope.name),
+    };
+  }
+
   /// Delete a tag
-  Future<void> deleteTag(String id) async {
+  Future<void> deleteTag(String id) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.deletedRecord,
+    body: () => _deleteTagInner(id),
+  );
+
+  Future<void> _deleteTagInner(String id) async {
     try {
       _log.info('Deleting tag: $id');
       await (_db.delete(_db.tags)..where((t) => t.id.equals(id))).go();
@@ -195,33 +526,24 @@ class TagRepository {
   /// Get tags for a specific dive
   Future<List<domain.Tag>> getTagsForDive(String diveId) async {
     try {
+      // DISTINCT so a legacy database that has not yet been through the v149
+      // collapse still renders each tag once (#1032).
       final result = await _db
           .customSelect(
             '''
-        SELECT t.* FROM tags t
+        SELECT DISTINCT t.* FROM tags t
         INNER JOIN dive_tags dt ON t.id = dt.tag_id
         WHERE dt.dive_id = ?
-        ORDER BY t.name
+        ORDER BY t.name COLLATE NOCASE
       ''',
             variables: [Variable.withString(diveId)],
           )
           .get();
 
-      return result
-          .map(
-            (row) => domain.Tag(
-              id: row.data['id'] as String,
-              name: row.data['name'] as String,
-              colorHex: row.data['color'] as String?,
-              createdAt: DateTime.fromMillisecondsSinceEpoch(
-                row.data['created_at'] as int,
-              ),
-              updatedAt: DateTime.fromMillisecondsSinceEpoch(
-                row.data['updated_at'] as int,
-              ),
-            ),
-          )
-          .toList();
+      return sortedByText(
+        result,
+        (r) => r.data['name'] as String,
+      ).map((row) => mapTagRow(_db.tags.map(row.data))).toList();
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get tags for dive: $diveId',
@@ -242,28 +564,18 @@ class TagRepository {
       final placeholders = diveIds.map((_) => '?').join(',');
       final result = await _db.customSelect(
         '''
-        SELECT dt.dive_id, t.* FROM tags t
+        SELECT DISTINCT dt.dive_id, t.* FROM tags t
         INNER JOIN dive_tags dt ON t.id = dt.tag_id
         WHERE dt.dive_id IN ($placeholders)
-        ORDER BY t.name
+        ORDER BY t.name COLLATE NOCASE
       ''',
         variables: diveIds.map((id) => Variable.withString(id)).toList(),
       ).get();
 
       final tagsByDive = <String, List<domain.Tag>>{};
-      for (final row in result) {
+      for (final row in sortedByText(result, (r) => r.data['name'] as String)) {
         final diveId = row.data['dive_id'] as String;
-        final tag = domain.Tag(
-          id: row.data['id'] as String,
-          name: row.data['name'] as String,
-          colorHex: row.data['color'] as String?,
-          createdAt: DateTime.fromMillisecondsSinceEpoch(
-            row.data['created_at'] as int,
-          ),
-          updatedAt: DateTime.fromMillisecondsSinceEpoch(
-            row.data['updated_at'] as int,
-          ),
-        );
+        final tag = mapTagRow(_db.tags.map(row.data));
         tagsByDive.putIfAbsent(diveId, () => []).add(tag);
       }
       return tagsByDive;
@@ -277,7 +589,12 @@ class TagRepository {
     }
   }
 
-  /// Set tags for a dive (replaces existing tags)
+  /// Makes [tags] the dive's tags. Only what changed is written (issue
+  /// #4477): a tag that stays keeps its row, a dropped tag's row is deleted,
+  /// and an added tag gets a row under a fresh id. Rewriting every row made
+  /// a revert of the save restore the old rows beside the new ones, which
+  /// the unique index on (dive_id, tag_id) refuses. A save that changes
+  /// nothing writes nothing.
   Future<void> setTagsForDive(String diveId, List<domain.Tag> tags) async {
     try {
       _log.info('Setting ${tags.length} tags for dive: $diveId');
@@ -285,21 +602,27 @@ class TagRepository {
       final existingDiveTags = await (_db.select(
         _db.diveTags,
       )..where((t) => t.diveId.equals(diveId))).get();
+      // Deduplicated by id: `dive_tags` is uniquely indexed on
+      // (dive_id, tag_id) since v149, so the same tag listed twice would
+      // throw rather than quietly double up.
+      final wanted = {for (final tag in tags) tag.id};
+      final have = {for (final row in existingDiveTags) row.tagId};
+      if (wanted.length == have.length && wanted.containsAll(have)) return;
 
-      // Delete existing tags for this dive
-      await (_db.delete(
-        _db.diveTags,
-      )..where((t) => t.diveId.equals(diveId))).go();
       for (final diveTag in existingDiveTags) {
+        if (wanted.contains(diveTag.tagId)) continue;
+        await (_db.delete(
+          _db.diveTags,
+        )..where((t) => t.id.equals(diveTag.id))).go();
         await _syncRepository.logDeletion(
           entityType: 'diveTags',
           recordId: diveTag.id,
         );
       }
 
-      // Insert new tags
       final now = DateTime.now().millisecondsSinceEpoch;
-      for (final tag in tags) {
+      for (final tagId in wanted) {
+        if (have.contains(tagId)) continue;
         final id = _uuid.v4();
         await _db
             .into(_db.diveTags)
@@ -307,7 +630,7 @@ class TagRepository {
               DiveTagsCompanion(
                 id: Value(id),
                 diveId: Value(diveId),
-                tagId: Value(tag.id),
+                tagId: Value(tagId),
                 createdAt: Value(now),
               ),
             );
@@ -339,23 +662,37 @@ class TagRepository {
     }
   }
 
-  /// Add a tag to a dive
+  /// Add a tag to a dive.
+  ///
+  /// A no-op when the dive already carries the tag. Re-running an import used
+  /// to blind-insert a second junction row under a fresh uuid, which is how
+  /// one dive ended up showing the same import tag several times (#1032).
   Future<void> addTagToDive(String diveId, String tagId) async {
     try {
       _log.info('Adding tag $tagId to dive: $diveId');
       final now = DateTime.now().millisecondsSinceEpoch;
       final id = _uuid.v4();
 
-      await _db
+      // One statement rather than read-then-insert. A separate existence check
+      // is both an extra round trip and still racy: two callers can each see
+      // "missing" and the loser then throws on idx_dive_tags_dive_tag_unique.
+      // Letting the database decide makes the duplicate a true no-op, and a
+      // null return says the pair was already there (PR #1033 review).
+      final inserted = await _db
           .into(_db.diveTags)
-          .insert(
+          .insertReturningOrNull(
             DiveTagsCompanion(
               id: Value(id),
               diveId: Value(diveId),
               tagId: Value(tagId),
               createdAt: Value(now),
             ),
+            onConflict: DoNothing<$DiveTagsTable, DiveTag>(target: const []),
           );
+      if (inserted == null) {
+        _log.info('Dive $diveId already carries tag $tagId');
+        return;
+      }
 
       await _syncRepository.markRecordPending(
         entityType: 'diveTags',
@@ -421,39 +758,41 @@ class TagRepository {
   // Statistics
   // ============================================================================
 
-  /// Get tag statistics (usage counts)
+  /// Get tag statistics (usage counts per scope)
   Future<List<TagStatistic>> getTagStatistics({String? diverId}) async {
     try {
       final diverFilter = diverId != null ? 'WHERE t.diver_id = ?' : '';
       final variables = diverId != null
           ? [Variable.withString(diverId)]
           : <Variable<Object>>[];
+      const scopes = domain.TagScope.values;
+      final countColumns = [
+        for (final scope in scopes)
+          '(SELECT COUNT(*) FROM ${scope.table.junctionTable} j '
+              'WHERE j.tag_id = t.id) AS ${scope.name}_count',
+      ];
+      // Registry order, so the dive count comes first: the dive tag picker
+      // lists "tags you use most" in exactly this order, and each later
+      // scope's count only breaks ties (#1765, #1942).
+      final order = [for (final scope in scopes) '${scope.name}_count DESC'];
 
+      // stats-scope-exempt: usage counts for managing tags, not a
+      // statistic. A planned or stats-excluded dive still carries the tag.
       final result = await _db.customSelect('''
-        SELECT t.*, COUNT(dt.dive_id) as dive_count
+        SELECT t.*, ${countColumns.join(', ')}
         FROM tags t
-        LEFT JOIN dive_tags dt ON t.id = dt.tag_id
         $diverFilter
-        GROUP BY t.id
-        ORDER BY dive_count DESC, t.name
+        ORDER BY ${order.join(', ')}, t.name
       ''', variables: variables).get();
 
       return result
           .map(
             (row) => TagStatistic(
-              tag: domain.Tag(
-                id: row.data['id'] as String,
-                diverId: row.data['diver_id'] as String?,
-                name: row.data['name'] as String,
-                colorHex: row.data['color'] as String?,
-                createdAt: DateTime.fromMillisecondsSinceEpoch(
-                  row.data['created_at'] as int,
-                ),
-                updatedAt: DateTime.fromMillisecondsSinceEpoch(
-                  row.data['updated_at'] as int,
-                ),
-              ),
-              diveCount: row.data['dive_count'] as int,
+              tag: mapTagRow(_db.tags.map(row.data)),
+              counts: {
+                for (final scope in scopes)
+                  scope: row.read<int>('${scope.name}_count'),
+              },
             ),
           )
           .toList();
@@ -472,6 +811,9 @@ class TagRepository {
     try {
       final result = await _db
           .customSelect(
+            // stats-scope-exempt: usage/deletion indicator. Must see every
+            // dive carrying the tag, excluded ones included, or removing the
+            // tag would strand a reference.
             'SELECT COUNT(*) as count FROM dive_tags WHERE tag_id = ?',
             variables: [Variable.withString(tagId)],
           )
@@ -487,21 +829,42 @@ class TagRepository {
     }
   }
 
-  /// Get combined dive count for multiple tags (union, not sum)
-  Future<int> getMergedDiveCount(List<String> tagIds) async {
-    if (tagIds.isEmpty) return 0;
+  /// How many distinct items of each scope carry any of [tagIds] (union, not
+  /// sum): an item carrying two of them counts once. Previews what a bulk
+  /// delete or a merge rewrites (#1902). Every registry scope has an entry.
+  Future<Map<domain.TagScope, int>> getMergedUsage(List<String> tagIds) async {
+    if (tagIds.isEmpty) {
+      return {for (final scope in domain.TagScope.values) scope: 0};
+    }
     try {
-      final placeholders = tagIds.map((_) => '?').join(',');
-      final result = await _db
+      final rows = tagIds.map((_) => '(?)').join(', ');
+      final counts = [
+        for (final scope in domain.TagScope.values)
+          '(SELECT COUNT(DISTINCT ${scope.table.parentColumn}) '
+              'FROM ${scope.table.junctionTable} '
+              'WHERE tag_id IN (SELECT tag_id FROM selected)) '
+              'AS ${scope.name}',
+      ];
+      final row = await _db
           .customSelect(
-            'SELECT COUNT(DISTINCT dive_id) as count FROM dive_tags WHERE tag_id IN ($placeholders)',
+            // stats-scope-exempt: delete and merge preview. Tells the diver
+            // how many items the change rewrites, which is every one of
+            // them. The ids bind once, in the CTE, and every count reads
+            // from it: binding them per count would divide the selection
+            // SQLite's bound-variable limit allows. Chunking would not do,
+            // since a union count cannot be summed across chunks.
+            'WITH selected(tag_id) AS (VALUES $rows) '
+            'SELECT ${counts.join(', ')}',
             variables: tagIds.map((id) => Variable.withString(id)).toList(),
           )
           .getSingle();
-      return result.data['count'] as int;
+      return {
+        for (final scope in domain.TagScope.values)
+          scope: row.read<int>(scope.name),
+      };
     } catch (e, stackTrace) {
       _log.error(
-        'Failed to get merged dive count',
+        'Failed to get merged tag usage',
         error: e,
         stackTrace: stackTrace,
       );
@@ -512,18 +875,18 @@ class TagRepository {
   /// Search tags by name (for autocomplete)
   Future<List<domain.Tag>> searchTags(String query, {String? diverId}) async {
     try {
-      if (query.isEmpty) return getAllTags(diverId: diverId);
+      if (query.isEmpty) return await getAllTags(diverId: diverId);
 
       final searchQuery = _db.select(_db.tags)
-        ..where((t) => t.name.lower().contains(query.toLowerCase()))
-        ..orderBy([(t) => OrderingTerm.asc(t.name)]);
+        ..where((t) => t.name.searchFold().contains(foldForSearch(query)))
+        ..orderBy([(t) => OrderingTerm.asc(t.name.collate(Collate.noCase))]);
 
       if (diverId != null) {
         searchQuery.where((t) => t.diverId.equals(diverId));
       }
 
       final rows = await searchQuery.get();
-      return rows.map(_mapRowToTag).toList();
+      return sortedByText(rows, (r) => r.name).map(_mapRowToTag).toList();
     } catch (e, stackTrace) {
       _log.error(
         'Failed to search tags: $query',
@@ -542,9 +905,26 @@ class TagRepository {
   ///
   /// [sourceTagIds] are the tags to merge away (will be deleted).
   /// [survivingTagId] is the tag that remains, updated with [name] and [colorHex].
-  /// All dive associations from source tags move to the surviving tag.
-  /// Duplicate associations (dive already has surviving tag) are removed.
+  /// Every link of a source tag, in every junction of the tag scope registry,
+  /// moves to the surviving tag. A link whose item already has the surviving
+  /// tag is removed.
   Future<void> mergeTags({
+    required List<String> sourceTagIds,
+    required String survivingTagId,
+    required String name,
+    required String? colorHex,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.merge,
+    body: () => _mergeTagsInner(
+      sourceTagIds: sourceTagIds,
+      survivingTagId: survivingTagId,
+      name: name,
+      colorHex: colorHex,
+    ),
+  );
+
+  Future<void> _mergeTagsInner({
     required List<String> sourceTagIds,
     required String survivingTagId,
     required String name,
@@ -563,25 +943,34 @@ class TagRepository {
       final now = DateTime.now().millisecondsSinceEpoch;
 
       await _db.transaction(() async {
-        // Pre-fetch all diveIds that already have the surviving tag
-        final existingSurvivingDiveIds =
-            (await (_db.select(
-                  _db.diveTags,
-                )..where((t) => t.tagId.equals(survivingTagId))).get())
-                .map((dt) => dt.diveId)
-                .toSet();
+        // Items that already carry the surviving tag, per junction.
+        final covered = <TagScopeTable, Set<String>>{};
+        for (final junction in tagScopeTables) {
+          covered[junction] = {
+            for (final link in await _linksOf(junction, survivingTagId))
+              link.parentId,
+          };
+        }
 
-        // Collect all affected diveIds to batch-update updatedAt once
-        final affectedDiveIds = <String>{};
-        // Update surviving tag name and color
+        // The survivor keeps every use the merged tags had (issue #1765). A
+        // merge of rows that carry no scope at all stays a dive tag.
+        final mergedRows = await (_db.select(
+          _db.tags,
+        )..where((t) => t.id.isIn([survivingTagId, ...sourceTagIds]))).get();
+        final union = {for (final row in mergedRows) ...tagScopesOf(row)};
         await (_db.update(
           _db.tags,
         )..where((t) => t.id.equals(survivingTagId))).write(
-          TagsCompanion(
-            name: Value(name),
-            color: Value(colorHex),
-            updatedAt: Value(now),
-          ),
+          RawValuesInsertable<Tag>({
+            ...TagsCompanion(
+              name: Value(name),
+              color: Value(colorHex),
+              updatedAt: Value(now),
+            ).toColumns(false),
+            ...tagScopeColumns(
+              union.isEmpty ? const {domain.TagScope.dives} : union,
+            ),
+          }),
         );
         await _syncRepository.markRecordPending(
           entityType: 'tags',
@@ -589,46 +978,63 @@ class TagRepository {
           localUpdatedAt: now,
         );
 
+        // Smart albums filtered by a merged tag follow it to the survivor
+        // (issue #1970); its id is about to stop existing.
+        await repointSmartAlbumTags(
+          _db,
+          _syncRepository,
+          fromTagIds: sourceTagIds,
+          toTagId: survivingTagId,
+          now: now,
+        );
+
+        // Parents to re-stamp once at the end, by table: a dive link
+        // re-stamps its dive; site links are clockless children (#1769).
+        final restamp = <String, Set<String>>{};
         for (final sourceId in sourceTagIds) {
-          // Get all dive associations for this source tag
-          final sourceDiveTags = await (_db.select(
-            _db.diveTags,
-          )..where((t) => t.tagId.equals(sourceId))).get();
-
-          for (final diveTag in sourceDiveTags) {
-            if (!existingSurvivingDiveIds.contains(diveTag.diveId)) {
-              // Move association to surviving tag
-              final newId = _uuid.v4();
-              await _db
-                  .into(_db.diveTags)
-                  .insert(
-                    DiveTagsCompanion(
-                      id: Value(newId),
-                      diveId: Value(diveTag.diveId),
-                      tagId: Value(survivingTagId),
-                      createdAt: Value(now),
-                    ),
-                  );
-              await _syncRepository.markRecordPending(
-                entityType: 'diveTags',
-                recordId: newId,
-                localUpdatedAt: now,
+          for (final junction in tagScopeTables) {
+            final updates = {_table(junction.junctionTable)};
+            final carried = covered[junction]!;
+            for (final link in await _linksOf(junction, sourceId)) {
+              if (carried.add(link.parentId)) {
+                // Move the link to the surviving tag.
+                final newId = _uuid.v4();
+                await _db.customInsert(
+                  'INSERT INTO ${junction.junctionTable} '
+                  '(id, ${junction.parentColumn}, tag_id, created_at) '
+                  'VALUES (?, ?, ?, ?)',
+                  variables: [
+                    Variable.withString(newId),
+                    Variable.withString(link.parentId),
+                    Variable.withString(survivingTagId),
+                    Variable.withInt(now),
+                  ],
+                  updates: updates,
+                );
+                await _syncRepository.markRecordPending(
+                  entityType: junction.syncEntity,
+                  recordId: newId,
+                  localUpdatedAt: now,
+                );
+              }
+              // Deleted explicitly (not by CASCADE) so sync tracks each one.
+              await _db.customUpdate(
+                'DELETE FROM ${junction.junctionTable} WHERE id = ?',
+                variables: [Variable.withString(link.id)],
+                updates: updates,
+                updateKind: UpdateKind.delete,
               );
-              // Track so subsequent source tags see this dive as covered
-              existingSurvivingDiveIds.add(diveTag.diveId);
+              await _syncRepository.logDeletion(
+                entityType: junction.syncEntity,
+                recordId: link.id,
+              );
+              final parentTable = junction.restampedParentTable;
+              if (parentTable != null) {
+                restamp
+                    .putIfAbsent(parentTable, () => <String>{})
+                    .add(link.parentId);
+              }
             }
-
-            // Delete explicitly (not relying on CASCADE) so sync tracks
-            // each deletion
-            await (_db.delete(
-              _db.diveTags,
-            )..where((t) => t.id.equals(diveTag.id))).go();
-            await _syncRepository.logDeletion(
-              entityType: 'diveTags',
-              recordId: diveTag.id,
-            );
-
-            affectedDiveIds.add(diveTag.diveId);
           }
 
           // Delete the source tag (inlined to avoid SyncEventBus inside txn)
@@ -641,15 +1047,22 @@ class TagRepository {
           );
         }
 
-        // Batch-update updatedAt for all affected dives
-        for (final diveId in affectedDiveIds) {
-          await (_db.update(_db.dives)..where((t) => t.id.equals(diveId)))
-              .write(DivesCompanion(updatedAt: Value(now)));
-          await _syncRepository.markRecordPending(
-            entityType: 'dives',
-            recordId: diveId,
-            localUpdatedAt: now,
-          );
+        for (final entry in restamp.entries) {
+          for (final parentId in entry.value) {
+            await _db.customUpdate(
+              'UPDATE ${entry.key} SET updated_at = ? WHERE id = ?',
+              variables: [Variable.withInt(now), Variable.withString(parentId)],
+              updates: {_table(entry.key)},
+              updateKind: UpdateKind.update,
+            );
+            // The table name doubles as its sync entity type (see
+            // TagScopeTable.restampedParentTable).
+            await _syncRepository.markRecordPending(
+              entityType: entry.key,
+              recordId: parentId,
+              localUpdatedAt: now,
+            );
+          }
         }
       });
 
@@ -665,22 +1078,19 @@ class TagRepository {
   // Mapping Helpers
   // ============================================================================
 
-  domain.Tag _mapRowToTag(Tag row) {
-    return domain.Tag(
-      id: row.id,
-      diverId: row.diverId,
-      name: row.name,
-      colorHex: row.color,
-      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
-      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
-    );
-  }
+  domain.Tag _mapRowToTag(Tag row) => mapTagRow(row);
 }
 
 /// Tag usage statistics
 class TagStatistic {
   final domain.Tag tag;
-  final int diveCount;
 
-  TagStatistic({required this.tag, required this.diveCount});
+  /// Items carrying the tag, per scope (issues #1765, #1942). The repository
+  /// fills every scope; a hand-built statistic may leave some out.
+  final Map<domain.TagScope, int> counts;
+
+  TagStatistic({required this.tag, this.counts = const {}});
+
+  /// How many items of [scope] carry the tag; 0 when [counts] lacks it.
+  int count(domain.TagScope scope) => counts[scope] ?? 0;
 }

@@ -1,5 +1,13 @@
 import 'package:flutter/material.dart';
 
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
+import 'package:submersion/features/shared_library/presentation/widgets/library_site_badge.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
+
 /// Single-row flat tile for the site list (maximum density).
 ///
 /// Row: Site name (expanded) | Location (truncated) | Dive count | Chevron
@@ -8,10 +16,13 @@ class DenseSiteListTile extends StatelessWidget {
   final String? location;
   final int diveCount;
   final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
   final bool isSelectionMode;
   final bool isSelected;
   final bool isHighlighted;
+  final bool showSharedBadge;
+
+  /// The site, when the row should show a shared site library badge (issue #2567).
+  final DiveSite? site;
 
   const DenseSiteListTile({
     super.key,
@@ -19,10 +30,11 @@ class DenseSiteListTile extends StatelessWidget {
     this.location,
     required this.diveCount,
     this.onTap,
-    this.onLongPress,
     this.isSelectionMode = false,
     this.isSelected = false,
     this.isHighlighted = false,
+    this.showSharedBadge = false,
+    this.site,
   });
 
   @override
@@ -48,27 +60,18 @@ class DenseSiteListTile extends StatelessWidget {
         ),
         child: InkWell(
           onTap: onTap,
-          onLongPress: onLongPress,
           child: Padding(
-            padding: const EdgeInsets.only(
-              left: 8,
-              right: 16,
-              top: 10,
-              bottom: 10,
+            padding: const EdgeInsets.symmetric(
+              horizontal: kRecordRowDenseHorizontalPadding,
+              vertical: 10,
             ),
             child: Row(
               children: [
-                Visibility(
-                  visible: isSelectionMode,
-                  maintainSize: true,
-                  maintainAnimation: true,
-                  maintainState: true,
-                  child: Checkbox(
-                    value: isSelected,
-                    onChanged: (_) => onTap?.call(),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
-                  ),
+                SelectionCheckboxSlot(
+                  isSelectionMode: isSelectionMode,
+                  isChecked: isSelected,
+                  onChanged: (_) => onTap?.call(),
+                  gap: 8,
                 ),
                 // Site name (expanded)
                 Expanded(
@@ -80,18 +83,40 @@ class DenseSiteListTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (showSharedBadge) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message:
+                        context.l10n.accessibility_label_sharedWithProfiles,
+                    child: Icon(
+                      Icons.people_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+                if (site != null) LibrarySiteBadge(site: site!),
                 const SizedBox(width: 8),
                 // Location (truncated, ~100px width)
                 if (location != null)
                   SizedBox(
                     width: 100,
-                    child: Text(
-                      location!,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: secondaryTextColor,
+                    // The column is right-aligned, so the flag sits just
+                    // before the text rather than at the column's far edge.
+                    child: Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: LocationWithFlag(
+                        country: site?.country,
+                        countryCode: site?.countryCode,
+                        text: Text(
+                          location!,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: secondaryTextColor),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                        ),
                       ),
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.right,
                     ),
                   ),
                 const SizedBox(width: 8),
@@ -106,12 +131,9 @@ class DenseSiteListTile extends StatelessWidget {
                     textAlign: TextAlign.right,
                   ),
                 ),
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: secondaryTextColor,
-                    size: 18,
-                  ),
+                RecordListChevron(
+                  size: RecordListChevron.denseSize,
+                  color: secondaryTextColor,
                 ),
               ],
             ),

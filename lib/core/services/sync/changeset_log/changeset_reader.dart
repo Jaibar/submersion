@@ -1,0 +1,483 @@
+import 'dart:typed_data';
+
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/peer_device_name_store.dart';
+import 'package:submersion/core/services/sync/crypto/crypto_errors.dart';
+import 'package:submersion/core/services/sync/sync_data_serializer.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_part_file_sink.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_codec.dart';
+import 'package:submersion/core/services/sync/changeset_log/changeset_log_layout.dart';
+import 'package:submersion/core/services/sync/changeset_log/peer_cursor_store.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_manifest.dart';
+
+/// Applies one decoded payload (base or changeset). The real implementation is
+/// SyncService._applyRemotePayload (HLC LWW + tombstones + FK repair), injected
+/// so the merge stays the single source of truth.
+typedef ApplyPayload = Future<void> Function(SyncPayload payload);
+
+/// Progress of a peer base download: [downloaded] of [total] parts have landed
+/// for the base named by [manifest]. Lets the caller keep the progress bar
+/// moving through a multi-hundred-MB adoption (issue #1421).
+typedef BaseDownloadProgress =
+    void Function(SyncManifest manifest, int downloaded, int total);
+
+/// Applies a base that has been streamed to a local temp [filePath]. The real
+/// implementation streams the file through the merge in bounded memory; see
+/// SyncService._applyRemoteBaseFile.
+typedef ApplyBaseFile =
+    Future<void> Function(String filePath, SyncManifest manifest);
+
+class ChangesetReadResult {
+  const ChangesetReadResult({
+    required this.peersProcessed,
+    required this.payloadsApplied,
+    this.peerManifests = const [],
+    this.peerManifestListedAt = const {},
+    this.skippedPeerDeviceIds = const {},
+    this.skippedPeerNames = const {},
+    this.newerSchemaPeerDeviceIds = const {},
+    this.newerSchemaPeerNames = const {},
+    this.olderSchemaPeerDeviceIds = const {},
+    this.olderSchemaPeerNames = const {},
+    this.readFailedPeerDeviceIds = const {},
+    this.readFailedPeerNames = const {},
+    this.retiredPeerIds = const {},
+    this.retiredPeerHasFiles = false,
+    this.incompletePeerDeviceIds = const {},
+    this.unpublishedPeerDeviceIds = const {},
+  });
+  final int peersProcessed;
+  final int payloadsApplied;
+
+  /// Every non-retired peer manifest seen this pull (including stale-epoch
+  /// ones, which stay inert for merging but still block/inform tombstone GC).
+  final List<SyncManifest> peerManifests;
+
+  /// When the cloud listed each entry of [peerManifests], keyed by device
+  /// id: the server's clock, where a manifest's own updatedAt is the peer's.
+  final Map<String, DateTime> peerManifestListedAt;
+
+  /// Peers whose manifests were deliberately not applied because they do not
+  /// belong to the current library epoch. The caller should surface these to
+  /// the user rather than reporting a misleadingly clean sync.
+  final Set<String> skippedPeerDeviceIds;
+
+  /// Display names for the entries in [skippedPeerDeviceIds] that published
+  /// one, keyed by device id. Peers on manifests written before the name field
+  /// existed, and peers that nothing identifies by name, are simply absent;
+  /// the UI falls back to a short id label for those.
+  final Map<String, String> skippedPeerNames;
+
+  /// Peers held because their manifests declare a compatibility floor above
+  /// this build's schema, i.e. they published across a breaking schema change
+  /// this build predates. Their cursors are not advanced; the data applies
+  /// after this device updates.
+  final Set<String> newerSchemaPeerDeviceIds;
+
+  /// Display names for the entries in [newerSchemaPeerDeviceIds] that
+  /// published one, keyed by device id. Same fallback contract as
+  /// [skippedPeerNames]: absent means the UI shows a short id label.
+  final Map<String, String> newerSchemaPeerNames;
+
+  /// Peers whose own schema is below this build's compatibility floor, so
+  /// they hold every payload this device publishes until they update (the
+  /// reverse of [newerSchemaPeerDeviceIds]). Their own payloads still apply
+  /// here; this only lets the user see that the sync is one-way.
+  final Set<String> olderSchemaPeerDeviceIds;
+
+  /// Display names for the entries in [olderSchemaPeerDeviceIds] that
+  /// published one. Same fallback contract as [skippedPeerNames].
+  final Map<String, String> olderSchemaPeerNames;
+
+  /// Peers whose read threw partway through this pull (a provider error, a
+  /// malformed manifest or changeset, an apply failure, ...). Their cursors
+  /// stayed put, so the next sync retries them -- but the caller must surface
+  /// them rather than reporting a misleadingly clean sync.
+  final Set<String> readFailedPeerDeviceIds;
+
+  /// Display names for the entries in [readFailedPeerDeviceIds] whose
+  /// manifests were parsed (and named the device) before the failure. Same
+  /// fallback contract as [skippedPeerNames]: absent means the UI shows a
+  /// short id label.
+  final Map<String, String> readFailedPeerNames;
+  final Set<String> retiredPeerIds;
+
+  /// True when a retired peer still has non-marker files in the bucket (a
+  /// partial retirement) -- tells the sweeper to retry the deletion.
+  final bool retiredPeerHasFiles;
+
+  /// Current-epoch peers this pull stopped short of: a missing or corrupt
+  /// base, a changeset gap, or a corrupt changeset. None of these is a read
+  /// failure (the cursor still advances through what applied), so without
+  /// this set the pull looks complete although the peer has published rows
+  /// this device has not applied. The storage cleanup must not trust such a
+  /// pull to know every media object a peer references.
+  final Set<String> incompletePeerDeviceIds;
+
+  /// Devices with files in the sync folder but no manifest yet (a first
+  /// publish still uploading). They are invisible to every manifest-based
+  /// check, yet may already be uploading media.
+  final Set<String> unpublishedPeerDeviceIds;
+}
+
+/// Consumes peers' changeset logs: discovers peers, decides per-peer what to
+/// fetch against [PeerCursorStore], applies in seq order via [ApplyPayload],
+/// and advances the cursor. Stops at the first missing file (transient gap)
+/// and retries next sync; application is idempotent so re-reads are safe.
+class ChangesetReader {
+  ChangesetReader(this._codec, this._peerCursors, {BasePartFileSink? baseSink})
+    : _baseSink = baseSink ?? BasePartFileSink();
+
+  final ChangesetCodec _codec;
+  final PeerCursorStore _peerCursors;
+  final BasePartFileSink _baseSink;
+  static final _log = LoggerService.forClass(ChangesetReader);
+
+  Future<ChangesetReadResult> pull({
+    required CloudStorageProvider provider,
+    required String selfDeviceId,
+    required String folderId,
+    required ApplyPayload apply,
+    required ApplyBaseFile applyBaseFile,
+    String? currentEpochId,
+    int localSchemaVersion = AppDatabase.currentSchemaVersion,
+    int localCompatibilityFloor = AppDatabase.minimumCompatibleSchemaVersion,
+    List<CloudFileInfo>? preListedFiles,
+    BaseDownloadProgress? onBaseDownloadProgress,
+    PeerDeviceNameStore? peerNames,
+  }) async {
+    final providerId = provider.providerId;
+    // [preListedFiles] lets the caller reuse a listing it just made (the
+    // retirement-fence check lists the same folder immediately before this
+    // pull), saving a round-trip on high-latency backends. Safe because
+    // nothing mutates the folder between that listing and this pull, and
+    // every consumer is already tolerant of a slightly stale view (a missing
+    // file reads as a transient gap and retries next sync).
+    final files =
+        preListedFiles ??
+        await provider.listFiles(
+          folderId: folderId,
+          namePattern: ChangesetLogLayout.prefix,
+        );
+    final byName = {for (final f in files) f.name: f};
+    final peerIds = ChangesetLogLayout.peerDeviceIds(
+      files.map((f) => f.name),
+      selfDeviceId,
+    );
+    final retiredPeerIds = <String>{
+      for (final f in files)
+        if (ChangesetLogLayout.isRetiredMarker(f.name) &&
+            ChangesetLogLayout.deviceIdOf(f.name) != null &&
+            ChangesetLogLayout.deviceIdOf(f.name) != selfDeviceId)
+          ChangesetLogLayout.deviceIdOf(f.name)!,
+    };
+    final retiredPeerHasFiles = files.any(
+      (f) =>
+          !ChangesetLogLayout.isRetiredMarker(f.name) &&
+          retiredPeerIds.contains(ChangesetLogLayout.deviceIdOf(f.name)),
+    );
+    final peerManifests = <SyncManifest>[];
+    final peerManifestListedAt = <String, DateTime>{};
+    final skippedPeerDeviceIds = <String>{};
+    final skippedPeerNames = <String, String>{};
+    final newerSchemaPeerDeviceIds = <String>{};
+    final newerSchemaPeerNames = <String, String>{};
+    final olderSchemaPeerDeviceIds = <String>{};
+    final olderSchemaPeerNames = <String, String>{};
+    final readFailedPeerDeviceIds = <String>{};
+    final readFailedPeerNames = <String, String>{};
+    final incompletePeerDeviceIds = <String>{};
+    final unpublishedPeerDeviceIds = <String>{};
+
+    var peersProcessed = 0;
+    var payloadsApplied = 0;
+
+    for (final peerId in peerIds) {
+      // Captured as soon as the manifest parses, so the catch below can name
+      // the peer even when the failure comes later in the read.
+      String? peerName;
+      try {
+        // A retired peer's files are being deleted; never merge from them and
+        // never advance a cursor against them.
+        if (retiredPeerIds.contains(peerId)) continue;
+        final manifestFile = byName[ChangesetLogLayout.manifestName(peerId)];
+        if (manifestFile == null) {
+          // Files but no manifest yet: a first publish still uploading.
+          unpublishedPeerDeviceIds.add(peerId);
+          continue;
+        }
+        final manifest = SyncManifest.fromBytes(
+          await provider.downloadFile(manifestFile.id),
+        );
+        peerManifests.add(manifest);
+        peerManifestListedAt[manifest.deviceId] = manifestFile.modifiedTime;
+        final manifestName = manifest.deviceName;
+        if (manifestName != null && manifestName.isNotEmpty) {
+          peerName = manifestName;
+        }
+        // Recorded unconditionally: the manifest read succeeded, so a
+        // missing name is the peer's current state and must clear any name
+        // it published before, not leave a stale label behind.
+        //
+        // Guarded on its own: a name is optional metadata, and a failed
+        // preferences write is not a failed peer read. Left to the catch
+        // below it would mark this peer read-failed and cost its changesets
+        // for the whole cycle.
+        try {
+          await peerNames?.record(peerId, manifestName);
+        } catch (e) {
+          _log.warning('Could not record the name for peer $peerId', error: e);
+        }
+
+        // Stale-epoch filter: once this device is on a library epoch, a peer
+        // stamped with a different epoch (including an unstamped legacy peer)
+        // is inert. Applying it could leak a replaced-away library back in.
+        // Timestamps cannot prove that a peer observed the replacement because
+        // heartbeats rewrite updatedAt without changing the library epoch.
+        if (currentEpochId != null && manifest.epochId != currentEpochId) {
+          skippedPeerDeviceIds.add(peerId);
+          final name = manifest.deviceName;
+          if (name != null && name.isNotEmpty) {
+            skippedPeerNames[peerId] = name;
+          }
+          continue;
+        }
+
+        // Compatibility-floor filter: hold peers whose declared floor exceeds
+        // this build's schema, i.e. they publish across a breaking schema
+        // change this build predates. Additive changes do not raise the floor,
+        // because the merge overlay preserves columns an older reader omits
+        // (see AppDatabase.minimumCompatibleSchemaVersion). The cursor stays
+        // put, so the data applies once this device updates.
+        final peerSchema = manifest.schemaVersion;
+        if (peerSchema != null && peerSchema > localSchemaVersion) {
+          newerSchemaPeerDeviceIds.add(peerId);
+          final name = manifest.deviceName;
+          if (name != null && name.isNotEmpty) {
+            newerSchemaPeerNames[peerId] = name;
+          }
+          continue;
+        }
+
+        // The same gate seen from the other side: a peer whose own schema is
+        // below the floor this device stamps holds everything we publish.
+        // Recorded, never skipped, because its payloads are still safe to
+        // apply here. writerSchemaVersion arrived in the same change that
+        // turned schemaVersion into the floor, so a manifest without it
+        // carries the writer's actual schema in schemaVersion.
+        final peerWriterSchema =
+            manifest.writerSchemaVersion ?? manifest.schemaVersion;
+        if (peerWriterSchema != null &&
+            peerWriterSchema < localCompatibilityFloor) {
+          olderSchemaPeerDeviceIds.add(peerId);
+          final name = manifest.deviceName;
+          if (name != null && name.isNotEmpty) {
+            olderSchemaPeerNames[peerId] = name;
+          }
+        }
+        peersProcessed++;
+
+        final cursor = await _peerCursors.get(peerId, providerId);
+        final lastApplied = cursor?.lastSeqApplied ?? 0;
+        if (lastApplied >= manifest.headSeq) continue; // up to date
+
+        var appliedThrough = lastApplied;
+        var baseSeqApplied = cursor?.baseSeqApplied;
+        var appliedHlc = cursor?.appliedHlcHigh;
+
+        // Cold-start, or lapped by the peer's compaction: adopt the base.
+        final baseSeq = manifest.baseSeq;
+        if (baseSeq != null && lastApplied < baseSeq) {
+          // A base adoption can run for minutes on a large library, so log
+          // its shape and timing: a debug log that goes silent here is
+          // otherwise indistinguishable from a hang.
+          _log.info(
+            'Adopting base seq $baseSeq from peer $peerId'
+            '${peerName != null ? ' ($peerName)' : ''}: '
+            '${manifest.basePartCount ?? 0} parts, '
+            '${manifest.baseBytes ?? 0} bytes '
+            '(cursor at $lastApplied, head ${manifest.headSeq})',
+          );
+          final stopwatch = Stopwatch()..start();
+          final path = await _fetchBaseToFile(
+            provider,
+            peerId,
+            manifest,
+            byName,
+            onPartDownloaded: onBaseDownloadProgress == null
+                ? null
+                : (downloaded, total) =>
+                      onBaseDownloadProgress(manifest, downloaded, total),
+          );
+          if (path == null) {
+            _log.warning(
+              'Base seq $baseSeq from peer $peerId is incomplete or corrupt; '
+              'will retry next sync',
+            );
+            // Missing or corrupt base: transient, retry next sync.
+            incompletePeerDeviceIds.add(peerId);
+            continue;
+          }
+          _log.info(
+            'Base seq $baseSeq from peer $peerId assembled in '
+            '${stopwatch.elapsed.inSeconds}s; applying',
+          );
+          try {
+            await applyBaseFile(path, manifest);
+          } finally {
+            await _baseSink.deleteQuietly(path);
+          }
+          _log.info(
+            'Base seq $baseSeq from peer $peerId applied '
+            '(${stopwatch.elapsed.inSeconds}s total)',
+          );
+          payloadsApplied++;
+          appliedThrough = baseSeq;
+          baseSeqApplied = baseSeq;
+          // The manifest's publishedHlcHigh describes headSeq; it equals the
+          // base's own high watermark only when the base IS the head. Never
+          // over-claim an ack -- tombstone GC relies on it.
+          if (baseSeq == manifest.headSeq) {
+            appliedHlc = _maxHlc(appliedHlc, manifest.publishedHlcHigh);
+          }
+        }
+
+        // Changesets (appliedThrough+1 .. headSeq], stopping at the first gap.
+        for (var seq = appliedThrough + 1; seq <= manifest.headSeq; seq++) {
+          final csFile = byName[ChangesetLogLayout.changesetName(peerId, seq)];
+          if (csFile == null) break; // gap -> apply what we have, retry later
+          final Uint8List csBytes;
+          try {
+            csBytes = await provider.downloadFile(csFile.id);
+          } on EnvelopeCorruptException {
+            // Same standing as the checksum failure below, so the same
+            // handling: break rather than throw, which reaches the cursor
+            // upsert and records the seqs already applied. Throwing here
+            // would unwind to the per-peer catch, which skips that upsert,
+            // so every later sync would re-download and re-apply this
+            // peer's whole backlog and still never advance past this seq.
+            break;
+          }
+          final decoded = await _codec.decodeVerifiedChangeset(csBytes);
+          if (!decoded.checksumValid) {
+            break; // corrupt changeset -> stop; a fixed sync retries from here
+          }
+          final cs = decoded.payload;
+          await apply(cs);
+          payloadsApplied++;
+          appliedThrough = seq;
+          appliedHlc = _maxHlc(appliedHlc, cs.toHlc);
+        }
+
+        // A gap or a corrupt changeset stopped this peer before its head.
+        if (appliedThrough < manifest.headSeq) {
+          incompletePeerDeviceIds.add(peerId);
+        }
+
+        // Advance only forward, after applying, so an interrupted apply
+        // re-pulls next time rather than skipping a seq.
+        if (appliedThrough > lastApplied) {
+          await _peerCursors.upsert(
+            peerDeviceId: peerId,
+            provider: providerId,
+            baseSeqApplied: baseSeqApplied,
+            lastSeqApplied: appliedThrough,
+            appliedHlcHigh: appliedHlc,
+          );
+        }
+      } catch (e, stackTrace) {
+        // Refused access is the account, not this peer: the next read would
+        // be refused too, and a clean-looking finish hides that (issue #3811).
+        if (isAccessRefused(e)) rethrow;
+        // One bad peer must not block the others; its cursor stays put so the
+        // next sync retries it. Record the failure so the caller can surface
+        // it instead of reporting a misleadingly clean sync.
+        readFailedPeerDeviceIds.add(peerId);
+        if (peerName != null) {
+          readFailedPeerNames[peerId] = peerName;
+        }
+        _log.warning(
+          'Failed to read peer $peerId'
+          '${peerName != null ? ' ($peerName)' : ''}; '
+          'cursor kept for retry next sync',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        continue;
+      }
+    }
+
+    return ChangesetReadResult(
+      peersProcessed: peersProcessed,
+      payloadsApplied: payloadsApplied,
+      peerManifests: peerManifests,
+      peerManifestListedAt: peerManifestListedAt,
+      skippedPeerDeviceIds: skippedPeerDeviceIds,
+      skippedPeerNames: skippedPeerNames,
+      newerSchemaPeerDeviceIds: newerSchemaPeerDeviceIds,
+      newerSchemaPeerNames: newerSchemaPeerNames,
+      olderSchemaPeerDeviceIds: olderSchemaPeerDeviceIds,
+      olderSchemaPeerNames: olderSchemaPeerNames,
+      readFailedPeerDeviceIds: readFailedPeerDeviceIds,
+      readFailedPeerNames: readFailedPeerNames,
+      retiredPeerIds: retiredPeerIds,
+      retiredPeerHasFiles: retiredPeerHasFiles,
+      incompletePeerDeviceIds: incompletePeerDeviceIds,
+      unpublishedPeerDeviceIds: unpublishedPeerDeviceIds,
+    );
+  }
+
+  static String? _maxHlc(String? a, String? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.compareTo(b) >= 0 ? a : b;
+  }
+
+  /// Streams the peer's base parts into a single temp file, verifying each
+  /// part and the whole-file checksum as bytes land (never holding the base in
+  /// memory). Returns the temp file path, or null if a part is missing or any
+  /// checksum fails (transient -> retry next sync). The byte-level checksums
+  /// are independent of -- and stronger than -- the decoded payload's data
+  /// checksum, which ignores headers and deletions.
+  Future<String?> _fetchBaseToFile(
+    CloudStorageProvider provider,
+    String peerId,
+    SyncManifest manifest,
+    Map<String, CloudFileInfo> byName, {
+    void Function(int downloaded, int total)? onPartDownloaded,
+  }) async {
+    final baseSeq = manifest.baseSeq!;
+    final partCount = manifest.basePartCount ?? 0;
+    // A manifest that names a base (baseSeq set) but no parts is malformed --
+    // a real base always has at least one part. Treat it as a transient gap
+    // (publish in flight / truncated manifest) so we don't assemble an empty
+    // file and advance the cursor past a base we never applied.
+    if (partCount <= 0) return null;
+    try {
+      return await _baseSink.assemble(
+        name: 'ssv1_${peerId}_$baseSeq',
+        partCount: partCount,
+        wholeChecksum: manifest.baseChecksum,
+        partChecksums: manifest.basePartChecksums,
+        downloadPart: (i) async {
+          final pf =
+              byName[ChangesetLogLayout.basePartName(peerId, baseSeq, i)];
+          if (pf == null) return null;
+          return provider.downloadFile(pf.id);
+        },
+        onPartDownloaded: onPartDownloaded,
+      );
+    } on BaseFetchInterrupted catch (e, stackTrace) {
+      // Pull only ever adds, so this peer can simply wait for the next sync,
+      // as it does for a base the cloud lacks.
+      _log.warning(
+        'Base fetch from peer $peerId was interrupted',
+        error: e.cause,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+}

@@ -1,0 +1,495 @@
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+
+import 'package:submersion/core/services/pdf_templates/pdf_fonts.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
+import 'package:submersion/features/planner/domain/services/bailout_solver.dart';
+import 'package:submersion/features/planner/domain/services/contingency_service.dart';
+import 'package:submersion/features/planner/domain/services/range_table_service.dart';
+import 'package:submersion/features/planner/domain/services/schedule_lines.dart';
+
+/// Localized strings the slate needs (assembled from context.l10n at the
+/// call site so the service stays context-free).
+class PlanSlateLabels {
+  final String runtimeTable;
+  final String gasPlan;
+  final String contingencies;
+  final String Function(String gas) lostGasLabel;
+  final String rangeTable;
+  final String bailout;
+  final String duration;
+  final String depth;
+  final String runtime;
+  final String gas;
+  final String turnAt;
+  final String minGas;
+
+  /// The gas table's column for the problem-solving gas held back at the
+  /// bottom, which is not part of what the cylinder uses (#4475).
+  final String problemSolving;
+
+  /// What a back gas's Turn cell says when no turn rule applies (#3603).
+  final String noTurnRule;
+
+  /// What a back gas's Turn or Min gas cell says when the cylinder has no
+  /// start pressure to work from (#3603).
+  final String noStartPressure;
+
+  /// What a back gas's Min gas cell says when the cylinder has no size
+  /// (#3603).
+  final String noVolume;
+  final String base;
+
+  /// A duration in whole minutes, such as "12 min" (#2252).
+  final String Function(String minutes) minutes;
+
+  /// The short "max" in front of the plan's deepest point in the header.
+  final String maxPrefix;
+
+  /// What the bailout section says when no carried gas reaches [depth], the
+  /// deepest of them only reaching [deepestMod] (#3961).
+  final String Function(String depth, String deepestMod) noEligibleBailoutGas;
+
+  const PlanSlateLabels({
+    required this.runtimeTable,
+    required this.gasPlan,
+    required this.contingencies,
+    required this.lostGasLabel,
+    required this.rangeTable,
+    required this.bailout,
+    required this.duration,
+    required this.depth,
+    required this.runtime,
+    required this.gas,
+    required this.turnAt,
+    required this.minGas,
+    required this.problemSolving,
+    required this.noTurnRule,
+    required this.noStartPressure,
+    required this.noVolume,
+    required this.base,
+    required this.minutes,
+    required this.maxPrefix,
+    required this.noEligibleBailoutGas,
+  });
+}
+
+/// One Turn or Min gas cell of the slate's gas table: the figure where the
+/// engine computed it, the missing input on a back gas it could not compute
+/// for (#3603), and a dash on a cylinder the figure does not apply to.
+String planSlateGasLimitCell(
+  double? bar,
+  PlanGasLimitGap? gap,
+  UnitFormatter units,
+  PlanSlateLabels labels,
+) {
+  if (bar != null) return units.formatPressure(bar, decimals: 0);
+  return switch (gap) {
+    PlanGasLimitGap.noTurnRule => labels.noTurnRule,
+    PlanGasLimitGap.noStartPressure => labels.noStartPressure,
+    PlanGasLimitGap.noVolume => labels.noVolume,
+    null => '--',
+  };
+}
+
+/// One Problem solving cell of the slate's gas table: the gas held back for
+/// problem-solving time, in the diver's volume unit, and a dash on a
+/// cylinder that holds none (#4475).
+String planSlateProblemSolvingCell(double liters, UnitFormatter units) =>
+    liters > 0 ? units.convertVolume(liters).toStringAsFixed(0) : '--';
+
+/// The slate's bailout section: the worst case's time and gas, or, when no
+/// carried gas reaches the plan, that instead of an ascent nothing can make
+/// (#3961). The depth rounds up and the MOD down, as the app's own words do.
+///
+/// Top-level so tests can assert the rendered string directly, as
+/// [planSlateHeaderLine] explains.
+String planSlateBailoutLine(
+  BailoutOutcome bailout,
+  UnitFormatter units,
+  PlanSlateLabels labels,
+) {
+  if (bailout.gasGap case final gap?) {
+    return labels.noEligibleBailoutGas(
+      units.formatDepthCeil(gap.depthMeters, decimals: 0),
+      units.formatDepthFloor(gap.deepestModMeters, decimals: 0),
+    );
+  }
+  final worst = bailout.worstCase;
+  return 'TTS ${planSlateMinutes(worst.ttsSeconds, labels)} @ ${units.formatDepth(worst.depthMeters)} '
+      '(${units.formatVolume(worst.litersRequired)} / '
+      '${units.formatVolume(bailout.availableLiters)})';
+}
+
+/// The slate's header line: plan date, mode, gradient factors, and the
+/// headline outcome numbers.
+///
+/// Top-level so tests can assert the rendered string directly. The slate
+/// embeds a TrueType font, so its glyph-indexed text cannot be read back out
+/// of the saved PDF the way the Helvetica-based logbook templates can.
+///
+/// GF, RT and CNS stay as they are in every language: they are the
+/// abbreviations printed on dive computers and deco tables.
+String planSlateHeaderLine(
+  domain.DivePlan plan,
+  PlanOutcome outcome,
+  UnitFormatter units,
+  PlanSlateLabels labels, {
+  required int gfLow,
+  required int gfHigh,
+}) =>
+    // The date follows the diver's DateFormatPreference: a slate is printed
+    // and read at the dive site, not parsed by another program (#964).
+    '${units.formatDate(plan.updatedAt)}   ${plan.mode.name.toUpperCase()}   '
+    'GF $gfLow/$gfHigh   '
+    '${labels.maxPrefix} ${units.formatDepth(outcome.maxDepth)}   '
+    'RT ${planSlateMinutes(outcome.runtimeSeconds, labels)}   '
+    'CNS ${outcome.cnsEnd.toStringAsFixed(0)}%';
+
+/// One line of the slate's runtime table, in column order: depth, duration,
+/// runtime, gas. Top-level for the reason [planSlateHeaderLine] gives.
+List<String> planSlateRuntimeCells(ScheduleLine line, UnitFormatter units) => [
+  '${PlanSlatePdfService._pdfGlyph(line.row.kind)} '
+      '${units.formatDepth(line.row.depthMeters, decimals: 0)}',
+  line.durationLabel(),
+  '${line.runtimeMinutes}',
+  GasMix(o2: line.row.gasFO2 * 100.0, he: line.row.gasFHe * 100.0).name,
+];
+
+/// Whole minutes, rounded up, as the slate prints durations.
+String planSlateMinutes(int seconds, PlanSlateLabels labels) =>
+    labels.minutes('${(seconds / 60).ceil()}');
+
+/// Renders a plan as a high-contrast printable dive slate: runtime table,
+/// gas plan, contingency tables, bailout summary, and range table. Pure
+/// consumer of engine outputs — no deco math of its own.
+class PlanSlatePdfService {
+  const PlanSlatePdfService();
+
+  Future<List<int>> buildSlate({
+    required domain.DivePlan plan,
+    required PlanOutcome outcome,
+    required List<DeviationOutcome> deviations,
+    required List<LostGasOutcome> lostGas,
+    required RangeTable? rangeTable,
+    required BailoutOutcome? bailout,
+    required UnitFormatter units,
+    required PlanSlateLabels labels,
+    required double deviationDepthDelta,
+    required int deviationTimeMinutes,
+    required int gfLow,
+    required int gfHigh,
+    PdfLocalization? localization,
+  }) async {
+    // [labels] arrive localized; [localization] picks the fonts and text
+    // direction for that language (#2252). Null is English.
+    final loc = localization ?? PdfLocalization.english();
+    await PdfFonts.instance.initialize();
+    final pdf = pw.Document(theme: await PdfFonts.instance.themeFor(loc));
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(28),
+        textDirection: loc.textDirection,
+        build: (context) => [
+          _header(plan, outcome, units, labels, gfLow: gfLow, gfHigh: gfHigh),
+          pw.SizedBox(height: 10),
+          _sectionTitle(labels.runtimeTable),
+          _runtimeTable(outcome, units, labels),
+          pw.SizedBox(height: 10),
+          _sectionTitle(labels.gasPlan),
+          _gasTable(plan, outcome, units, labels),
+          if (bailout != null) ...[
+            pw.SizedBox(height: 10),
+            _sectionTitle(labels.bailout),
+            pw.Text(
+              planSlateBailoutLine(bailout, units, labels),
+              style: pw.TextStyle(
+                fontSize: 10,
+                fontWeight: bailout.gasGap == null ? null : pw.FontWeight.bold,
+                color: bailout.gasGap == null ? null : PdfColors.red900,
+              ),
+            ),
+          ],
+          if (deviations.isNotEmpty || lostGas.isNotEmpty) ...[
+            pw.SizedBox(height: 10),
+            _sectionTitle(labels.contingencies),
+            for (final deviation in deviations) ...[
+              _subTitle(
+                _deviationLabel(
+                  deviation,
+                  deviationDepthDelta,
+                  deviationTimeMinutes,
+                  units,
+                  labels,
+                ),
+              ),
+              _runtimeTable(deviation.outcome, units, labels),
+              pw.SizedBox(height: 6),
+            ],
+            for (final lost in lostGas) ...[
+              _subTitle(labels.lostGasLabel(lost.tank.gasMix.name)),
+              _runtimeTable(lost.outcome, units, labels),
+              pw.SizedBox(height: 6),
+            ],
+          ],
+          if (rangeTable != null && !rangeTable.isEmpty) ...[
+            pw.SizedBox(height: 10),
+            _sectionTitle(labels.rangeTable),
+            _rangeGrid(rangeTable, units, labels),
+          ],
+        ],
+      ),
+    );
+
+    return pdf.save();
+  }
+
+  String _deviationLabel(
+    DeviationOutcome deviation,
+    double deviationDepthDelta,
+    int deviationTimeMinutes,
+    UnitFormatter units,
+    PlanSlateLabels labels,
+  ) {
+    final depth = '+${units.formatDepth(deviationDepthDelta, decimals: 0)}';
+    final time = '+${labels.minutes('$deviationTimeMinutes')}';
+    return switch (deviation.key) {
+      'deeper' => depth,
+      'longer' => time,
+      _ => '$depth $time',
+    };
+  }
+
+  pw.Widget _header(
+    domain.DivePlan plan,
+    PlanOutcome outcome,
+    UnitFormatter units,
+    PlanSlateLabels labels, {
+    required int gfLow,
+    required int gfHigh,
+  }) {
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text(
+          plan.name,
+          style: const pw.TextStyle(
+            fontSize: 20,
+            fontWeight: pw.FontWeight.bold,
+          ),
+        ),
+        pw.SizedBox(height: 2),
+        pw.Text(
+          planSlateHeaderLine(
+            plan,
+            outcome,
+            units,
+            labels,
+            gfLow: gfLow,
+            gfHigh: gfHigh,
+          ),
+          style: const pw.TextStyle(fontSize: 10),
+        ),
+        pw.Divider(thickness: 1.2),
+      ],
+    );
+  }
+
+  pw.Widget _sectionTitle(String text) => pw.Padding(
+    padding: const pw.EdgeInsets.only(bottom: 3),
+    child: pw.Text(
+      text.toUpperCase(),
+      style: const pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+    ),
+  );
+
+  pw.Widget _subTitle(String text) => pw.Padding(
+    padding: const pw.EdgeInsets.only(top: 3, bottom: 2),
+    child: pw.Text(
+      text,
+      style: const pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
+    ),
+  );
+
+  pw.Widget _runtimeTable(
+    PlanOutcome outcome,
+    UnitFormatter units,
+    PlanSlateLabels labels,
+  ) {
+    pw.Widget cell(String text, {bool header = false}) => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(
+          fontSize: 9,
+          fontWeight: header ? pw.FontWeight.bold : null,
+        ),
+      ),
+    );
+
+    return pw.Table(
+      border: pw.TableBorder.all(width: 0.4),
+      columnWidths: const {
+        0: pw.FlexColumnWidth(1.2),
+        1: pw.FlexColumnWidth(1),
+        2: pw.FlexColumnWidth(1),
+        3: pw.FlexColumnWidth(1.4),
+      },
+      children: [
+        pw.TableRow(
+          children: [
+            cell(labels.depth, header: true),
+            cell(labels.duration, header: true),
+            cell(labels.runtime, header: true),
+            cell(labels.gas, header: true),
+          ],
+        ),
+        for (final line in scheduleLines(outcome.schedule))
+          pw.TableRow(
+            children: [
+              for (final text in planSlateRuntimeCells(line, units)) cell(text),
+            ],
+          ),
+      ],
+    );
+  }
+
+  /// ASCII stand-ins for the on-screen arrows: the slate's built-in font has
+  /// no arrow glyphs, and a missing glyph prints as a box.
+  static String _pdfGlyph(PlanScheduleRowKind kind) => switch (kind) {
+    PlanScheduleRowKind.descent => 'v',
+    PlanScheduleRowKind.level => '=',
+    PlanScheduleRowKind.ascent => '^',
+    PlanScheduleRowKind.stop => '-',
+  };
+
+  pw.Widget _gasTable(
+    domain.DivePlan plan,
+    PlanOutcome outcome,
+    UnitFormatter units,
+    PlanSlateLabels labels,
+  ) {
+    String tankLabel(String tankId) {
+      final tank = plan.tanks.where((t) => t.id == tankId).firstOrNull;
+      if (tank == null) return '--';
+      return tank.name ?? tank.gasMix.name;
+    }
+
+    pw.Widget cell(String text, {bool header = false}) => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(
+          fontSize: 9,
+          fontWeight: header ? pw.FontWeight.bold : null,
+        ),
+      ),
+    );
+
+    return pw.Table(
+      border: pw.TableBorder.all(width: 0.4),
+      children: [
+        pw.TableRow(
+          children: [
+            cell(labels.gas, header: true),
+            cell(units.volumeSymbol, header: true),
+            cell('%', header: true),
+            cell(
+              '${labels.problemSolving} (${units.volumeSymbol})',
+              header: true,
+            ),
+            cell(labels.turnAt, header: true),
+            cell(labels.minGas, header: true),
+          ],
+        ),
+        for (final usage in outcome.tankUsages)
+          pw.TableRow(
+            children: [
+              cell(tankLabel(usage.tankId)),
+              cell(units.convertVolume(usage.litersUsed).toStringAsFixed(0)),
+              cell('${usage.percentUsed.toStringAsFixed(0)}%'),
+              cell(
+                planSlateProblemSolvingCell(usage.problemSolvingLiters, units),
+              ),
+              cell(
+                planSlateGasLimitCell(
+                  usage.turnPressureBar,
+                  usage.turnPressureGap,
+                  units,
+                  labels,
+                ),
+              ),
+              cell(
+                planSlateGasLimitCell(
+                  usage.minGasBar,
+                  usage.minGasGap,
+                  units,
+                  labels,
+                ),
+              ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  pw.Widget _rangeGrid(
+    RangeTable table,
+    UnitFormatter units,
+    PlanSlateLabels labels,
+  ) {
+    pw.Widget cell(String text, {bool header = false, bool flag = false}) =>
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: pw.Text(
+            text,
+            style: pw.TextStyle(
+              fontSize: 9,
+              fontWeight: header || flag ? pw.FontWeight.bold : null,
+              color: flag ? PdfColors.red900 : null,
+            ),
+          ),
+        );
+
+    String depthLabel(double delta) => delta == 0
+        ? labels.base
+        : '${delta > 0 ? '+' : '-'}${units.formatDepth(delta.abs(), decimals: 0)}';
+    String timeLabel(int delta) => delta == 0
+        ? labels.base
+        : '${delta > 0 ? '+' : '-'}${labels.minutes('${delta.abs()}')}';
+
+    return pw.Table(
+      border: pw.TableBorder.all(width: 0.4),
+      children: [
+        pw.TableRow(
+          children: [
+            cell('', header: true),
+            for (final timeDelta in table.timeDeltas)
+              cell(timeLabel(timeDelta), header: true),
+          ],
+        ),
+        for (var d = 0; d < table.depthDeltas.length; d++)
+          pw.TableRow(
+            children: [
+              cell(depthLabel(table.depthDeltas[d]), header: true),
+              for (final rangeCell in table.cells[d])
+                if (rangeCell == null)
+                  cell('--')
+                else
+                  cell(
+                    '${(rangeCell.outcome.ttsAtBottom / 60).ceil()}',
+                    flag: !rangeCell.outcome.isDiveable,
+                  ),
+            ],
+          ),
+      ],
+    );
+  }
+}

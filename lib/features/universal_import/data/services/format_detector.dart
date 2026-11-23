@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:csv/csv.dart';
 
+import 'package:submersion/core/services/export/csv/codec/submersion_csv_signatures.dart';
+import 'package:submersion/features/nav_track/data/services/parsers/seacraft_enc_signature.dart';
 import 'package:submersion/features/universal_import/data/models/detection_result.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 
@@ -19,6 +21,10 @@ class FormatDetector {
 
   /// Maximum bytes to read for detection purposes.
   static const _peekSize = 8192;
+
+  /// The UTF-8 byte order mark as decoded text (U+FEFF). Written as an escape
+  /// because the literal character is invisible in source.
+  static const _bom = '\u{FEFF}';
 
   /// Detect the format and source app of the given file bytes.
   DetectionResult detect(Uint8List bytes) {
@@ -55,6 +61,14 @@ class FormatDetector {
     final xmlResult = _detectXml(textContent);
     if (xmlResult != null) return xmlResult;
 
+    // 2a. Suunto app JSON export (a hand-off to the Suunto importer)
+    final suuntoJsonResult = _detectSuuntoJson(textContent);
+    if (suuntoJsonResult != null) return suuntoJsonResult;
+
+    // 2b. DAN DL7 pipe-segment detection (plain text, not XML)
+    final dl7Result = _detectDl7(textContent);
+    if (dl7Result != null) return dl7Result;
+
     // 3. CSV detection
     final csvResult = _detectCsv(textContent, bytes);
     if (csvResult != null) return csvResult;
@@ -64,6 +78,25 @@ class FormatDetector {
       format: ImportFormat.unknown,
       confidence: 0.0,
       warnings: ['Could not identify file format'],
+    );
+  }
+
+  // ======================== Suunto JSON Detection ========================
+
+  /// The Suunto app's JSON export (`DeviceLog`) or a saved cloud export
+  /// (`suunto/sml`), issue #1445. Matched on the opening brace plus a
+  /// Suunto-only key in the peeked text, since a full export runs to
+  /// megabytes and is never decoded here.
+  DetectionResult? _detectSuuntoJson(String text) {
+    final body = (text.startsWith(_bom) ? text.substring(1) : text).trimLeft();
+    if (!body.startsWith('{')) return null;
+    if (!body.contains('"DeviceLog"') && !body.contains('"suunto/sml"')) {
+      return null;
+    }
+    return const DetectionResult(
+      format: ImportFormat.suuntoJson,
+      sourceApp: SourceApp.suunto,
+      confidence: 0.95,
     );
   }
 
@@ -143,6 +176,20 @@ class FormatDetector {
       );
     }
 
+    // MacDive native XML: root <dives>, DOCTYPE macdive_logbook.dtd, <schema>.
+    // Must precede the UDDF check because both are XML but MacDive's native
+    // XML is a different format entirely. Match opening tags as prefixes so
+    // attributes/namespace declarations (`<dives xmlns=...>`) or trailing
+    // whitespace (`<dives >`) don't defeat detection.
+    if (lower.contains('mac-dive.com/macdive_logbook.dtd') ||
+        (lower.contains('<dives') && lower.contains('<schema'))) {
+      return const DetectionResult(
+        format: ImportFormat.macdiveXml,
+        sourceApp: SourceApp.macdive,
+        confidence: 0.95,
+      );
+    }
+
     // UDDF: <uddf> root element
     if (lower.contains('<uddf')) {
       // Check if it's a Submersion export
@@ -181,6 +228,15 @@ class FormatDetector {
       );
     }
 
+    // Ratio Computers XML: <diveSegment> root with <segmentHeader>
+    if (lower.contains('<divesegment') && lower.contains('<segmentheader')) {
+      return const DetectionResult(
+        format: ImportFormat.ratioXml,
+        sourceApp: SourceApp.ratio,
+        confidence: 0.95,
+      );
+    }
+
     // Generic XML with dive-related keywords
     if (_hasDiveKeywords(lower)) {
       return const DetectionResult(
@@ -214,13 +270,43 @@ class FormatDetector {
     return matchCount >= 3;
   }
 
+  // ======================== DL7 Detection ========================
+
+  /// DAN DL7 (.zxu/.zxl) files are pipe-delimited HL7-style text starting
+  /// with an FSH file-header segment. DiverLog+/DiveCloud exports embed an
+  /// `<AQUALUNG>` block in the ZAR segment, which identifies the source app.
+  ///
+  /// The UTF-8 BOM decodes to U+FEFF, which Dart's trimLeft() does NOT
+  /// remove (it is not Unicode White_Space), so it is stripped explicitly.
+  DetectionResult? _detectDl7(String content) {
+    var trimmed = content.trimLeft();
+    if (trimmed.startsWith(_bom)) {
+      trimmed = trimmed.substring(1).trimLeft();
+    }
+    if (!trimmed.startsWith('FSH|')) return null;
+    final isDiverLog = trimmed.contains('<AQUALUNG>');
+    return DetectionResult(
+      format: ImportFormat.danDl7,
+      sourceApp: isDiverLog ? SourceApp.diverLog : SourceApp.dan,
+      confidence: 0.95,
+    );
+  }
+
   // ======================== CSV Detection ========================
 
   DetectionResult? _detectCsv(String content, Uint8List bytes) {
-    // Try to parse first line as CSV headers
+    // Normalize line endings before parsing: the csv package's default eol
+    // is '\r\n' matched literally, so an LF-only file (e.g. the MySSI web
+    // export) would otherwise parse as ONE giant row and every cell would
+    // be reported as a header (#190).
+    //
+    // A UTF-8 BOM needs no handling here: utf8.decode in [detect] already
+    // consumes it, so `content` never starts with U+FEFF.
+    final normalized = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
     List<List<dynamic>> rows;
     try {
-      rows = const CsvToListConverter().convert(content);
+      rows = const CsvToListConverter(eol: '\n').convert(normalized);
     } catch (_) {
       return null;
     }
@@ -232,6 +318,41 @@ class FormatDetector {
         .toList();
 
     if (headers.isEmpty || headers.length < 2) return null;
+
+    // A Seacraft ENC navigation console log ahead of every app-scoring
+    // heuristic below: it carries no dive data at all (spec
+    // 2026-09-10-underwater-nav-track-design.md), so it must never be
+    // scored as -- or fall through to -- a generic dive CSV. Checked
+    // against the raw header text (not `headers`, which is already
+    // lower-cased and trimmed by the caller): `looksLikeSeacraftEnc`
+    // normalizes on its own and this keeps that one signature function the
+    // single source of truth for every entry point.
+    final untrimmedHeaders = rows.first.map((e) => e.toString()).toList();
+    if (looksLikeSeacraftEnc(untrimmedHeaders)) {
+      return DetectionResult(
+        format: ImportFormat.navTrack,
+        confidence: 1.0,
+        csvHeaders: rows.first.map((e) => e.toString().trim()).toList(),
+      );
+    }
+
+    // Submersion's own exports carry their full column set, so they are
+    // recognised exactly and routed to their dedicated parsers (#1813).
+    final rawHeaders = rows.first.map((e) => e.toString().trim()).toList();
+    final kind = SubmersionCsvSignatures.match(rawHeaders);
+    if (kind != null) {
+      return DetectionResult(
+        format: switch (kind) {
+          SubmersionCsvKind.dives => ImportFormat.submersionDivesCsv,
+          SubmersionCsvKind.sites => ImportFormat.submersionSitesCsv,
+          SubmersionCsvKind.equipment => ImportFormat.submersionEquipmentCsv,
+          SubmersionCsvKind.fills => ImportFormat.submersionFillsCsv,
+        },
+        sourceApp: SourceApp.submersion,
+        confidence: 1.0,
+        csvHeaders: rawHeaders,
+      );
+    }
 
     // Score against known app signatures
     final appScores = <SourceApp, double>{};
@@ -329,6 +450,15 @@ class FormatDetector {
   double _scoreSsi(List<String> headers) {
     final joined = headers.join(' ');
     if (joined.contains('ssi') || joined.contains('mydiveguide')) return 0.85;
+    // The MySSI website CSV export carries no 'ssi' branding anywhere; match
+    // its distinctive column set instead (#190).
+    const myssiSignature = [
+      'dive activity',
+      'specialty dive',
+      'dive buddy / instructor / center',
+    ];
+    final hits = myssiSignature.where(headers.contains).length;
+    if (hits >= 2) return 0.8;
     return 0.0;
   }
 

@@ -1,0 +1,204 @@
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/media/data/services/enrichment_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
+
+/// Where an item sits on its dive by its capture time alone, and the shift
+/// its dive applies to every capture time (issue #4539).
+typedef MediaAutomaticTime = ({int elapsedSeconds, int diveShiftSeconds});
+
+/// Positions a dive's linked media on the profile chart by computing and
+/// saving a [MediaEnrichment] (elapsed seconds + depth) for every item that
+/// has a capture time but no enrichment yet.
+///
+/// The gallery and Lightroom import paths enrich at import time, but the local
+/// file/folder linking path only creates the [MediaItem] row. Without an
+/// enrichment row the chart's marker builder drops the item
+/// (`photo_marker_layout` skips `enrichment == null`), so a linked photo shows
+/// in the grid but never on the depth/time chart. This service closes that gap
+/// and, being idempotent, doubles as a backfill for already-linked media.
+class DiveMediaEnricher {
+  DiveMediaEnricher({
+    required this.loadDive,
+    required this.loadMediaForDive,
+    required this.saveEnrichments,
+    required this.loadPrimarySourceEntry,
+    this.enrichmentService = const EnrichmentService(),
+  });
+
+  /// Loads a dive with its profile hydrated (e.g. `DiveRepository.getDiveById`,
+  /// which populates `profile`; list queries do not).
+  final Future<Dive?> Function(String diveId) loadDive;
+  final Future<List<MediaItem>> Function(String diveId) loadMediaForDive;
+
+  /// When a dive's primary computer began recording, the instant its profile
+  /// counts from (`DiveRepository.getPrimarySourceEntry`); null for a dive
+  /// with no such source. See [DiveMediaClock] for why the dive's own start
+  /// is not always that instant (issue #4539).
+  final Future<DateTime?> Function(String diveId) loadPrimarySourceEntry;
+
+  /// Persists a whole dive's new/changed rows in one call
+  /// (`MediaRepository.saveEnrichments`: one transaction, one table tick).
+  /// Per-row saves here committed once per photo, and the backfill runs
+  /// from the OPEN media viewer: whenever the burst outlasted the 300ms
+  /// tick debounce, the library query and the other media providers re-ran
+  /// while the user was mid-swipe.
+  final Future<void> Function(List<MediaEnrichment> enrichments)
+  saveEnrichments;
+  final EnrichmentService enrichmentService;
+
+  /// Enriches every media item linked to [diveId] whose stored enrichment is
+  /// missing, or disagrees with what the dive's profile says it should be.
+  ///
+  /// Recomputing every item and writing only on a difference is what makes
+  /// this a repair as well as a backfill. Skipping anything that merely HAD a
+  /// row meant two classes of wrong data could never heal: rows surviving a
+  /// re-link still pointing at the previous dive, and rows written before the
+  /// taken_at wall-clock-UTC fix, whose elapsed time is skewed by the host's
+  /// offset and whose depth is clamped to the first profile point. The only
+  /// remedy used to be unlinking and re-adding the photo.
+  ///
+  /// Rows that already match are left untouched. That matters beyond saving a
+  /// query: mediaEnrichment is an HLC-synced entity, so rewriting an unchanged
+  /// row would bump its clock and ship a no-op to every other device.
+  ///
+  /// Returns the number of rows written (0 means nothing changed, so callers
+  /// can skip a refresh).
+  Future<int> enrichMissingForDive(String diveId) async {
+    // Most dives have no media, and this runs on every dive that is opened:
+    // the cheap read comes first, before the dive and its whole profile.
+    final media = await loadMediaForDive(diveId);
+    if (media.isEmpty) return 0;
+    final dive = await loadDive(diveId);
+    if (dive == null || dive.profile.isEmpty) return 0;
+    final clock = await _clockFor(dive);
+    final toSave = <MediaEnrichment>[];
+    for (final item in media) {
+      // Signatures are attached to a dive but not moments within it, and the
+      // chart excludes them regardless — don't fabricate a depth/time for one.
+      if (item.isSignature) continue;
+
+      // A pinned item (issue #1090) is positioned from the diver's offset,
+      // never from its capture time, so a backfill converges on the pin
+      // instead of reverting it, and the dive's shift leaves it alone.
+      final manual = item.manualElapsedSeconds;
+      final result = manual != null
+          ? enrichmentService.calculateEnrichmentAtElapsed(
+              profile: dive.profile,
+              elapsedSeconds: manual,
+            )
+          : _automatic(dive, clock, item);
+
+      // Mirror the gallery path: don't persist a row we couldn't actually
+      // place (no depth and no usable profile match). An existing row is left
+      // alone rather than overwritten with the unplaceable result.
+      if (result.depthMeters == null &&
+          result.matchConfidence == MatchConfidence.noProfile) {
+        continue;
+      }
+
+      final existing = item.enrichment;
+      if (existing != null && _matches(existing, result, diveId)) continue;
+
+      toSave.add(
+        MediaEnrichment(
+          // Keep the row's identity so the repository updates in place
+          // instead of minting a second row for the same media.
+          id: existing?.id ?? '',
+          mediaId: item.id,
+          diveId: diveId,
+          depthMeters: result.depthMeters,
+          temperatureCelsius: result.temperatureCelsius,
+          elapsedSeconds: result.elapsedSeconds,
+          matchConfidence: result.matchConfidence,
+          timestampOffsetSeconds: result.timestampOffsetSeconds,
+          createdAt: DateTime.now(),
+        ),
+      );
+    }
+    // One batched save for the whole dive; skipped entirely when nothing
+    // changed, so the idempotent re-run costs no write and no tick.
+    if (toSave.isNotEmpty) {
+      await saveEnrichments(toSave);
+    }
+    return toSave.length;
+  }
+
+  /// Where [item] sits on its dive by its capture time alone, whatever pin it
+  /// carries, with the shift the dive applies (issue #4539). The Set-time
+  /// dialog reads this to turn the moment the diver picks for one item into
+  /// a shift for all of them.
+  ///
+  /// Null when there is nothing to measure against: no dive, no profile, or
+  /// a signature, which has no moment in the dive.
+  Future<MediaAutomaticTime?> automaticTimeFor(MediaItem item) async {
+    final diveId = item.diveId;
+    if (diveId == null || item.isSignature) return null;
+    final dive = await loadDive(diveId);
+    if (dive == null || dive.profile.isEmpty) return null;
+    final clock = await _clockFor(dive);
+    return (
+      elapsedSeconds: _automatic(dive, clock, item).elapsedSeconds,
+      diveShiftSeconds: clock.offsetSeconds,
+    );
+  }
+
+  Future<DiveMediaClock> _clockFor(Dive dive) async => DiveMediaClock.forDive(
+    dive,
+    primarySourceEntry: await loadPrimarySourceEntry(dive.id),
+  );
+
+  EnrichmentResult _automatic(
+    Dive dive,
+    DiveMediaClock clock,
+    MediaItem item,
+  ) => enrichmentService.calculateEnrichment(
+    profile: dive.profile,
+    diveStartTime: clock.countsFrom,
+    photoTime: item.takenAt,
+  );
+
+  /// Whether [existing] already records exactly what [result] computes for
+  /// [diveId].
+  ///
+  /// Compares the computed values and the dive they belong to, not the row's
+  /// own identity or bookkeeping: `id` and `createdAt` are persisted but say
+  /// nothing about whether the enrichment is correct, and the repository's
+  /// update path does not rewrite them either. A partial match still counts
+  /// as a mismatch, since a stored row disagreeing on any value is wrong.
+  bool _matches(
+    MediaEnrichment existing,
+    EnrichmentResult result,
+    String diveId,
+  ) =>
+      existing.diveId == diveId &&
+      existing.depthMeters == result.depthMeters &&
+      existing.temperatureCelsius == result.temperatureCelsius &&
+      existing.elapsedSeconds == result.elapsedSeconds &&
+      existing.matchConfidence == result.matchConfidence &&
+      existing.timestampOffsetSeconds == result.timestampOffsetSeconds;
+}
+
+/// A browser's enricher (issue #4121): media is read-only there, and
+/// enrichment rows are synced, so it writes none and leaves them to the
+/// devices that link the photos.
+class ReadOnlyDiveMediaEnricher extends DiveMediaEnricher {
+  ReadOnlyDiveMediaEnricher()
+    : super(
+        loadDive: _noDive,
+        loadMediaForDive: _noMedia,
+        saveEnrichments: _noSave,
+        loadPrimarySourceEntry: _noEntry,
+      );
+
+  static Future<Dive?> _noDive(String diveId) async => null;
+  static Future<List<MediaItem>> _noMedia(String diveId) async => const [];
+  static Future<void> _noSave(List<MediaEnrichment> enrichments) async {}
+  static Future<DateTime?> _noEntry(String diveId) async => null;
+
+  @override
+  Future<int> enrichMissingForDive(String diveId) async => 0;
+
+  @override
+  Future<MediaAutomaticTime?> automaticTimeFor(MediaItem item) async => null;
+}

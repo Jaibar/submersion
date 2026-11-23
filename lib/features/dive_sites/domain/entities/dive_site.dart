@@ -1,5 +1,8 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_catalogue_answers.dart';
+
 /// Site difficulty levels
 enum SiteDifficulty {
   beginner,
@@ -39,8 +42,16 @@ class DiveSite extends Equatable {
   final double? minDepth; // meters - shallowest point of the site
   final double? maxDepth; // meters - deepest point of the site
   final SiteDifficulty? difficulty; // Site difficulty level
+  final WaterType? waterType; // Salt / fresh / brackish
   final String? country;
+
+  /// The country's ISO 3166-1 alpha-2 code (issue #4426): the geocoder's,
+  /// or read from [country]. Null when neither named one.
+  final String? countryCode;
   final String? region;
+  final String? city;
+  final String? island;
+  final String? bodyOfWater;
   final List<String> photoIds;
   final double? rating; // 1-5 stars
   final String notes;
@@ -50,7 +61,29 @@ class DiveSite extends Equatable {
   final String? parkingInfo; // Parking availability and tips
   final double?
   altitude; // Altitude above sea level in meters (for altitude diving)
-  final SiteConditions? conditions;
+  /// The ways into the water at this site (issues #1104, #2054), in enum
+  /// order. Snapped onto a dive when the site is assigned only while there is
+  /// exactly one ([soleEntryMethod]); the diver can always override it.
+  final List<EntryMethod> entryMethods;
+
+  /// The ways out of the water at this site. Empty means "same as entry".
+  final List<EntryMethod> exitMethods;
+  final bool isShared;
+
+  /// The shared site library this site belongs to (issue #2567); null for a
+  /// personal site.
+  final String? sharedLibraryId;
+
+  /// The id of the built-in catalogue record this site was adopted from;
+  /// null for a site the diver made by hand. It records where the site came
+  /// from: written when the site is created, never by an ordinary edit.
+  final String? catalogueId;
+
+  /// What the diver has settled about catalogue records for this site:
+  /// records it also stands for, records that are a different place, and
+  /// details turned down. Like [catalogueId], never written by an
+  /// ordinary edit.
+  final SiteCatalogueAnswers catalogueAnswers;
 
   const DiveSite({
     required this.id,
@@ -61,8 +94,13 @@ class DiveSite extends Equatable {
     this.minDepth,
     this.maxDepth,
     this.difficulty,
+    this.waterType,
     this.country,
+    this.countryCode,
     this.region,
+    this.city,
+    this.island,
+    this.bodyOfWater,
     this.photoIds = const [],
     this.rating,
     this.notes = '',
@@ -71,15 +109,61 @@ class DiveSite extends Equatable {
     this.mooringNumber,
     this.parkingInfo,
     this.altitude,
-    this.conditions,
+    this.entryMethods = const [],
+    this.exitMethods = const [],
+    this.isShared = false,
+    this.sharedLibraryId,
+    this.catalogueId,
+    this.catalogueAnswers = SiteCatalogueAnswers.empty,
   });
 
-  /// Full location string (region, country)
+  /// Whether this site belongs to a shared site library (issue #2567).
+  bool get isLibrarySite => sharedLibraryId != null;
+
+  /// Whether the site has anything about getting in and out: parking,
+  /// access notes, a mooring, or entry and exit methods.
+  bool get hasAccessInfo =>
+      (parkingInfo?.isNotEmpty ?? false) ||
+      (accessNotes?.isNotEmpty ?? false) ||
+      (mooringNumber?.isNotEmpty ?? false) ||
+      entryMethods.isNotEmpty ||
+      exitMethods.isNotEmpty;
+
+  /// The site's entry method when it lists exactly one, else null: with
+  /// several there is no telling which one a given dive used.
+  EntryMethod? get soleEntryMethod =>
+      entryMethods.length == 1 ? entryMethods.single : null;
+
+  /// The site's exit method when it lists exactly one, else null.
+  EntryMethod? get soleExitMethod =>
+      exitMethods.length == 1 ? exitMethods.single : null;
+
+  /// The town a site belongs to: its [city], falling back to its [island],
+  /// trimmed; empty when neither is set.
+  String get locality {
+    final cityTrimmed = city?.trim() ?? '';
+    return cityTrimmed.isNotEmpty ? cityTrimmed : (island?.trim() ?? '');
+  }
+
+  /// Compact one-line location formatted as `locality · region, country`.
+  /// Locality prefers [city], falling back to [island]. [bodyOfWater] is
+  /// intentionally excluded to keep list tiles and map popups tight.
   String get locationString {
-    final parts = <String>[];
-    if (region != null && region!.isNotEmpty) parts.add(region!);
-    if (country != null && country!.isNotEmpty) parts.add(country!);
-    return parts.join(', ');
+    // Trim before testing meaningfulness and before rendering so whitespace-
+    // only values (e.g. from imported/synced data) are ignored and the output
+    // is normalized — consistent with the save/merge paths' trim().isNotEmpty.
+    final regionTrimmed = region?.trim() ?? '';
+    final countryTrimmed = country?.trim() ?? '';
+    final base = <String>[];
+    if (regionTrimmed.isNotEmpty) base.add(regionTrimmed);
+    if (countryTrimmed.isNotEmpty) base.add(countryTrimmed);
+    final baseStr = base.join(', ');
+
+    if (locality.isNotEmpty && baseStr.isNotEmpty) {
+      return '$locality · $baseStr';
+    }
+    if (locality.isNotEmpty) return locality;
+    return baseStr;
   }
 
   bool get hasCoordinates => location != null;
@@ -103,8 +187,13 @@ class DiveSite extends Equatable {
     double? minDepth,
     double? maxDepth,
     SiteDifficulty? difficulty,
+    WaterType? waterType,
     String? country,
+    String? countryCode,
     String? region,
+    String? city,
+    String? island,
+    String? bodyOfWater,
     List<String>? photoIds,
     double? rating,
     String? notes,
@@ -113,28 +202,69 @@ class DiveSite extends Equatable {
     String? mooringNumber,
     String? parkingInfo,
     double? altitude,
-    SiteConditions? conditions,
+    List<EntryMethod>? entryMethods,
+    List<EntryMethod>? exitMethods,
+    bool? isShared,
+    String? sharedLibraryId,
+    bool clearSharedLibraryId = false,
+    String? catalogueId,
+    bool clearCatalogueId = false,
+    SiteCatalogueAnswers? catalogueAnswers,
+    bool clearRating = false,
+    bool clearLocation = false,
+    bool clearMinDepth = false,
+    bool clearMaxDepth = false,
+    bool clearDifficulty = false,
+    bool clearWaterType = false,
+    bool clearCountry = false,
+    bool clearCountryCode = false,
+    bool clearRegion = false,
+    bool clearCity = false,
+    bool clearIsland = false,
+    bool clearBodyOfWater = false,
+    bool clearHazards = false,
+    bool clearAccessNotes = false,
+    bool clearMooringNumber = false,
+    bool clearParkingInfo = false,
+    bool clearAltitude = false,
   }) {
     return DiveSite(
       id: id ?? this.id,
       diverId: diverId ?? this.diverId,
       name: name ?? this.name,
       description: description ?? this.description,
-      location: location ?? this.location,
-      minDepth: minDepth ?? this.minDepth,
-      maxDepth: maxDepth ?? this.maxDepth,
-      difficulty: difficulty ?? this.difficulty,
-      country: country ?? this.country,
-      region: region ?? this.region,
+      location: clearLocation ? null : location ?? this.location,
+      minDepth: clearMinDepth ? null : minDepth ?? this.minDepth,
+      maxDepth: clearMaxDepth ? null : maxDepth ?? this.maxDepth,
+      difficulty: clearDifficulty ? null : difficulty ?? this.difficulty,
+      waterType: clearWaterType ? null : waterType ?? this.waterType,
+      country: clearCountry ? null : country ?? this.country,
+      // A code names its country: clearing the country clears it too.
+      countryCode: clearCountry || clearCountryCode
+          ? null
+          : countryCode ?? this.countryCode,
+      region: clearRegion ? null : region ?? this.region,
+      city: clearCity ? null : city ?? this.city,
+      island: clearIsland ? null : island ?? this.island,
+      bodyOfWater: clearBodyOfWater ? null : bodyOfWater ?? this.bodyOfWater,
       photoIds: photoIds ?? this.photoIds,
-      rating: rating ?? this.rating,
+      rating: clearRating ? null : rating ?? this.rating,
       notes: notes ?? this.notes,
-      hazards: hazards ?? this.hazards,
-      accessNotes: accessNotes ?? this.accessNotes,
-      mooringNumber: mooringNumber ?? this.mooringNumber,
-      parkingInfo: parkingInfo ?? this.parkingInfo,
-      altitude: altitude ?? this.altitude,
-      conditions: conditions ?? this.conditions,
+      hazards: clearHazards ? null : hazards ?? this.hazards,
+      accessNotes: clearAccessNotes ? null : accessNotes ?? this.accessNotes,
+      mooringNumber: clearMooringNumber
+          ? null
+          : mooringNumber ?? this.mooringNumber,
+      parkingInfo: clearParkingInfo ? null : parkingInfo ?? this.parkingInfo,
+      altitude: clearAltitude ? null : altitude ?? this.altitude,
+      entryMethods: entryMethods ?? this.entryMethods,
+      exitMethods: exitMethods ?? this.exitMethods,
+      isShared: isShared ?? this.isShared,
+      sharedLibraryId: clearSharedLibraryId
+          ? null
+          : (sharedLibraryId ?? this.sharedLibraryId),
+      catalogueId: clearCatalogueId ? null : (catalogueId ?? this.catalogueId),
+      catalogueAnswers: catalogueAnswers ?? this.catalogueAnswers,
     );
   }
 
@@ -148,8 +278,13 @@ class DiveSite extends Equatable {
     minDepth,
     maxDepth,
     difficulty,
+    waterType,
     country,
+    countryCode,
     region,
+    city,
+    island,
+    bodyOfWater,
     photoIds,
     rating,
     notes,
@@ -158,7 +293,12 @@ class DiveSite extends Equatable {
     mooringNumber,
     parkingInfo,
     altitude,
-    conditions,
+    entryMethods,
+    exitMethods,
+    isShared,
+    sharedLibraryId,
+    catalogueId,
+    catalogueAnswers,
   ];
 }
 
@@ -175,36 +315,4 @@ class GeoPoint extends Equatable {
   @override
   String toString() =>
       '${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}';
-}
-
-/// Typical conditions at a dive site
-class SiteConditions extends Equatable {
-  final String? waterType; // salt, fresh, brackish
-  final String? typicalVisibility;
-  final String? typicalCurrent;
-  final String? bestSeason;
-  final double? minTemp; // celsius
-  final double? maxTemp; // celsius
-  final String? entryType; // shore, boat
-
-  const SiteConditions({
-    this.waterType,
-    this.typicalVisibility,
-    this.typicalCurrent,
-    this.bestSeason,
-    this.minTemp,
-    this.maxTemp,
-    this.entryType,
-  });
-
-  @override
-  List<Object?> get props => [
-    waterType,
-    typicalVisibility,
-    typicalCurrent,
-    bestSeason,
-    minTemp,
-    maxTemp,
-    entryType,
-  ];
 }

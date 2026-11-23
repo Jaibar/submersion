@@ -1,0 +1,233 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_clocks_card.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+void main() {
+  // formatDate resolves DateFormat against Intl.defaultLocale, a process
+  // global the app assigns from the diver's locale and a widget test never
+  // sets (MaterialApp.locale does not touch it). Pin it so the date strings
+  // asserted below do not rest on the machine default or a prior test.
+  late String? previousLocale;
+  setUp(() {
+    previousLocale = Intl.defaultLocale;
+    Intl.defaultLocale = 'en_US';
+  });
+  tearDown(() {
+    Intl.defaultLocale = previousLocale;
+  });
+
+  final t0 = DateTime(2025, 1, 1);
+  final now = DateTime(2026, 7, 16);
+
+  final hydro = ServiceKind(
+    id: 'hydro',
+    name: 'Hydrostatic test',
+    applicableTypes: const [EquipmentType.tank],
+    defaultIntervalDays: 1825,
+    autoAttach: true,
+    isBuiltIn: true,
+    createdAt: t0,
+    updatedAt: t0,
+  );
+  final vip = ServiceKind(
+    id: 'vip',
+    name: 'Visual inspection (VIP)',
+    applicableTypes: const [EquipmentType.tank],
+    defaultIntervalDays: 365,
+    autoAttach: true,
+    isBuiltIn: true,
+    createdAt: t0,
+    updatedAt: t0,
+  );
+  final o2 = ServiceKind(
+    id: 'o2-clean',
+    name: 'O2 clean',
+    applicableTypes: const [EquipmentType.tank],
+    defaultIntervalDays: 365,
+    isBuiltIn: true,
+    createdAt: t0,
+    updatedAt: t0,
+  );
+
+  ServiceSchedule sched(String kindId) => ServiceSchedule(
+    id: 's-$kindId',
+    equipmentId: 'e1',
+    serviceKindId: kindId,
+    createdAt: t0,
+    updatedAt: t0,
+  );
+
+  ServiceClockStatus status(
+    ServiceKind kind,
+    ServiceClockSeverity severity,
+    DateTime dueDate,
+  ) => ServiceClockStatus(
+    schedule: sched(kind.id),
+    kind: kind,
+    anchor: t0,
+    dueDate: dueDate,
+    severity: severity,
+    now: now,
+  );
+
+  Widget buildCard({
+    List<ServiceClockStatus>? statuses,
+    List<ServiceSchedule>? schedules,
+    List<ServiceKind>? scopedKinds,
+    Map<String, ServiceKind>? allKinds,
+  }) {
+    return ProviderScope(
+      overrides: [
+        allServiceKindsByIdProvider.overrideWith(
+          (ref) async =>
+              allKinds ??
+              {
+                for (final k in [hydro, vip, o2]) k.id: k,
+              },
+        ),
+        serviceClockStatusesProvider('e1').overrideWith(
+          (ref) async =>
+              statuses ??
+              [
+                status(
+                  hydro,
+                  ServiceClockSeverity.overdue,
+                  DateTime(2026, 1, 1),
+                ),
+                status(vip, ServiceClockSeverity.ok, DateTime(2027, 5, 1)),
+              ],
+        ),
+        serviceSchedulesForEquipmentProvider('e1').overrideWith(
+          (ref) async => schedules ?? [sched('hydro'), sched('vip')],
+        ),
+        serviceKindsProvider.overrideWith(
+          (ref) async => scopedKinds ?? [hydro, vip, o2],
+        ),
+      ],
+      child: const MaterialApp(
+        locale: Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: ServiceClocksCard(equipmentId: 'e1'),
+          ),
+        ),
+      ),
+    );
+  }
+
+  testWidgets('names a schedule on another profile custom kind (shared gear)', (
+    tester,
+  ) async {
+    // Issue #2046: a shared item's schedule can use its owner's custom
+    // kind, which the active diver's scoped kind list leaves out.
+    final ownerKind = ServiceKind(
+      id: 'owner-kind',
+      name: 'Owner clean',
+      applicableTypes: const [EquipmentType.tank],
+      diverId: 'owner',
+      createdAt: t0,
+      updatedAt: t0,
+    );
+    await tester.pumpWidget(
+      buildCard(
+        statuses: [
+          status(hydro, ServiceClockSeverity.ok, DateTime(2027, 1, 1)),
+        ],
+        schedules: [sched('hydro'), sched('owner-kind')],
+        scopedKinds: [hydro],
+        allKinds: {hydro.id: hydro, ownerKind.id: ownerKind},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Owner clean'), findsOneWidget);
+  });
+
+  testWidgets('renders one row per clock with trigger text', (tester) async {
+    await tester.pumpWidget(buildCard());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hydrostatic test'), findsOneWidget);
+    expect(find.text('Visual inspection (VIP)'), findsOneWidget);
+    expect(find.textContaining('Overdue since'), findsOneWidget);
+    expect(find.textContaining('Due '), findsOneWidget);
+  });
+
+  testWidgets(
+    'a clock with a due date and a usage count renders them as separate '
+    'lines, not crowded into one (issue #3267)',
+    (tester) async {
+      await tester.pumpWidget(
+        buildCard(
+          statuses: [
+            ServiceClockStatus(
+              schedule: sched(hydro.id),
+              kind: hydro,
+              anchor: t0,
+              dueDate: DateTime(2027, 1, 1),
+              divesSinceAnchor: 51,
+              divesRemaining: 49,
+              severity: ServiceClockSeverity.ok,
+              now: now,
+            ),
+          ],
+          schedules: [sched('hydro')],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Due '), findsOneWidget);
+      expect(
+        find.text('51 of 100 dives, 49 left'),
+        findsOneWidget,
+        reason:
+            'the usage count must be its own Text widget, not joined with '
+            'the due date into a single crowded line',
+      );
+    },
+  );
+
+  testWidgets('due and overdue clocks get the status palette dots', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildCard(
+        statuses: [
+          status(hydro, ServiceClockSeverity.overdue, DateTime(2026, 1, 1)),
+          status(vip, ServiceClockSeverity.dueSoon, DateTime(2026, 7, 30)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final dots = tester
+        .widgetList<Icon>(find.byIcon(Icons.circle))
+        .map((d) => d.color)
+        .toList();
+    expect(dots, [
+      StatusColors.light.alert.accent,
+      StatusColors.light.warn.accent,
+    ]);
+  });
+
+  testWidgets('each clock says which date it counts from', (tester) async {
+    // A baseline date, a service record, the purchase date and the date
+    // the item was added can each start a clock; without this line a
+    // diver cannot tell which one did.
+    await tester.pumpWidget(buildCard());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Counting since Jan 1, 2025'), findsNWidgets(2));
+  });
+}

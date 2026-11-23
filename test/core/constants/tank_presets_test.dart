@@ -41,6 +41,15 @@ void main() {
       expect(al80.material, TankMaterial.aluminum);
     });
 
+    test('AL100 has correct specs', () {
+      const al100 = TankPresets.al100;
+      expect(al100.volumeLiters, 13.1);
+      expect(al100.workingPressureBar, closeTo(227.527, 0.001));
+      expect(al100.ratedCapacityCuft, 100.0);
+      expect(al100.volumeCuft, 100.0);
+      expect(al100.material, TankMaterial.aluminum);
+    });
+
     test('HP100 has correct specs', () {
       const hp100 = TankPresets.hp100;
       expect(hp100.volumeLiters, 12.9);
@@ -84,7 +93,7 @@ void main() {
     });
 
     test('all presets list contains expected count', () {
-      expect(TankPresets.all.length, 12);
+      expect(TankPresets.all.length, 13);
     });
 
     test('US tank pressures convert cleanly to PSI', () {
@@ -113,6 +122,11 @@ void main() {
         expect(psi, 3442, reason: '${preset.displayName} should be 3442 PSI');
       }
 
+      // 3300 PSI tank
+      final al100Psi = (TankPresets.al100.workingPressureBar * psiConversion)
+          .round();
+      expect(al100Psi, 3300);
+
       // 2640 PSI tank
       final lp85Psi = (TankPresets.lp85.workingPressureBar * psiConversion)
           .round();
@@ -135,13 +149,87 @@ void main() {
       expect(match!.name, 'hp100');
     });
 
+    test('matches AL100 by volume and pressure', () {
+      final match = TankPresets.matchBySpecs(13.1, 228.0);
+      expect(match, isNotNull);
+      expect(match!.name, 'al100');
+      expect(match.ratedCapacityCuft, 100.0);
+    });
+
+    test('AL100 and HP100 stay distinct despite the same rated capacity', () {
+      // Same 100 cu ft rating, different water volume and service pressure.
+      expect(TankPresets.matchBySpecs(13.1, 227.5)!.name, 'al100');
+      expect(TankPresets.matchBySpecs(12.9, 237.3)!.name, 'hp100');
+    });
+
     test('returns null for non-matching specs', () {
       expect(TankPresets.matchBySpecs(14.0, 220.0), isNull);
+    });
+
+    test('resolves the AL40 tie to the plain cylinder, not the stage', () {
+      // An AL40 and an AL40 Stage share volume, working pressure and cuft
+      // rating, so specs alone cannot separate them. The documented tie-break
+      // is the order of TankPresets.all. Pinned here because callers that use
+      // the result for anything beyond the cuft rating (buoyancy, notably)
+      // would otherwise change behaviour if the list were reordered.
+      final match = TankPresets.matchBySpecs(5.7, 206.843);
+      expect(match, isNotNull);
+      expect(match!.name, 'al40');
+      expect(
+        TankPresets.al40.volumeLiters,
+        TankPresets.al40Stage.volumeLiters,
+        reason: 'the tie this pins only exists while the specs are identical',
+      );
+      expect(
+        TankPresets.al40.workingPressureBar,
+        TankPresets.al40Stage.workingPressureBar,
+      );
     });
 
     test('returns null for metric tanks (no ratedCapacityCuft)', () {
       // Steel 12L is 12.0L @ 200 bar but has no ratedCapacityCuft
       expect(TankPresets.matchBySpecs(12.0, 200.0), isNull);
+    });
+  });
+
+  group('matchAnyBySpecs', () {
+    test('matches the metric steel presets that matchBySpecs skips', () {
+      // A 12 L / 200 bar cylinder imported without a material (#3686).
+      expect(TankPresets.matchAnyBySpecs(12.0, 200.0)?.name, 'steel12');
+      expect(TankPresets.matchAnyBySpecs(10.0, 200.0)?.name, 'steel10');
+      expect(TankPresets.matchAnyBySpecs(15.0, 200.0)?.name, 'steel15');
+    });
+
+    test('still matches rated presets, with the same tie-break', () {
+      expect(TankPresets.matchAnyBySpecs(11.1, 207.0)?.name, 'al80');
+      expect(TankPresets.matchAnyBySpecs(5.7, 206.843)?.name, 'al40');
+    });
+
+    test('a known material must agree with the preset', () {
+      expect(
+        TankPresets.matchAnyBySpecs(
+          12.0,
+          200.0,
+          material: TankMaterial.steel,
+        )?.name,
+        'steel12',
+      );
+      expect(
+        TankPresets.matchAnyBySpecs(
+          12.0,
+          200.0,
+          material: TankMaterial.aluminum,
+        ),
+        isNull,
+      );
+      expect(
+        TankPresets.matchAnyBySpecs(11.1, 207.0, material: TankMaterial.steel),
+        isNull,
+      );
+    });
+
+    test('returns null for non-matching specs', () {
+      expect(TankPresets.matchAnyBySpecs(12.0, 232.0), isNull);
     });
   });
 }

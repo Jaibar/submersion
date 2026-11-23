@@ -18,6 +18,17 @@ class IncomingDiveData {
   final String? computerSerial;
   final List<DiveProfilePoint> profile;
   final String? siteName;
+  final String? weather;
+  final String? surfaceConditions;
+  final String? boatName;
+  final String? boatCaptain;
+  final String? diveOperator;
+  final String? sourceUuid;
+
+  /// The dive number the source itself recorded (the computer's own count,
+  /// or the number in the imported file), or null when it recorded none.
+  /// Only used when the diver chooses to retain source dive numbers.
+  final int? diveNumber;
 
   const IncomingDiveData({
     this.startTime,
@@ -30,6 +41,13 @@ class IncomingDiveData {
     this.computerSerial,
     this.profile = const [],
     this.siteName,
+    this.weather,
+    this.surfaceConditions,
+    this.boatName,
+    this.boatCaptain,
+    this.diveOperator,
+    this.sourceUuid,
+    this.diveNumber,
   });
 
   /// Create from a [DownloadedDive] (dive computer download flow).
@@ -43,6 +61,7 @@ class IncomingDiveData {
       avgDepth: dive.avgDepth,
       durationSeconds: dive.durationSeconds,
       waterTemp: dive.minTemperature,
+      diveNumber: dive.diveNumber,
       computerName: computer?.displayName,
       computerModel: computer?.fullName,
       computerSerial: computer?.serialNumber,
@@ -86,6 +105,13 @@ class IncomingDiveData {
       computerSerial: data['diveComputerSerial'] as String?,
       siteName: data['siteName'] as String?,
       profile: profile,
+      weather: data['weather'] as String?,
+      surfaceConditions: data['surfaceConditions'] as String?,
+      boatName: data['boatName'] as String?,
+      boatCaptain: data['boatCaptain'] as String?,
+      diveOperator: data['diveOperator'] as String?,
+      sourceUuid: data['sourceUuid'] as String?,
+      diveNumber: (data['diveNumber'] as num?)?.toInt(),
     );
   }
 }

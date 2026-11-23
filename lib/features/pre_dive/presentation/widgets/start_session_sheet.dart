@@ -1,0 +1,358 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/core/built_ins/visible_built_ins.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_row_labels_of.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_dropdown_label.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template_section.dart';
+import 'package:submersion/features/pre_dive/domain/services/session_item_composer.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/hidden_built_ins_provider.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/presentation/providers/set_bundle_providers.dart';
+import 'package:submersion/features/pre_dive/presentation/helpers/set_check_titles.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+/// Bottom sheet that starts a pre-dive checklist session: pick a template,
+/// optionally pick an equipment set (only offered when the template has an
+/// equipmentSet item), then compose the snapshot and open the runner.
+Future<void> showStartSessionSheet(
+  BuildContext context, {
+  String? diveId,
+  String? tripId,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+      ),
+      child: _StartSessionSheet(diveId: diveId, tripId: tripId),
+    ),
+  );
+}
+
+/// The members of [set] a pre-dive session checks: every member in [all]
+/// except one on the wishlist (#2025), which is not in the diver's kit.
+/// [gearIds] is what the set applies when that is more than its own
+/// members, the gear of the sets it includes (issue #4525).
+List<EquipmentItem> sessionSetGear(
+  List<EquipmentItem> all,
+  EquipmentSet set, {
+  List<String>? gearIds,
+}) {
+  final ids = (gearIds ?? set.equipmentIds).toSet();
+  return [
+    for (final g in all)
+      if (ids.contains(g.id) && !g.isWanted) g,
+  ];
+}
+
+class _StartSessionSheet extends ConsumerStatefulWidget {
+  final String? diveId;
+  final String? tripId;
+
+  const _StartSessionSheet({this.diveId, this.tripId});
+
+  @override
+  ConsumerState<_StartSessionSheet> createState() => _StartSessionSheetState();
+}
+
+class _StartSessionSheetState extends ConsumerState<_StartSessionSheet> {
+  PreDiveChecklistTemplate? _template;
+  List<PreDiveChecklistTemplateItem> _templateItems = const [];
+  List<PreDiveChecklistTemplateSection> _templateSections = const [];
+  EquipmentSet? _equipmentSet;
+  bool _setInitialized = false;
+  final Map<String, EquipmentItem?> _equipmentByItemId = {};
+  final Set<String> _equipmentInitialized = {};
+  bool _starting = false;
+
+  bool get _needsEquipmentSet =>
+      _templateItems.any((i) => i.itemType == PreDiveItemType.equipmentSet);
+
+  List<PreDiveChecklistTemplateItem> get _equipmentItems => _templateItems
+      .where((i) => i.itemType == PreDiveItemType.equipment)
+      .toList();
+
+  Future<void> _selectTemplate(PreDiveChecklistTemplate template) async {
+    final repository = ref.read(preDiveTemplateRepositoryProvider);
+    final items = await repository.getItemsForTemplate(template.id);
+    final sections = await repository.getSectionsForTemplate(template.id);
+    if (!mounted) return;
+    setState(() {
+      _template = template;
+      _templateItems = items;
+      _templateSections = sections;
+      _equipmentByItemId.clear();
+      _equipmentInitialized.clear();
+    });
+  }
+
+  Future<void> _begin() async {
+    final template = _template;
+    if (template == null || _starting) return;
+    setState(() => _starting = true);
+    // Read before the first await: the set's checks are worded for the
+    // diver (issue #4525).
+    final l10n = context.l10n;
+    final units = UnitFormatter(ref.read(settingsProvider));
+    try {
+      final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
+      final chosenSet = _needsEquipmentSet ? _equipmentSet : null;
+      final chosenSingles = <String, EquipmentItem>{
+        for (final item in _equipmentItems)
+          if (_equipmentByItemId[item.id] != null)
+            item.id: _equipmentByItemId[item.id]!,
+      };
+      var gear = const <EquipmentItem>[];
+      List<String>? setGearIds;
+      var setChecks = const <String>[];
+      if (chosenSet != null) {
+        // What the set applies: its gear with that of the sets it includes,
+        // and a check each for its lead and its cylinders (issue #4525).
+        try {
+          final bundle = await ref.read(setBundleProvider(chosenSet.id).future);
+          if (bundle != null) {
+            setGearIds = bundle.gearIds;
+            setChecks = setCheckTitles(l10n, units, bundle);
+          }
+        } catch (_) {
+          // Sets unavailable: the set's own gear, as before.
+        }
+        final all = await EquipmentRepository().getAllEquipment(
+          diverId: diverId,
+        );
+        gear = sessionSetGear(all, chosenSet, gearIds: setGearIds);
+      }
+      // Union of set-expanded gear and single-item links, deduplicated by id
+      // so a device chosen both ways is not passed twice to the composer.
+      final allGear = {
+        for (final g in gear) g.id: g,
+        for (final g in chosenSingles.values) g.id: g,
+      }.values.toList();
+      // Overdue service is a purely informative, live-computed warning shown
+      // in the runner (SessionItemTile), not a decision baked into the
+      // session at start time -- so no service-clock lookup happens here.
+      final composed = SessionItemComposer.compose(
+        templateItems: _templateItems,
+        templateSections: _templateSections,
+        equipmentSet: chosenSet,
+        equipmentSetGearIds: setGearIds,
+        setCheckTitles: setChecks,
+        equipmentItems: allGear,
+        equipmentByTemplateItemId: {
+          for (final entry in chosenSingles.entries) entry.key: entry.value.id,
+        },
+        now: DateTime.now(),
+      );
+      final session = await ref
+          .read(preDiveSessionRepositoryProvider)
+          .startSession(
+            template: template,
+            items: composed.items,
+            sections: composed.sections,
+            diverId: diverId,
+            diveId: widget.diveId,
+            tripId: widget.tripId,
+            equipmentSetId: chosenSet?.id,
+            equipmentSetName: chosenSet?.name,
+          );
+      // Remember each single-equipment choice on its template item so the
+      // next session pre-fills it. Skipped for built-in templates, whose
+      // items are shared across every diver.
+      if (!template.isBuiltIn) {
+        final templateRepo = ref.read(preDiveTemplateRepositoryProvider);
+        // A remembered device on the wishlist (#2025) was hidden from the
+        // picker, not unchosen: keep it remembered for when it is bought.
+        final wantedIds = {
+          for (final e in ref.read(allEquipmentProvider).value ?? const [])
+            if (e.isWanted) e.id,
+        };
+        for (final item in _equipmentItems) {
+          final chosen = _equipmentByItemId[item.id];
+          final chosenId = chosen?.id;
+          if (chosenId == null && wantedIds.contains(item.equipmentId)) {
+            continue;
+          }
+          if (chosenId != item.equipmentId) {
+            await templateRepo.updateItemEquipment(item.id, chosenId);
+          }
+        }
+      }
+      if (mounted) {
+        Navigator.pop(context);
+        context.push('/pre-dive-sessions/${session.id}');
+      }
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  /// One single-equipment item's device picker. [options] leaves out
+  /// wishlist gear (#2025), but a device already chosen stays listed even if
+  /// it turns Wanted while the sheet is open: a dropdown value missing from
+  /// its items fails Flutter's assertion and would drop the choice.
+  Widget _equipmentDropdown(
+    PreDiveChecklistTemplateItem item,
+    List<EquipmentItem> options,
+    AppLocalizations l10n,
+  ) {
+    final chosen = _equipmentByItemId[item.id];
+    final listed = [
+      ...options,
+      if (chosen != null && !options.any((e) => e.id == chosen.id)) chosen,
+    ];
+    // Labelled as one list, so devices sharing a name show their ID (#3191).
+    final labels = equipmentRowLabelsOf(context, ref, listed);
+    return DropdownButtonFormField<EquipmentItem?>(
+      initialValue: chosen,
+      // Bounds the label's width, so a long name and details ellipsize
+      // instead of overflowing the sheet.
+      isExpanded: true,
+      decoration: InputDecoration(labelText: item.title),
+      items: [
+        DropdownMenuItem<EquipmentItem?>(
+          value: null,
+          child: Text(l10n.preDive_start_noEquipment),
+        ),
+        for (final e in listed)
+          DropdownMenuItem<EquipmentItem?>(
+            value: e.id == chosen?.id ? chosen : e,
+            child: EquipmentDropdownLabel(item: e, label: labels[e.id]),
+          ),
+      ],
+      onChanged: (e) => setState(() => _equipmentByItemId[item.id] = e),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final templatesAsync = ref.watch(preDiveTemplatesProvider);
+    // Hidden built-ins are not offered (issue #401), except the one already
+    // chosen: the dropdown asserts its value is among its items.
+    final allTemplates =
+        templatesAsync.value ?? const <PreDiveChecklistTemplate>[];
+    final templates = visibleBuiltIns(
+      allTemplates,
+      ref.watch(hiddenBuiltInIdsProvider(BuiltInCatalog.preDiveTemplates)),
+      isBuiltIn: (t) => t.isBuiltIn,
+      idOf: (t) => t.id,
+      keep: [_template?.id],
+    );
+    final setsAsync = ref.watch(equipmentSetsProvider);
+    final sets = setsAsync.value ?? const [];
+    final equipmentAsync = ref.watch(allEquipmentProvider);
+    // Wishlist gear (#2025) is not something to check before a dive, and a
+    // remembered device the diver has since set to Wanted is not pre-filled.
+    final equipmentList = [
+      for (final e in equipmentAsync.value ?? const <EquipmentItem>[])
+        if (!e.isWanted) e,
+    ];
+
+    // Pre-select the diver's default equipment set once sets load.
+    if (!_setInitialized && sets.isNotEmpty) {
+      _setInitialized = true;
+      _equipmentSet = sets.where((s) => s.isDefault).firstOrNull;
+    }
+
+    // Pre-fill each single-equipment item with its remembered device once
+    // the diver's equipment list loads.
+    if (equipmentList.isNotEmpty) {
+      for (final item in _equipmentItems) {
+        if (_equipmentInitialized.add(item.id)) {
+          _equipmentByItemId[item.id] = equipmentList
+              .where((e) => e.id == item.equipmentId)
+              .firstOrNull;
+        }
+      }
+    }
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              l10n.preDive_start_title,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<PreDiveChecklistTemplate>(
+              initialValue: _template,
+              decoration: InputDecoration(
+                labelText: l10n.preDive_start_template,
+                // Says where to bring one back when the diver hid them all,
+                // naming Settings as the navigation labels it.
+                helperText: templates.isEmpty && allTemplates.isNotEmpty
+                    ? l10n.preDive_start_allTemplatesHidden(
+                        '${l10n.nav_settings} > '
+                        '${l10n.settings_section_manage_title} > '
+                        '${l10n.settings_manage_preDiveChecklists}',
+                      )
+                    : null,
+                helperMaxLines: 3,
+              ),
+              items: [
+                for (final template in templates)
+                  DropdownMenuItem(value: template, child: Text(template.name)),
+              ],
+              onChanged: (template) {
+                if (template != null) _selectTemplate(template);
+              },
+            ),
+            if (_needsEquipmentSet) ...[
+              const SizedBox(height: 8),
+              DropdownButtonFormField<EquipmentSet?>(
+                initialValue: _equipmentSet,
+                decoration: InputDecoration(
+                  labelText: l10n.preDive_start_equipmentSet,
+                ),
+                items: [
+                  DropdownMenuItem<EquipmentSet?>(
+                    value: null,
+                    child: Text(l10n.preDive_start_noEquipmentSet),
+                  ),
+                  for (final set in sets)
+                    DropdownMenuItem<EquipmentSet?>(
+                      value: set,
+                      child: Text(set.name),
+                    ),
+                ],
+                onChanged: (set) => setState(() => _equipmentSet = set),
+              ),
+            ],
+            for (final item in _equipmentItems) ...[
+              const SizedBox(height: 8),
+              _equipmentDropdown(item, equipmentList, l10n),
+            ],
+            const SizedBox(height: 16),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+              ),
+              onPressed: _template == null || _starting ? null : _begin,
+              child: Text(l10n.preDive_start_begin),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

@@ -2,34 +2,215 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/dive_stats_scope.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/core/utils/stream_debounce.dart';
+import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/features/dive_import/data/services/imported_file_reclaimer.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_computer_links.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_location_buddy_links.dart';
 import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart'
+    show AppSettings;
+import 'package:submersion/features/divers/data/repositories/diver_delete_steps.dart';
+import 'package:submersion/features/divers/data/repositories/diver_location_retirement.dart';
+import 'package:submersion/features/divers/data/repositories/diver_owned_rows.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart'
     as domain;
+import 'package:submersion/features/dive_log/data/repositories/trip_cylinder_links.dart';
+import 'package:submersion/features/equipment/data/repositories/cylinder_gear_links.dart';
+import 'package:submersion/features/media/data/repositories/media_parent_cascade.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media_store/data/media_deletion_coordinator.dart';
+import 'package:submersion/features/media_store/data/media_transfer_queue_repository.dart';
+import 'package:submersion/features/planner/data/repositories/dive_plan_dive_links.dart';
+import 'package:submersion/features/site_types/data/repositories/site_type_repository.dart';
+import 'package:submersion/features/equipment/data/services/equipment_transfer_service.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
+import 'package:submersion/features/divers/data/repositories/diver_share_handover.dart';
+import 'package:submersion/features/divers/data/repositories/item_shares_repository.dart';
+import 'package:submersion/features/divers/data/repositories/profile_hides_repository.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/document_ids.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_location_center_links.dart';
+import 'package:submersion/features/trips/data/repositories/side_trip_links.dart';
+import 'package:submersion/core/constants/enums.dart';
+
+/// Result returned by [DiverRepository.deleteDiverWithReassignment].
+///
+/// When shared trips/sites are reassigned to a surviving diver before
+/// deletion, [hasReassignments] is true and the counts/target are populated.
+class DeleteDiverResult {
+  final int reassignedTripsCount;
+  final int reassignedSitesCount;
+  final String? reassignedToDiverId;
+  final String? reassignedToDiverName;
+
+  /// Items of the deleted profile's gear other profiles needed, handed to
+  /// them instead of deleted (issue #2852).
+  final int keptEquipmentCount;
+
+  /// The profiles that received kept gear, in handover order, no repeats.
+  final List<String> keptEquipmentHeirNames;
+
+  /// Trips and sites the deleted profile shared with chosen profiles, each
+  /// handed to one of them (issue #2151); not in the reassigned counts,
+  /// which name one heir.
+  final int handedOverCount;
+
+  const DeleteDiverResult({
+    required this.reassignedTripsCount,
+    required this.reassignedSitesCount,
+    this.reassignedToDiverId,
+    this.reassignedToDiverName,
+    this.keptEquipmentCount = 0,
+    this.keptEquipmentHeirNames = const [],
+    this.handedOverCount = 0,
+  });
+
+  bool get hasReassignments =>
+      reassignedTripsCount > 0 || reassignedSitesCount > 0;
+
+  bool get hasKeptEquipment => keptEquipmentCount > 0;
+}
 
 class DiverRepository {
+  DiverRepository({
+    ImportedFileReclaimer? importedFileReclaimer,
+    MediaDeletionCoordinator? mediaDeletionCoordinator,
+    EquipmentTransferService? equipmentTransferService,
+    DocumentRepository? documentRepository,
+  }) : _documentRepository = documentRepository ?? DocumentRepository(),
+       _importedFileReclaimer =
+           importedFileReclaimer ?? ImportedFileReclaimer(),
+       _injectedMediaDeletionCoordinator = mediaDeletionCoordinator,
+       _equipmentTransfer =
+           equipmentTransferService ?? EquipmentTransferService();
+
   AppDatabase get _db => DatabaseService.instance.database;
+  final ImportedFileReclaimer _importedFileReclaimer;
+  final DocumentRepository _documentRepository;
+  final MediaDeletionCoordinator? _injectedMediaDeletionCoordinator;
+  final EquipmentTransferService _equipmentTransfer;
+
+  /// Built on first use: most callers construct a DiverRepository only to
+  /// read the active diver, and never delete one. No worker kick from the
+  /// data layer (provider cycles), the rule SiteRepository follows: queued
+  /// intents drain on the next kick, and the Verify Library sweep is the
+  /// backstop.
+  late final MediaDeletionCoordinator _mediaDeletionCoordinator =
+      _injectedMediaDeletionCoordinator ??
+      MediaDeletionCoordinator(
+        mediaRepository: MediaRepository(),
+        queue: () => MediaTransferQueueRepository(),
+      );
   final DiverSettingsRepository _settingsRepository = DiverSettingsRepository();
   final SyncRepository _syncRepository = SyncRepository();
   static const _uuid = Uuid();
   static final _log = LoggerService.forClass(DiverRepository);
-  static const _activeDiverIdKey = 'active_diver_id';
+
+  /// Settings-table key holding the device-local active diver id.
+  ///
+  /// Public so writers outside this repository that must keep the pointer
+  /// valid in the same transaction as their own change (diver merge) target
+  /// the same row the readers here consult.
+  static const activeDiverIdSettingsKey = 'active_diver_id';
 
   /// Get all divers ordered by name
   Future<List<domain.Diver>> getAllDivers() async {
     try {
       final query = _db.select(_db.divers)
-        ..orderBy([(t) => OrderingTerm.asc(t.name)]);
+        ..orderBy([(t) => OrderingTerm.asc(t.name.collate(Collate.noCase))]);
       final rows = await query.get();
-      return rows.map(_mapRowToDiver).toList();
+      return await _withDocuments(
+        sortedByText(rows, (r) => r.name).map(_mapRowToDiver).toList(),
+      );
     } catch (e, stackTrace) {
       _log.error('Failed to get all divers', error: e, stackTrace: stackTrace);
       rethrow;
     }
   }
+
+  /// Number of divers, counted in SQL without loading or mapping any rows.
+  ///
+  /// Used by the setup wizard's post-restore "did a library arrive?" gate,
+  /// which only needs existence -- loading and mapping every diver row (with
+  /// its emergency contacts, insurance, etc.) just to call `isNotEmpty` is
+  /// wasted work after a pull that may have brought in a large library.
+  Future<int> getDiverCount() async {
+    try {
+      final result = await _db
+          .customSelect('SELECT COUNT(*) AS count FROM divers')
+          .getSingle();
+      return result.read<int>('count');
+    } catch (e, stackTrace) {
+      _log.error('Failed to get diver count', error: e, stackTrace: stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Emits whenever the `divers` table changes so list providers can
+  /// refresh after a sync or any other write.
+  ///
+  /// Insurance and medical clearance are read from documents (issue #2613),
+  /// so a document change ticks too.
+  Stream<void> watchDiversChanges() => _db.tableUpdates(
+    TableUpdateQuery.allOf([
+      TableUpdateQuery.onTable(_db.divers),
+      TableUpdateQuery.onTable(_db.documents),
+    ]),
+  );
+
+  /// Dive count per diver id, counted in SQL. A profile with no dives is
+  /// absent from the map, as are dives with no diver.
+  Future<Map<String, int>> getDiveCountsByDiver() async {
+    try {
+      final rows = await _db
+          .customSelect(
+            // stats-scope-exempt: which profile holds the logbook, matched
+            // to the Dives list count (every row, planned and excluded too),
+            // not a statistic.
+            'SELECT diver_id, COUNT(*) AS count FROM dives '
+            'WHERE diver_id IS NOT NULL GROUP BY diver_id',
+            readsFrom: {_db.dives},
+          )
+          .get();
+      return {
+        for (final row in rows)
+          row.read<String>('diver_id'): row.read<int>('count'),
+      };
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to count dives per diver',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Emits whenever a write could change [getDiveCountsByDiver]: a dive
+  /// added, removed or moved, or a profile added or removed. Debounced like
+  /// the dive list's own tick, so a sync or import committing many dives runs
+  /// the GROUP BY once on the settled table instead of once per commit.
+  Stream<void> watchDiveCountChanges() => _db
+      .tableUpdates(
+        TableUpdateQuery.allOf([
+          TableUpdateQuery.onTable(_db.dives),
+          TableUpdateQuery.onTable(_db.divers),
+        ]),
+      )
+      .debounce(DiveRepository.changeTickDebounce);
 
   /// Get the default diver (or first if none marked default)
   Future<domain.Diver?> getDefaultDiver() async {
@@ -40,7 +221,7 @@ class DiverRepository {
         ..limit(1);
       var row = await query.getSingleOrNull();
 
-      if (row != null) return _mapRowToDiver(row);
+      if (row != null) return await _withDocument(_mapRowToDiver(row));
 
       // Fallback to first diver
       query = _db.select(_db.divers)
@@ -48,7 +229,7 @@ class DiverRepository {
         ..limit(1);
       row = await query.getSingleOrNull();
 
-      return row != null ? _mapRowToDiver(row) : null;
+      return row != null ? await _withDocument(_mapRowToDiver(row)) : null;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get default diver',
@@ -64,7 +245,7 @@ class DiverRepository {
     try {
       final query = _db.select(_db.divers)..where((t) => t.id.equals(id));
       final row = await query.getSingleOrNull();
-      return row != null ? _mapRowToDiver(row) : null;
+      return row != null ? await _withDocument(_mapRowToDiver(row)) : null;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get diver by id: $id',
@@ -75,51 +256,110 @@ class DiverRepository {
     }
   }
 
-  /// Create a new diver
-  Future<domain.Diver> createDiver(domain.Diver diver) async {
+  /// Create a new diver, with a settings row seeded from [settings] (the
+  /// defaults when omitted).
+  ///
+  /// Pass the diver's real settings here rather than overwriting the row
+  /// afterwards. On a fresh database `CurrentDiverIdNotifier` resolves to
+  /// the new diver on the divers-table tick alone, and the SettingsNotifier
+  /// then loads this row straight away; a row that briefly held the defaults
+  /// could be loaded, and later saved back, in their place (#2298). The two
+  /// inserts share a transaction so no reader sees the diver without its row.
+  Future<domain.Diver> createDiver(
+    domain.Diver diver, {
+    AppSettings? settings,
+  }) async {
     try {
       _log.info('Creating diver: ${diver.name}');
       final id = diver.id.isEmpty ? _uuid.v4() : diver.id;
       final now = DateTime.now();
 
-      await _db
-          .into(_db.divers)
-          .insert(
-            DiversCompanion(
-              id: Value(id),
-              name: Value(diver.name),
-              email: Value(diver.email),
-              phone: Value(diver.phone),
-              photoPath: Value(diver.photoPath),
-              emergencyContactName: Value(diver.emergencyContact.name),
-              emergencyContactPhone: Value(diver.emergencyContact.phone),
-              emergencyContactRelation: Value(diver.emergencyContact.relation),
-              emergencyContact2Name: Value(diver.emergencyContact2.name),
-              emergencyContact2Phone: Value(diver.emergencyContact2.phone),
-              emergencyContact2Relation: Value(
-                diver.emergencyContact2.relation,
+      await _db.transaction(() async {
+        await _db
+            .into(_db.divers)
+            .insert(
+              DiversCompanion(
+                id: Value(id),
+                name: Value(diver.name),
+                email: Value(diver.email),
+                phone: Value(diver.phone),
+                photoPath: Value(diver.photoPath),
+                photo: Value(diver.photo),
+                emergencyContactName: Value(diver.emergencyContact.name),
+                emergencyContactPhone: Value(diver.emergencyContact.phone),
+                emergencyContactRelation: Value(
+                  diver.emergencyContact.relation,
+                ),
+                emergencyContact2Name: Value(diver.emergencyContact2.name),
+                emergencyContact2Phone: Value(diver.emergencyContact2.phone),
+                emergencyContact2Relation: Value(
+                  diver.emergencyContact2.relation,
+                ),
+                medicalNotes: Value(diver.medicalNotes),
+                bloodType: Value(diver.bloodType),
+                allergies: Value(diver.allergies),
+                medications: Value(diver.medications),
+                notes: Value(diver.notes),
+                isDefault: Value(diver.isDefault),
+                createdAt: Value(now.millisecondsSinceEpoch),
+                updatedAt: Value(now.millisecondsSinceEpoch),
+                priorDiveCount: Value(diver.priorDiveCount),
+                priorDiveTimeSeconds: Value(diver.priorDiveTimeSeconds),
+                divingSince: Value(diver.divingSince?.year),
+                socialHandle: Value(diver.socialHandle),
+                buddyCardShare: Value(diver.buddyCardShare),
+                sex: Value(diver.sex?.name),
+                birthYear: Value(diver.birthYear),
               ),
-              medicalNotes: Value(diver.medicalNotes),
-              bloodType: Value(diver.bloodType),
-              allergies: Value(diver.allergies),
-              medications: Value(diver.medications),
-              medicalClearanceExpiryDate: Value(
-                diver.medicalClearanceExpiryDate?.millisecondsSinceEpoch,
-              ),
-              insuranceProvider: Value(diver.insurance.provider),
-              insurancePolicyNumber: Value(diver.insurance.policyNumber),
-              insuranceExpiryDate: Value(
-                diver.insurance.expiryDate?.millisecondsSinceEpoch,
-              ),
-              notes: Value(diver.notes),
-              isDefault: Value(diver.isDefault),
-              createdAt: Value(now.millisecondsSinceEpoch),
-              updatedAt: Value(now.millisecondsSinceEpoch),
-            ),
-          );
+            );
 
-      // Create default settings for the new diver
-      await _settingsRepository.createSettingsForDiver(id);
+        await _settingsRepository.createSettingsForDiver(
+          id,
+          settings: settings,
+        );
+
+        // An import (the universal adapter's DAN number) can hand a new
+        // diver an insurance or a clearance date; they are filed as
+        // documents (issue #2613), never on the diver row.
+        if (diver.insurance.hasAnyDetail) {
+          await DocumentRepository().save(
+            Document(
+              id: documentInsuranceId(id),
+              diverId: id,
+              owner: const DocumentOwner.personal(),
+              type: DocumentType.insurance,
+              issuer: diver.insurance.providerLabel,
+              referenceNumber: diver.insurance.policyLabel,
+              expiryDate: diver.insurance.expiryDate,
+              emergencyPhone: diver.insurance.assistanceLine,
+              phone: diver.insurance.officeLine,
+              isPrimary: true,
+              createdAt: now,
+              updatedAt: now,
+            ),
+            const [],
+            // Notified once after the diver transaction commits.
+            notify: false,
+          );
+        }
+        final clearance = diver.medicalClearanceExpiryDate;
+        if (clearance != null) {
+          await DocumentRepository().save(
+            Document(
+              id: documentMedicalClearanceId(id),
+              diverId: id,
+              owner: const DocumentOwner.personal(),
+              type: DocumentType.medicalClearance,
+              expiryDate: clearance,
+              createdAt: now,
+              updatedAt: now,
+            ),
+            const [],
+            // Notified once after the diver transaction commits.
+            notify: false,
+          );
+        }
+      });
 
       await _syncRepository.markRecordPending(
         entityType: 'divers',
@@ -152,6 +392,7 @@ class DiverRepository {
           email: Value(diver.email),
           phone: Value(diver.phone),
           photoPath: Value(diver.photoPath),
+          photo: Value(diver.photo),
           emergencyContactName: Value(diver.emergencyContact.name),
           emergencyContactPhone: Value(diver.emergencyContact.phone),
           emergencyContactRelation: Value(diver.emergencyContact.relation),
@@ -162,17 +403,16 @@ class DiverRepository {
           bloodType: Value(diver.bloodType),
           allergies: Value(diver.allergies),
           medications: Value(diver.medications),
-          medicalClearanceExpiryDate: Value(
-            diver.medicalClearanceExpiryDate?.millisecondsSinceEpoch,
-          ),
-          insuranceProvider: Value(diver.insurance.provider),
-          insurancePolicyNumber: Value(diver.insurance.policyNumber),
-          insuranceExpiryDate: Value(
-            diver.insurance.expiryDate?.millisecondsSinceEpoch,
-          ),
           notes: Value(diver.notes),
           isDefault: Value(diver.isDefault),
           updatedAt: Value(now),
+          priorDiveCount: Value(diver.priorDiveCount),
+          priorDiveTimeSeconds: Value(diver.priorDiveTimeSeconds),
+          divingSince: Value(diver.divingSince?.year),
+          socialHandle: Value(diver.socialHandle),
+          buddyCardShare: Value(diver.buddyCardShare),
+          sex: Value(diver.sex?.name),
+          birthYear: Value(diver.birthYear),
         ),
       );
       await _syncRepository.markRecordPending(
@@ -192,94 +432,575 @@ class DiverRepository {
     }
   }
 
-  /// Delete a diver
+  /// Delete a diver.
+  ///
+  /// Delegates to [deleteDiverWithReassignment] so that shared trips and
+  /// sites owned by the deleted diver are preserved by reassigning them
+  /// to a surviving diver before the delete cascade runs. Use
+  /// [deleteDiverWithReassignment] directly if you need the reassignment
+  /// counts for user feedback.
+  @Deprecated(
+    'Use deleteDiverWithReassignment to get reassignment counts; '
+    'this wrapper is kept for backwards compatibility.',
+  )
   Future<void> deleteDiver(String id) async {
+    await deleteDiverWithReassignment(id);
+  }
+
+  /// The [column] values of a raw query, for the cascade steps that have to
+  /// know which rows they are about to change so they can mark them pending.
+  Future<List<String>> _idsOf(
+    String sql,
+    List<String> args, {
+    String column = 'id',
+  }) async {
+    final rows = await _db
+        .customSelect(
+          sql,
+          variables: [for (final a in args) Variable.withString(a)],
+        )
+        .get();
+    return [for (final r in rows) r.read<String>(column)];
+  }
+
+  /// Whether the pre-v183 row-per-sample `dive_profiles` table is still in
+  /// this database. Every current build reads samples from the series
+  /// tables, so a hit here means the v183 pack could not finish and the
+  /// table was deliberately kept for a later retry.
+  ///
+  /// Mirrors `DiveComputerRepository._legacyProfilesTableExists`; the two
+  /// guard the same statement against the same failure and the check is one
+  /// query, not worth a dependency between the repositories.
+  Future<bool> _legacyProfilesTableExists() async {
+    final rows = await _db
+        .customSelect(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+          "AND name = 'dive_profiles'",
+        )
+        .get();
+    return rows.isNotEmpty;
+  }
+
+  /// The parents of media that [deleteDiverWithReassignment] removes,
+  /// mirroring its step lists (`diver_delete_steps.dart`): every dive, site,
+  /// piece of gear and buddy the diver still owns. Read inside the delete's
+  /// transaction after Step 0, when the shared sites already belong to the
+  /// survivor, so what remains is exactly what the transaction deletes.
+  Future<DyingMediaParents> _dyingMediaParents(String id) async =>
+      DyingMediaParents(
+        // stats-scope-exempt: a deletion cascade, not a statistic.
+        diveIds: (await _idsOf('SELECT id FROM dives WHERE diver_id = ?', [
+          id,
+        ])).toSet(),
+        siteIds: (await _idsOf('SELECT id FROM dive_sites WHERE diver_id = ?', [
+          id,
+        ])).toSet(),
+        equipmentIds: (await _idsOf(
+          'SELECT id FROM equipment WHERE diver_id = ?',
+          [id],
+        )).toSet(),
+        buddyIds: (await _idsOf('SELECT id FROM buddies WHERE diver_id = ?', [
+          id,
+        ])).toSet(),
+      );
+
+  /// Deletes the media only this diver's rows linked, with tombstones and
+  /// blob-delete intents, and unlinks, stamps and marks pending the media a
+  /// surviving row still links (issue #1954, spec 5.4).
+  ///
+  /// After the delete commits, never inside it: the coordinator's queue
+  /// lives in another database, and a failed delete must leave the media as
+  /// it was. A failure here is logged, not rethrown: the diver is gone and
+  /// cannot be restored.
+  ///
+  /// The survivors go first and on their own. The commit already cleared
+  /// their dying links with SET NULL and no stamp, and their live links keep
+  /// them out of every sweep, so a lost unlink would leave peers with the
+  /// stale link for good. A doomed row the deletion misses is recoverable
+  /// (the orphan sweep collects it, and the Verify Library sweep a missed
+  /// blob intent), so each deletion batch is isolated and a failed one does
+  /// not stop the rest.
+  ///
+  /// Each doomed row is judged again inside the delete's own transaction
+  /// ([mediaRowLivesOn] as `keepIf`), so one relinked to a surviving parent
+  /// since the plan survives, even if the relink lands during the
+  /// coordinator's queue write. [recheckDoomed] only drops the rows already
+  /// relinked beforehand. Batches are bounded: the coordinator tombstones
+  /// their enrichment with one list per call, and a whole library can pass
+  /// what one statement binds.
+  Future<void> _applyMediaCascade(String diverId, MediaCascadePlan plan) async {
     try {
-      _log.info('Deleting diver: $id');
+      await unlinkMediaFromDeletedParents(_db, _syncRepository, plan.survivors);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Deleted diver $diverId, but could not publish the unlinks of the '
+        'media that outlived it',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+
+    final List<MediaItem> doomed;
+    try {
+      doomed = await recheckDoomed(_db, plan);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Deleted diver $diverId, but could not read the media only it linked',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return;
+    }
+    for (var i = 0; i < doomed.length; i += mediaCascadeIdChunk) {
+      final batch = doomed.sublist(
+        i,
+        i + mediaCascadeIdChunk < doomed.length
+            ? i + mediaCascadeIdChunk
+            : doomed.length,
+      );
+      try {
+        await _mediaDeletionCoordinator.deleteMediaItems(
+          batch,
+          keepIf: (row) => mediaRowLivesOn(row, plan.parents),
+        );
+      } catch (e, stackTrace) {
+        _log.error(
+          'Deleted diver $diverId, but could not delete ${batch.length} of '
+          'the media only it linked',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
+  /// Delete a diver, reassigning shared trips/sites to a surviving diver first.
+  ///
+  /// - If surviving divers exist, shared trips and sites owned by [id] are
+  ///   reassigned to the current default diver (if not the one being deleted)
+  ///   or to the oldest surviving diver by [createdAt].
+  /// - Private (non-shared) records are deleted as usual.
+  /// - If no surviving diver exists, all records are deleted (same as
+  ///   [deleteDiver]).
+  ///
+  /// Returns a [DeleteDiverResult] describing what was reassigned.
+  Future<DeleteDiverResult> deleteDiverWithReassignment(String id) async {
+    final result = await ChangeLogScope.bulk(
+      DatabaseService.instance.databaseOrNull,
+      label: ChangeLogLabels.deletedRecord,
+      body: () => _deleteDiverWithReassignment(id),
+    );
+    // The delete is done by now, so a failure here must not report it as
+    // failed. What survivors inherited stays in the log under their own name.
+    try {
+      await ChangeLogRepository().clearForDiver(id);
+    } catch (error, stackTrace) {
+      _log.warning(
+        'Could not clear the change log of diver $id',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    return result;
+  }
+
+  Future<DeleteDiverResult> _deleteDiverWithReassignment(String id) async {
+    try {
+      _log.info('Deleting diver with reassignment: $id');
+
+      // Find surviving divers (all except the one being deleted), ordered so
+      // that the default diver comes first, then oldest by createdAt.
+      final allDiversRows =
+          await (_db.select(_db.divers)
+                ..where((t) => t.id.isNotValue(id))
+                ..orderBy([
+                  (t) => OrderingTerm.desc(t.isDefault),
+                  (t) => OrderingTerm.asc(t.createdAt),
+                ]))
+              .get();
+
+      String? targetId;
+      String? targetName;
+      int reassignedTrips = 0;
+      int reassignedSites = 0;
+      var keptEquipment = 0;
+      var handedOverCount = 0;
+      final movedTransmitters = <String>[];
+      final keptHeirIds = <String>[];
+
+      if (allDiversRows.isNotEmpty) {
+        targetId = allDiversRows.first.id;
+        targetName = allDiversRows.first.name;
+      }
+
+      // Set inside the transaction, applied after it commits.
+      late final MediaCascadePlan mediaPlan;
+      // The delete steps remove documents with raw SQL, so their expiry
+      // reminders are cancelled here once the delete commits (#2613).
+      final documentIds = [
+        for (final r
+            in await _db
+                .customSelect(
+                  'SELECT id FROM documents WHERE diver_id = ?',
+                  variables: [Variable.withString(id)],
+                )
+                .get())
+          r.read<String>('id'),
+      ];
 
       await _db.transaction(() async {
-        // Step 1: Null out cross-diver FK references to this diver's computers.
-        // Other divers' dives/profiles/data_sources may reference this diver's
-        // dive_computers (from multi-computer consolidation). These nullable FKs
-        // have no CASCADE, so null them before deleting the computers.
-        await _db.customStatement(
-          'UPDATE dives SET computer_id = NULL '
+        // Step 0a: Hand over the gear other profiles need (issue #2852),
+        // before anything below selects this diver's rows: every later step
+        // matches `diver_id = id`, so a moved item, dive computer or
+        // transmitter is out of their reach, and the media plan keeps the
+        // moved gear's media.
+        final handoverAt = DateTime.now().millisecondsSinceEpoch;
+        for (final kept in await _equipmentTransfer.keptUnitsForDiver(id)) {
+          final moved = await _equipmentTransfer.transferUnitInTransaction(
+            unit: kept.unit,
+            fromDiverId: id,
+            toDiverId: kept.heirId,
+            keepAccess: false,
+            moveRegistry: true,
+            now: handoverAt,
+          );
+          keptEquipment += moved.itemsMoved;
+          movedTransmitters.addAll(moved.movedTransmitterIds);
+          if (!keptHeirIds.contains(kept.heirId)) keptHeirIds.add(kept.heirId);
+        }
+
+        // Step 0-: Trips and sites shared with chosen profiles go to the
+        // first profile each was shared with (issue #2151), before the
+        // steps below treat them as private and delete them. They are not
+        // counted below: the message names only the heir of the trips and
+        // sites shared with everyone.
+        final handedOver = await handOverSharedItems(
+          _syncRepository,
+          fromDiverId: id,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        handedOverCount = handedOver.tripIds.length + handedOver.siteIds.length;
+
+        // Step 0: Reassign shared records to the surviving diver (if any).
+        if (targetId != null) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+
+          // Collect shared trip IDs before reassignment for sync marking.
+          final sharedTripRows = await _db
+              .customSelect(
+                'SELECT id FROM trips WHERE diver_id = ? AND is_shared = 1',
+                variables: [Variable.withString(id)],
+              )
+              .get();
+          final sharedTripIds = sharedTripRows
+              .map((r) => r.data['id'] as String)
+              .toList();
+
+          if (sharedTripIds.isNotEmpty) {
+            await _db.customStatement(
+              'UPDATE trips SET diver_id = ?, updated_at = ? '
+              'WHERE diver_id = ? AND is_shared = 1',
+              [targetId, now, id],
+            );
+            reassignedTrips = sharedTripIds.length;
+          }
+
+          // Collect shared site IDs before reassignment for sync marking.
+          final sharedSiteRows = await _db
+              .customSelect(
+                'SELECT id FROM dive_sites WHERE diver_id = ? AND is_shared = 1',
+                variables: [Variable.withString(id)],
+              )
+              .get();
+          final sharedSiteIds = sharedSiteRows
+              .map((r) => r.data['id'] as String)
+              .toList();
+
+          if (sharedSiteIds.isNotEmpty) {
+            await _db.customStatement(
+              'UPDATE dive_sites SET diver_id = ?, updated_at = ? '
+              'WHERE diver_id = ? AND is_shared = 1',
+              [targetId, now, id],
+            );
+            reassignedSites = sharedSiteIds.length;
+          }
+
+          // Mark reassigned records pending for sync.
+          for (final tripId in sharedTripIds) {
+            await _syncRepository.markRecordPending(
+              entityType: 'trips',
+              recordId: tripId,
+              localUpdatedAt: now,
+            );
+          }
+          for (final siteId in sharedSiteIds) {
+            await _syncRepository.markRecordPending(
+              entityType: 'diveSites',
+              recordId: siteId,
+              localUpdatedAt: now,
+            );
+          }
+
+          // A share row naming the heir (left by a sync race beside the
+          // everyone flag) would share the item with its own owner
+          // (issue #2151).
+          final shares = ItemSharesRepository();
+          await shares.deleteShares(
+            SharedItemKind.trip,
+            sharedTripIds,
+            diverId: targetId,
+          );
+          await shares.deleteShares(
+            SharedItemKind.site,
+            sharedSiteIds,
+            diverId: targetId,
+          );
+
+          // The heir now owns these; its own hides of them would leave it
+          // owning items it cannot see (issue #2594).
+          final hides = ProfileHidesRepository();
+          await hides.deleteHides(
+            SharedItemKind.trip,
+            sharedTripIds,
+            diverId: targetId,
+          );
+          await hides.deleteHides(
+            SharedItemKind.site,
+            sharedSiteIds,
+            diverId: targetId,
+          );
+        }
+
+        // Step 0b: Plan the media cascade (issue #1954). Here, after the
+        // shared sites have gone to the survivor and before any delete: the
+        // links still name the parents, which the deletes below clear with
+        // ON DELETE SET NULL and no stamp, and in one transaction the plan
+        // names exactly the rows this delete removes.
+        mediaPlan = await planMediaCascade(_db, await _dyingMediaParents(id));
+
+        // Step 1: Null out cross-diver FK references to this diver's
+        // computers.
+        //
+        // These rows survive the delete and are synced, so clearing them is
+        // a change a peer has to see: without a fresh updated_at and a
+        // pending mark the peer keeps the old computerId and its next
+        // last-writer-wins update carries that dangling reference back. The
+        // series and tank calls below stamp and mark for themselves.
+        final clearedAt = DateTime.now().millisecondsSinceEpoch;
+        final foreignDiveIds = await _idsOf(
+          'SELECT id FROM dives '
           'WHERE computer_id IN '
           '(SELECT id FROM dive_computers WHERE diver_id = ?) '
           'AND (diver_id IS NULL OR diver_id != ?)',
           [id, id],
         );
         await _db.customStatement(
-          'UPDATE dive_profiles SET computer_id = NULL '
+          'UPDATE dives SET computer_id = NULL, updated_at = ? '
+          'WHERE computer_id IN '
+          '(SELECT id FROM dive_computers WHERE diver_id = ?) '
+          'AND (diver_id IS NULL OR diver_id != ?)',
+          [clearedAt, id, id],
+        );
+        await ProfileSeriesRepository().clearComputersOfDiverForForeignDives(
+          id,
+        );
+        await TankPressureSeriesRepository()
+            .clearComputersOfDiverForForeignDives(id);
+        // Tanks of those dives attributed to this diver's computers: the
+        // computers' delete would clear them by ON DELETE SET NULL, with no
+        // clock and so unseen by peers and by the caches' source stamp.
+        await clearTankComputerLinks(
+          _db,
+          _syncRepository,
+          (t) =>
+              t.computerId.isInQuery(
+                _db.selectOnly(_db.diveComputers)
+                  ..addColumns([_db.diveComputers.id])
+                  ..where(_db.diveComputers.diverId.equals(id)),
+              ) &
+              t.diveId.isNotInQuery(
+                _db.selectOnly(_db.dives)
+                  ..addColumns([_db.dives.id])
+                  ..where(_db.dives.diverId.equals(id)),
+              ),
+          now: clearedAt,
+        );
+        // dive_data_sources carries no updated_at: it is a child that syncs
+        // with its parent dive, so the parent is what gets marked (the rule
+        // TankPressureRepository follows too). Its own clock is restamped
+        // with the clear, so the null is newer than any peer's copy (#2644).
+        final sourceParentIds = await _idsOf(
+          'SELECT DISTINCT dive_id FROM dive_data_sources '
           'WHERE computer_id IN '
           '(SELECT id FROM dive_computers WHERE diver_id = ?) '
           'AND dive_id NOT IN (SELECT id FROM dives WHERE diver_id = ?)',
           [id, id],
+          column: 'dive_id',
         );
         await _db.customStatement(
-          'UPDATE dive_data_sources SET computer_id = NULL '
+          'UPDATE dive_data_sources SET computer_id = NULL, hlc = ? '
           'WHERE computer_id IN '
           '(SELECT id FROM dive_computers WHERE diver_id = ?) '
+          // stats-scope-exempt: reassignment cascade, not a statistic.
           'AND dive_id NOT IN (SELECT id FROM dives WHERE diver_id = ?)',
-          [id, id],
+          [await _syncRepository.issueRowClock(), id, id],
         );
+        for (final diveId in {...foreignDiveIds, ...sourceParentIds}) {
+          await _syncRepository.markRecordPending(
+            entityType: 'dives',
+            recordId: diveId,
+            localUpdatedAt: clearedAt,
+          );
+        }
+        // The v183 rung drops dive_profiles only once its rows have actually
+        // moved into the series table, so a device whose pack threw still
+        // carries it, and its computer_id FK has no ON DELETE action. A
+        // surviving row on another diver's dive fails step 4's
+        // `DELETE FROM dive_computers` with SqliteException(787) and rolls
+        // the whole delete back, so the diver could never be deleted on that
+        // device. Same #823 failure, same fix as
+        // DiveComputerRepository.deleteComputer. The table is no longer
+        // synced, so this only unblocks the FK: nothing to stamp or mark.
+        if (await _legacyProfilesTableExists()) {
+          await _db.customStatement(
+            'UPDATE dive_profiles SET computer_id = NULL '
+            'WHERE computer_id IN '
+            '(SELECT id FROM dive_computers WHERE diver_id = ?) '
+            // stats-scope-exempt: reassignment cascade, not a statistic.
+            'AND dive_id NOT IN (SELECT id FROM dives WHERE diver_id = ?)',
+            [id, id],
+          );
+        }
 
-        // Step 2: Delete dives (cascades: profiles, tanks, data_sources,
-        // equipment, weights, sightings, tags, buddies, events, photos,
-        // pressure profiles, gas switches, tide records, custom fields,
-        // pending photo suggestions)
-        await _db.customStatement('DELETE FROM dives WHERE diver_id = ?', [id]);
-
-        // Step 3: Delete trip children that lack CASCADE on trip FK
-        await _db.customStatement(
-          'DELETE FROM liveaboard_detail_records WHERE trip_id IN '
-          '(SELECT id FROM trips WHERE diver_id = ?)',
-          [id],
-        );
-        await _db.customStatement(
-          'DELETE FROM trip_itinerary_days WHERE trip_id IN '
-          '(SELECT id FROM trips WHERE diver_id = ?)',
-          [id],
-        );
-
-        // Step 4: Delete remaining per-diver entities
-        await _db.customStatement('DELETE FROM trips WHERE diver_id = ?', [id]);
-        await _db.customStatement('DELETE FROM dive_sites WHERE diver_id = ?', [
+        // Step 1b: Delete and tombstone the diver's templates, presets,
+        // configs, plans and sessions, then free the surviving plans that
+        // point at the dives and private sites deleted below.
+        await deleteDiverOwnedRows(_db, _syncRepository, id);
+        await clearPlanLinksToDiverRows(
+          _db,
+          _syncRepository,
           id,
-        ]);
-        await _db.customStatement('DELETE FROM equipment WHERE diver_id = ?', [
-          id,
-        ]);
-        await _db.customStatement(
-          'DELETE FROM equipment_sets WHERE diver_id = ?',
-          [id],
-        );
-        await _db.customStatement('DELETE FROM buddies WHERE diver_id = ?', [
-          id,
-        ]);
-        await _db.customStatement(
-          'DELETE FROM certifications WHERE diver_id = ?',
-          [id],
-        );
-        await _db.customStatement(
-          'DELETE FROM dive_centers WHERE diver_id = ?',
-          [id],
-        );
-        await _db.customStatement('DELETE FROM tags WHERE diver_id = ?', [id]);
-        await _db.customStatement(
-          'DELETE FROM dive_types WHERE diver_id = ? AND is_built_in = 0',
-          [id],
-        );
-        await _db.customStatement(
-          'DELETE FROM tank_presets WHERE diver_id = ?',
-          [id],
-        );
-        await _db.customStatement(
-          'DELETE FROM dive_computers WHERE diver_id = ?',
-          [id],
+          now: DateTime.now().millisecondsSinceEpoch,
         );
 
-        // Delete diver settings (not nullable, so delete instead of nullify)
+        // Step 2: Delete and tombstone the diver's dives. Their children
+        // cascade here and, from each dive's tombstone, on a peer.
+        await deleteDiverRows(_db, _syncRepository, id, diverDiveSteps);
+        // Those dive deletes cascaded their media enrichment away, and a
+        // cascade logs nothing. Tombstone it here, from ids read before the
+        // transaction, so it rolls back with the delete (spec 5.3, 5.4).
+        await _syncRepository.logDeletions(
+          entityType: 'mediaEnrichment',
+          recordIds: mediaPlan.enrichmentIds,
+        );
+
+        // Step 2b: Null out cross-diver FK references to the sites, trips
+        // and dive centers we're about to delete. Other divers may hold
+        // dives pointing at this diver's private (non-reassigned) records,
+        // typically because those records were shared at one point before
+        // being unshared. The schema does not cascade SET NULL on these
+        // FKs, so without this step the upcoming DELETEs would violate the
+        // foreign-key constraint.
+        // The diver's side trips hand surviving profiles' dives to their
+        // larger trips first, and surviving side trips of the diver's trips
+        // become trips of their own (issue #3658).
+        await detachSideTripsForDelete(
+          _db,
+          _syncRepository,
+          await _idsOf('SELECT id FROM trips WHERE diver_id = ?', [id]),
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        await clearDiveLinksToDiverRows(
+          _db,
+          _syncRepository,
+          id,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+
+        // Step 3: Delete and tombstone the trips, with the children their
+        // own deletion tombstones, and the sites the diver still owns. The
+        // shared ones were reassigned in Step 0 and keep their children.
+        // Other divers' surviving tanks can still link this diver's trip
+        // slots. Cleared and staged here, as the gear links are below: the
+        // schema's SET NULL reaches no peer.
+        await clearTripCylinderLinks(
+          _db,
+          _syncRepository,
+          await _idsOf(
+            'SELECT id FROM trip_cylinders WHERE trip_id IN '
+            '(SELECT id FROM trips WHERE diver_id = ?)',
+            [id],
+          ),
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        await deleteDiverRows(_db, _syncRepository, id, diverTripAndSiteSteps);
+
+        // Step 4: Delete and tombstone the rest of the diver's library.
+        // Other divers' surviving tanks can still link this diver's gear, as
+        // the cylinder's item or its regulator. Cleared and staged with their
+        // dives here: the cylinder link had no ON DELETE action before v210
+        // and failed this delete, and the schema's SET NULL reaches no peer.
+        await clearCylinderGearLinks(
+          _db,
+          _syncRepository,
+          await _idsOf('SELECT id FROM equipment WHERE diver_id = ?', [id]),
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        await deleteDiverRows(_db, _syncRepository, id, diverGearSteps);
+        // Fills on other divers' trips made at this diver's centers: the
+        // centers go with the library below, so clear and stage those links
+        // now; the schema's SET NULL reaches no peer.
+        final centerIds = await _idsOf(
+          'SELECT id FROM dive_centers WHERE diver_id = ?',
+          [id],
+        );
+        await clearTripCylinderEventCenterLinks(
+          _db,
+          _syncRepository,
+          centerIds,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        // After the gear, so only surviving gear's schedules keep a kind.
+        await retireDiverServiceKinds(
+          _db,
+          _syncRepository,
+          id,
+          survivorId: targetId,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        // After the gear, so only surviving gear's moves keep a place.
+        await retireDiverEquipmentLocations(
+          _db,
+          _syncRepository,
+          id,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        // After the retirement, so only places that survive are staged.
+        await clearEquipmentLocationCenterLinks(
+          _db,
+          _syncRepository,
+          centerIds,
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        await clearEquipmentLocationBuddyLinks(
+          _db,
+          _syncRepository,
+          await _idsOf('SELECT id FROM buddies WHERE diver_id = ?', [id]),
+          now: DateTime.now().millisecondsSinceEpoch,
+        );
+        await deleteDiverRows(_db, _syncRepository, id, diverLibrarySteps);
+        // Custom site types go with their links, tombstoned: a link on
+        // another diver's surviving site has no foreign key to cascade it.
+        await deleteSiteTypesWithLinks(
+          _db,
+          _syncRepository,
+          await _idsOf(
+            'SELECT id FROM site_types WHERE diver_id = ? AND is_built_in = 0',
+            [id],
+          ),
+        );
+
+        // Delete diver settings (not nullable, so delete instead of nullify).
         final settingsRows = await (_db.select(
           _db.diverSettings,
         )..where((t) => t.diverId.equals(id))).get();
@@ -293,22 +1014,53 @@ class DiverRepository {
           );
         }
 
-        // Now delete the diver
+        // Delete the diver record.
         await (_db.delete(_db.divers)..where((t) => t.id.equals(id))).go();
         await _syncRepository.logDeletion(entityType: 'divers', recordId: id);
       });
+      await _applyMediaCascade(id, mediaPlan);
+      await _documentRepository.cancelRemindersFor(documentIds);
+      // The cascade above took dive_data_sources rows that can have been the
+      // last references to a stored import file (issue #478). Swept after the
+      // transaction commits, so a failure leaks a row rather than stranding a
+      // surviving source row on bytes that are gone.
+      await _importedFileReclaimer.reclaimOrphans();
 
       SyncEventBus.notifyLocalChange();
+      await _equipmentTransfer.rescanMovedTransmitters(movedTransmitters);
       _log.info('Deleted diver: $id');
+
+      return DeleteDiverResult(
+        reassignedTripsCount: reassignedTrips,
+        reassignedSitesCount: reassignedSites,
+        reassignedToDiverId: reassignedTrips > 0 || reassignedSites > 0
+            ? targetId
+            : null,
+        reassignedToDiverName: reassignedTrips > 0 || reassignedSites > 0
+            ? targetName
+            : null,
+        keptEquipmentCount: keptEquipment,
+        handedOverCount: handedOverCount,
+        keptEquipmentHeirNames: [
+          for (final heirId in keptHeirIds)
+            for (final r in allDiversRows)
+              if (r.id == heirId) r.name,
+        ],
+      );
     } catch (e, stackTrace) {
       _log.error(
-        'Failed to delete diver: $id',
+        'Failed to delete diver with reassignment: $id',
         error: e,
         stackTrace: stackTrace,
       );
       rethrow;
     }
   }
+
+  /// How many items of [diverId]'s gear a delete would keep for other
+  /// profiles, for the delete confirmation (issue #2852).
+  Future<int> keptEquipmentCount(String diverId) =>
+      _equipmentTransfer.keptEquipmentCount(diverId);
 
   /// Set a diver as the default (clears default from others)
   Future<void> setDefaultDiver(String id) async {
@@ -349,7 +1101,8 @@ class DiverRepository {
     try {
       final result = await _db
           .customSelect(
-            'SELECT COUNT(*) as count FROM dives WHERE diver_id = ?',
+            'SELECT COUNT(*) as count FROM dives WHERE diver_id = ?'
+            "${DiveStatsScope.and(alias: 'dives')}",
             variables: [Variable.withString(diverId)],
           )
           .getSingle();
@@ -369,7 +1122,9 @@ class DiverRepository {
     try {
       final result = await _db
           .customSelect(
-            'SELECT COALESCE(SUM(bottom_time), 0) as total FROM dives WHERE diver_id = ?',
+            'SELECT COALESCE(SUM(bottom_time), 0) as total '
+            'FROM dives WHERE diver_id = ?'
+            "${DiveStatsScope.and(alias: 'dives')}",
             variables: [Variable.withString(diverId)],
           )
           .getSingle();
@@ -389,7 +1144,7 @@ class DiverRepository {
   Future<String?> getActiveDiverIdFromSettings() async {
     try {
       final query = _db.select(_db.settings)
-        ..where((t) => t.key.equals(_activeDiverIdKey));
+        ..where((t) => t.key.equals(activeDiverIdSettingsKey));
       final row = await query.getSingleOrNull();
       return row?.value;
     } catch (e, stackTrace) {
@@ -410,13 +1165,13 @@ class DiverRepository {
       if (diverId == null) {
         await (_db.delete(
           _db.settings,
-        )..where((t) => t.key.equals(_activeDiverIdKey))).go();
+        )..where((t) => t.key.equals(activeDiverIdSettingsKey))).go();
       } else {
         await _db
             .into(_db.settings)
             .insertOnConflictUpdate(
               SettingsCompanion(
-                key: const Value(_activeDiverIdKey),
+                key: const Value(activeDiverIdSettingsKey),
                 value: Value(diverId),
                 updatedAt: Value(now),
               ),
@@ -431,6 +1186,34 @@ class DiverRepository {
     }
   }
 
+  /// Overlays each diver's insurance (their primary insurance document) and
+  /// medical clearance (the expiry of their current clearance document, the
+  /// one that reminds).
+  Future<List<domain.Diver>> _withDocuments(
+    List<domain.Diver> divers, {
+    String? diverId,
+  }) async {
+    if (divers.isEmpty) return divers;
+    final documents = DocumentRepository();
+    final insurance = await documents.primaryInsuranceByDiver(diverId: diverId);
+    final clearance = await documents.latestClearanceExpiryByDiver(
+      diverId: diverId,
+    );
+    return [
+      for (final d in divers)
+        d.copyWith(
+          insurance: switch (insurance[d.id]) {
+            final doc? => domain.DiverInsurance.fromDocument(doc),
+            null => const domain.DiverInsurance(),
+          },
+          medicalClearanceExpiryDate: clearance[d.id],
+        ),
+    ];
+  }
+
+  Future<domain.Diver> _withDocument(domain.Diver diver) async =>
+      (await _withDocuments([diver], diverId: diver.id)).single;
+
   domain.Diver _mapRowToDiver(Diver row) {
     return domain.Diver(
       id: row.id,
@@ -438,6 +1221,7 @@ class DiverRepository {
       email: row.email,
       phone: row.phone,
       photoPath: row.photoPath,
+      photo: row.photo,
       emergencyContact: domain.EmergencyContact(
         name: row.emergencyContactName,
         phone: row.emergencyContactPhone,
@@ -452,20 +1236,20 @@ class DiverRepository {
       bloodType: row.bloodType,
       allergies: row.allergies,
       medications: row.medications,
-      medicalClearanceExpiryDate: row.medicalClearanceExpiryDate != null
-          ? DateTime.fromMillisecondsSinceEpoch(row.medicalClearanceExpiryDate!)
-          : null,
-      insurance: domain.DiverInsurance(
-        provider: row.insuranceProvider,
-        policyNumber: row.insurancePolicyNumber,
-        expiryDate: row.insuranceExpiryDate != null
-            ? DateTime.fromMillisecondsSinceEpoch(row.insuranceExpiryDate!)
-            : null,
-      ),
+      // Insurance and clearance are filled from documents by
+      // _withDocuments (issue #2613); the row's own columns are legacy.
       notes: row.notes,
       isDefault: row.isDefault,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+      priorDiveCount: row.priorDiveCount,
+      priorDiveTimeSeconds: row.priorDiveTimeSeconds,
+      divingSince: row.divingSince != null ? DateTime(row.divingSince!) : null,
+      socialHandle: row.socialHandle,
+      buddyCardShare: row.buddyCardShare,
+      // A name a newer build wrote reads as not given.
+      sex: DiverSex.values.asNameMap()[row.sex],
+      birthYear: row.birthYear,
     );
   }
 }

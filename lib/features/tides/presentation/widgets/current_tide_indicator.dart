@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/tide/entities/tide_extremes.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/tides/presentation/tide_state_display.dart';
 
 /// Compact indicator showing current tide state.
 ///
@@ -46,7 +49,7 @@ class CurrentTideIndicator extends StatelessWidget {
         ? ', ${status.nextExtreme!.type == TideExtremeType.high ? context.l10n.tides_label_high : context.l10n.tides_label_low} ${context.l10n.tides_label_tideIn(_formatDuration(status.timeToNextExtreme!))}'
         : '';
     final semanticLabel = context.l10n.tides_semantic_currentTide(
-      status.state.displayName,
+      status.state.localizedName(context.l10n),
       currentHeightStr,
       depthUnit.symbol,
       nextExtremeLabel,
@@ -84,7 +87,7 @@ class CurrentTideIndicator extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      status.state.displayName,
+                      status.state.localizedName(context.l10n),
                       style:
                           (compact
                                   ? textTheme.titleSmall
@@ -102,7 +105,9 @@ class CurrentTideIndicator extends StatelessWidget {
                     ),
                     if (status.rateOfChange != null && !compact)
                       Text(
-                        '${status.rateOfChange! > 0 ? '+' : ''}${DepthUnit.meters.convert(status.rateOfChange!, depthUnit).toStringAsFixed(2)}${depthUnit.symbol}/hr',
+                        UnitFormatter(
+                          AppSettings(depthUnit: depthUnit),
+                        ).formatTideRate(status.rateOfChange),
                         style: textTheme.bodySmall?.copyWith(
                           color: colorScheme.onSurfaceVariant,
                         ),
@@ -195,7 +200,9 @@ class TideStateBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Semantics(
-      label: context.l10n.tides_semantic_tideState(state.displayName),
+      label: context.l10n.tides_semantic_tideState(
+        state.localizedName(context.l10n),
+      ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
@@ -214,7 +221,7 @@ class TideStateBadge extends StatelessWidget {
             ),
             const SizedBox(width: 4),
             Text(
-              state.displayName,
+              state.localizedName(context.l10n),
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w500,

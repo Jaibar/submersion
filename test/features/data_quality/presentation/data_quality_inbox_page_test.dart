@@ -1,0 +1,3065 @@
+import 'dart:async';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/database/database.dart'
+    show
+        DiveComputersCompanion,
+        DiveDataSourcesCompanion,
+        DiveTanksCompanion,
+        EquipmentCompanion,
+        TransmittersCompanion;
+import 'package:submersion/core/database/dive_computer_gear_identity.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/data_quality/data/repositories/quality_findings_repository.dart';
+import 'package:submersion/features/data_quality/data/services/quality_scan_service.dart';
+import 'package:submersion/features/data_quality/data/services/quality_scan_state_store.dart';
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/data_quality/presentation/pages/data_quality_inbox_page.dart';
+import 'package:submersion/features/data_quality/presentation/providers/data_quality_providers.dart';
+import 'package:submersion/features/data_quality/presentation/providers/quality_inbox_providers.dart';
+import 'package:submersion/features/data_quality/presentation/widgets/quality_finding_card.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_gas_mix_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_log/presentation/widgets/combine_dives_dialog.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/dive_log/data/services/dive_split_service.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+import 'package:submersion/features/data_quality/presentation/pages/data_quality_inbox_actions.dart';
+import 'package:submersion/features/transmitters/data/services/transmitter_auto_registrar.dart';
+import 'package:submersion/features/transmitters/presentation/pages/transmitter_setup_redirect.dart';
+import 'package:submersion/features/transmitters/presentation/providers/transmitter_providers.dart';
+
+import '../../../helpers/global_test_defaults.dart';
+import '../../../helpers/l10n_test_helpers.dart';
+import '../../../helpers/test_database.dart';
+import '../../../helpers/test_app.dart';
+
+/// Findings repository stub whose `watchFindings` emits a single, timer-free
+/// value. The inbox's stream provider is autoDispose over a Drift query stream
+/// in production; using a plain [Stream.value] keeps the widget test out of
+/// fake-async timer trouble while still exercising every rendering branch.
+class _FakeFindingsRepository implements QualityFindingsRepository {
+  _FakeFindingsRepository(this.findings);
+  List<QualityFinding> findings;
+  final dismissed = <String>[];
+  final requestedDiverIds = <String?>[];
+
+  @override
+  Stream<List<QualityFinding>> watchFindings({String? diverId}) {
+    requestedDiverIds.add(diverId);
+    return Stream.value(findings);
+  }
+
+  @override
+  Future<void> setStatus(String id, QualityStatus status) async {
+    dismissed.add(id);
+  }
+
+  final dismissedAll = <String>[];
+  final reopened = <String>[];
+
+  bool failDismissAll = false;
+  bool failReopenAll = false;
+
+  @override
+  Future<void> dismissAll(Iterable<String> ids) async {
+    if (failDismissAll) throw StateError('database is locked');
+    dismissedAll.addAll(ids);
+  }
+
+  @override
+  Future<void> reopenAll(Iterable<String> ids) async {
+    if (failReopenAll) throw StateError('database is locked');
+    reopened.addAll(ids);
+  }
+
+  /// What the badge and the scan message count: the open findings only.
+  @override
+  Stream<int> watchOpenCount({String? diverId}) => Stream.value(
+    findings.where((f) => f.status == QualityStatus.open).length,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier() : super(const AppSettings());
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// A scan service whose [scanLibrary] is fully driven by the test: it can
+/// report a fixed progress step, block on an optional [gate], then resolve with
+/// a fixed [summary].
+class _FakeScanService extends QualityScanService {
+  _FakeScanService({required this.summary, this.gate, this.progress});
+  final QualityScanSummary summary;
+  final Completer<void>? gate;
+  final ({int done, int total})? progress;
+
+  @override
+  Future<QualityScanSummary> scanLibrary({
+    void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
+    Set<String>? enabledDetectorIds,
+    DateTime? now,
+  }) async {
+    if (progress != null) onProgress?.call(progress!.done, progress!.total);
+    if (gate != null) await gate!.future;
+    return QualityScanSummary(
+      divesScanned: summary.divesScanned,
+      findingsProduced: summary.findingsProduced,
+      detectorErrors: summary.detectorErrors,
+      cancelled: isCancelled?.call() ?? false,
+    );
+  }
+}
+
+/// A scan-state store with test-controlled bookkeeping so the "new checks"
+/// banner and the last-scan line can be driven directly.
+class _FakeScanStateStore extends QualityScanStateStore {
+  _FakeScanStateStore(super.prefs, {this.last, this.newVersions = false});
+  final DateTime? last;
+  final bool newVersions;
+  final recorded = <DateTime>[];
+
+  @override
+  DateTime? get lastFullScanAt => last;
+
+  @override
+  bool get hasNewDetectorVersions => newVersions;
+
+  @override
+  Future<void> recordFullScan(DateTime at, Map<String, int> versions) async {
+    recorded.add(at);
+  }
+}
+
+QualityFinding finding({String detectorId = 'sample_gap'}) => QualityFinding(
+  id: 'f-$detectorId',
+  diveId: 'd1',
+  detectorId: detectorId,
+  detectorVersion: 1,
+  category: QualityCategory.profile,
+  severity: QualitySeverity.info,
+  status: QualityStatus.open,
+  params: const {'gapCount': 2, 'longestGapSeconds': 90},
+  createdAt: DateTime.utc(2026, 7, 17),
+  updatedAt: DateTime.utc(2026, 7, 17),
+);
+
+QualityFinding _f({
+  required String id,
+  String diveId = 'd1',
+  String? relatedDiveId,
+  String? computerId,
+  required String detectorId,
+  required QualityCategory category,
+  Map<String, Object?> params = const {},
+  QualitySeverity severity = QualitySeverity.warning,
+  QualityStatus status = QualityStatus.open,
+  int detectorVersion = 1,
+}) => QualityFinding(
+  id: id,
+  diveId: diveId,
+  relatedDiveId: relatedDiveId,
+  computerId: computerId,
+  detectorId: detectorId,
+  detectorVersion: detectorVersion,
+  category: category,
+  severity: severity,
+  status: status,
+  params: params,
+  createdAt: DateTime.utc(2026, 7, 17),
+  updatedAt: DateTime.utc(2026, 7, 17),
+);
+
+Future<Widget> _wrap(
+  _FakeFindingsRepository repo, {
+  String? activeDiverId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+  return ProviderScope(
+    overrides: [
+      qualityFindingsRepositoryProvider.overrideWithValue(repo),
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+      if (activeDiverId != null)
+        validatedCurrentDiverIdProvider.overrideWith(
+          (ref) async => activeDiverId,
+        ),
+    ],
+    child: const MaterialApp(
+      // Every assertion in this file is an English literal, and an unpinned
+      // MaterialApp resolves against the HOST machine's locale list (not a
+      // fixed en_US), so the app's own translations would win on a
+      // non-English dev machine and the finders would match nothing.
+      locale: Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: DataQualityInboxPage(),
+    ),
+  );
+}
+
+/// Seeds a dive so the inbox can name it. The group header reads through the
+/// real repository, so a test that asserts on a header needs a real row.
+Future<void> _seedDive(
+  String id, {
+  String? name,
+  DateTime? entryTime,
+  double? maxDepth,
+  Duration? runtime,
+  String notes = '',
+  int? rating,
+}) {
+  final entry = entryTime ?? DateTime.utc(2026, 6, 14, 9, 12);
+  return DiveRepository().createDive(
+    domain.Dive(
+      id: id,
+      name: name,
+      dateTime: entry,
+      entryTime: entry,
+      maxDepth: maxDepth,
+      runtime: runtime,
+      notes: notes,
+      rating: rating,
+    ),
+  );
+}
+
+Future<SharedPreferences> _prefs() async {
+  SharedPreferences.setMockInitialValues({});
+  return SharedPreferences.getInstance();
+}
+
+/// Builds the inbox page over a fake findings stream (the given [findings]),
+/// with optional scan-service / scan-state-store fakes. Repairs still dispatch
+/// to the real [QualityRepairExecutor] against the test database.
+List<dynamic> _overrides(
+  SharedPreferences prefs, {
+  List<QualityFinding> findings = const [],
+  QualityScanService? scanService,
+  QualityScanStateStore? store,
+  Map<String, String>? computerNames,
+  VoidCallback? onComputerNamesRead,
+  DiveRepository? diveRepository,
+}) => [
+  qualityFindingsRepositoryProvider.overrideWithValue(
+    _FakeFindingsRepository(List.of(findings)),
+  ),
+  sharedPreferencesProvider.overrideWithValue(prefs),
+  settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+  if (scanService != null)
+    qualityScanServiceProvider.overrideWithValue(scanService),
+  if (store != null) qualityScanStateStoreProvider.overrideWithValue(store),
+  if (diveRepository != null)
+    diveRepositoryProvider.overrideWithValue(diveRepository),
+  // The name map is built from the saved-computers list, which needs a
+  // diver and a computers table this page test has no reason to stand up.
+  // Overriding it keeps the assertion on what the page does with the names.
+  if (computerNames != null || onComputerNamesRead != null)
+    qualityComputerNamesProvider.overrideWith((ref) async {
+      onComputerNamesRead?.call();
+      return computerNames ?? const {};
+    }),
+];
+
+Widget _scope(
+  SharedPreferences prefs, {
+  List<QualityFinding> findings = const [],
+  QualityScanService? scanService,
+  QualityScanStateStore? store,
+  String? filterDiveId,
+  Map<String, String>? computerNames,
+  VoidCallback? onComputerNamesRead,
+  DiveRepository? diveRepository,
+}) => ProviderScope(
+  overrides: _overrides(
+    prefs,
+    findings: findings,
+    scanService: scanService,
+    store: store,
+    computerNames: computerNames,
+    onComputerNamesRead: onComputerNamesRead,
+    diveRepository: diveRepository,
+  ).cast(),
+  child: localizedMaterialApp(
+    // See the note in _wrap: pinned so the English finders below survive a
+    // non-English host locale.
+    locale: const Locale('en'),
+    home: DataQualityInboxPage(filterDiveId: filterDiveId),
+  ),
+);
+
+/// A repository whose identity lookup fails, for the branch where the header
+/// cannot name a dive because the read itself broke (as opposed to the dive
+/// simply being absent from an otherwise successful read).
+class _FailingDiveRepository implements DiveRepository {
+  @override
+  Future<List<DiveSummary>> getSummariesByIds(List<String> ids) async {
+    throw StateError('identity lookup unavailable');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Splits every source off into dive 'split-new'.
+class _FakeSplitService implements DiveSplitService {
+  @override
+  Future<String> split({
+    required String diveId,
+    required String sourceId,
+  }) async => 'split-new';
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  setUp(() async {
+    await setUpTestDatabase();
+    // Repair dispatch queues a targeted rescan; keep the Drift work out of the
+    // widget-test zone.
+    QualityScanScheduler.enabled = false;
+  });
+  tearDown(() {
+    applyGlobalTestDefaults();
+    return tearDownTestDatabase();
+  });
+
+  // --- Existing fake-repository coverage -----------------------------------
+
+  // Another profile's findings must not be listed, opened or edited from the
+  // active diver's inbox (issue #3049).
+  testWidgets('lists only the active diver\'s findings', (tester) async {
+    final repo = _FakeFindingsRepository([]);
+    await tester.pumpWidget(await _wrap(repo, activeDiverId: 'diver-b'));
+    await tester.pumpAndSettle();
+    expect(repo.requestedDiverIds, ['diver-b']);
+  });
+
+  testWidgets('empty inbox shows the all-clear state', (tester) async {
+    await tester.pumpWidget(await _wrap(_FakeFindingsRepository([])));
+    await tester.pumpAndSettle();
+    expect(find.text('All clear'), findsOneWidget);
+    // Never scanned: the empty state shows the CTA copy, not a last-scan line.
+    expect(find.textContaining('has not been scanned'), findsOneWidget);
+  });
+
+  testWidgets('a finding renders its detector title', (tester) async {
+    await tester.pumpWidget(await _wrap(_FakeFindingsRepository([finding()])));
+    await tester.pumpAndSettle();
+    expect(find.text('Sample gaps'), findsOneWidget);
+  });
+
+  testWidgets('dismiss marks the finding dismissed', (tester) async {
+    final repo = _FakeFindingsRepository([finding()]);
+    await tester.pumpWidget(await _wrap(repo));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(ListTile).first); // expand
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dismiss'));
+    await tester.pumpAndSettle();
+    expect(repo.dismissed, ['f-sample_gap']);
+  });
+
+  testWidgets('expanded card shows exactly one Go to dive link', (
+    tester,
+  ) async {
+    // sample_gap's repair options include a GoToDiveRepair; the card also
+    // renders its own footer "Go to dive" -- there must be no duplicate.
+    await tester.pumpWidget(await _wrap(_FakeFindingsRepository([finding()])));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(ListTile).first); // expand
+    await tester.pumpAndSettle();
+    expect(find.text('Go to dive'), findsOneWidget);
+  });
+
+  group('Assign transmitter (issue #3676)', () {
+    Future<void> pumpUnknownTransmitter(WidgetTester tester) async {
+      final prefs = await _prefs();
+      final router = GoRouter(
+        routes: [
+          GoRoute(path: '/', builder: (_, _) => const DataQualityInboxPage()),
+          GoRoute(
+            path: '/equipment/:id',
+            builder: (_, s) =>
+                Scaffold(body: Text('ITEM ${s.pathParameters['id']}')),
+          ),
+          GoRoute(
+            path: '/transmitters/new',
+            builder: (_, s) => TransmitterSetupRedirect(
+              serial: s.uri.queryParameters['serial'],
+              diveId: s.uri.queryParameters['dive'],
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ..._overrides(
+              prefs,
+              findings: [
+                _f(
+                  id: 'f-tx',
+                  detectorId: 'unknown_transmitter',
+                  category: QualityCategory.tank,
+                  severity: QualitySeverity.info,
+                  params: const {'serial': '4A21F'},
+                ),
+              ],
+            ),
+            transmitterAutoRegistrarProvider.overrideWithValue(
+              TransmitterAutoRegistrar(nameFor: (serial) => 'Tx $serial'),
+            ),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(QualityFindingCard),
+              matching: find.byType(Icon),
+            )
+            .first,
+      ); // expand
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> seedDiveCarrying(String serial) async {
+      await _seedDive('d1');
+      final db = DatabaseService.instance.database;
+      await db
+          .into(db.diveTanks)
+          .insert(
+            DiveTanksCompanion.insert(
+              id: 'tank-1',
+              diveId: 'd1',
+              transmitterSerial: Value(serial),
+            ),
+          );
+    }
+
+    testWidgets("opens the transmitter's item", (tester) async {
+      await tester.runAsync(() async {
+        await seedDiveCarrying('4A21F');
+        final db = DatabaseService.instance.database;
+        await db
+            .into(db.equipment)
+            .insert(
+              EquipmentCompanion.insert(
+                id: 'tx-gear',
+                name: 'Back gas tx',
+                type: 'transmitter',
+                createdAt: 0,
+                updatedAt: 0,
+              ),
+            );
+        await db
+            .into(db.transmitters)
+            .insert(
+              TransmittersCompanion.insert(
+                id: 'tx1',
+                label: 'Back gas tx',
+                tankRole: 'backGas',
+                transmitterSerial: const Value('4A21F'),
+                transmitterEquipmentId: const Value('tx-gear'),
+                createdAt: 0,
+                updatedAt: 0,
+              ),
+            );
+      });
+      await pumpUnknownTransmitter(tester);
+
+      await tester.runAsync(() async {
+        await tester.tap(find.text('Assign transmitter'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('ITEM tx-gear'), findsOneWidget);
+    });
+
+    testWidgets('registers a serial no entry knows yet, then opens its new '
+        'item', (tester) async {
+      await tester.runAsync(() => seedDiveCarrying('4A21F'));
+      await pumpUnknownTransmitter(tester);
+
+      await tester.runAsync(() async {
+        await tester.tap(find.text('Assign transmitter'));
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      });
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('ITEM ${transmitterGearSeedId(null, '4A21F')}'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('a split rebuilds the sensor summaries of both dives', (
+    tester,
+  ) async {
+    // The condition engine reads the summaries, and the split rewrites the
+    // original's profile without touching its updated_at.
+    final requests = <String>[];
+    SensorSummaryScheduler.instance.summaryRequestListener = (ids, force) =>
+        requests.add('${(ids.toList()..sort()).join(',')}:$force');
+    addTearDown(
+      () => SensorSummaryScheduler.instance.summaryRequestListener = null,
+    );
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ..._overrides(
+            prefs,
+            findings: [
+              _f(
+                id: 'f-conflict',
+                detectorId: 'source_conflict',
+                category: QualityCategory.profile,
+                params: const {'sourceId': 's1', 'primarySeconds': 100},
+              ),
+            ],
+          ),
+          diveSplitServiceProvider.overrideWithValue(_FakeSplitService()),
+        ].cast(),
+        child: localizedMaterialApp(
+          locale: const Locale('en'),
+          home: const DataQualityInboxPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find
+          .descendant(
+            of: find.byType(QualityFindingCard),
+            matching: find.byType(Icon),
+          )
+          .first,
+    ); // expand
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Split into separate dives'));
+    await tester.pumpAndSettle();
+    expect(requests, ['d1,split-new:true']);
+  });
+
+  // --- Rendering / formatter coverage --------------------------------------
+
+  testWidgets('renders unit-formatted messages for every formatter', (
+    tester,
+  ) async {
+    // One finding per formatter closure (depth, pressure, temperature, sac),
+    // all on the same dive so they collapse into one group (append branch).
+    await _seedDive('d1', name: 'Reef wall');
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'm-depth',
+            detectorId: 'depth_spike',
+            category: QualityCategory.profile,
+            params: const {'depth': 30.0, 'atSeconds': 125},
+          ),
+          _f(
+            id: 'm-pressure',
+            detectorId: 'pressure_anomaly',
+            category: QualityCategory.pressure,
+            params: const {'startBar': 50.0, 'endBar': 200.0},
+          ),
+          _f(
+            id: 'm-temp',
+            detectorId: 'temp_anomaly',
+            category: QualityCategory.temperature,
+            params: const {'deltaC': 6.0, 'spikeShaped': true},
+          ),
+          _f(
+            id: 'm-sac',
+            detectorId: 'pressure_anomaly',
+            category: QualityCategory.pressure,
+            params: const {'surfaceLpm': 40.0},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(QualityFindingCard), findsNWidgets(4));
+    expect(find.text('Depth spike'), findsOneWidget);
+    expect(find.text('Temperature anomaly'), findsOneWidget);
+    expect(find.text('Pressure anomaly'), findsNWidgets(2));
+    // Single dive group header, naming the dive rather than its uuid.
+    expect(find.textContaining('Reef wall'), findsOneWidget);
+    expect(find.text('d1'), findsNothing);
+  });
+
+  // --- Chip row / filtering ------------------------------------------------
+
+  testWidgets('chip selection filters findings by category', (tester) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'c-gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+          _f(
+            id: 'c-clock',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 3},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // All chip: both categories visible; per-chip counts are rendered.
+    expect(find.text('Sample gaps'), findsOneWidget);
+    expect(find.text('Clock & timezone'), findsOneWidget);
+    expect(find.text('Time (1)'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilterChip, 'Time (1)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sample gaps'), findsNothing);
+    expect(find.text('Clock & timezone'), findsOneWidget);
+  });
+
+  testWidgets('filterDiveId deep-link shows only touching findings', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd2',
+        findings: [
+          _f(
+            id: 'dl-gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+          _f(
+            id: 'dl-clock',
+            diveId: 'd2',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+          _f(
+            id: 'dl-dup',
+            diveId: 'd1',
+            relatedDiveId: 'd2',
+            detectorId: 'duplicate',
+            category: QualityCategory.duplicate,
+            params: const {'score': 0.9, 'timeDiffMinutes': 5},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // d1-only sample_gap is filtered out; d2 and the d2-related pair remain.
+    expect(find.text('Sample gaps'), findsNothing);
+    expect(find.text('Clock & timezone'), findsOneWidget);
+    expect(find.text('Likely duplicate'), findsOneWidget);
+  });
+
+  testWidgets(
+    'comma-separated filterDiveId shows findings for every id in the set',
+    (tester) async {
+      final prefs = await _prefs();
+      await tester.pumpWidget(
+        _scope(
+          prefs,
+          // Whole imported set (as the import summary deep-links); no dive in
+          // scope may be hidden even though the count spans all of them.
+          filterDiveId: 'd1,d2',
+          findings: [
+            _f(
+              id: 'gap-d1',
+              detectorId: 'sample_gap',
+              category: QualityCategory.profile,
+              params: const {'gapCount': 1, 'longestGapSeconds': 30},
+            ),
+            _f(
+              id: 'clock-d2',
+              diveId: 'd2',
+              detectorId: 'clock_offset',
+              category: QualityCategory.time,
+              params: const {'offsetHours': 2},
+            ),
+            _f(
+              id: 'spike-d3',
+              diveId: 'd3',
+              detectorId: 'depth_spike',
+              category: QualityCategory.profile,
+              params: const {'depth': 55.0, 'atSeconds': 120},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // d1 and d2 findings both show; d3 (outside the set) is hidden.
+      expect(find.text('Sample gaps'), findsOneWidget);
+      expect(find.text('Clock & timezone'), findsOneWidget);
+      expect(find.text('Depth spike'), findsNothing);
+    },
+  );
+
+  testWidgets('chip counts cover only the dives in the deep-link filter', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd2',
+        findings: [
+          _f(
+            id: 'cc-clock-d2',
+            diveId: 'd2',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+          // A pair anchored on d1 but naming d2 is in scope, so it counts.
+          _f(
+            id: 'cc-dup',
+            diveId: 'd1',
+            relatedDiveId: 'd2',
+            detectorId: 'duplicate',
+            category: QualityCategory.duplicate,
+            params: const {'score': 0.9, 'timeDiffMinutes': 5},
+          ),
+          // Outside the filter: shown nowhere on this page, so counted nowhere.
+          _f(
+            id: 'cc-clock-d1',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 3},
+          ),
+          _f(
+            id: 'cc-gap-d3',
+            diveId: 'd3',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+          _f(
+            id: 'cc-pressure-d3',
+            diveId: 'd3',
+            detectorId: 'pressure_anomaly',
+            category: QualityCategory.pressure,
+            params: const {'startBar': 50.0, 'endBar': 200.0},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(QualityFindingCard), findsNWidgets(2));
+    expect(find.text('Time (1)'), findsOneWidget);
+    expect(find.text('Duplicates (1)'), findsOneWidget);
+    expect(find.text('Profile (0)'), findsOneWidget);
+    expect(find.text('Tanks (0)'), findsOneWidget);
+  });
+
+  testWidgets('chip counts leave out closed findings on the filtered dive', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd1',
+        findings: [
+          _f(
+            id: 'cf-open',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+          _f(
+            id: 'cf-dismissed',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 3},
+            status: QualityStatus.dismissed,
+          ),
+          _f(
+            id: 'cf-resolved',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+            status: QualityStatus.resolved,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(QualityFindingCard), findsOneWidget);
+    expect(find.text('Time (1)'), findsOneWidget);
+    expect(find.text('Profile (0)'), findsOneWidget);
+  });
+
+  testWidgets('chip counts span every dive in a comma-separated filter', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd1,d2',
+        findings: [
+          _f(
+            id: 'cs-gap-d1',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+          _f(
+            id: 'cs-temp-d2',
+            diveId: 'd2',
+            detectorId: 'temp_anomaly',
+            category: QualityCategory.temperature,
+            params: const {'deltaC': 6.0, 'spikeShaped': true},
+          ),
+          _f(
+            id: 'cs-spike-d3',
+            diveId: 'd3',
+            detectorId: 'depth_spike',
+            category: QualityCategory.profile,
+            params: const {'depth': 55.0, 'atSeconds': 120},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Profile covers profile and temperature: one each from d1 and d2, and
+    // none from d3, which sits outside the imported set.
+    expect(find.text('Profile (2)'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilterChip, 'Profile (2)'));
+    await tester.pumpAndSettle();
+    expect(find.byType(QualityFindingCard), findsNWidgets(2));
+  });
+
+  bool chipSelected(WidgetTester tester, String label) => tester
+      .widget<FilterChip>(find.widgetWithText(FilterChip, label))
+      .selected;
+
+  testWidgets('each visit to the inbox starts on the All chip', (tester) async {
+    final prefs = await _prefs();
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: _overrides(
+          prefs,
+          findings: [
+            _f(
+              id: 'v-clock',
+              detectorId: 'clock_offset',
+              category: QualityCategory.time,
+              params: const {'offsetHours': 2},
+            ),
+          ],
+        ).cast(),
+        child: MaterialApp(
+          navigatorKey: navigatorKey,
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const SizedBox.shrink(),
+        ),
+      ),
+    );
+    Future<void> openInbox() async {
+      unawaited(
+        navigatorKey.currentState!.push(
+          MaterialPageRoute<void>(builder: (_) => const DataQualityInboxPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await openInbox();
+    await tester.tap(find.widgetWithText(FilterChip, 'Tanks (0)'));
+    await tester.pumpAndSettle();
+    expect(chipSelected(tester, 'Tanks (0)'), isTrue);
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    await openInbox();
+
+    expect(chipSelected(tester, 'All'), isTrue);
+    expect(find.byType(QualityFindingCard), findsOneWidget);
+  });
+
+  testWidgets('the chip survives opening a dive and coming back', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: _overrides(
+          prefs,
+          findings: [
+            _f(
+              id: 's-clock',
+              detectorId: 'clock_offset',
+              category: QualityCategory.time,
+              params: const {'offsetHours': 2},
+            ),
+          ],
+        ).cast(),
+        child: MaterialApp(
+          navigatorKey: navigatorKey,
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const DataQualityInboxPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Time (1)'));
+    await tester.pumpAndSettle();
+
+    // A route pushed over the inbox (a dive, say) keeps it mounted, so the
+    // diver comes back to the category they were working through.
+    unawaited(
+      navigatorKey.currentState!.push(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+
+    expect(chipSelected(tester, 'Time (1)'), isTrue);
+  });
+
+  testWidgets('an inbox stacked on another keeps its own chip', (tester) async {
+    // Library inbox -> a dive -> that dive's Data Quality link mounts a second
+    // inbox over the first; each must keep its own selection.
+    final prefs = await _prefs();
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: _overrides(
+          prefs,
+          findings: [
+            _f(
+              id: 'k-clock',
+              detectorId: 'clock_offset',
+              category: QualityCategory.time,
+              params: const {'offsetHours': 2},
+            ),
+          ],
+        ).cast(),
+        child: MaterialApp(
+          navigatorKey: navigatorKey,
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const DataQualityInboxPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Tanks (0)'));
+    await tester.pumpAndSettle();
+
+    unawaited(
+      navigatorKey.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const DataQualityInboxPage(filterDiveId: 'd1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(chipSelected(tester, 'All'), isTrue);
+    expect(find.byType(QualityFindingCard), findsOneWidget);
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(chipSelected(tester, 'Tanks (0)'), isTrue);
+  });
+
+  testWidgets('a chip that hides every finding says so and offers the rest', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd1',
+        findings: [
+          _f(
+            id: 'e-clock',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Tanks (0)'));
+    await tester.pumpAndSettle();
+
+    // The dive still has a Time finding, so the page must not call it clean.
+    expect(find.byType(QualityFindingCard), findsNothing);
+    expect(find.text('All clear'), findsNothing);
+    expect(find.text('No findings in this category'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Show all findings'));
+    await tester.pumpAndSettle();
+
+    expect(chipSelected(tester, 'All'), isTrue);
+    expect(find.byType(QualityFindingCard), findsOneWidget);
+  });
+
+  testWidgets('with nothing in scope the inbox still reads All clear', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(_scope(prefs));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Tanks (0)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('All clear'), findsOneWidget);
+    expect(find.text('No findings in this category'), findsNothing);
+  });
+
+  testWidgets('one dive gets one header even when findings interleave', (
+    tester,
+  ) async {
+    await _seedDive('d1', name: 'Reef wall');
+    await _seedDive('d2', name: 'Night dive');
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        // watchFindings emits in updatedAt order (not by dive), so d1's two
+        // findings straddle d2's. Grouping must still yield a single d1 header.
+        findings: [
+          _f(
+            id: 'd1-gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+          _f(
+            id: 'd2-clock',
+            diveId: 'd2',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+          _f(
+            id: 'd1-spike',
+            detectorId: 'depth_spike',
+            category: QualityCategory.profile,
+            params: const {'depth': 55.0, 'atSeconds': 120},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Exactly one header per dive despite the interleaving, each naming its
+    // own dive.
+    expect(find.textContaining('Reef wall'), findsOneWidget);
+    expect(find.textContaining('Night dive'), findsOneWidget);
+  });
+
+  // --- Dive identity -------------------------------------------------------
+
+  testWidgets('header names an unnamed, siteless dive by when it happened', (
+    tester,
+  ) async {
+    // The reported bug: a downloaded dive carries neither a custom name nor a
+    // site, so the old fallback chain ran all the way to the raw uuid and the
+    // page named no dive the diver could recognize.
+    await _seedDive('d1', entryTime: DateTime.utc(2026, 6, 14, 9, 12));
+    final prefs = await _prefs();
+    await tester.pumpWidget(_scope(prefs, findings: [finding()]));
+    await tester.pumpAndSettle();
+
+    expect(find.text('d1'), findsNothing);
+    expect(find.textContaining('2026'), findsOneWidget);
+  });
+
+  testWidgets('header carries the dive max depth and duration', (tester) async {
+    await _seedDive(
+      'd1',
+      name: 'Reef wall',
+      maxDepth: 28.4,
+      runtime: const Duration(minutes: 47),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(_scope(prefs, findings: [finding()]));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('28.4'), findsOneWidget);
+    expect(find.textContaining('47 min'), findsOneWidget);
+  });
+
+  testWidgets('a finding whose dive is gone says so instead of showing an id', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(_scope(prefs, findings: [finding()]));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Dive details unavailable'), findsOneWidget);
+    expect(find.text('d1'), findsNothing);
+  });
+
+  testWidgets('a cross-dive finding names the dive it is paired with', (
+    tester,
+  ) async {
+    await _seedDive('d1', name: 'Reef wall');
+    await _seedDive('d2', name: 'Night dive');
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'dupe',
+            detectorId: 'duplicate',
+            category: QualityCategory.duplicate,
+            relatedDiveId: 'd2',
+            params: const {'score': 0.5, 'timeDiffMinutes': 1},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Paired with'), findsOneWidget);
+    expect(find.textContaining('Night dive'), findsOneWidget);
+  });
+
+  testWidgets('a finding names the computer that recorded it', (tester) async {
+    await _seedDive('d1', name: 'Reef wall');
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            computerId: 'c1',
+            params: const {'gapCount': 2, 'longestGapSeconds': 90},
+          ),
+        ],
+        computerNames: const {'c1': 'Perdix AI'},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Recorded by Perdix AI'), findsOneWidget);
+  });
+
+  testWidgets('a deep link still names a paired dive outside its filter', (
+    tester,
+  ) async {
+    // The identity lookup is scoped to the dive filter so a deep link does not
+    // load the whole library. The pair's other dive is outside that filter, and
+    // must still be named: scoping away the dive the row points at would make
+    // the row useless exactly where the deep link sends you.
+    await _seedDive('d1', name: 'Reef wall');
+    await _seedDive('d2', name: 'Night dive');
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        filterDiveId: 'd1',
+        findings: [
+          _f(
+            id: 'dupe',
+            detectorId: 'duplicate',
+            category: QualityCategory.duplicate,
+            relatedDiveId: 'd2',
+            params: const {'score': 0.5, 'timeDiffMinutes': 1},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Night dive'), findsOneWidget);
+  });
+
+  testWidgets('computer names are not read when no finding names one', (
+    tester,
+  ) async {
+    // Resolving names costs a diver lookup plus a computers-table read. No
+    // finding here carries a computerId, so nothing should ask for them.
+    await _seedDive('d1', name: 'Reef wall');
+    var read = false;
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [finding()],
+        onComputerNamesRead: () => read = true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(read, isFalse);
+  });
+
+  testWidgets('computer names are read when a finding names one', (
+    tester,
+  ) async {
+    await _seedDive('d1', name: 'Reef wall');
+    var read = false;
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            computerId: 'c1',
+            params: const {'gapCount': 2, 'longestGapSeconds': 90},
+          ),
+        ],
+        onComputerNamesRead: () => read = true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(read, isTrue);
+  });
+
+  testWidgets('tapping a dive header opens that dive', (tester) async {
+    await _seedDive('d1', name: 'Reef wall');
+    final prefs = await _prefs();
+    final router = GoRouter(
+      initialLocation: '/quality',
+      routes: [
+        GoRoute(
+          path: '/quality',
+          builder: (_, _) => const DataQualityInboxPage(),
+        ),
+        GoRoute(
+          path: '/dives/:id',
+          builder: (_, state) =>
+              Scaffold(body: Text('opened ${state.pathParameters['id']}')),
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: _overrides(prefs, findings: [finding()]),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.textContaining('Reef wall'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('opened d1'), findsOneWidget);
+  });
+
+  // A shared gear pair spans two profiles. Bob sees it under his own dive,
+  // and Alice's dive is named but cannot be opened from his inbox (#3049).
+  testWidgets('files a cross-profile pair under the active diver\'s dive', (
+    tester,
+  ) async {
+    await _seedDive('a1', name: 'Alice wreck');
+    await _seedDive('b1', name: 'Bob reef');
+    final prefs = await _prefs();
+    final router = GoRouter(
+      initialLocation: '/quality',
+      routes: [
+        GoRoute(
+          path: '/quality',
+          builder: (_, _) => const DataQualityInboxPage(),
+        ),
+        GoRoute(
+          path: '/dives/:id',
+          builder: (_, state) =>
+              Scaffold(body: Text('opened ${state.pathParameters['id']}')),
+        ),
+      ],
+    );
+    final pair = _f(
+      id: 'gear',
+      diveId: 'a1',
+      relatedDiveId: 'b1',
+      detectorId: 'shared_gear_overlap',
+      category: QualityCategory.time,
+      severity: QualitySeverity.info,
+      params: const {
+        'equipmentId': 'light',
+        'itemName': 'Light',
+        'partIds': <String>[],
+        'dives': {
+          'a1': {'diverId': 'alice', 'diverName': 'Alice', 'removable': true},
+          'b1': {'diverId': 'bob', 'diverName': 'Bob', 'removable': true},
+        },
+      },
+    );
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: [
+          ..._overrides(prefs, findings: [pair]),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => 'bob'),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Alice's dive appears only in the "paired with" row, which does nothing.
+    await tester.tap(find.textContaining('Alice wreck'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('opened'), findsNothing);
+
+    await tester.tap(find.textContaining('Bob reef'));
+    await tester.pumpAndSettle();
+    expect(find.text('opened b1'), findsOneWidget);
+  });
+
+  testWidgets('a failed identity lookup says so rather than showing an id', (
+    tester,
+  ) async {
+    // Distinct from the dive simply being absent: here the read itself broke,
+    // so there is no map at all. The header must still name the state instead
+    // of leaving a blank line above the findings.
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [finding()],
+        diveRepository: _FailingDiveRepository(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Dive details unavailable'), findsOneWidget);
+    expect(find.text('d1'), findsNothing);
+    // The finding itself still renders; only its identity is unknown.
+    expect(find.text('Sample gaps'), findsOneWidget);
+  });
+
+  // --- Empty state variants + library scan flow ----------------------------
+
+  testWidgets('empty state shows last-scan line and scans on tap', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    final store = _FakeScanStateStore(prefs, last: DateTime.utc(2026, 7, 10));
+    final service = _FakeScanService(
+      summary: const QualityScanSummary(
+        divesScanned: 0,
+        findingsProduced: 0,
+        detectorErrors: 0,
+      ),
+    );
+    await tester.pumpWidget(_scope(prefs, scanService: service, store: store));
+    await tester.pumpAndSettle();
+
+    expect(find.text('All clear'), findsOneWidget);
+    expect(find.textContaining('Last scan'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Scan library'));
+    await tester.pumpAndSettle();
+
+    expect(store.recorded, isNotEmpty);
+    expect(find.textContaining('Scan complete'), findsOneWidget);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  // The scan's own count includes dismissed findings it detected again, so
+  // it read 410 while the badge and the dashboard showed 277 (issue #4209).
+  testWidgets('the scan message counts the open findings, as the badge does', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    final service = _FakeScanService(
+      summary: const QualityScanSummary(
+        divesScanned: 3,
+        findingsProduced: 5,
+        detectorErrors: 0,
+      ),
+    );
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        scanService: service,
+        store: _FakeScanStateStore(prefs),
+        findings: [
+          for (final (id, status) in [
+            ('open-1', QualityStatus.open),
+            ('open-2', QualityStatus.open),
+            ('gone-1', QualityStatus.dismissed),
+            ('gone-2', QualityStatus.dismissed),
+            ('gone-3', QualityStatus.dismissed),
+          ])
+            _f(
+              id: id,
+              detectorId: 'sample_gap',
+              category: QualityCategory.profile,
+              status: status,
+              params: const {'gapCount': 1, 'longestGapSeconds': 30},
+            ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.radar));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan complete - 2 open items to review'), findsOneWidget);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('scan shows an indeterminate progress bar and can be cancelled', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    final gate = Completer<void>();
+    final store = _FakeScanStateStore(prefs);
+    final service = _FakeScanService(
+      summary: const QualityScanSummary(
+        divesScanned: 3,
+        findingsProduced: 2,
+        detectorErrors: 0,
+      ),
+      gate: gate,
+    );
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        scanService: service,
+        store: store,
+        findings: [
+          _f(
+            id: 's-gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.radar));
+    await tester.pump();
+
+    // (0, 0) => indeterminate, and the app-bar scan action is hidden.
+    final bar = tester.widget<LinearProgressIndicator>(
+      find.byType(LinearProgressIndicator),
+    );
+    expect(bar.value, isNull);
+    expect(find.byIcon(Icons.radar), findsNothing);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    // Stopped partway, so it is not a full scan and must not read as one.
+    expect(store.recorded, isEmpty);
+    expect(find.textContaining('Scan complete'), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(find.byIcon(Icons.radar), findsOneWidget);
+  });
+
+  testWidgets('a cancelled scan keeps the new-checks banner', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'quality_last_full_scan_at': 1,
+      'quality_detector_versions': '{}',
+    });
+    addTearDown(() => SharedPreferences.setMockInitialValues({}));
+    final prefs = await SharedPreferences.getInstance();
+    final gate = Completer<void>();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        scanService: _FakeScanService(
+          summary: const QualityScanSummary(
+            divesScanned: 200,
+            findingsProduced: 1,
+            detectorErrors: 0,
+          ),
+          gate: gate,
+        ),
+        store: QualityScanStateStore(prefs),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Rescan'), findsOneWidget);
+
+    await tester.tap(find.text('Rescan'));
+    await tester.pump();
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Rescan'), findsOneWidget);
+  });
+
+  testWidgets('scan shows determinate progress and reports detector errors', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    final gate = Completer<void>();
+    final store = _FakeScanStateStore(prefs);
+    final service = _FakeScanService(
+      summary: const QualityScanSummary(
+        divesScanned: 4,
+        findingsProduced: 0,
+        detectorErrors: 2,
+      ),
+      gate: gate,
+      progress: (done: 2, total: 4),
+    );
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        scanService: service,
+        store: store,
+        findings: [
+          _f(
+            id: 'e-gap',
+            detectorId: 'sample_gap',
+            category: QualityCategory.profile,
+            params: const {'gapCount': 1, 'longestGapSeconds': 30},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.radar));
+    await tester.pump();
+
+    final bar = tester.widget<LinearProgressIndicator>(
+      find.byType(LinearProgressIndicator),
+    );
+    expect(bar.value, closeTo(0.5, 0.001));
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('could not be fully checked'), findsOneWidget);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('new-checks banner offers a rescan', (tester) async {
+    final prefs = await _prefs();
+    final store = _FakeScanStateStore(
+      prefs,
+      last: DateTime.utc(2026, 7, 10),
+      newVersions: true,
+    );
+    final service = _FakeScanService(
+      summary: const QualityScanSummary(
+        divesScanned: 1,
+        findingsProduced: 0,
+        detectorErrors: 0,
+      ),
+    );
+    await tester.pumpWidget(_scope(prefs, scanService: service, store: store));
+    await tester.pumpAndSettle();
+
+    expect(find.text('New quality checks are available'), findsOneWidget);
+
+    await tester.tap(find.text('Rescan'));
+    await tester.pumpAndSettle();
+
+    expect(store.recorded, isNotEmpty);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  // --- Repair dispatch (_runAction) ----------------------------------------
+
+  final repairCases = <String, QualityFinding>{
+    'fill gaps': _f(
+      id: 'r-gap',
+      detectorId: 'sample_gap',
+      category: QualityCategory.profile,
+      params: const {'gapCount': 2, 'longestGapSeconds': 90},
+    ),
+    'despike': _f(
+      id: 'r-spike',
+      detectorId: 'depth_spike',
+      category: QualityCategory.profile,
+      params: const {'depth': 30.0, 'atSeconds': 125},
+    ),
+    'recompute metrics': _f(
+      id: 'r-recompute',
+      detectorId: 'depth_spike',
+      category: QualityCategory.profile,
+      params: const {'storedMaxDepth': 30.0, 'profileMaxDepth': 28.0},
+    ),
+    'smooth temperature': _f(
+      id: 'r-smooth',
+      detectorId: 'temp_anomaly',
+      category: QualityCategory.temperature,
+      params: const {'deltaC': 6.0, 'spikeShaped': true},
+    ),
+    'convert temperature': _f(
+      id: 'r-convert',
+      detectorId: 'temp_anomaly',
+      category: QualityCategory.temperature,
+      params: const {
+        'minTempC': 285.0,
+        'maxTempC': 290.0,
+        'fahrenheitAsKelvinSuspected': true,
+      },
+    ),
+    'smooth impossible rates': _f(
+      id: 'r-rates',
+      detectorId: 'impossible_rate',
+      category: QualityCategory.profile,
+      params: const {'startSeconds': 120, 'interpolatable': true},
+    ),
+    'clamp negative depths': _f(
+      id: 'r-clamp',
+      detectorId: 'depth_spike',
+      category: QualityCategory.profile,
+      params: const {'sampleCount': 3, 'minDepth': -2.0},
+    ),
+    'swap tank pressures': _f(
+      id: 'r-swapp',
+      detectorId: 'pressure_anomaly',
+      category: QualityCategory.pressure,
+      params: const {'tankId': 't1', 'startBar': 50.0, 'endBar': 200.0},
+    ),
+    'set tank record from series': _f(
+      id: 'r-series',
+      detectorId: 'pressure_anomaly',
+      category: QualityCategory.pressure,
+      params: const {'tankId': 't1', 'recordBar': 200.0, 'seriesBar': 50.0},
+    ),
+    'swap pressure series': _f(
+      id: 'r-swapseries',
+      detectorId: 'tank_assignment',
+      category: QualityCategory.tank,
+      params: const {'tankIdA': 'a', 'tankIdB': 'b'},
+    ),
+    'set primary source': _f(
+      id: 'r-primary',
+      detectorId: 'source_conflict',
+      category: QualityCategory.source,
+      params: const {
+        'sourceId': 's1',
+        'primaryMaxDepth': 30.0,
+        'sourceMaxDepth': 28.0,
+      },
+    ),
+  };
+
+  repairCases.forEach((name, f) {
+    testWidgets('repair "$name" dispatches through _runAction', (tester) async {
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [f]));
+      await tester.pumpAndSettle();
+
+      // The primary action under the finding's detail.
+      await tester.tap(find.byType(FilledButton).first);
+      await tester.pumpAndSettle();
+
+      // Set-primary asks first, since it has no snackbar undo (#4209).
+      if (find.byType(AlertDialog).evaluate().isNotEmpty) {
+        await tester.tap(find.text('Make primary'));
+        await tester.pumpAndSettle();
+      }
+
+      // Each of these repairs reports the outcome (applied or failed) as a
+      // SnackBar via the shared withUndo helper.
+      expect(find.byType(SnackBar), findsWidgets);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+  });
+
+  testWidgets('time-shift repair opens the offset sheet and applies', (
+    tester,
+  ) async {
+    // A real dive so shiftTimes + divesInSameImport have a row to operate on.
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-clock',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 3},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    // The offset sheet: number field + import-wide toggle + OK.
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.tap(find.byType(CheckboxListTile));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    // Exercise the undo action wired onto the SnackBar.
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('a source clock fix moves the secondary, never the logbook '
+      '(#3655)', (tester) async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+    );
+    final db = DatabaseService.instance.database;
+    for (final (id, primary, at) in [
+      ('uddf', true, entry),
+      ('dc', false, entry.add(const Duration(hours: 1))),
+    ]) {
+      await db
+          .into(db.diveDataSources)
+          .insert(
+            DiveDataSourcesCompanion(
+              id: Value(id),
+              diveId: const Value('d1'),
+              isPrimary: Value(primary),
+              entryTime: Value(at),
+              importedAt: Value(entry),
+              createdAt: Value(entry),
+            ),
+          );
+    }
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-src-clock',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 1, 'sourceId': 'dc'},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+    // Pre-filled with the shift that brings the source onto the primary.
+    expect(find.widgetWithText(TextField, '-1'), findsOneWidget);
+    // The source names no registered computer, so no other dive can be
+    // said to share its clock and the computer-wide checkbox is absent.
+    expect(find.byType(CheckboxListTile), findsNothing);
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    final sources = await DiveRepository().getDataSources('d1');
+    expect(
+      sources
+          .firstWhere((s) => s.id == 'dc')
+          .entryTime!
+          .isAtSameMomentAs(entry),
+      isTrue,
+    );
+    expect((await DiveRepository().getDiveById('d1'))!.entryTime, entry);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  // Which computer a source finding is about used to show nowhere when the
+  // source named no saved computer (issue #4209).
+  group('source findings name their source (#4209)', () {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+
+    Future<void> seedSources() async {
+      await DiveRepository().createDive(
+        domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+      );
+      final db = DatabaseService.instance.database;
+      for (final (id, primary, model, at) in [
+        ('uddf', true, null, entry),
+        ('dc', false, 'Suunto EON Core', entry.add(const Duration(hours: 1))),
+      ]) {
+        await db
+            .into(db.diveDataSources)
+            .insert(
+              DiveDataSourcesCompanion(
+                id: Value(id),
+                diveId: const Value('d1'),
+                isPrimary: Value(primary),
+                computerModel: Value(model),
+                entryTime: Value(at),
+                importedAt: Value(entry),
+                createdAt: Value(entry),
+              ),
+            );
+      }
+    }
+
+    testWidgets('the clock fix names the computer on the card and the sheet', (
+      tester,
+    ) async {
+      await seedSources();
+      final prefs = await _prefs();
+      await tester.pumpWidget(
+        _scope(
+          prefs,
+          findings: [
+            _f(
+              id: 'r-src-clock',
+              detectorId: 'clock_offset',
+              category: QualityCategory.time,
+              params: const {'offsetHours': 1, 'sourceId': 'dc'},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Recorded by Suunto EON Core'), findsOneWidget);
+      await tester.tap(find.text("Fix Suunto EON Core's clock by -1 h"));
+      await tester.pumpAndSettle();
+      // The card's row, and the sheet's heading above it.
+      expect(find.text('Recorded by Suunto EON Core'), findsNWidgets(2));
+
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    QualityFinding conflict() => _f(
+      id: 'r-src-conflict',
+      detectorId: 'source_conflict',
+      category: QualityCategory.source,
+      params: const {
+        'sourceId': 'dc',
+        'primarySeconds': 1390,
+        'sourceSeconds': 4050,
+      },
+    );
+
+    Future<bool> dcIsPrimary() async => (await DiveRepository().getDataSources(
+      'd1',
+    )).firstWhere((s) => s.id == 'dc').isPrimary;
+
+    testWidgets('set-primary asks first and changes nothing on cancel', (
+      tester,
+    ) async {
+      await seedSources();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [conflict()]));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Sources disagree on dive duration: 23 min vs. 68 min'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Make Suunto EON Core the primary source'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Make Suunto EON Core the primary source?'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Repair applied'), findsNothing);
+      expect(await dcIsPrimary(), isFalse);
+    });
+
+    testWidgets('set-primary applies once confirmed', (tester) async {
+      await seedSources();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [conflict()]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Make Suunto EON Core the primary source'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Make primary'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Repair applied'), findsOneWidget);
+      expect(await dcIsPrimary(), isTrue);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    Future<bool> dcPresent() async =>
+        (await DiveRepository().getDataSources('d1')).any((s) => s.id == 'dc');
+
+    testWidgets('remove source asks first and changes nothing on cancel '
+        '(#4393)', (tester) async {
+      await seedSources();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [conflict()]));
+      await tester.pumpAndSettle();
+
+      // Every action after the first shows on the expanded card.
+      await tester.tap(
+        find.text('Sources disagree on dive duration: 23 min vs. 68 min'),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Remove Suunto EON Core'));
+      await tester.tap(find.text('Remove Suunto EON Core'));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove this source?'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(await dcPresent(), isTrue);
+    });
+
+    testWidgets('remove source explains why a shared computer cannot be '
+        'removed (#4393)', (tester) async {
+      await seedSources();
+      await tester.runAsync(() async {
+        final db = DatabaseService.instance.database;
+        await db
+            .into(db.diveComputers)
+            .insert(
+              const DiveComputersCompanion(
+                id: Value('teric'),
+                name: Value('Teric'),
+                createdAt: Value(0),
+                updatedAt: Value(0),
+              ),
+            );
+        await (db.update(
+          db.diveDataSources,
+        )).write(const DiveDataSourcesCompanion(computerId: Value('teric')));
+      });
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [conflict()]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.text('Sources disagree on dive duration: 23 min vs. 68 min'),
+      );
+      await tester.pumpAndSettle();
+      // With a computer, the source is named after it, not the model.
+      final remove = find.textContaining(RegExp(r'^Remove '));
+      await tester.ensureVisible(remove);
+      await tester.tap(remove);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove this source?'), findsNothing);
+      expect(
+        find.text(
+          'This source shares its dive computer with another source of the '
+          'dive, so their readings cannot be told apart and it cannot be '
+          'removed on its own.',
+        ),
+        findsOneWidget,
+      );
+      // The display list merges two sources of one computer, so read the row.
+      final db = DatabaseService.instance.database;
+      final rows = await tester.runAsync(
+        () => (db.select(
+          db.diveDataSources,
+        )..where((t) => t.id.equals('dc'))).get(),
+      );
+      expect(rows, hasLength(1));
+      await tester.pumpAndSettle(const Duration(seconds: 5));
+    });
+
+    testWidgets('remove source removes it once confirmed (#4393)', (
+      tester,
+    ) async {
+      await seedSources();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [conflict()]));
+      await tester.pumpAndSettle();
+
+      // Every action after the first shows on the expanded card.
+      await tester.tap(
+        find.text('Sources disagree on dive duration: 23 min vs. 68 min'),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Remove Suunto EON Core'));
+      await tester.tap(find.text('Remove Suunto EON Core'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Source removed'), findsOneWidget);
+      expect(await dcPresent(), isFalse);
+      await tester.pumpAndSettle(const Duration(seconds: 11));
+    });
+  });
+
+  testWidgets('the logbook shift moves this dive alone, forward to the '
+      'secondary (#3655)', (tester) async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          // No sourceId: the logbook shift is the only repair offered.
+          _f(
+            id: 'r-logbook',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 2},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Shift logbook time by +2 h'), findsOneWidget);
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    expect(
+      (await DiveRepository().getDiveById('d1'))!.entryTime,
+      entry.add(const Duration(hours: 2)),
+    );
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('a failed source read before the clock fix is reported, '
+      'not dropped (#3655)', (tester) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-src-clock-failed',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 1, 'sourceId': 'dc'},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    // The read the repair makes before its sheet now has no table to read.
+    await DatabaseService.instance.database.customStatement(
+      'DROP TABLE dive_data_sources',
+    );
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Repair failed'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('the computer-wide checkbox follows the source as it is now, '
+      'not the finding (#3655)', (tester) async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+    );
+    final db = DatabaseService.instance.database;
+    await db
+        .into(db.diveComputers)
+        .insert(
+          const DiveComputersCompanion(
+            id: Value('pc1'),
+            name: Value('Perdix'),
+            createdAt: Value(0),
+            updatedAt: Value(0),
+          ),
+        );
+    for (final (id, primary, at, computer) in [
+      ('uddf', true, entry, null),
+      ('dc', false, entry.add(const Duration(hours: 1)), 'pc1'),
+    ]) {
+      await db
+          .into(db.diveDataSources)
+          .insert(
+            DiveDataSourcesCompanion(
+              id: Value(id),
+              diveId: const Value('d1'),
+              computerId: Value(computer),
+              isPrimary: Value(primary),
+              entryTime: Value(at),
+              importedAt: Value(entry),
+              createdAt: Value(entry),
+            ),
+          );
+    }
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          // Scanned before the source was linked to its computer.
+          _f(
+            id: 'r-src-clock-linked',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'offsetHours': 1, 'sourceId': 'dc'},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Also fix this computer on other dives with the same offset'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byType(CheckboxListTile));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    final sources = await DiveRepository().getDataSources('d1');
+    expect(
+      sources
+          .firstWhere((s) => s.id == 'dc')
+          .entryTime!
+          .isAtSameMomentAs(entry),
+      isTrue,
+    );
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('lining a source up by its profile is one tap with Undo '
+      '(#4296)', (tester) async {
+    final entry = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: entry, entryTime: entry),
+    );
+    final db = DatabaseService.instance.database;
+    for (final (id, primary) in [('main', true), ('dc', false)]) {
+      await db
+          .into(db.diveDataSources)
+          .insert(
+            DiveDataSourcesCompanion(
+              id: Value(id),
+              diveId: const Value('d1'),
+              isPrimary: Value(primary),
+              importedAt: Value(entry),
+              createdAt: Value(entry),
+            ),
+          );
+    }
+    final series = ProfileSeriesRepository();
+    await series.insertSeries(
+      diveId: 'd1',
+      sourceId: 'dc',
+      isPrimary: false,
+      samples: const [
+        ProfileSample(timestamp: -1200, depth: 0),
+        ProfileSample(timestamp: -1140, depth: 10),
+      ],
+    );
+    Future<int> firstSample() async => (await series.getSeriesForDive(
+      'd1',
+    )).firstWhere((s) => s.sourceId == 'dc').samples.first.timestamp;
+
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-src-fit',
+            detectorId: 'clock_offset',
+            category: QualityCategory.time,
+            params: const {'sourceId': 'dc', 'profileOffsetSeconds': 1160},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+    expect(find.text('Repair applied'), findsOneWidget);
+    expect(await tester.runAsync(firstSample), -40);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(await tester.runAsync(firstSample), -1200);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('scalar water-temp repair converts the dive and can undo', (
+    tester,
+  ) async {
+    // 78 recorded as Celsius is 25.6 C read as Fahrenheit.
+    await DiveRepository().createDive(
+      domain.Dive(id: 'd1', dateTime: DateTime.utc(2026, 7, 1), waterTemp: 78),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-temp-scalar',
+            detectorId: 'temp_anomaly',
+            category: QualityCategory.temperature,
+            params: const {'waterTempC': 78.0, 'fahrenheitSuspected': true},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    expect(
+      (await DiveRepository().getDiveById('d1'))!.waterTemp,
+      closeTo(25.5556, 1e-3),
+    );
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+    expect((await DiveRepository().getDiveById('d1'))!.waterTemp, 78);
+  });
+
+  testWidgets(
+    'consolidate-duplicate repair opens the combine dialog with the primary '
+    'selector instead of merging on the spot',
+    (tester) async {
+      // Which recording survives a consolidation decides whose notes, site
+      // and edits are kept. The one-tap path used to pick the smaller UUID;
+      // it now defers to the dialog's primary-computer selector (#1690).
+      final t = DateTime.utc(2026, 7, 1, 10);
+      await DiveRepository().createDive(
+        domain.Dive(
+          id: 'd1',
+          dateTime: t,
+          entryTime: t,
+          runtime: const Duration(minutes: 30),
+          diveComputerModel: 'Perdix',
+          diveComputerSerial: 'serial-1',
+        ),
+      );
+      await DiveRepository().createDive(
+        domain.Dive(
+          id: 'd2',
+          dateTime: t.add(const Duration(minutes: 5)),
+          entryTime: t.add(const Duration(minutes: 5)),
+          runtime: const Duration(minutes: 25),
+          diveComputerModel: 'Teric',
+          diveComputerSerial: 'serial-2',
+        ),
+      );
+      final prefs = await _prefs();
+      await tester.pumpWidget(
+        _scope(
+          prefs,
+          findings: [
+            _f(
+              id: 'r-dup',
+              diveId: 'd1',
+              relatedDiveId: 'd2',
+              detectorId: 'duplicate',
+              category: QualityCategory.duplicate,
+              params: const {'score': 0.9, 'timeDiffMinutes': 5},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FilledButton).first);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CombineDivesDialog), findsOneWidget);
+      expect(find.text('Primary dive computer'), findsOneWidget);
+      expect(find.byType(RadioListTile<String>), findsNWidgets(2));
+      // Nothing was merged: both rows are still live.
+      expect(await DiveRepository().getDiveById('d2'), isNotNull);
+      // Dismiss the barrier so the dialog route closes cleanly.
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+    },
+  );
+
+  // Issue #165: the missing-switch card writes its switches and Undo takes
+  // exactly those back out.
+  testWidgets('Add gas switch writes the switch, Undo removes it', (
+    tester,
+  ) async {
+    await DiveRepository().createDive(
+      domain.Dive(
+        id: 'd1',
+        dateTime: DateTime.utc(2026, 6, 14, 9),
+        tanks: const [
+          domain.DiveTank(id: 'back', order: 0),
+          domain.DiveTank(id: 'deco', order: 1),
+        ],
+      ),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-missing-switch',
+            detectorId: 'missing_gas_switch',
+            category: QualityCategory.tank,
+            params: const {
+              'missingSwitches': [
+                {
+                  'tankId': 'deco',
+                  'tankPosition': 1,
+                  't': 1800,
+                  'depth': 21.0,
+                  'o2Percent': 50.0,
+                  'hePercent': 0.0,
+                },
+              ],
+              'deepStarts': [],
+            },
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Add gas switch'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Repair applied'), findsOneWidget);
+    final added = await tester.runAsync(
+      () => DiveRepository().getGasSwitchesForDive('d1'),
+    );
+    expect(
+      [for (final s in added!) (s.gasSwitch.tankId, s.gasSwitch.timestamp)],
+      [('deco', 1800)],
+    );
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+    final after = await tester.runAsync(
+      () => DiveRepository().getGasSwitchesForDive('d1'),
+    );
+    expect(after, isEmpty);
+  });
+
+  group('impossible gas mix repair (issue #4714)', () {
+    Future<void> seedTank(double o2) => DiveRepository().createDive(
+      domain.Dive(
+        id: 'd1',
+        dateTime: DateTime.utc(2026, 6, 14, 9),
+        tanks: [
+          domain.DiveTank(
+            id: 'back',
+            order: 0,
+            gasMix: domain.GasMix(o2: o2),
+          ),
+        ],
+      ),
+    );
+
+    Widget inbox(SharedPreferences prefs) => _scope(
+      prefs,
+      findings: [
+        _f(
+          id: 'r-impossible-mix',
+          detectorId: 'impossible_gas_mix',
+          category: QualityCategory.gas,
+          params: const {
+            'tankId': 'back',
+            'tankPosition': 0,
+            'o2Percent': 3200.0,
+            'hePercent': 0.0,
+            'correctedO2Percent': 32.0,
+            'correctedHePercent': 0.0,
+          },
+        ),
+      ],
+    );
+
+    Future<double?> storedO2(WidgetTester tester) async =>
+        (await tester.runAsync(
+          () => TankGasMixRepository().tankMix(diveId: 'd1', tankId: 'back'),
+        ))?.mix.o2;
+
+    testWidgets('Correct to EAN32 divides the cylinder, with no Undo', (
+      tester,
+    ) async {
+      await seedTank(3200);
+      await tester.pumpWidget(inbox(await _prefs()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Correct to EAN32'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Repair applied'), findsOneWidget);
+      // The next launch would write the same mix again, so none is offered.
+      expect(find.text('Undo'), findsNothing);
+      expect(await storedO2(tester), 32.0);
+    });
+
+    testWidgets('a mix put right since the scan is left alone', (tester) async {
+      await seedTank(30);
+      await tester.pumpWidget(inbox(await _prefs()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Correct to EAN32'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Nothing to repair here'), findsOneWidget);
+      expect(await storedO2(tester), 30.0);
+    });
+  });
+
+  group('delete-duplicate repair', () {
+    // The commonest duplicate: one dive downloaded twice from a single
+    // computer, where the second copy is a fragment. Consolidation is
+    // refused for that pair, so the card offers to delete the fragment,
+    // and names both dives before anything is written.
+    Future<QualityFinding> seedPair({
+      String doomedNotes = '',
+      int? doomedRating,
+    }) async {
+      await _seedDive(
+        'd1',
+        name: 'Blue Hole',
+        maxDepth: 20,
+        runtime: const Duration(minutes: 35),
+      );
+      await _seedDive(
+        'd2',
+        name: 'Fragment',
+        entryTime: DateTime.utc(2026, 6, 14, 9, 13),
+        maxDepth: 1.7,
+        runtime: const Duration(seconds: 13),
+        notes: doomedNotes,
+        rating: doomedRating,
+      );
+      return _f(
+        id: 'r-dup-same',
+        diveId: 'd1',
+        relatedDiveId: 'd2',
+        detectorId: 'duplicate',
+        category: QualityCategory.duplicate,
+        // Only detector 4 checks whether the doomed copy carries the diver's
+        // own entries, and the repair mapping will not act on an older
+        // finding (#1720), so a fixture offering the repair must say 4.
+        detectorVersion: 4,
+        params: const {
+          'score': 0.9,
+          'timeDiffMinutes': 1,
+          'sameComputer': true,
+          'redundantDiveId': 'd2',
+        },
+      );
+    }
+
+    testWidgets('names both dives, deletes the fragment, and can undo', (
+      tester,
+    ) async {
+      final finding = await seedPair();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [finding]));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('No automatic fix. Open the dive to correct this.'),
+        findsNothing,
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete duplicate'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.textContaining('Keep: '), findsOneWidget);
+      expect(find.textContaining('Blue Hole'), findsWidgets);
+      expect(find.textContaining('Delete: '), findsOneWidget);
+      expect(find.textContaining('Fragment'), findsWidgets);
+      // The confirmation has to say what is about to happen, not only who.
+      expect(find.textContaining('same dive computer'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.text('Repair applied'), findsOneWidget);
+      expect(await DiveRepository().getDiveById('d2'), isNull);
+      expect(await DiveRepository().getDiveById('d1'), isNotNull);
+
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+      expect(await DiveRepository().getDiveById('d2'), isNotNull);
+    });
+
+    // The detector will not name a copy carrying the diver's work as the
+    // redundant one (#1720), so this pair should never reach the dialog. It
+    // is written by hand precisely because the dialog is what stands between
+    // the diver and the delete if that rule is ever loosened, or if another
+    // caller reaches the repair by a different route (#1729).
+    testWidgets('the confirmation says what the doomed copy carries', (
+      tester,
+    ) async {
+      final finding = await seedPair(
+        doomedNotes: 'viz was poor',
+        doomedRating: 4,
+      );
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [finding]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete duplicate'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('This copy also has: notes \u00b7 a rating'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    });
+
+    // The read that fills that line runs on the tap, before the dialog. The
+    // repair card drops the Future it returns, so an error there used to go
+    // nowhere: the tap did nothing and said nothing. It must not fall back to
+    // a dialog without the line either, because that is indistinguishable
+    // from "this copy holds nothing", the one reassurance a failed read
+    // cannot give.
+    testWidgets('a failed read reports it rather than confirming blind', (
+      tester,
+    ) async {
+      final finding = await seedPair();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [finding]));
+      await tester.pumpAndSettle();
+
+      final db = DatabaseService.instance.database;
+      await tester.runAsync(
+        () => db.customStatement('DROP TABLE dive_custom_fields'),
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete duplicate'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.textContaining('Repair failed'), findsOneWidget);
+      final survivors = await tester.runAsync(
+        () => db.customSelect("SELECT id FROM dives WHERE id = 'd2'").get(),
+      );
+      expect(survivors, hasLength(1));
+    });
+
+    testWidgets('cancelling the confirmation deletes nothing', (tester) async {
+      final finding = await seedPair();
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [finding]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete duplicate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(await DiveRepository().getDiveById('d2'), isNotNull);
+    });
+  });
+
+  testWidgets('a same-computer duplicate offers no Consolidate button', (
+    tester,
+  ) async {
+    // The real-world duplicate is the same dive downloaded twice from one
+    // computer, and DiveConsolidationBuilder refuses to merge those. The
+    // inbox used to offer Consolidate anyway, so the tap could only ever
+    // fail; the card now explains that no automatic fix exists instead.
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-dup-same',
+            diveId: 'd1',
+            relatedDiveId: 'd2',
+            detectorId: 'duplicate',
+            category: QualityCategory.duplicate,
+            params: const {
+              'score': 0.9,
+              'timeDiffMinutes': 1,
+              'sameComputer': true,
+            },
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Consolidate'), findsNothing);
+    expect(
+      find.text('No automatic fix. Open the dive to correct this.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('split-source repair reports a failure through a SnackBar', (
+    tester,
+  ) async {
+    // DiveSplitService.split() throws for a source that does not belong to
+    // the dive, and it also refuses a dive whose stored series this build
+    // cannot decode. Either way the diver must be told: the repair used to
+    // run outside any try/catch, so the tap silently did nothing and the
+    // finding stayed open forever.
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-splitsource',
+            detectorId: 'source_conflict',
+            category: QualityCategory.source,
+            params: const {
+              'sourceId': 's1',
+              'primaryMaxDepth': 30.0,
+              'sourceMaxDepth': 28.0,
+            },
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Split is not the card's primary action; expand the card to reach it.
+    // Tap the title rather than the tile's center: the trailing primary
+    // button is wide enough to sit under it.
+    await tester.tap(find.text('Conflicting sources'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Split into separate dives'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Split failed'), findsOneWidget);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  testWidgets('combine-split repair opens the combine dialog', (tester) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-split',
+            diveId: 'd1',
+            relatedDiveId: 'd2',
+            detectorId: 'split_pair',
+            category: QualityCategory.time,
+            params: const {'gapSeconds': 120},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CombineDivesDialog), findsOneWidget);
+    // Dismiss the barrier so the dialog route closes cleanly.
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('reassign-series repair no-ops when the dive is missing', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-reassign',
+            detectorId: 'tank_assignment',
+            category: QualityCategory.tank,
+            params: const {'tankId': 't1'},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    // No dive row => the tank picker returns null and the action returns
+    // without a SnackBar; the page stays intact.
+    expect(find.text('Wrong cylinder'), findsOneWidget);
+  });
+
+  testWidgets('reassign-series repair opens the tank picker', (tester) async {
+    final t = DateTime.utc(2026, 7, 1, 10);
+    await DiveRepository().createDive(
+      domain.Dive(
+        id: 'd1',
+        dateTime: t,
+        entryTime: t,
+        tanks: const [
+          domain.DiveTank(id: 't1', order: 0),
+          domain.DiveTank(id: 't2', order: 1),
+        ],
+      ),
+    );
+    final prefs = await _prefs();
+    await tester.pumpWidget(
+      _scope(
+        prefs,
+        findings: [
+          _f(
+            id: 'r-reassign2',
+            detectorId: 'tank_assignment',
+            category: QualityCategory.tank,
+            params: const {'tankId': 't1'},
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(FilledButton).first);
+    await tester.pumpAndSettle();
+
+    // The picker lists the dive's other tank; choosing it dispatches the
+    // reassignment (reported via a SnackBar).
+    await tester.tap(find.text('Tank 2'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SnackBar), findsWidgets);
+    await tester.pumpAndSettle(const Duration(seconds: 6));
+  });
+
+  group('duplicate cylinders and dismiss all shown (#4393)', () {
+    QualityFinding twin({String id = 'twin-1', bool sameTransmitter = true}) =>
+        _f(
+          id: id,
+          detectorId: 'tank_assignment',
+          category: QualityCategory.tank,
+          params: {
+            'tankIdA': 'tank-a',
+            'tankIdB': 'tank-b',
+            'meanDiffBar': 0.0,
+            'sameTransmitter': sameTransmitter,
+          },
+        );
+
+    testWidgets('bulk removal shows only on the Tanks chip with serial-proven '
+        'twins', (tester) async {
+      final repo = _FakeFindingsRepository([twin()]);
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(bulkRemoveDuplicatesKey), findsNothing);
+      await tester.tap(find.widgetWithText(FilterChip, 'Tanks (1)'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(bulkRemoveDuplicatesKey), findsOneWidget);
+      expect(
+        find.byTooltip('Remove duplicate cylinders (1 dive)'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('bulk removal is hidden for curve-only twins', (tester) async {
+      final repo = _FakeFindingsRepository([twin(sameTransmitter: false)]);
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilterChip, 'Tanks (1)'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(bulkRemoveDuplicatesKey), findsNothing);
+    });
+
+    testWidgets('dismiss all shown dismisses exactly the shown findings and '
+        'undo reopens them', (tester) async {
+      final gap = _f(
+        id: 'gap-1',
+        detectorId: 'sample_gap',
+        category: QualityCategory.profile,
+        params: const {'gapCount': 2, 'longestGapSeconds': 90},
+      );
+      final repo = _FakeFindingsRepository([twin(), gap]);
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilterChip, 'Tanks (1)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(inboxOverflowMenuKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all shown (1)'));
+      await tester.pumpAndSettle();
+      expect(find.text('Dismiss 1 finding?'), findsOneWidget);
+      await tester.tap(find.text('Dismiss all'));
+      await tester.pumpAndSettle();
+
+      expect(repo.dismissedAll, ['twin-1']);
+      expect(find.text('Dismissed 1 finding'), findsOneWidget);
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+      expect(repo.reopened, ['twin-1']);
+    });
+
+    testWidgets('a failing Undo of dismiss all says so', (tester) async {
+      final repo = _FakeFindingsRepository([twin()])..failReopenAll = true;
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(inboxOverflowMenuKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all shown (1)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Repair failed'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    testWidgets('bulk removal with nothing left to merge says so', (
+      tester,
+    ) async {
+      // No tank rows: every twin finding is stale.
+      final repo = _FakeFindingsRepository([twin()]);
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilterChip, 'Tanks (1)'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(bulkRemoveDuplicatesKey));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove duplicate cylinders'), findsNothing);
+      expect(find.text('Nothing to repair here'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    testWidgets('a failing dismiss all says so instead of doing nothing', (
+      tester,
+    ) async {
+      final repo = _FakeFindingsRepository([twin()])..failDismissAll = true;
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(inboxOverflowMenuKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all shown (1)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Repair failed'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    Future<void> seedTwin(WidgetTester tester) => tester.runAsync(() async {
+      await _seedDive('d1');
+      final db = DatabaseService.instance.database;
+      for (final id in ['tank-a', 'tank-b']) {
+        await db
+            .into(db.diveTanks)
+            .insert(
+              DiveTanksCompanion.insert(
+                id: id,
+                diveId: 'd1',
+                o2Percent: const Value(32),
+                transmitterSerial: const Value('X1'),
+              ),
+            );
+      }
+    });
+
+    Future<List<String>> tankIds(WidgetTester tester) async {
+      final db = DatabaseService.instance.database;
+      final rows = await tester.runAsync(() => db.select(db.diveTanks).get());
+      return [for (final t in rows!) t.id];
+    }
+
+    testWidgets('confirming a per-card removal merges and offers Undo', (
+      tester,
+    ) async {
+      await seedTwin(tester);
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [twin()]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Remove duplicate cylinder'));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove the duplicate cylinder?'), findsOneWidget);
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Removed on 1 dive'), findsOneWidget);
+      expect(await tankIds(tester), ['tank-a']);
+      await tester.pumpAndSettle(const Duration(seconds: 11));
+    });
+
+    testWidgets('a per-card removal whose rows have gone says so', (
+      tester,
+    ) async {
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [twin()]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Remove duplicate cylinder'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove the duplicate cylinder?'), findsNothing);
+      expect(find.text('Nothing to repair here'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 6));
+    });
+
+    testWidgets('the bulk sheet runs the removal and reports it', (
+      tester,
+    ) async {
+      await seedTwin(tester);
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [twin()]));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilterChip, 'Tanks (1)'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(bulkRemoveDuplicatesKey));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove duplicate cylinders'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Removed on 1 dive'), findsOneWidget);
+      expect(await tankIds(tester), ['tank-a']);
+      await tester.pumpAndSettle(const Duration(seconds: 11));
+    });
+
+    testWidgets('cancelling dismiss all changes nothing', (tester) async {
+      final repo = _FakeFindingsRepository([twin()]);
+      await tester.pumpWidget(await _wrap(repo));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(inboxOverflowMenuKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss all shown (1)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(repo.dismissedAll, isEmpty);
+    });
+
+    testWidgets('a twin whose mixes differ asks which mix to keep', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        await _seedDive('d1');
+        final db = DatabaseService.instance.database;
+        for (final (id, o2) in [('tank-a', 32.0), ('tank-b', 21.0)]) {
+          await db
+              .into(db.diveTanks)
+              .insert(
+                DiveTanksCompanion.insert(
+                  id: id,
+                  diveId: 'd1',
+                  o2Percent: Value(o2),
+                  transmitterSerial: const Value('X1'),
+                ),
+              );
+        }
+      });
+      final prefs = await _prefs();
+      await tester.pumpWidget(_scope(prefs, findings: [twin()]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Remove duplicate cylinder'));
+      await tester.pumpAndSettle();
+      expect(find.text('Which gas did this cylinder hold?'), findsOneWidget);
+      expect(find.text('EAN32'), findsOneWidget);
+      expect(find.text('Air'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    });
+  });
+}

@@ -1,0 +1,123 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:submersion/core/services/export/csv/codec/csv_export_units.dart';
+import 'package:submersion/core/services/export/export_service.dart';
+import 'package:submersion/core/services/export/shared/file_export_utils.dart';
+
+import '../../../../helpers/global_test_defaults.dart';
+import '../../../../helpers/mock_file_picker_platform.dart';
+import 'csv_dives_writer_test.dart' show imperial;
+import 'csv_test_fixtures.dart';
+
+/// The `units` choice reaches every CSV entry point on the ExportService
+/// facade, including the save-to-file paths (#1813).
+void main() {
+  late MockFilePickerPlatform mockPicker;
+  late FilePickerPlatform originalPicker;
+  late Directory workDir;
+
+  setUp(() {
+    workDir = Directory.systemTemp.createTempSync('csv_units_plumbing');
+    originalPicker = FilePickerPlatform.instance;
+    mockPicker = MockFilePickerPlatform()
+      ..saveFileResult = Uri.file(p.join(workDir.path, 'export.csv'));
+    FilePickerPlatform.instance = mockPicker;
+  });
+
+  tearDown(() {
+    FilePickerPlatform.instance = originalPicker;
+    workDir.deleteSync(recursive: true);
+  });
+
+  final units = CsvExportUnits.fromSettings(imperial);
+  final service = ExportService();
+
+  String header(String csv) => csv.split('\r\n').first;
+  String saved() => utf8.decode(mockPicker.lastSavedBytes!);
+
+  test('generating content honours the units', () {
+    expect(
+      header(service.generateDivesCsvContent(goldenDives(), units: units)),
+      contains('Max Depth (ft)'),
+    );
+    expect(
+      header(service.generateSitesCsvContent(goldenSites(), units: units)),
+      contains('Max Depth (ft)'),
+    );
+    expect(
+      header(
+        service.generateEquipmentCsvContent(goldenEquipment(), units: units),
+      ),
+      contains('Buoyancy (lbs)'),
+    );
+    expect(
+      header(service.generateFillsCsvContent(goldenFills(), units: units)),
+      contains('Pressure (psi)'),
+    );
+  });
+
+  test('saving dives writes the chosen units', () async {
+    await service.saveDivesCsvToFile(
+      goldenDives(),
+      dialogTitle: 'Save',
+      units: units,
+    );
+    expect(header(saved()), contains('Water Temp (°F)'));
+  });
+
+  test('saving sites writes the chosen units', () async {
+    await service.saveSitesCsvToFile(
+      goldenSites(),
+      dialogTitle: 'Save',
+      units: units,
+    );
+    expect(header(saved()), contains('Max Depth (ft)'));
+  });
+
+  test('saving equipment writes the chosen units and parts', () async {
+    await service.saveEquipmentCsvToFile(
+      goldenEquipment(),
+      componentNames: goldenComponentNames(),
+      dialogTitle: 'Save',
+      units: units,
+    );
+    expect(header(saved()), contains('Dry Weight (lbs)'));
+    expect(saved(), contains('Mk25; Long hose'));
+  });
+
+  test('saving fills writes the chosen units and the cylinder name', () async {
+    await service.saveFillsCsvToFile(
+      goldenFills(),
+      equipmentById: goldenFillEquipment(),
+      dialogTitle: 'Save',
+      units: units,
+    );
+    expect(header(saved()), contains('Temperature (°F)'));
+    expect(saved(), contains('AL80'));
+  });
+
+  test('sharing fills writes the chosen units and the cylinder name '
+      'under the fills file name', () async {
+    // No file-capable share sheet here, so the share lands through the
+    // save dialog and the picker sees the bytes.
+    debugCanShareFiles = false;
+    addTearDown(applyGlobalTestDefaults);
+    final path = await service.exportFillsToCsv(
+      goldenFills(),
+      equipmentById: goldenFillEquipment(),
+      units: units,
+    );
+    expect(path, p.join(workDir.path, 'export.csv'));
+    expect(mockPicker.lastSavedFileName, 'fills_export.csv');
+    expect(header(saved()), contains('Temperature (°F)'));
+    expect(saved(), contains('AL80'));
+  });
+
+  test('the default is still the historical metric file', () async {
+    await service.saveDivesCsvToFile(goldenDives(), dialogTitle: 'Save');
+    expect(header(saved()), contains('Max Depth (m)'));
+  });
+}

@@ -1,0 +1,381 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
+
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/cloud_storage/deferred_write_provider.dart';
+import 'package:submersion/core/services/sync/crypto/encryption_key_store.dart';
+import 'package:submersion/core/services/sync/crypto/keyslots.dart';
+import 'package:submersion/core/services/sync/crypto/sync_envelope.dart';
+import 'package:submersion/core/services/sync/sync_preferences.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/exceptions/backup_encrypted_exception.dart';
+
+import '../../../../helpers/mock_channels.dart';
+import '../../../../support/fake_cloud_storage_provider.dart';
+import '../../../../support/fake_keychain_storage.dart';
+
+const _fastKdf = KdfParams(m: 1024, t: 3, p: 1);
+
+/// Records flush and history-reset calls, as a Git backend would receive.
+class _HistoryKeepingCloud extends FakeCloudStorageProvider
+    implements DeferredWriteProvider, HistoryResettable {
+  final calls = <String>[];
+
+  @override
+  Future<void> flush({Duration? timeout}) async => calls.add('flush');
+
+  @override
+  Future<void> resetHistoryNow() async => calls.add('reset');
+}
+
+const _passphrase = 'correct horse battery staple';
+
+class _FakeBackupDatabaseAdapter implements BackupDatabaseAdapter {
+  _FakeBackupDatabaseAdapter({this.writesRealDatabase = false});
+
+  /// Backs up a minimal Submersion-shaped SQLite file instead of the marker
+  /// text, for tests that restore what they backed up: a restore deep-checks
+  /// a decrypted copy, and the marker text is not a database.
+  final bool writesRealDatabase;
+
+  @override
+  Future<void> backup(String destinationPath, {String? note}) async {
+    final file = File(destinationPath);
+    await file.parent.create(recursive: true);
+    if (!writesRealDatabase) {
+      await file.writeAsString('fake backup data');
+      return;
+    }
+    if (await file.exists()) await file.delete();
+    final db = sqlite3.sqlite3.open(destinationPath);
+    try {
+      db.execute('CREATE TABLE dives (id TEXT PRIMARY KEY)');
+      db.execute('CREATE TABLE dive_sites (id TEXT PRIMARY KEY)');
+    } finally {
+      db.close();
+    }
+  }
+
+  @override
+  Future<void> restore(
+    String backupPath, {
+    void Function(int, int)? onMigrationProgress,
+  }) async {}
+
+  @override
+  Future<String> get databasePath async => '/fake/db/path';
+
+  @override
+  AppDatabase get database =>
+      throw UnimplementedError('Fake database does not support queries');
+
+  @override
+  String? get databaseKeyHex => null;
+}
+
+/// Per-file temp root, so the backup service's fixed `Submersion/Backups`
+/// subtree does not collide with the other suites that mock path_provider the
+/// same way. `flutter test` runs files in parallel isolates against one real
+/// $TMPDIR, so sharing it let one suite truncate or encrypt another's artifact
+/// mid-assert.
+final _isolatedTempDir = Directory.systemTemp.createTempSync(
+  'backup_enc_test_',
+);
+
+void main() {
+  tearDownAll(() {
+    if (_isolatedTempDir.existsSync()) {
+      _isolatedTempDir.deleteSync(recursive: true);
+    }
+  });
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          (MethodCall methodCall) async {
+            if (methodCall.method == 'getTemporaryDirectory') {
+              return _isolatedTempDir.path;
+            }
+            if (methodCall.method == 'getApplicationDocumentsDirectory') {
+              return _isolatedTempDir.path;
+            }
+            return null;
+          },
+        );
+  });
+  tearDownAll(clearPathAndShareChannelMocks);
+
+  late BackupPreferences preferences;
+  late SyncPreferences syncPreferences;
+  late EncryptionKeyStore keyStore;
+  late FakeCloudStorageProvider cloud;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    preferences = BackupPreferences(prefs);
+    syncPreferences = SyncPreferences(prefs);
+    keyStore = EncryptionKeyStore(storage: InMemoryKeychain());
+    cloud = FakeCloudStorageProvider();
+  });
+
+  BackupService buildService({bool writesRealDatabase = false}) =>
+      BackupService(
+        dbAdapter: _FakeBackupDatabaseAdapter(
+          writesRealDatabase: writesRealDatabase,
+        ),
+        preferences: preferences,
+        cloudProvider: cloud,
+        encryptionKeyStore: keyStore,
+        syncPreferences: syncPreferences,
+      );
+
+  /// Seed an unlocked encrypted-library state (key + mirror + flag).
+  Future<String> seedEncryption() async {
+    final mlk = SecretKey(List<int>.generate(32, (i) => (i * 3 + 1) % 256));
+    const keyId = '8f14e45f-ceea-467f-ab37-a10a8d5f4c11';
+    final file = KeyslotFile(
+      version: 1,
+      libraryKeyId: keyId,
+      slots: [
+        await Keyslots.createSlot(
+          type: 'passphrase',
+          secret: _passphrase,
+          mlk: mlk,
+          kdf: _fastKdf,
+        ),
+      ],
+    );
+    await keyStore.saveKey(
+      libraryKeyId: keyId,
+      mlkBytes: await mlk.extractBytes(),
+    );
+    await keyStore.saveKeyslotMirror(file.toJsonBytes());
+    await syncPreferences.setSyncEncryptionEnabled(true);
+    return keyId;
+  }
+
+  // The support fake's createFolder returns the folder name as its id.
+  Future<String> backupFolderId() => cloud.createFolder('Submersion Backups');
+
+  Future<({String name, Uint8List bytes})> singleCloudBackup() async {
+    final files = await cloud.listFiles(
+      folderId: await backupFolderId(),
+      namePattern: 'submersion_backup_',
+    );
+    expect(files, hasLength(1));
+    return (
+      name: files.single.name,
+      bytes: await cloud.downloadFile(files.single.id),
+    );
+  }
+
+  test('encryption on: cloud copy is .sbe with SBE1 magic, local stays '
+      'plaintext', () async {
+    await seedEncryption();
+    await preferences.setCloudBackupEnabled(true);
+
+    final service = buildService();
+    final record = await service.performBackup();
+
+    final uploaded = await singleCloudBackup();
+    expect(uploaded.name, endsWith('.sbe'));
+    expect(SyncEnvelope.hasMagic(uploaded.bytes), isTrue);
+    // Local artifact untouched:
+    expect(record.localPath, isNotNull);
+    expect(await File(record.localPath!).readAsString(), 'fake backup data');
+  });
+
+  test('encryption off: cloud copy keeps the plaintext .db name', () async {
+    await preferences.setCloudBackupEnabled(true);
+
+    final service = buildService();
+    await service.performBackup();
+
+    final uploaded = await singleCloudBackup();
+    expect(uploaded.name, endsWith('.db'));
+    expect(SyncEnvelope.hasMagic(uploaded.bytes), isFalse);
+    expect(utf8.decode(uploaded.bytes), 'fake backup data');
+  });
+
+  test('restoreFromFile: encrypted artifact with no secret and no cached '
+      'key throws BackupEncryptedException', () async {
+    final keyId = await seedEncryption();
+    await preferences.setCloudBackupEnabled(true);
+    final service = buildService();
+    await service.performBackup();
+    final uploaded = await singleCloudBackup();
+    // Write the encrypted artifact to disk as a picked file:
+    final picked = File(p.join(_isolatedTempDir.path, 'picked_$keyId.sbe'));
+    await picked.writeAsBytes(uploaded.bytes);
+    addTearDown(() async {
+      if (await picked.exists()) await picked.delete();
+    });
+    // Drop the cached key: a fresh device with no key and no secret.
+    await keyStore.clearKey();
+
+    await expectLater(
+      service.restoreFromFile(picked.path),
+      throwsA(isA<BackupEncryptedException>()),
+    );
+  });
+
+  test('restoreFromFile: succeeds with the passphrase, and silently with '
+      'the cached key', () async {
+    await seedEncryption();
+    await preferences.setCloudBackupEnabled(true);
+    final service = buildService(writesRealDatabase: true);
+    await service.performBackup();
+    final uploaded = await singleCloudBackup();
+    final picked = File(p.join(_isolatedTempDir.path, 'picked_enc.sbe'));
+    await picked.writeAsBytes(uploaded.bytes);
+    addTearDown(() async {
+      if (await picked.exists()) await picked.delete();
+    });
+
+    // Cached key path (key still present): no secret needed.
+    await service.restoreFromFile(picked.path);
+
+    // Passphrase path (no cached key):
+    await keyStore.clearKey();
+    await service.restoreFromFile(picked.path, encryptionSecret: _passphrase);
+  });
+
+  test('validateBackupFile accepts an encrypted .sbe artifact', () async {
+    await seedEncryption();
+    await preferences.setCloudBackupEnabled(true);
+    final service = buildService();
+    await service.performBackup();
+    final uploaded = await singleCloudBackup();
+    final picked = File(p.join(_isolatedTempDir.path, 'valid_enc.sbe'));
+    await picked.writeAsBytes(uploaded.bytes);
+    addTearDown(() async {
+      if (await picked.exists()) await picked.delete();
+    });
+
+    final result = await service.validateBackupFile(picked.path);
+    expect(result.isValid, isTrue);
+  });
+
+  test('validateBackupFile rejects a .sbe file that lacks the magic', () async {
+    final service = buildService();
+    final bogus = File(p.join(_isolatedTempDir.path, 'bogus.sbe'));
+    await bogus.writeAsString('not an encrypted backup at all');
+    addTearDown(() async {
+      if (await bogus.exists()) await bogus.delete();
+    });
+
+    final result = await service.validateBackupFile(bogus.path);
+    expect(result.isValid, isFalse);
+  });
+
+  test('deletePlaintextCloudBackups removes only *.db artifacts', () async {
+    await preferences.setCloudBackupEnabled(true);
+    final service = buildService();
+    await service.performBackup(); // plaintext .db upload
+
+    await seedEncryption();
+    await service.performBackup(); // encrypted .sbe upload
+
+    final removed = await service.deletePlaintextCloudBackups();
+    expect(removed, 1);
+    final remaining = await cloud.listFiles(
+      folderId: await backupFolderId(),
+      namePattern: 'submersion_backup_',
+    );
+    expect(remaining, hasLength(1));
+    expect(remaining.single.name, endsWith('.sbe'));
+  });
+
+  group('a backend that keeps deleted data in history (Git)', () {
+    late _HistoryKeepingCloud keeping;
+
+    setUp(() {
+      keeping = _HistoryKeepingCloud();
+      cloud = keeping;
+    });
+
+    test('removing plaintext cloud backups resets its history', () async {
+      await preferences.setCloudBackupEnabled(true);
+      final service = buildService();
+      await service.performBackup();
+      await seedEncryption();
+      expect(await service.deletePlaintextCloudBackups(), 1);
+      expect(keeping.calls, contains('reset'));
+    });
+
+    test(
+      'deleting a backup pushes the cloud delete before returning',
+      () async {
+        await preferences.setCloudBackupEnabled(true);
+        final service = buildService();
+        final record = await service.performBackup();
+        expect(record.cloudFileId, isNotNull);
+        await service.deleteBackup(record);
+        expect(keeping.calls, contains('flush'));
+      },
+    );
+  });
+
+  group('encryption on but this device is not unlocked (issue #3089)', () {
+    Future<List<String>> cloudBackupNames() async {
+      final files = await cloud.listFiles(
+        folderId: await backupFolderId(),
+        namePattern: 'submersion_backup_',
+      );
+      return files.map((f) => f.name).toList();
+    }
+
+    test('no key: the cloud copy is skipped and the backup stays '
+        'local-only', () async {
+      await syncPreferences.setSyncEncryptionEnabled(true);
+      await preferences.setCloudBackupEnabled(true);
+
+      final record = await buildService().performBackup();
+
+      expect(await cloudBackupNames(), isEmpty);
+      expect(record.location, BackupLocation.local);
+      expect(record.cloudFileId, isNull);
+      expect(await File(record.localPath!).readAsString(), 'fake backup data');
+    });
+
+    test('key without its keyslot mirror: the cloud copy is skipped', () async {
+      await seedEncryption();
+      await keyStore.clearKeyslotMirror();
+      await preferences.setCloudBackupEnabled(true);
+
+      final record = await buildService().performBackup();
+
+      expect(await cloudBackupNames(), isEmpty);
+      expect(record.location, BackupLocation.local);
+    });
+
+    test('isCloudBackupBlockedByEncryptionLock reports the locked '
+        'state only', () async {
+      final service = buildService();
+      await syncPreferences.setSyncEncryptionEnabled(true);
+      // Cloud backup off: nothing is blocked.
+      expect(await service.isCloudBackupBlockedByEncryptionLock(), isFalse);
+
+      await preferences.setCloudBackupEnabled(true);
+      expect(await service.isCloudBackupBlockedByEncryptionLock(), isTrue);
+
+      await syncPreferences.setSyncEncryptionEnabled(false);
+      expect(await service.isCloudBackupBlockedByEncryptionLock(), isFalse);
+
+      await seedEncryption();
+      expect(await service.isCloudBackupBlockedByEncryptionLock(), isFalse);
+    });
+  });
+}

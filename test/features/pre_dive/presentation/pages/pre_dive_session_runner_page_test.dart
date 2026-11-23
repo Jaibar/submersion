@@ -1,0 +1,993 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:submersion/features/equipment/domain/entities/overdue_service_entry.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/pre_dive/data/repositories/pre_dive_session_repository.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_session_runner_page.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+
+import '../../../../helpers/test_app.dart';
+
+/// Records the write-through calls the page makes. Only the members the page
+/// actually invokes are overridden; everything else routes to [noSuchMethod].
+class _FakeSessionRepo implements PreDiveSessionRepository {
+  final calls =
+      <
+        ({
+          String itemId,
+          PreDiveItemState state,
+          double? valueNumber,
+          String? note,
+          List<OverdueServiceEntry>? overdueServices,
+          double? sourceValueNumber,
+        })
+      >[];
+  final completed = <String>[];
+  final aborted = <String>[];
+
+  @override
+  Future<void> updateItemState({
+    required String sessionId,
+    required String itemId,
+    required PreDiveItemState state,
+    double? valueNumber,
+    String? valueText,
+    String? note,
+    List<OverdueServiceEntry>? overdueServices,
+    double? sourceValueNumber,
+  }) async {
+    calls.add((
+      itemId: itemId,
+      state: state,
+      valueNumber: valueNumber,
+      note: note,
+      overdueServices: overdueServices,
+      sourceValueNumber: sourceValueNumber,
+    ));
+  }
+
+  @override
+  Future<void> completeSession(String id) async => completed.add(id);
+
+  @override
+  Future<void> abortSession(String id) async => aborted.add(id);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  final now = DateTime.fromMillisecondsSinceEpoch(1700000000000);
+
+  PreDiveSession session({
+    bool strict = true,
+    PreDiveSessionStatus status = PreDiveSessionStatus.inProgress,
+    DateTime? completedAt,
+  }) => PreDiveSession(
+    id: 's1',
+    templateName: 'CCR Build',
+    strictOrder: strict,
+    startedAt: now,
+    status: status,
+    completedAt: completedAt,
+    createdAt: now,
+    updatedAt: now,
+  );
+
+  PreDiveSessionItem item(
+    int order, {
+    PreDiveItemState state = PreDiveItemState.pending,
+    bool required = true,
+    PreDiveItemType itemType = PreDiveItemType.check,
+    String? sectionId,
+    String? valueLabel,
+    String? valueUnit,
+    double? valueMin,
+    double? valueMax,
+    double? valueNumber,
+    String note = '',
+    String? equipmentId,
+    List<OverdueServiceEntry>? overdueServices,
+    String? sourceItemId,
+    double? sourceValueNumber,
+  }) => PreDiveSessionItem(
+    id: 'i$order',
+    sessionId: 's1',
+    title: 'Item $order',
+    sectionId: sectionId,
+    sortOrder: order,
+    state: state,
+    isRequired: required,
+    itemType: itemType,
+    valueLabel: valueLabel,
+    valueUnit: valueUnit,
+    valueMin: valueMin,
+    valueMax: valueMax,
+    valueNumber: valueNumber,
+    note: note,
+    completedAt: state == PreDiveItemState.pending ? null : now,
+    equipmentId: equipmentId,
+    overdueServices: overdueServices,
+    sourceItemId: sourceItemId,
+    sourceValueNumber: sourceValueNumber,
+    createdAt: now,
+    updatedAt: now,
+  );
+
+  Future<_FakeSessionRepo> pumpRunner(
+    WidgetTester tester, {
+    required PreDiveSession s,
+    required List<PreDiveSessionItem> items,
+    List<PreDiveSessionSection> sections = const [],
+    List<dynamic> extraOverrides = const [],
+    Locale locale = const Locale('en'),
+  }) async {
+    final repo = _FakeSessionRepo();
+    await tester.pumpWidget(
+      testApp(
+        locale: locale,
+        overrides: [
+          preDiveSessionRepositoryProvider.overrideWithValue(repo),
+          preDiveSessionProvider('s1').overrideWith((ref) async => s),
+          preDiveSessionItemsProvider('s1').overrideWith((ref) async => items),
+          preDiveSessionSectionsProvider(
+            's1',
+          ).overrideWith((ref) async => sections),
+          ...extraOverrides,
+        ],
+        child: const PreDiveSessionRunnerPage(sessionId: 's1'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    return repo;
+  }
+
+  testWidgets('shows progress and strict-order gating', (tester) async {
+    final items = [item(0, state: PreDiveItemState.done), item(1), item(2)];
+    final repo = await pumpRunner(tester, s: session(), items: items);
+
+    expect(find.text('1 of 3'), findsOneWidget);
+
+    // Second item is the next actionable; third is inert.
+    final tile1 = tester.widget<ListTile>(
+      find.ancestor(of: find.text('Item 1'), matching: find.byType(ListTile)),
+    );
+    final tile2 = tester.widget<ListTile>(
+      find.ancestor(of: find.text('Item 2'), matching: find.byType(ListTile)),
+    );
+    expect(tile1.enabled, isTrue);
+    expect(tile2.enabled, isFalse);
+
+    // Tapping the actionable item records a done state change.
+    await tester.tap(find.text('Item 1'));
+    await tester.pumpAndSettle();
+    expect(repo.calls.single.itemId, 'i1');
+    expect(repo.calls.single.state, PreDiveItemState.done);
+  });
+
+  // Note: one pump per test — re-pumping a new ProviderScope in the same
+  // test updates the existing scope element, whose overrides are fixed at
+  // creation, so the second set of overrides would be silently ignored.
+  testWidgets('Complete disabled while a required item pends', (tester) async {
+    await pumpRunner(tester, s: session(), items: [item(0)]);
+    final disabled = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Complete'),
+    );
+    expect(disabled.onPressed, isNull);
+  });
+
+  testWidgets('Complete enabled once required items resolve', (tester) async {
+    await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+    final enabled = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Complete'),
+    );
+    expect(enabled.onPressed, isNotNull);
+  });
+
+  testWidgets('locked session renders banner and no Complete button', (
+    tester,
+  ) async {
+    await pumpRunner(
+      tester,
+      s: session(status: PreDiveSessionStatus.completed),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+    expect(find.textContaining('This checklist is locked'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Complete'), findsNothing);
+    // No abort action either.
+    expect(find.byIcon(Icons.close), findsNothing);
+  });
+
+  testWidgets('locked banner shows aborted status and completed date', (
+    tester,
+  ) async {
+    await pumpRunner(
+      tester,
+      s: session(
+        status: PreDiveSessionStatus.aborted,
+        completedAt: DateTime(2023, 11, 14),
+      ),
+      items: [item(0, state: PreDiveItemState.skipped, required: false)],
+    );
+    // Status label and formatted date are folded into the locked banner.
+    // (Date format is locale-dependent; assert the month/day are present.)
+    expect(find.textContaining('Aborted'), findsOneWidget);
+    expect(find.textContaining('Nov 14'), findsOneWidget);
+  });
+
+  testWidgets('the locked banner localizes its date/time connector', (
+    tester,
+  ) async {
+    // formatDateTime falls back to a hardcoded English "at" unless it is
+    // handed l10n, which left the banner mixing languages.
+    await pumpRunner(
+      tester,
+      s: session(
+        status: PreDiveSessionStatus.completed,
+        completedAt: DateTime(2023, 11, 14, 9, 12),
+      ),
+      items: [item(0, state: PreDiveItemState.done)],
+      locale: const Locale('de'),
+    );
+
+    expect(find.textContaining(' um '), findsOneWidget);
+    expect(find.textContaining(' at '), findsNothing);
+  });
+
+  testWidgets('locked session is read-only: tiles disabled, no item menu', (
+    tester,
+  ) async {
+    await pumpRunner(
+      tester,
+      s: session(status: PreDiveSessionStatus.completed),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+    final tile = tester.widget<ListTile>(
+      find.ancestor(of: find.text('Item 0'), matching: find.byType(ListTile)),
+    );
+    expect(tile.enabled, isFalse);
+    expect(find.byType(PopupMenuButton<String>), findsNothing);
+    // No bottom bar on a locked session.
+    expect(find.byType(BottomAppBar), findsNothing);
+  });
+
+  testWidgets('renders a section header above grouped items', (tester) async {
+    await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, sectionId: 'sec1')],
+      sections: [
+        PreDiveSessionSection(
+          id: 'sec1',
+          sessionId: 's1',
+          title: 'Pre-breathe',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ],
+    );
+    expect(find.text('Pre-breathe'), findsOneWidget);
+    expect(find.text('Item 0'), findsOneWidget);
+  });
+
+  testWidgets('strict order follows the rows as drawn: an unsectioned item '
+      'drawn last is unlocked last, whatever its sortOrder', (tester) async {
+    await pumpRunner(
+      tester,
+      s: session(),
+      // Item 0 has no section, so it is drawn after the Cells group even
+      // though it sorts first.
+      items: [
+        item(0),
+        item(1, sectionId: 'cells'),
+      ],
+      sections: [
+        PreDiveSessionSection(
+          id: 'cells',
+          sessionId: 's1',
+          title: 'Cells',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ],
+    );
+
+    ListTile tileOf(String title) => tester.widget<ListTile>(
+      find.ancestor(of: find.text(title), matching: find.byType(ListTile)),
+    );
+    expect(tileOf('Item 1').enabled, isTrue);
+    expect(tileOf('Item 0').enabled, isFalse);
+  });
+
+  testWidgets('error from session provider surfaces error text', (
+    tester,
+  ) async {
+    final repo = _FakeSessionRepo();
+    await tester.pumpWidget(
+      testApp(
+        locale: const Locale('en'),
+        overrides: [
+          preDiveSessionRepositoryProvider.overrideWithValue(repo),
+          preDiveSessionProvider(
+            's1',
+          ).overrideWith((ref) async => throw Exception('boom')),
+          preDiveSessionItemsProvider('s1').overrideWith((ref) async => []),
+        ],
+        child: const PreDiveSessionRunnerPage(sessionId: 's1'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('boom'), findsOneWidget);
+  });
+
+  testWidgets('value item opens entry dialog and records value + note', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [
+        item(
+          0,
+          itemType: PreDiveItemType.value,
+          valueLabel: 'Set point',
+          valueUnit: 'bar',
+        ),
+      ],
+    );
+
+    await tester.tap(find.text('Item 0'));
+    await tester.pumpAndSettle();
+
+    // Dialog titled by the value label (also echoed in the tile subtitle);
+    // the value-field label is unique to the dialog.
+    expect(find.text('Set point'), findsWidgets);
+    expect(find.text('Enter value'), findsOneWidget);
+    final fields = find.byType(TextField);
+    expect(fields, findsNWidgets(2));
+
+    await tester.enterText(fields.at(0), '1.2');
+    await tester.enterText(fields.at(1), 'looks good');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    final call = repo.calls.single;
+    expect(call.itemId, 'i0');
+    expect(call.state, PreDiveItemState.done);
+    expect(call.valueNumber, 1.2);
+    expect(call.note, 'looks good');
+  });
+
+  testWidgets('an unreadable value keeps the dialog open and says why '
+      '(#1900)', (tester) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [
+        item(0, itemType: PreDiveItemType.value, valueLabel: 'Set point'),
+      ],
+    );
+
+    await tester.tap(find.text('Item 0'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).at(0), '1..2');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Enter a valid number'), findsOneWidget);
+    expect(
+      repo.calls,
+      isEmpty,
+      reason: 'used to record the item with no value',
+    );
+  });
+
+  testWidgets('value entry dialog cancel writes nothing', (tester) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [
+        item(0, itemType: PreDiveItemType.value, valueLabel: 'Set point'),
+      ],
+    );
+
+    await tester.tap(find.text('Item 0'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(repo.calls, isEmpty);
+  });
+
+  testWidgets(
+    'marking an overdue equipment-linked item Done freezes its overdue list',
+    (tester) async {
+      final overdueStatus = ServiceClockStatus(
+        schedule: ServiceSchedule(
+          id: 'sched1',
+          equipmentId: 'g1',
+          serviceKindId: 'vip',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        kind: ServiceKind(
+          id: 'vip',
+          name: 'Visual inspection',
+          applicableTypes: const [],
+          createdAt: now,
+          updatedAt: now,
+        ),
+        anchor: now,
+        dueDate: DateTime(2020, 1, 1),
+        severity: ServiceClockSeverity.overdue,
+        now: DateTime(2026, 1, 1),
+      );
+      final repo = await pumpRunner(
+        tester,
+        s: session(),
+        items: [item(0, equipmentId: 'g1')],
+        extraOverrides: [
+          sessionServiceClocksProvider('s1').overrideWith(
+            (ref) async => {
+              'g1': [overdueStatus],
+            },
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Item 0'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.state, PreDiveItemState.done);
+      expect(call.overdueServices, hasLength(1));
+      expect(call.overdueServices!.single.kindName, 'Visual inspection');
+    },
+  );
+
+  testWidgets(
+    'marking a Done item with dueSoon/ok clocks freezes all of them, not '
+    'only overdue ones',
+    (tester) async {
+      final dueSoonStatus = ServiceClockStatus(
+        schedule: ServiceSchedule(
+          id: 'sched2',
+          equipmentId: 'g1',
+          serviceKindId: 'scrubber',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        kind: ServiceKind(
+          id: 'scrubber',
+          name: 'Scrubber',
+          applicableTypes: const [],
+          createdAt: now,
+          updatedAt: now,
+        ),
+        anchor: now,
+        hoursSinceAnchor: 4,
+        hoursRemaining: 8,
+        severity: ServiceClockSeverity.dueSoon,
+        now: DateTime(2026, 1, 1),
+      );
+      final okStatus = ServiceClockStatus(
+        schedule: ServiceSchedule(
+          id: 'sched3',
+          equipmentId: 'g1',
+          serviceKindId: 'co2',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        kind: ServiceKind(
+          id: 'co2',
+          name: 'CO2 sensor',
+          applicableTypes: const [],
+          createdAt: now,
+          updatedAt: now,
+        ),
+        anchor: now,
+        dueDate: DateTime(2027, 1, 1),
+        severity: ServiceClockSeverity.ok,
+        now: DateTime(2026, 1, 1),
+      );
+      final repo = await pumpRunner(
+        tester,
+        s: session(),
+        items: [item(0, equipmentId: 'g1')],
+        extraOverrides: [
+          sessionServiceClocksProvider('s1').overrideWith(
+            (ref) async => {
+              'g1': [dueSoonStatus, okStatus],
+            },
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Item 0'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.state, PreDiveItemState.done);
+      expect(call.overdueServices, hasLength(2));
+      expect(
+        call.overdueServices!.map((e) => e.kindName),
+        containsAll(['Scrubber', 'CO2 sensor']),
+      );
+      expect(
+        call.overdueServices!.map((e) => e.severity),
+        containsAll([ServiceClockSeverity.dueSoon, ServiceClockSeverity.ok]),
+      );
+    },
+  );
+
+  testWidgets(
+    'resolving an item with no linked equipment writes a null snapshot, not '
+    'an empty one',
+    (tester) async {
+      // Null and empty are different: null means there was nothing to check,
+      // empty means the linked equipment was checked and came back clean.
+      // Freezing an empty list for every unlinked item would erase that.
+      final repo = await pumpRunner(tester, s: session(), items: [item(0)]);
+
+      await tester.tap(find.text('Item 0'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.state, PreDiveItemState.done);
+      expect(call.overdueServices, isNull);
+    },
+  );
+
+  testWidgets(
+    'resolving an equipment-linked item with no overdue clocks writes an '
+    'empty snapshot, not null',
+    (tester) async {
+      final repo = await pumpRunner(
+        tester,
+        s: session(),
+        items: [item(0, equipmentId: 'g1')],
+        extraOverrides: [
+          sessionServiceClocksProvider(
+            's1',
+          ).overrideWith((ref) async => {'g1': []}),
+        ],
+      );
+
+      await tester.tap(find.text('Item 0'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.state, PreDiveItemState.done);
+      expect(call.overdueServices, isEmpty);
+    },
+  );
+
+  testWidgets('Skip menu action records a skipped state', (tester) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, required: false)],
+    );
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Skip'));
+    await tester.pumpAndSettle();
+
+    expect(repo.calls.single.itemId, 'i0');
+    expect(repo.calls.single.state, PreDiveItemState.skipped);
+  });
+
+  testWidgets('Reset menu action on a resolved item restores pending', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reset to pending'));
+    await tester.pumpAndSettle();
+
+    expect(repo.calls.single.state, PreDiveItemState.pending);
+  });
+
+  testWidgets('Add note menu records the note, preserving state', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'checked twice');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    final call = repo.calls.single;
+    expect(call.note, 'checked twice');
+    // Add note keeps the current state (done), never forcing a transition.
+    expect(call.state, PreDiveItemState.done);
+  });
+
+  testWidgets('Add note cancel writes nothing', (tester) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(repo.calls, isEmpty);
+  });
+
+  testWidgets('Flag menu records a flagged state with the note', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(tester, s: session(), items: [item(0)]);
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Flag'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'o-ring worn');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    final call = repo.calls.single;
+    expect(call.state, PreDiveItemState.flagged);
+    expect(call.note, 'o-ring worn');
+  });
+
+  testWidgets('Flag dialog cancel writes nothing', (tester) async {
+    final repo = await pumpRunner(tester, s: session(), items: [item(0)]);
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Flag'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(repo.calls, isEmpty);
+  });
+
+  testWidgets('flagged badge shows and Complete confirms before finishing', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [
+        item(0, state: PreDiveItemState.done),
+        item(1, state: PreDiveItemState.flagged),
+      ],
+    );
+
+    // Flagged badge chip in the app bar.
+    expect(find.text('1 flagged'), findsOneWidget);
+    expect(find.byIcon(Icons.flag), findsWidgets);
+
+    // Complete is enabled (flagged counts as resolved for required items).
+    await tester.tap(find.widgetWithText(FilledButton, 'Complete'));
+    await tester.pumpAndSettle();
+
+    // Confirmation dialog names the flagged count.
+    expect(find.text('Complete with 1 flagged items?'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, 'Complete'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repo.completed, ['s1']);
+  });
+
+  testWidgets('cancelling the flagged confirmation does not complete', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [
+        item(0, state: PreDiveItemState.done),
+        item(1, state: PreDiveItemState.flagged),
+      ],
+    );
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Complete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(repo.completed, isEmpty);
+  });
+
+  testWidgets('Complete with no flagged items finishes without a dialog', (
+    tester,
+  ) async {
+    final repo = await pumpRunner(
+      tester,
+      s: session(),
+      items: [item(0, state: PreDiveItemState.done)],
+    );
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Complete'));
+    await tester.pumpAndSettle();
+
+    // No confirmation dialog was shown for a clean checklist.
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(repo.completed, ['s1']);
+  });
+
+  testWidgets('Abort confirmation aborts the session', (tester) async {
+    final repo = await pumpRunner(tester, s: session(), items: [item(0)]);
+
+    await tester.tap(find.byIcon(Icons.close));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Abort this checklist?'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, 'Abort checklist'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repo.aborted, ['s1']);
+  });
+
+  testWidgets('Abort cancel leaves the session untouched', (tester) async {
+    final repo = await pumpRunner(tester, s: session(), items: [item(0)]);
+
+    await tester.tap(find.byIcon(Icons.close));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(repo.aborted, isEmpty);
+  });
+
+  group('cell linearity entry (#986)', () {
+    List<PreDiveSessionItem> pair({
+      double? airValue = 10.1,
+      double? o2Value,
+      PreDiveItemState o2State = PreDiveItemState.pending,
+      double? frozenAir,
+    }) => [
+      item(
+        0,
+        itemType: PreDiveItemType.value,
+        state: PreDiveItemState.done,
+        valueLabel: 'Cell 1',
+        valueUnit: 'mV',
+        valueNumber: airValue,
+      ),
+      item(
+        1,
+        itemType: PreDiveItemType.cellLinearity,
+        state: o2State,
+        valueLabel: 'Cell 1 O2',
+        valueUnit: 'mV',
+        valueNumber: o2Value,
+        valueMin: 95,
+        sourceItemId: 'i0',
+        sourceValueNumber: frozenAir,
+      ),
+    ];
+
+    testWidgets('the readout uses the diver separator under de (#1682)', (
+      tester,
+    ) async {
+      // The field itself is already locale-aware (seeded through
+      // formatDecimalForInput, read through parseUserDecimal), so an ASCII
+      // readout contradicts the comma the diver just typed into it.
+      //
+      // Only Intl.defaultLocale moves; the MaterialApp stays on 'en'. The
+      // formatters resolve the process global, so the two locales are
+      // deliberately independent, and pinning the widget locale alone would
+      // give a test that passes against unfixed code. Leaving the sentence in
+      // English also keeps these assertions off the German translations, so a
+      // reworded string cannot fail a test about numbers.
+      final previousLocale = Intl.defaultLocale;
+      addTearDown(() => Intl.defaultLocale = previousLocale);
+      Intl.defaultLocale = 'de';
+
+      await pumpRunner(tester, s: session(strict: false), items: pair());
+
+      await tester.tap(find.text('Item 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('In air: 10,1'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, '48,0');
+      await tester.pump();
+
+      expect(find.textContaining('Expected 48,3 mV'), findsOneWidget);
+      expect(find.textContaining('10.1'), findsNothing);
+      expect(find.textContaining('48.3'), findsNothing);
+    });
+
+    testWidgets('the dialog shows the air reading and a live readout', (
+      tester,
+    ) async {
+      await pumpRunner(tester, s: session(strict: false), items: pair());
+
+      await tester.tap(find.text('Item 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('In air: 10.1'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, '48.0');
+      await tester.pump();
+
+      expect(find.textContaining('Expected 48.3 mV'), findsOneWidget);
+      expect(find.textContaining('linearity 99%'), findsOneWidget);
+    });
+
+    testWidgets('confirming freezes the air reading on the item', (
+      tester,
+    ) async {
+      final repo = await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(),
+      );
+
+      await tester.tap(find.text('Item 1'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, '48.0');
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.itemId, 'i1');
+      expect(call.valueNumber, 48.0);
+      expect(
+        call.sourceValueNumber,
+        10.1,
+        reason: 'the air reading must be frozen onto the linearity row',
+      );
+    });
+
+    testWidgets('an unanswered air reading still allows entry', (tester) async {
+      await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(airValue: null),
+      );
+
+      await tester.tap(find.text('Item 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Not yet recorded'), findsOneWidget);
+      await tester.enterText(find.byType(TextField).first, '48.0');
+      await tester.pump();
+      // No air reading means no expectation, so no readout, but the O2 value
+      // is still recordable and OK is still live.
+      expect(find.textContaining('linearity'), findsNothing);
+      expect(find.text('OK'), findsOneWidget);
+    });
+
+    testWidgets('a resolved linearity item cannot be re-edited in place', (
+      tester,
+    ) async {
+      // The frozen air reading cannot be silently rewritten by correcting the
+      // O2 value, because a resolved item is not actionable at all
+      // (ChecklistSessionEngine.isItemActionable gates on pending). Reaching
+      // the dialog requires Reset first, and Reset clears the frozen reading,
+      // so the next resolve legitimately freezes the current source.
+      final repo = await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(
+          o2Value: 48.0,
+          o2State: PreDiveItemState.done,
+          frozenAir: 9.4,
+        ),
+      );
+
+      await tester.tap(find.text('Item 1'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byType(TextField),
+        findsNothing,
+        reason: 'no entry dialog opens for a resolved item',
+      );
+      expect(
+        repo.calls,
+        isEmpty,
+        reason: 'nothing was written, so the frozen reading stands',
+      );
+      // The hint is still there, still reporting the original basis.
+      expect(find.textContaining('has changed since'), findsOneWidget);
+      expect(find.textContaining('Air 9.4 mV'), findsOneWidget);
+    });
+
+    testWidgets('resetting clears the frozen reading', (tester) async {
+      // The other half of the invariant: Reset is the only route back into
+      // the dialog, and it wipes the frozen value first.
+      final repo = await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(
+          o2Value: 48.0,
+          o2State: PreDiveItemState.done,
+          frozenAir: 9.4,
+        ),
+      );
+
+      await tester.tap(find.byType(PopupMenuButton<String>).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reset to pending'));
+      await tester.pumpAndSettle();
+
+      final call = repo.calls.single;
+      expect(call.itemId, 'i1');
+      expect(call.state, PreDiveItemState.pending);
+    });
+
+    testWidgets('the stale hint appears when the source has moved on', (
+      tester,
+    ) async {
+      // Frozen at 9.4, but the air row now reads 10.1.
+      await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(
+          o2Value: 48.0,
+          o2State: PreDiveItemState.done,
+          frozenAir: 9.4,
+        ),
+      );
+
+      expect(find.textContaining('has changed since'), findsOneWidget);
+      // The frozen figure is what is reported, not a recomputation.
+      expect(find.textContaining('Air 9.4 mV'), findsOneWidget);
+    });
+
+    testWidgets('no hint while the source still matches', (tester) async {
+      await pumpRunner(
+        tester,
+        s: session(strict: false),
+        items: pair(
+          o2Value: 48.0,
+          o2State: PreDiveItemState.done,
+          frozenAir: 10.1,
+        ),
+      );
+
+      expect(find.textContaining('has changed since'), findsNothing);
+      expect(find.textContaining('linearity 99%'), findsOneWidget);
+    });
+  });
+}

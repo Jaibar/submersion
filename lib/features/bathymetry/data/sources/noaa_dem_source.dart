@@ -1,0 +1,235 @@
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:http/http.dart' as http;
+
+import 'package:submersion/core/utils/geo_math.dart';
+import 'package:submersion/features/bathymetry/data/sources/arcgis_float32_tiff_parser.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_source.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+
+/// High-resolution coastal tier: the NOAA NCEI DEM mosaic ImageServer,
+/// which stacks CUDEM and regional DEMs over an ETOPO background. US
+/// public domain. Coverage is patchy and mostly US coastal, so this source
+/// declines wherever the stack holds nothing better than that background.
+///
+/// The probe is what keeps that honest. `identify` reports every DEM under
+/// a point with its own cell size, so the source knows BEFORE fetching
+/// whether it has anything worth having: measured 3.4 m in the Florida
+/// Keys, 10.3 m at La Jolla, and only ETOPO's 464 m at Bonaire, where it
+/// declines and lets the ETOPO tier serve that data directly. Those
+/// figures are the cell's coarser axis, so they never overstate the DEM.
+class NoaaDemSource implements BathymetrySource {
+  static const String sourceId = 'noaa_dem';
+
+  /// Below this cell size the mosaic is offering a real coastal DEM. Above
+  /// it, the stack holds only its ETOPO background, which the ETOPO tier
+  /// already serves without the extra round trip.
+  static const double usefulCellSizeMeters = 50;
+
+  /// Cells per side requested from exportImage. The server resamples to
+  /// whatever is asked, so this is a render-budget choice, not a data one.
+  static const int requestDim = 256;
+
+  /// Meters per degree of latitude, effectively constant with latitude.
+  static const double _metersPerDegLat = 110540.0;
+
+  static const Duration _timeout = Duration(seconds: 15);
+
+  /// Where the mosaic holds any DEM finer than [usefulCellSizeMeters], as
+  /// (minLat, maxLat, minLon, maxLon). Outside these boxes [probe] declines
+  /// without a network call, since the service has nothing to offer there.
+  ///
+  /// Derived 2026-09-26 from the ImageServer's own catalogue: every item
+  /// with `LowPS < 0.00046` (50 m at the equator), clustered, then padded
+  /// by about a degree so a new DEM next to an existing one still lands
+  /// inside. That is wider than US soil: NCEI also publishes DEMs for
+  /// Bermuda, the Bahamas, Grenada, the Cook and Society Islands and the
+  /// Galapagos. Erring wide only means a NOAA outage keeps a nearby
+  /// uncovered site from caching until it recovers; erring narrow would let
+  /// an outage pin a covered site to a coarser fallback forever. A DEM
+  /// published somewhere new is missed until this table grows; the ETOPO,
+  /// GMRT and EMODnet tiers still serve that point, just more coarsely. The
+  /// Aleutians cross the antimeridian, hence the second Alaska box.
+  static const List<(double, double, double, double)> _coverage = [
+    (23.0, 50.0, -128.0, -63.0), // US mainland, Bermuda, Bahamas
+    (50.0, 72.0, -180.0, -129.0), // Alaska, through the central Aleutians
+    (50.0, 56.0, 171.0, 180.0), // western Aleutians (Shemya, Attu)
+    (17.0, 30.0, -180.0, -153.0), // Hawaii, incl. Northwestern Islands
+    (16.5, 19.5, -68.5, -63.5), // Puerto Rico, US and British Virgin Is.
+    (11.0, 14.0, -63.0, -60.5), // Grenada
+    (12.0, 21.0, 143.5, 147.0), // Guam, Northern Mariana Islands
+    (18.5, 20.0, 166.0, 167.5), // Wake Island
+    (-15.5, -10.5, -172.0, -168.0), // American Samoa
+    (-23.0, -15.5, -161.0, -148.0), // Cook (Rarotonga), Society (Tahiti)
+    (-3.0, 3.0, -93.0, -86.5), // Galapagos
+  ];
+
+  /// Whether [p] sits where this source could plausibly have data. Only
+  /// there is a probe worth a network call, and so only there can a failed
+  /// probe count as a transient failure (see [BathymetrySource.probe]).
+  static bool plausiblyCovers(GeoPoint p) => _coverage.any(
+    (b) =>
+        p.latitude >= b.$1 &&
+        p.latitude <= b.$2 &&
+        p.longitude >= b.$3 &&
+        p.longitude <= b.$4,
+  );
+
+  final http.Client _client;
+  final String baseUrl;
+
+  NoaaDemSource({
+    http.Client? client,
+    this.baseUrl =
+        'https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_all/ImageServer',
+  }) : _client = client ?? http.Client();
+
+  @override
+  String get id => sourceId;
+
+  /// Coverage is patchy coastal, so a dry answer here proves nothing about
+  /// whether a coordinate is on land.
+  @override
+  bool get global => false;
+
+  /// See [BathymetrySource.minKnownFraction]'s doc: unchanged from the
+  /// resolver's original default. Unlike swissBATHY3D, this source's own
+  /// coastal mosaic tiles are themselves sparse survey data (not a
+  /// definitive land/water lookup per cell), so a thin grid here is
+  /// genuinely as untrustworthy as EMODnet's.
+  @override
+  double get minKnownFraction => 0.60;
+
+  @override
+  Future<SourceCapability?> probe(GeoPoint center) async {
+    if (!plausiblyCovers(center)) return null;
+    final url = Uri.parse('$baseUrl/identify').replace(
+      queryParameters: {
+        'geometry': '{"x":${center.longitude},"y":${center.latitude}}',
+        'geometryType': 'esriGeometryPoint',
+        'returnCatalogItems': 'true',
+        // Load-bearing. The default truncates the catalogue to three items,
+        // which hides a covered site's DEM behind the ETOPO background and
+        // makes the source decline where it actually has data.
+        'maxItemCount': '25',
+        'f': 'json',
+      },
+    );
+    final http.Response resp;
+    try {
+      resp = await _client.get(url).timeout(_timeout);
+    } catch (e) {
+      // Could not ask, inside coverage: a transient failure the resolver
+      // must hear about, not a decline.
+      throw BathymetryFetchException('NOAA DEM probe failed: $e');
+    }
+    if (resp.statusCode != 200) {
+      throw BathymetryFetchException('NOAA DEM probe HTTP ${resp.statusCode}');
+    }
+    try {
+      final body = jsonDecode(resp.body);
+      if (body is! Map<String, dynamic>) return null;
+      // ArcGIS returns error envelopes with HTTP 200, so a body without a
+      // catalogue is an ordinary decline rather than an exceptional case.
+      final items =
+          (body['catalogItems'] as Map<String, dynamic>?)?['features'];
+      if (items is! List || items.isEmpty) return null;
+
+      String? bestName;
+      double? bestDeg;
+      for (final item in items) {
+        if (item is! Map) continue;
+        final attrs = item['attributes'];
+        if (attrs is! Map) continue;
+        final lowPs = attrs['LowPS'];
+        if (lowPs is! num) continue;
+        final deg = lowPs.toDouble();
+        if (deg <= 0) continue;
+        if (bestDeg == null || deg < bestDeg) {
+          bestDeg = deg;
+          bestName = attrs['Name'] as String?;
+        }
+      }
+      if (bestDeg == null) return null;
+
+      // LowPS is in DEGREES, and a geographic cell is square in degrees,
+      // so its two sides differ in meters: the north-south side is a
+      // near-constant 110540 m per degree, while the east-west side shrinks
+      // with cos(latitude). Report the COARSER of the two, because a cell
+      // is only as good as its worst axis.
+      //
+      // Converting on longitude alone flatters a DEM as latitude rises. A
+      // 3 arc-second cell is 92.1 m north-south everywhere, but reads
+      // 46.4 m at 60 N and would slip under the threshold, so a 92 m grid
+      // would be accepted as high resolution and, sitting first in the
+      // declared order and within the resolver's preemption factor of
+      // GMRT's 60 m, would be fetched instead of it. NOAA's mosaic really
+      // does hold 3 arc-second Coastal Relief Model tiles, and Alaskan
+      // coastal water is where they are the best available.
+      //
+      // max() rather than simply the latitude axis: at the equator a
+      // degree of longitude is 111320 m against latitude's 110540, so the
+      // coarser side is not always the same one.
+      final meters =
+          bestDeg *
+          math.max(_metersPerDegLat, metersPerDegreeLongitude(center.latitude));
+      if (meters > usefulCellSizeMeters) return null;
+      return SourceCapability(
+        cellSizeMeters: meters,
+        detail: bestName ?? 'NOAA NCEI DEM',
+      );
+    } catch (_) {
+      // The service answered, just with something surprising: this source
+      // does not contribute here, which is a decline, not a failure.
+      return null;
+    }
+  }
+
+  @override
+  Future<BathymetryGrid> fetch(
+    GeoPoint center, {
+    required double spanMeters,
+  }) async {
+    final dLat = spanMeters / 2 / _metersPerDegLat;
+    final dLon = spanMeters / 2 / metersPerDegreeLongitude(center.latitude);
+    final west = center.longitude - dLon;
+    final east = center.longitude + dLon;
+    final south = center.latitude - dLat;
+    final north = center.latitude + dLat;
+    final url = Uri.parse('$baseUrl/exportImage').replace(
+      queryParameters: {
+        'bbox': '$west,$south,$east,$north',
+        'bboxSR': '4326',
+        'imageSR': '4326',
+        'size': '$requestDim,$requestDim',
+        'format': 'tiff',
+        'pixelType': 'F32',
+        'noDataInterpretation': 'esriNoDataMatchAny',
+        'interpolation': 'RSP_BilinearInterpolation',
+        'f': 'image',
+      },
+    );
+    try {
+      final resp = await _client.get(url).timeout(_timeout);
+      if (resp.statusCode != 200) {
+        throw BathymetryFetchException('NOAA DEM HTTP ${resp.statusCode}');
+      }
+      return ArcgisFloat32TiffParser.parse(
+        resp.bodyBytes,
+        westLon: west,
+        eastLon: east,
+        southLat: south,
+        northLat: north,
+        sourceId: sourceId,
+        resolutionMeters: spanMeters / requestDim,
+        fetchedAt: DateTime.now(),
+      );
+    } on BathymetryFetchException {
+      rethrow;
+    } on Exception catch (e) {
+      throw BathymetryFetchException('NOAA DEM fetch failed: $e');
+    }
+  }
+}

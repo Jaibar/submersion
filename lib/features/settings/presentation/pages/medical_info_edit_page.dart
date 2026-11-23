@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
-import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/pages/diver_profile_drafts.dart';
+import 'package:submersion/features/settings/presentation/pages/diver_profile_editor.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/features/documents/presentation/widgets/document_tile.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_field.dart';
+import 'package:submersion/shared/widgets/record_editing/record_editor_host.dart';
 
 class MedicalInfoEditPage extends ConsumerStatefulWidget {
   const MedicalInfoEditPage({super.key});
@@ -15,194 +20,82 @@ class MedicalInfoEditPage extends ConsumerStatefulWidget {
       _MedicalInfoEditPageState();
 }
 
-class _MedicalInfoEditPageState extends ConsumerState<MedicalInfoEditPage> {
+class _MedicalInfoEditPageState extends ConsumerState<MedicalInfoEditPage>
+    with
+        RecordEditorHost<MedicalInfoEditPage, MedicalInfoDraft>,
+        DiverProfileEditor<MedicalInfoEditPage, MedicalInfoDraft> {
   final _formKey = GlobalKey<FormState>();
   final _bloodTypeCtrl = TextEditingController();
   final _allergiesCtrl = TextEditingController();
   final _medicationsCtrl = TextEditingController();
   final _medicalNotesCtrl = TextEditingController();
 
-  DateTime? _medicalClearanceExpiry;
-  bool _populated = false;
-  bool _hasChanges = false;
-  bool _isSaving = false;
+  List<TextEditingController> get _controllers => [
+    _bloodTypeCtrl,
+    _allergiesCtrl,
+    _medicationsCtrl,
+    _medicalNotesCtrl,
+  ];
 
   @override
   void initState() {
     super.initState();
-    _bloodTypeCtrl.addListener(_onFieldChanged);
-    _allergiesCtrl.addListener(_onFieldChanged);
-    _medicationsCtrl.addListener(_onFieldChanged);
-    _medicalNotesCtrl.addListener(_onFieldChanged);
-  }
-
-  void _onFieldChanged() {
-    if (!_hasChanges) {
-      setState(() => _hasChanges = true);
+    for (final controller in _controllers) {
+      controller.addListener(editorChanged);
     }
+    openProfileEditor();
   }
 
   @override
   void dispose() {
-    _bloodTypeCtrl.dispose();
-    _allergiesCtrl.dispose();
-    _medicationsCtrl.dispose();
-    _medicalNotesCtrl.dispose();
+    disposeEditor();
+    for (final controller in _controllers) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
-  void _populateFromDiver(Diver diver) {
-    if (_populated) return;
-    _populated = true;
+  @override
+  String editorTitle(BuildContext context) =>
+      context.l10n.settings_profileHub_medicalInfo;
+
+  @override
+  MedicalInfoDraft readEditorDraft() => (
+    bloodType: _bloodTypeCtrl.text,
+    allergies: _allergiesCtrl.text,
+    medications: _medicationsCtrl.text,
+    medicalNotes: _medicalNotesCtrl.text,
+  );
+
+  @override
+  bool validateEditor() => _formKey.currentState?.validate() ?? false;
+
+  @override
+  void fillFromDiver(Diver diver) {
     _bloodTypeCtrl.text = diver.bloodType ?? '';
     _allergiesCtrl.text = diver.allergies ?? '';
     _medicationsCtrl.text = diver.medications ?? '';
     _medicalNotesCtrl.text = diver.medicalNotes;
-    _medicalClearanceExpiry = diver.medicalClearanceExpiryDate;
-    _hasChanges = false;
-  }
-
-  String? _trimOrNull(TextEditingController ctrl) {
-    final value = ctrl.text.trim();
-    return value.isEmpty ? null : value;
-  }
-
-  Future<void> _save(Diver existingDiver) async {
-    if (!_formKey.currentState!.validate()) return;
-
-    setState(() => _isSaving = true);
-
-    try {
-      final updated = existingDiver.copyWith(
-        bloodType: _trimOrNull(_bloodTypeCtrl),
-        allergies: _trimOrNull(_allergiesCtrl),
-        medications: _trimOrNull(_medicationsCtrl),
-        medicalNotes: _medicalNotesCtrl.text.trim(),
-        medicalClearanceExpiryDate: _medicalClearanceExpiry,
-        updatedAt: DateTime.now(),
-      );
-      await ref.read(diverListNotifierProvider.notifier).updateDiver(updated);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.settings_profileHub_saved)),
-        );
-        context.pop();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.divers_edit_errorSaving('$e'))),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isSaving = false);
-      }
-    }
-  }
-
-  Future<void> _selectMedicalClearanceExpiry() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate:
-          _medicalClearanceExpiry ?? now.add(const Duration(days: 365)),
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 365 * 5)),
-    );
-    if (picked != null) {
-      setState(() {
-        _medicalClearanceExpiry = picked;
-        _hasChanges = true;
-      });
-    }
-  }
-
-  Future<bool?> _showDiscardDialog() {
-    return showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(context.l10n.divers_edit_discardDialogTitle),
-        content: Text(context.l10n.divers_edit_discardDialogContent),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(context.l10n.divers_edit_keepEditingButton),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(context.l10n.divers_edit_discardButton),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
-  Widget build(BuildContext context) {
-    final diverAsync = ref.watch(currentDiverProvider);
+  Diver applyEditorDraft(
+    Diver stored,
+    MedicalInfoDraft start,
+    MedicalInfoDraft draft,
+  ) => applyMedicalInfoDraft(stored, start, draft);
 
-    return diverAsync.when(
-      loading: () =>
-          const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (error, _) => Scaffold(
-        appBar: AppBar(
-          title: Text(context.l10n.settings_profileHub_medicalInfo),
-        ),
-        body: Center(child: Text('$error')),
-      ),
-      data: (diver) {
-        if (diver == null) {
-          return Scaffold(
-            appBar: AppBar(
-              title: Text(context.l10n.settings_profileHub_medicalInfo),
-            ),
-            body: const Center(child: CircularProgressIndicator()),
-          );
-        }
-        _populateFromDiver(diver);
-        return _buildScaffold(diver);
-      },
-    );
-  }
+  @override
+  Widget build(BuildContext context) =>
+      profileScaffold(context, form: _buildForm);
 
-  Widget _buildScaffold(Diver diver) {
-    return PopScope(
-      canPop: !_hasChanges,
-      onPopInvokedWithResult: (didPop, result) async {
-        if (!didPop && _hasChanges) {
-          final shouldPop = await _showDiscardDialog();
-          if (shouldPop == true && mounted) {
-            Navigator.of(context).pop();
-          }
-        }
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(context.l10n.settings_profileHub_medicalInfo),
-          actions: [
-            if (_isSaving)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-              )
-            else
-              TextButton(
-                onPressed: () => _save(diver),
-                child: Text(context.l10n.divers_edit_saveButton),
-              ),
-          ],
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Card(
+  Widget _buildForm(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Form(
@@ -237,9 +130,7 @@ class _MedicalInfoEditPageState extends ConsumerState<MedicalInfoEditPage> {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    _buildMedicalClearanceField(),
-                    const SizedBox(height: 16),
-                    TextFormField(
+                    MarkdownNotesField(
                       controller: _medicalNotesCtrl,
                       decoration: InputDecoration(
                         labelText: context.l10n.divers_edit_medicalNotesLabel,
@@ -253,85 +144,88 @@ class _MedicalInfoEditPageState extends ConsumerState<MedicalInfoEditPage> {
               ),
             ),
           ),
-        ),
+          const SizedBox(height: 16),
+          // Clearances are documents with an expiry (issue #2613). One
+          // added here is its own record, saved at once (pattern, "Not
+          // held"); the medical edits stay underneath meanwhile.
+          const _MedicalClearancesCard(),
+        ],
       ),
     );
   }
+}
 
-  Widget _buildMedicalClearanceField() {
-    final isExpired =
-        _medicalClearanceExpiry != null &&
-        DateTime.now().isAfter(_medicalClearanceExpiry!);
-    final isExpiringSoon =
-        _medicalClearanceExpiry != null &&
-        !isExpired &&
-        _medicalClearanceExpiry!.isBefore(
-          DateTime.now().add(const Duration(days: 30)),
-        );
+/// The diver's medical clearance documents, each with its expiry badge,
+/// and a way to add one.
+class _MedicalClearancesCard extends ConsumerWidget {
+  const _MedicalClearancesCard();
 
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.verified_user),
-      title: Text(context.l10n.divers_edit_medicalClearanceTitle),
-      subtitle: Row(
-        children: [
-          Expanded(
-            child: Text(
-              _medicalClearanceExpiry != null
-                  ? DateFormat.yMMMd().format(_medicalClearanceExpiry!)
-                  : context.l10n.divers_edit_medicalClearanceNotSet,
-            ),
-          ),
-          if (isExpired)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.error,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                context.l10n.divers_edit_medicalClearanceExpired,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onError,
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final docs = ref.watch(
+      documentsForOwnerProvider(const DocumentOwner.personal()),
+    );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.medical_information_outlined,
+                  color: theme.colorScheme.primary,
                 ),
-              ),
-            )
-          else if (isExpiringSoon)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.orange,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                context.l10n.divers_edit_medicalClearanceExpiringSoon,
-                style: Theme.of(
-                  context,
-                ).textTheme.labelSmall?.copyWith(color: Colors.white),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    l10n.documents_medical_clearances,
+                    style: theme.textTheme.titleMedium,
+                  ),
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.add),
+                  label: Text(l10n.documents_medical_addClearance),
+                  onPressed: () =>
+                      context.push('/documents/new?type=medicalClearance'),
+                ),
+              ],
             ),
-        ],
-      ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_medicalClearanceExpiry != null)
-            IconButton(
-              icon: const Icon(Icons.clear),
-              tooltip: context.l10n.divers_edit_clearMedicalClearanceTooltip,
-              onPressed: () {
-                setState(() {
-                  _medicalClearanceExpiry = null;
-                  _hasChanges = true;
-                });
+            docs.when(
+              data: (list) {
+                final clearances = [
+                  for (final d in list)
+                    if (d.type == DocumentType.medicalClearance) d,
+                ];
+                if (clearances.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      l10n.documents_medical_clearancesEmpty,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  );
+                }
+                return Column(
+                  children: [
+                    for (final d in clearances)
+                      DocumentTile(
+                        document: d,
+                        onTap: () => context.push('/documents/${d.id}'),
+                      ),
+                  ],
+                );
               },
+              loading: () => const LinearProgressIndicator(),
+              error: (e, _) => Text(l10n.documents_error_load('$e')),
             ),
-          IconButton(
-            icon: const Icon(Icons.edit_calendar),
-            tooltip: context.l10n.divers_edit_selectMedicalClearanceTooltip,
-            onPressed: _selectMedicalClearanceExpiry,
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

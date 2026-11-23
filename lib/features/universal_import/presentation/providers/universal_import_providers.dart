@@ -1,26 +1,21 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:collection/collection.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:path/path.dart' as p;
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/core/services/export/models/uddf_import_result.dart';
-import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
-import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
-import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
-import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
-import 'package:submersion/features/dive_import/data/services/uddf_entity_importer.dart';
-import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
-import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
-import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
-import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_cancellation_token.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_step_failure.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/tank_presets/domain/services/default_tank_preset_resolver.dart';
-import 'package:submersion/features/tank_presets/presentation/providers/tank_preset_providers.dart';
-import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/features/universal_import/data/models/detection_result.dart';
+import 'package:submersion/features/universal_import/data/models/diver_target.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_options.dart';
@@ -30,17 +25,39 @@ import 'package:submersion/features/universal_import/data/csv/presets/built_in_p
 import 'package:submersion/features/universal_import/data/csv/presets/preset_registry.dart';
 import 'package:submersion/features/universal_import/presentation/providers/csv_preset_providers.dart';
 import 'package:submersion/features/universal_import/data/parsers/csv_import_parser.dart';
-import 'package:submersion/features/universal_import/data/parsers/fit_import_parser.dart';
 import 'package:submersion/features/universal_import/data/parsers/import_parser.dart';
-import 'package:submersion/features/universal_import/data/parsers/placeholder_parser.dart';
-import 'package:submersion/features/universal_import/data/parsers/subsurface_xml_parser.dart';
-import 'package:submersion/features/universal_import/data/parsers/shearwater_cloud_parser.dart';
-import 'package:submersion/features/universal_import/data/parsers/uddf_import_parser.dart';
 import 'package:submersion/features/universal_import/data/services/format_detector.dart';
+import 'package:submersion/features/universal_import/data/models/picked_import_file.dart';
+import 'package:submersion/features/universal_import/data/parsers/parser_registry.dart';
+import 'package:submersion/features/dive_import/data/services/fit_parser_service.dart';
+import 'package:submersion/features/universal_import/data/services/batch_parse_service.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_device_detector.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_device_importer.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_download_history.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_mtp_source.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_mtp_stager.dart';
+import 'package:submersion/features/universal_import/data/services/divemate_schema.dart';
+import 'package:submersion/features/universal_import/data/services/divinglog_db_reader.dart';
+import 'package:submersion/features/universal_import/data/services/macdive_db_reader.dart';
+import 'package:submersion/features/universal_import/data/services/default_diver_mapping.dart';
+import 'package:submersion/features/universal_import/data/services/payload_diver_expander.dart';
+import 'package:submersion/features/universal_import/data/services/payload_merger.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_db_reader.dart';
-import 'package:submersion/features/universal_import/data/services/import_duplicate_checker.dart';
-import 'package:submersion/features/universal_import/presentation/providers/import_consolidation_service.dart';
+import 'package:submersion/features/universal_import/data/services/payload_dive_rewrite.dart';
+import 'package:submersion/features/universal_import/data/services/surfacing_pressure_normalizer.dart';
+import 'package:submersion/features/universal_import/data/services/tank_pressure_glitch_normalizer.dart';
+import 'package:submersion/features/universal_import/data/services/zip_expansion_service.dart';
+import 'package:submersion/features/universal_import/domain/services/bundled_photo_exporter.dart';
+import 'package:submersion/features/universal_import/domain/services/import_media_resolver.dart';
+import 'package:submersion/features/universal_import/presentation/providers/empty_payload_message.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_state.dart';
+import 'package:submersion/core/services/files/picked_file_materializer.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 
 export 'package:submersion/features/universal_import/presentation/providers/universal_import_state.dart';
 
@@ -50,9 +67,92 @@ export 'package:submersion/features/universal_import/presentation/providers/univ
 
 /// Manages the universal import wizard flow.
 class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
-  UniversalImportNotifier(this._ref) : super(const UniversalImportState());
+  static const _log = LoggerService('UniversalImportNotifier');
+
+  UniversalImportNotifier(
+    this._ref, {
+    BatchParseService batchParseService = const BatchParseService(),
+    ImportParser Function(ImportFormat format) parserFor = parserForFormat,
+    ZipExpansionService zipExpansionService = const ZipExpansionService(),
+    GarminDeviceDetector garminDeviceDetector = const GarminDeviceDetector(),
+    GarminMtpStager? garminMtpStager,
+    GarminDownloadHistory? garminDownloadHistory,
+    FitParserService fitParserService = const FitParserService(),
+    Future<bool> Function(String path) folderWriteProbe = folderAcceptsWrites,
+  }) : _folderWriteProbe = folderWriteProbe,
+       _batchParseService = batchParseService,
+       _parserForFormat = parserFor,
+       _zipExpansion = zipExpansionService,
+       _garminDetector = garminDeviceDetector,
+       _garminMtpStager = garminMtpStager,
+       _garminHistory = garminDownloadHistory,
+       _fitParser = fitParserService,
+       super(const UniversalImportState());
 
   final Ref _ref;
+
+  /// Localizations for the errors this notifier records. It has no
+  /// `BuildContext`, and the wizard shows these strings as they are.
+  ///
+  /// Falls back to English when the language setting cannot be read. It
+  /// lives in settings, and a settings failure is one of the errors these
+  /// strings report: throwing again from inside that catch would skip the
+  /// failure and leave the step loading.
+  AppLocalizations get _l10n {
+    try {
+      return l10nForLocaleTag(_ref.read(localeProvider));
+    } catch (e) {
+      _log.warning('Language setting unavailable, reporting in English: $e');
+      return l10nForLocaleTag('en');
+    }
+  }
+
+  /// Injectable so a widget test can answer the writability question
+  /// without real filesystem work: `testWidgets` runs in a fake-async
+  /// zone that never completes real IO, so an awaited probe would park
+  /// forever.
+  final Future<bool> Function(String path) _folderWriteProbe;
+
+  /// Injectable so tests can drive deterministic batch-parse outcomes
+  /// (progress, cancellation) without real file timing.
+  final BatchParseService _batchParseService;
+
+  /// Injectable so tests can hold a parse open at a chosen moment.
+  final ImportParser Function(ImportFormat format) _parserForFormat;
+
+  /// Expands ZIP archives (DiveCloud exports) into their member files at
+  /// intake so members flow through normal detection and batching.
+  final ZipExpansionService _zipExpansion;
+
+  /// Detects a Garmin dive computer mounted as a USB drive. Injectable so
+  /// tests can point it at a temporary directory tree.
+  final GarminDeviceDetector _garminDetector;
+
+  /// Copies an MTP watch's files to a staging folder (Windows, issue #4223).
+  /// Null where there is no MTP source; built from the detector's when the
+  /// caller passes none.
+  final GarminMtpStager? _garminMtpStager;
+
+  GarminMtpStager? get _mtpStager {
+    if (_garminMtpStager != null) return _garminMtpStager;
+    final source = _garminDetector.mtpSource;
+    return source == null ? null : GarminMtpStager(source: source);
+  }
+
+  /// Where each Garmin's download marker is kept (issue #4223). Null keeps
+  /// none, so every download reads every activity.
+  final GarminDownloadHistory? _garminHistory;
+
+  GarminDeviceImporter get _garminImporter => GarminDeviceImporter(
+    detector: _garminDetector,
+    mtpStager: _mtpStager,
+    history: _garminHistory,
+    fitParser: _fitParser,
+  );
+
+  /// Filters dive FITs from non-dive activities when importing from a Garmin
+  /// device (it returns null for runs/rides/corrupt files).
+  final FitParserService _fitParser;
 
   /// Build a [PresetRegistry] that includes both built-in and user-saved
   /// presets so auto-detection scores against all of them.
@@ -80,17 +180,155 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     var detection = detector.detect(bytes);
 
     if (detection.format == ImportFormat.sqlite) {
-      final isShearwater = await ShearwaterDbReader.isShearwaterCloudDb(bytes);
-      if (isShearwater) {
+      // A browser has no SQLite engine to open the file with, so the probe
+      // that tells the flavours apart cannot run: the file stays a database
+      // this device cannot import, and the wizard says so (issue #4121).
+      if (!_ref.read(deviceCapabilitiesProvider).sqliteImport) {
+        return detection;
+      }
+      // Probe the SQLite table set once and reuse for each DB flavor
+      // check. Without this, every flavor would re-write the full byte
+      // array to its own temp file and re-open sqlite — wasteful for
+      // large dive databases on mobile/low-end devices.
+      final tables = await ShearwaterDbReader.probeSqliteTableNames(bytes);
+      if (ShearwaterDbReader.matchesTables(tables)) {
         detection = const DetectionResult(
           format: ImportFormat.shearwaterDb,
           sourceApp: SourceApp.shearwater,
           confidence: 0.95,
         );
+      } else if (MacDiveDbReader.matchesTables(tables)) {
+        detection = const DetectionResult(
+          format: ImportFormat.macdiveSqlite,
+          sourceApp: SourceApp.macdive,
+          confidence: 0.95,
+        );
+      } else if (DivingLogDbReader.matchesTables(tables)) {
+        // Checked last: its marker table is a single common name, so the
+        // more specific flavours claim their own files first. DiveMate
+        // writes the same schema, so the file is asked which program wrote
+        // it before it is called Diving Log (#3110).
+        detection = await DiveMateSchema.isDiveMateDb(bytes)
+            ? const DetectionResult(
+                format: ImportFormat.diveMateDdb,
+                sourceApp: SourceApp.diveMate,
+                confidence: 0.95,
+              )
+            : const DetectionResult(
+                format: ImportFormat.divingLogSqlite,
+                sourceApp: SourceApp.divingLog,
+                confidence: 0.95,
+              );
       }
     }
 
     return detection;
+  }
+
+  /// Stores photo/temp-dir bookkeeping from a ZIP expansion into state.
+  ///
+  /// Always overwrites, even for a non-ZIP (empty) expansion: otherwise the
+  /// photo map from a previous ZIP import would linger through a subsequent
+  /// non-ZIP import (pickFiles/pickFolder do not fully reset state) and its
+  /// photos could be misattached to the new dives. Temp dirs superseded by
+  /// this expansion are deleted so extracted data does not accumulate.
+  ///
+  /// Public only so a test can drive it: the picker entry points that need
+  /// it most go through the static file picker and cannot be exercised.
+  @visibleForTesting
+  void applyExpansionExtras(ArchiveExpansion expansion) {
+    final superseded = [
+      for (final dir in state.zipTempDirPaths)
+        if (!expansion.tempDirPaths.contains(dir)) dir,
+    ];
+    // Every photo decision belongs to the selection that prompted it. A
+    // fresh pick drops them all, or a destination chosen for one archive
+    // would silently receive the next archive's photos, and a resolution
+    // or skip from an earlier logbook would open the Photos step's gate
+    // for a new one that has not been looked at.
+    state = state.copyWith(
+      photoPathsByBaseName: expansion.photoPathsByBaseName,
+      unmatchedPhotoCount: expansion.unmatchedPhotoPaths.length,
+      zipTempDirPaths: expansion.tempDirPaths,
+      clearBundledPhotoFolderPath: true,
+      clearPhotoFolderPath: true,
+      clearPhotoResolution: true,
+      photosSkipped: false,
+    );
+    _deleteTempDirs(superseded);
+  }
+
+  /// Completes once every temp-directory deletion started before it was
+  /// read is done. A deletion started after that is not covered: read it
+  /// again, after the step whose cleanup is to be awaited.
+  ///
+  /// Nothing in the app waits on it: cleanup stays fire-and-forget. A test
+  /// awaits it to see a deletion land, instead of sleeping and hoping the
+  /// recursive delete was quick enough (issue #4343).
+  @visibleForTesting
+  Future<void> get pendingTempCleanup => _pendingTempCleanup;
+  Future<void> _pendingTempCleanup = Future<void>.value();
+
+  /// Deletes one extracted-ZIP temp directory. A test swaps in one that
+  /// holds a deletion open, to start another while it runs.
+  @visibleForTesting
+  Future<void> Function(Directory dir) deleteTempDir = _deleteRecursively;
+
+  static Future<void> _deleteRecursively(Directory dir) =>
+      dir.delete(recursive: true);
+
+  /// Best-effort, fire-and-forget deletion of extracted-ZIP temp directories.
+  void _deleteTempDirs(List<String> paths) {
+    if (paths.isEmpty) return;
+    final run = () async {
+      for (final path in paths) {
+        try {
+          await deleteTempDir(Directory(path));
+        } catch (_) {
+          // Temp cleanup is best-effort, and a folder already gone lands
+          // here too; the OS reclaims systemTemp anyway.
+        }
+      }
+    }();
+    // Joined, not chained: each cleanup starts at once, as before, and the
+    // one future still covers every cleanup in flight. Neither side can
+    // fail, since each delete swallows its own error.
+    _pendingTempCleanup = Future.wait([_pendingTempCleanup, run]);
+    unawaited(_pendingTempCleanup);
+  }
+
+  /// Single-file load by path (used when a ZIP expands to exactly one
+  /// member and by the classic picker path).
+  ///
+  /// With [stillWanted], nothing is loaded once it answers false: reading
+  /// takes a moment, and whoever asked may have been reset by then.
+  Future<void> _loadSingleFromFilePath(
+    String filePath, {
+    bool Function()? stillWanted,
+  }) async {
+    final bytes = await File(filePath).readAsBytes();
+    final detection = await _detectFormat(bytes);
+    if (stillWanted != null && !stillWanted()) return;
+    state = state.copyWith(
+      isLoading: false,
+      files: [
+        PickedImportFile(
+          name: p.basename(filePath),
+          path: filePath,
+          bytes: bytes,
+          detection: detection,
+          status: ImportFileStatus.pending,
+        ),
+      ],
+      detectionResult: detection,
+      // A hand-off format (a Seacraft ENC route, a Suunto JSON export) is
+      // imported by its own flow; it never advances to Confirm Source. The
+      // file-selection step shows that flow's hand-off card instead, which
+      // reads the bytes straight off this state.
+      currentStep: detection.format.isHandoff
+          ? ImportWizardStep.fileSelection
+          : ImportWizardStep.sourceConfirmation,
+    );
   }
 
   // -- External File Loading (drag-and-drop / sharing intents) --
@@ -107,46 +345,82 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
   ) async {
     // Reset to a clean slate so stale fileBytes/detectionResult from a
     // previous run don't leak through if detection fails or is unsupported.
+    final staleTempDirs = state.zipTempDirPaths;
     state = const UniversalImportState().copyWith(isLoading: true);
+    _deleteTempDirs(staleTempDirs);
 
     try {
+      if (ZipExpansionService.isZipBytes(bytes)) {
+        final expansion = await _zipExpansion.expandZipBytes(bytes, fileName);
+        applyExpansionExtras(expansion);
+        if (expansion.filePaths.isEmpty) {
+          final message = _l10n.universalImport_error_noFilesInArchive;
+          state = state.copyWith(isLoading: false, error: message);
+          return DetectionResult(
+            format: ImportFormat.unknown,
+            confidence: 0.0,
+            warnings: [message],
+          );
+        }
+        if (expansion.filePaths.length == 1) {
+          await _loadSingleFromFilePath(expansion.filePaths.first);
+        } else {
+          await _loadBatchFromPaths(expansion.filePaths);
+        }
+        state = state.copyWith(wasLoadedExternally: true);
+        return state.detectionResult ??
+            const DetectionResult(format: ImportFormat.unknown, confidence: 0);
+      }
+
       final detection = await _detectFormat(bytes);
 
       // Don't advance to sourceConfirmation for unsupported formats so the
       // wizard isn't left holding stale bytes if the caller shows a snackbar
-      // and doesn't navigate.
-      if (!detection.format.isSupported) {
+      // and doesn't navigate. A hand-off format (a Seacraft ENC route, a
+      // Suunto JSON export) is the one exception: deliberately unsupported
+      // by the universal pipeline, it still needs its bytes kept in state so
+      // the file-selection step's hand-off card can pass them on.
+      if (!detection.format.isSupported && !detection.format.isHandoff) {
         state = state.copyWith(isLoading: false);
         return detection;
       }
 
       state = state.copyWith(
         isLoading: false,
-        fileBytes: bytes,
-        fileName: fileName,
+        files: [
+          PickedImportFile(
+            name: fileName,
+            bytes: bytes,
+            detection: detection,
+            status: ImportFileStatus.pending,
+          ),
+        ],
         detectionResult: detection,
-        currentStep: ImportWizardStep.sourceConfirmation,
+        currentStep: detection.format.isHandoff
+            ? ImportWizardStep.fileSelection
+            : ImportWizardStep.sourceConfirmation,
         wasLoadedExternally: true,
       );
 
       return detection;
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        error: 'Failed to load file: $e',
-      );
-      return const DetectionResult(
+      final message = _l10n.universalImport_error_loadFailed('$e');
+      state = state.copyWith(isLoading: false, error: message);
+      return DetectionResult(
         format: ImportFormat.unknown,
         confidence: 0.0,
-        warnings: ['Failed to detect file format'],
+        warnings: [message],
       );
     }
   }
 
   // -- Step 0: File Selection --
 
-  /// Pick a file and run format detection.
-  Future<void> pickFile() async {
+  /// Pick one or more files and run format detection.
+  ///
+  /// A single selection keeps the classic wizard flow (Confirm Source, CSV
+  /// mapping); multiple selections enter the batch triage flow.
+  Future<void> pickFiles() async {
     // Reset to fileSelection so the canAdvance provider transitions
     // false -> true when detection completes, enabling auto-advance
     // even when re-selecting a file.
@@ -157,44 +431,377 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     );
 
     try {
-      final result = await FilePicker.pickFiles(
-        type: FileType.any,
-        allowMultiple: false,
-      );
+      final result = await FilePicker.pickFiles(type: FileType.any);
 
-      if (result == null || result.files.isEmpty) {
+      if (result.isEmpty) {
         state = state.copyWith(isLoading: false);
         return;
       }
 
-      final pickedFile = result.files.first;
-      final filePath = pickedFile.path;
-      if (filePath == null) {
+      // Copy in any handle without a local path (Android SAF picks) rather
+      // than filtering it out: dropping them silently would shrink the
+      // selection and then report "no importable files" for a pick the user
+      // made correctly.
+      final pickedPaths = [
+        for (final f in await materializePickedFiles(result)) f.path,
+      ];
+      final expansion = await _zipExpansion.expandAll(pickedPaths);
+      applyExpansionExtras(expansion);
+
+      if (expansion.filePaths.isEmpty) {
         state = state.copyWith(
           isLoading: false,
-          error: 'Could not access file',
+          error: _l10n.universalImport_error_noFilesInArchive,
+        );
+        return;
+      }
+      if (expansion.filePaths.length == 1) {
+        await _loadSingleFromFilePath(expansion.filePaths.first);
+        return;
+      }
+      await _loadBatchFromPaths(expansion.filePaths);
+    } catch (e) {
+      state = state.copyWith(
+        isLoading: false,
+        error: _l10n.universalImport_error_pickFailed('$e'),
+      );
+    }
+  }
+
+  /// Load many files by path: detect each (bytes read then discarded),
+  /// classify CSV/unsupported as excluded, and enter the triage step.
+  ///
+  /// With [stillWanted], nothing is loaded once it answers false, as for
+  /// [_loadSingleFromFilePath].
+  Future<void> _loadBatchFromPaths(
+    List<String> paths, {
+    bool Function()? stillWanted,
+  }) async {
+    final files = <PickedImportFile>[];
+    for (final path in paths) {
+      final name = p.basename(path);
+      try {
+        final bytes = await File(path).readAsBytes();
+        final detection = await _detectFormat(bytes);
+        // A hand-off file (a Seacraft ENC route, a Suunto JSON export) is
+        // excluded from the batch exactly like a CSV needing the single-file
+        // mapping wizard: it needs its own import flow, not the universal
+        // pipeline, so it reuses `excludedCsv` ->
+        // `ImportFileOutcomeStatus.needsIndividualImport` in the bulk summary
+        // (universal_adapter.dart) rather than `unsupported`.
+        final status =
+            detection.format == ImportFormat.csv || detection.format.isHandoff
+            ? ImportFileStatus.excludedCsv
+            : detection.format.isSupported
+            ? ImportFileStatus.pending
+            : ImportFileStatus.unsupported;
+        files.add(
+          PickedImportFile(
+            name: name,
+            path: path,
+            detection: detection,
+            status: status,
+          ),
+        );
+      } catch (e) {
+        files.add(
+          PickedImportFile(
+            name: name,
+            path: path,
+            detection: const DetectionResult(
+              format: ImportFormat.unknown,
+              confidence: 0,
+            ),
+            status: ImportFileStatus.failed,
+            error: e.toString(),
+          ),
+        );
+      }
+    }
+
+    if (stillWanted != null && !stillWanted()) return;
+    final firstPending = files.where(
+      (f) => f.status == ImportFileStatus.pending,
+    );
+    state = state.copyWith(
+      isLoading: false,
+      files: files,
+      // Gate providers key off detectionResult; use the first importable
+      // file's detection so canAdvance behaves for batches too. When the
+      // batch has no importable file, CLEAR any stale detection so the
+      // wizard cannot advance past triage.
+      detectionResult: firstPending.isNotEmpty
+          ? firstPending.first.detection
+          : null,
+      clearDetectionResult: firstPending.isEmpty,
+      currentStep: ImportWizardStep.sourceConfirmation,
+    );
+  }
+
+  /// Load multiple files by path (drag-and-drop). Resets prior state and
+  /// enters the triage step. Marks the load as external so the wizard does
+  /// not reset it on init.
+  Future<void> loadFilesFromPaths(List<String> paths) async {
+    final staleTempDirs = state.zipTempDirPaths;
+    state = const UniversalImportState().copyWith(isLoading: true);
+    _deleteTempDirs(staleTempDirs);
+    final expansion = await _zipExpansion.expandAll(paths);
+    applyExpansionExtras(expansion);
+    if (expansion.filePaths.isEmpty) {
+      state = state.copyWith(
+        isLoading: false,
+        error: _l10n.universalImport_error_noFilesInArchive,
+      );
+      return;
+    }
+    if (expansion.filePaths.length == 1) {
+      await _loadSingleFromFilePath(expansion.filePaths.first);
+    } else {
+      await _loadBatchFromPaths(expansion.filePaths);
+    }
+    state = state.copyWith(wasLoadedExternally: true);
+  }
+
+  /// Resolves the payload's referenced photos against [rootPath].
+  ///
+  /// Never throws into the wizard: a scan failure resolves to zero matches
+  /// and the user can pick a different folder or skip. Photos must not be
+  /// able to block a dive import.
+  Future<void> resolvePhotosIn(String rootPath) async {
+    final media = state.payload?.entitiesOf(ImportEntityType.media);
+    if (media == null || media.isEmpty) return;
+
+    state = state.copyWith(photoFolderPath: rootPath, isLoading: true);
+
+    ImportMediaResolution resolution;
+    try {
+      resolution = await const ImportMediaResolver().resolve(
+        media: media,
+        rootPath: rootPath,
+      );
+    } catch (e) {
+      _log.warning('Photo resolution failed under $rootPath: $e');
+      resolution = ImportMediaResolution(
+        resolvedPathByIndex: const {},
+        reRootedCount: 0,
+        filenameOnlyCount: 0,
+        notFoundCount: media.length,
+      );
+    }
+
+    state = state.copyWith(
+      photoResolution: resolution,
+      photosSkipped: false,
+      isLoading: false,
+    );
+  }
+
+  /// Records where photos bundled in an imported archive should be saved.
+  /// They are written there at import time and linked in place.
+  ///
+  /// Returns false, recording nothing, when the folder cannot be written
+  /// to, so the user hears about a read-only pick now rather than finding
+  /// the photos missing after the import.
+  Future<bool> chooseBundledPhotoFolder(String path) async {
+    if (!await _folderWriteProbe(path)) {
+      _log.warning('Bundled photo folder is not writable: $path');
+      return false;
+    }
+    state = state.copyWith(bundledPhotoFolderPath: path, photosSkipped: false);
+    return true;
+  }
+
+  /// Proceeds without photos: neither the logbook's referenced photos nor
+  /// any bundled in an archive are imported.
+  void skipPhotos() {
+    state = state.copyWith(
+      photosSkipped: true,
+      clearPhotoResolution: true,
+      clearPhotoFolderPath: true,
+      clearBundledPhotoFolderPath: true,
+    );
+  }
+
+  /// Desktop only: pick a folder and recursively gather importable files.
+  Future<void> pickFolder() async {
+    state = state.copyWith(
+      isLoading: true,
+      clearError: true,
+      currentStep: ImportWizardStep.fileSelection,
+    );
+
+    try {
+      final dirPath = await FilePicker.getDirectoryPath();
+      if (dirPath == null) {
+        state = state.copyWith(isLoading: false);
+        return;
+      }
+
+      final paths = await scanFolderForImportableFiles(dirPath);
+      if (paths.isEmpty) {
+        state = state.copyWith(
+          isLoading: false,
+          error: _l10n.universalImport_error_noFilesInFolder,
         );
         return;
       }
 
-      final bytes = await File(filePath).readAsBytes();
-      final fileName = pickedFile.name;
-      final detection = await _detectFormat(bytes);
+      // Folder scans surface ZIPs (DiveCloud exports); expand them so
+      // members flow through the batch like directly picked files.
+      final expansion = await _zipExpansion.expandAll(paths);
+      applyExpansionExtras(expansion);
+      final expandedPaths = expansion.filePaths;
 
-      state = state.copyWith(
-        isLoading: false,
-        fileBytes: bytes,
-        fileName: fileName,
-        detectionResult: detection,
-        currentStep: ImportWizardStep.sourceConfirmation,
-      );
+      if (expandedPaths.isEmpty) {
+        state = state.copyWith(
+          isLoading: false,
+          error: _l10n.universalImport_error_noFilesInFolder,
+        );
+        return;
+      }
+
+      if (expandedPaths.length == 1) {
+        // Single hit: behave exactly like a single-file pick.
+        await _loadSingleFromFilePath(expandedPaths.first);
+        return;
+      }
+
+      await _loadBatchFromPaths(expandedPaths);
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        error: 'Failed to pick file: $e',
+        error: _l10n.universalImport_error_folderScanFailed('$e'),
       );
     }
   }
+
+  /// Desktop only: detect a Garmin dive computer connected by cable and
+  /// load its dive activities into the wizard.
+  ///
+  /// Garmin watches expose activities as FIT files under `GARMIN/Activity`,
+  /// a folder that mixes dives with runs/rides; non-dive FITs are filtered
+  /// out before triage. When several Garmins are connected the first is
+  /// used, mounted volumes ahead of MTP watches.
+  ///
+  /// A watch reached over MTP (Windows, issue #4223) has no folder to read,
+  /// so its files are copied into a staging folder first, which the wizard
+  /// deletes with its other temp folders. Only activities after the
+  /// watch's download marker are read, unless [request] reads them all.
+  ///
+  /// A download is dropped once the wizard is reset or another download
+  /// starts: copying a watch takes a while, and one still running from an
+  /// earlier opening must not load its dives into this one.
+  Future<void> importFromGarminDevice([
+    GarminImportRequest request = const GarminImportRequest(),
+  ]) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.cloudImport);
+    _lastGarminRequest = request;
+    final run = ++_garminRun;
+    bool isCurrent() => mounted && run == _garminRun;
+    // This download's staging folder, if it made one.
+    String? stagingDir;
+    state = state.copyWith(
+      isLoading: true,
+      clearError: true,
+      currentStep: ImportWizardStep.fileSelection,
+      garminNothingNew: false,
+      clearGarminPendingMarker: true,
+    );
+
+    try {
+      final outcome = await _garminImporter.run(
+        request,
+        onProgress: (progress) {
+          if (isCurrent()) state = state.copyWith(garminProgress: progress);
+        },
+        onTempDir: (dirPath) {
+          stagingDir = dirPath;
+          // Registered before anything can fail, so the folder is always
+          // cleaned up. Also drops an earlier import's leftovers, as a
+          // fresh pick does. A stale download does not register: that
+          // would delete the staging folder of the one that replaced it.
+          if (isCurrent()) {
+            applyExpansionExtras(
+              ArchiveExpansion(filePaths: const [], tempDirPaths: [dirPath]),
+            );
+          }
+        },
+      );
+      if (!isCurrent()) return;
+      switch (outcome) {
+        case GarminNotConnected():
+          state = state.copyWith(
+            isLoading: false,
+            error: _l10n.universalImport_error_garminNotFound,
+          );
+        case GarminNoDives():
+          state = state.copyWith(
+            isLoading: false,
+            error: _l10n.universalImport_error_garminNoDives,
+          );
+        case GarminNothingNew():
+          state = state.copyWith(isLoading: false, garminNothingNew: true);
+        case GarminDivesFound(:final divePaths, :final pendingMarker):
+          // Not marked wasLoadedExternally: a Garmin import always runs
+          // inside the wizard, and the mark would make its next opening
+          // skip the reset, showing these dives again without reading the
+          // watch.
+          state = state.copyWith(garminPendingMarker: pendingMarker);
+          // Reading the files takes a moment too, and a reset in that
+          // moment must not be undone by their arrival.
+          if (divePaths.length == 1) {
+            await _loadSingleFromFilePath(
+              divePaths.first,
+              stillWanted: isCurrent,
+            );
+          } else {
+            await _loadBatchFromPaths(divePaths, stillWanted: isCurrent);
+          }
+      }
+    } on PlatformException catch (e) {
+      if (!isCurrent()) return;
+      state = state.copyWith(
+        isLoading: false,
+        error: switch (e.code) {
+          'busy' => _l10n.universalImport_error_garminBusy,
+          'notFound' => _l10n.universalImport_error_garminNotFound,
+          _ => _l10n.universalImport_error_garminReadFailed(
+            e.message ?? e.code,
+          ),
+        },
+      );
+    } catch (e) {
+      if (!isCurrent()) return;
+      state = state.copyWith(
+        isLoading: false,
+        error: _l10n.universalImport_error_garminReadFailed('$e'),
+      );
+    } finally {
+      if (isCurrent()) state = state.copyWith(clearGarminProgress: true);
+      // A stale download removes its own staging folder, now that it has
+      // stopped reading it. Either it was never registered, or the reset or
+      // the newer download deleted it while this one still had files open,
+      // which fails on Windows and would leave the folder behind. Deleting
+      // a folder that is already gone is harmless.
+      final staging = stagingDir;
+      if (staging != null && !isCurrent()) _deleteTempDirs([staging]);
+    }
+  }
+
+  /// Runs the last Garmin download again, reading every activity on the
+  /// watch, after it found nothing new.
+  Future<void> importAllFromGarminDevice() => importFromGarminDevice(
+    GarminImportRequest(
+      computerId: _lastGarminRequest.computerId,
+      readAll: true,
+    ),
+  );
+
+  GarminImportRequest _lastGarminRequest = const GarminImportRequest();
+
+  /// Numbers the Garmin downloads, and moves on at every reset. A download
+  /// whose number is no longer this one is stale and leaves the state alone.
+  int _garminRun = 0;
 
   // -- Step 1: Source Confirmation --
 
@@ -218,25 +825,50 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
   /// Confirm the detected source or override with a user selection.
   ///
   /// When [overrideApp] is null the pending override from state is used.
+  ///
+  /// Throws [ImportStepFailure] when nothing could be parsed, and
+  /// [ImportStepCancelled] when the parse was stopped. Both stop the wizard.
   Future<void> confirmSource({
     SourceApp? overrideApp,
     ImportFormat? overrideFormat,
   }) async {
+    if (state.isBatch) {
+      await _parseBatch();
+      return;
+    }
+
     final detection = state.detectionResult;
     if (detection == null) return;
 
     // Reset to sourceConfirmation so the canAdvance provider transitions
     // false -> true, enabling auto-advance even when re-confirming.
-    state = state.copyWith(currentStep: ImportWizardStep.sourceConfirmation);
+    //
+    // Anything an earlier confirmation parsed is dropped here: re-confirming
+    // means re-deciding what this file is, so a payload built under the old
+    // answer is stale. The CSV branch below never parses -- it hands off to
+    // Map Fields -- so without this an override to CSV after a successful
+    // parse would keep the old payload, and Map Fields would auto-skip on it,
+    // confirmFieldMapping would early-return on it, and Review would show the
+    // superseded import.
+    state = state.copyWith(
+      currentStep: ImportWizardStep.sourceConfirmation,
+      clearPayload: true,
+      selections: const {},
+    );
 
-    final effectiveOverride = overrideApp ?? state.pendingSourceOverride;
+    final pendingSource = state.pendingSourceOverride;
+    final pendingFormat = state.pendingFormatOverride;
+    final effectiveOverride = overrideApp ?? pendingSource;
 
-    final format =
-        overrideFormat ?? state.pendingFormatOverride ?? detection.format;
+    final format = overrideFormat ?? pendingFormat ?? detection.format;
     final sourceApp =
         effectiveOverride ?? detection.sourceApp ?? SourceApp.generic;
 
-    final options = ImportOptions(sourceApp: sourceApp, format: format);
+    final options = ImportOptions(
+      sourceApp: sourceApp,
+      format: format,
+      fileName: state.fileName,
+    );
 
     // For CSV files, run pipeline detection to check for multi-file presets.
     if (format == ImportFormat.csv && state.fileBytes != null) {
@@ -275,7 +907,20 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     // For non-CSV formats, parse immediately and await so payload is ready
     // before the wizard advances past the Map Fields step.
     if (format != ImportFormat.csv) {
-      await _parseAndCheckDuplicates();
+      try {
+        await _parseAndInstall();
+      } on ImportStepCancelled {
+        // Stopping a parse is not a new answer to what this file is, so the
+        // diver's choice comes back. Different options mean a reset or a new
+        // file took over, and the choice went with the old file.
+        if (identical(state.options, options)) {
+          state = state.copyWith(
+            pendingSourceOverride: pendingSource,
+            pendingFormatOverride: pendingFormat,
+          );
+        }
+        rethrow;
+      }
     }
   }
 
@@ -286,27 +931,16 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     state = state.copyWith(isLoading: true, clearError: true);
 
     try {
-      final result = await FilePicker.pickFiles(
-        type: FileType.any,
-        allowMultiple: false,
-      );
+      final pickedFile = await FilePicker.pickFile(type: FileType.any);
 
-      if (result == null || result.files.isEmpty) {
+      if (pickedFile == null) {
         state = state.copyWith(isLoading: false);
         return;
       }
 
-      final pickedFile = result.files.first;
-      final filePath = pickedFile.path;
-      if (filePath == null) {
-        state = state.copyWith(
-          isLoading: false,
-          error: 'Could not access file',
-        );
-        return;
-      }
-
-      final bytes = await File(filePath).readAsBytes();
+      // Reads through the handle, so a SAF pick with no local path works
+      // instead of failing with "Could not access file".
+      final bytes = await pickedFile.readAsBytes();
 
       state = state.copyWith(
         isLoading: false,
@@ -317,7 +951,7 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        error: 'Failed to pick additional file: $e',
+        error: _l10n.universalImport_error_additionalFilePickFailed('$e'),
       );
     }
   }
@@ -345,121 +979,346 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
   Future<void> confirmFieldMapping() async {
     if (state.payload != null) return;
     state = state.copyWith(currentStep: ImportWizardStep.review);
-    await _parseAndCheckDuplicates();
+    await _parseAndInstall();
   }
 
-  // -- Parsing + Duplicate Check --
+  // -- Parse Cancellation --
 
-  Future<void> _parseAndCheckDuplicates() async {
+  /// The parse the wizard is waiting on, from the file's bytes to its review.
+  /// Null when none is running.
+  ImportCancellationToken? _parseToken;
+
+  /// Stops waiting for the parse in flight, and the step that started it ends
+  /// in [ImportStepCancelled]. A parse commits nothing, so there is nothing to
+  /// undo. One already on a worker isolate cannot be stopped: it runs out
+  /// unseen and its result is dropped.
+  ///
+  /// A large file parses on a worker, so the app stays responsive and the
+  /// diver can leave the wizard and start again before it returns (#3865).
+  void cancelParse() => _parseToken?.cancel();
+
+  /// The state the parse in flight started from, which says what it is reading.
+  UniversalImportState? _parseStartedFrom;
+
+  /// Whether [token] still speaks for this notifier. Once a reset or a new
+  /// file has replaced it, the state belongs to whatever came next, and a
+  /// parse finishing late must leave it alone.
+  bool _ownsState(ImportCancellationToken token) =>
+      identical(token, _parseToken);
+
+  /// Drops the parse in flight as soon as anything replaces what it is reading,
+  /// whichever way it arrives. A parse's own last write replaces the files too,
+  /// by which point it has nothing left to do.
+  @override
+  set state(UniversalImportState value) {
+    final started = _parseStartedFrom;
+    if (started != null &&
+        !(identical(value.fileBytes, started.fileBytes) &&
+            identical(value.files, started.files))) {
+      _parseToken?.cancel();
+      _parseToken = null;
+      _parseStartedFrom = null;
+    }
+    super.state = value;
+  }
+
+  /// Runs [parse] as the parse in flight, under a token of its own.
+  ///
+  /// Whatever way it ends, it does not leave the step loading: an error nothing
+  /// else caught would keep the progress row running, with a Cancel that has
+  /// nothing left to stop.
+  Future<void> _underNewParse(
+    Future<void> Function(ImportCancellationToken token) parse,
+  ) async {
+    _parseToken?.cancel();
+    final token = _parseToken = ImportCancellationToken();
+    _parseStartedFrom = state;
+    try {
+      await parse(token);
+    } finally {
+      if (_ownsState(token)) {
+        _parseToken = null;
+        _parseStartedFrom = null;
+        if (state.isLoading) state = state.copyWith(isLoading: false);
+      }
+    }
+  }
+
+  // -- Batch Parsing (multi-file imports) --
+
+  Future<void> _parseBatch() => _underNewParse(_parseBatchUnder);
+
+  Future<void> _parseBatchUnder(ImportCancellationToken token) async {
+    state = state.copyWith(
+      isLoading: true,
+      clearError: true,
+      parseTotal: state.pendingFiles.length,
+      parseCurrent: 0,
+    );
+
+    final result = await _batchParseService.parseAll(
+      state.files,
+      onProgress: (current, total) {
+        if (!_ownsState(token)) return;
+        state = state.copyWith(parseCurrent: current, parseTotal: total);
+      },
+      cancelToken: token,
+    );
+
+    if (result.cancelled || token.isCancelled) {
+      throw _batchCancelled(token, result);
+    }
+
+    if (result.parsed.isEmpty) {
+      // Clear the detection result so the Confirm Source / triage step's
+      // canAdvance gate (universalAdapterSourceReadyProvider, which only checks
+      // detectionResult.isFormatSupported) goes false -- there is no payload to
+      // review, so Next must not stay enabled.
+      state = state.copyWith(
+        isLoading: false,
+        files: result.files,
+        clearDetectionResult: true,
+      );
+      throw _fail(_l10n.universalImport_error_noDataInFiles);
+    }
+
+    final payload = await token.untilCancelled(
+      _applySurfacingPressureRule(
+        const PayloadMerger().merge(result.parsed),
+        cancelToken: token,
+      ),
+    );
+    if (payload == null) throw _batchCancelled(token, result);
+
+    state = state.copyWith(
+      isLoading: false,
+      files: result.files,
+      payload: payload,
+      clearDiverMapping: true,
+      selections: _defaultSelections(payload),
+      currentStep: ImportWizardStep.review,
+    );
+  }
+
+  /// Back to triage for a batch stopped part way, leaving the wizard on it.
+  ImportStepCancelled _batchCancelled(
+    ImportCancellationToken token,
+    BatchParseResult result,
+  ) {
+    if (_ownsState(token)) {
+      // Stay on triage; reset parse bookkeeping so a re-run starts clean.
+      // Files already parsed this run must be reset to pending: their
+      // FilePayloads (result.parsed) are not retained in state, and
+      // parseAll skips non-pending files, so on a re-run they would be
+      // silently dropped from the merged import. Resetting makes a re-run
+      // re-parse and merge them.
+      final resetFiles = [
+        for (final f in result.files)
+          f.status == ImportFileStatus.parsed
+              ? f.copyWith(status: ImportFileStatus.pending, diveCount: 0)
+              : f,
+      ];
+      state = state.copyWith(
+        isLoading: false,
+        files: resetFiles,
+        parseCurrent: 0,
+        parseTotal: 0,
+        currentStep: ImportWizardStep.sourceConfirmation,
+      );
+    }
+    return const ImportStepCancelled();
+  }
+
+  // -- Parsing --
+
+  /// Parse the selected file and move the wizard to review.
+  ///
+  /// Throws [ImportStepFailure] when no payload could be produced. The wizard
+  /// gates every later step on that payload, so returning quietly here would
+  /// let it advance onto a step with nothing to act on -- for a non-CSV file
+  /// that is the CSV-only Map Fields step, which then reads "0 of 0 columns
+  /// mapped" with Next disabled and no explanation. For the same reason it
+  /// throws [ImportStepCancelled] when the parse was stopped.
+  Future<void> _parseAndInstall() async {
     final bytes = state.fileBytes;
     final opts = state.options;
-    if (bytes == null || opts == null) return;
+    if (bytes == null || opts == null) {
+      throw _fail(_l10n.universalImport_error_fileUnreadable);
+    }
 
-    state = state.copyWith(isLoading: true, clearError: true);
+    await _underNewParse((token) => _parseUnder(token, bytes, opts));
+  }
 
+  Future<void> _parseUnder(
+    ImportCancellationToken token,
+    Uint8List bytes,
+    ImportOptions opts,
+  ) async {
+    // A batch before this leaves its counts behind, and a single file would
+    // show them.
+    state = state.copyWith(
+      isLoading: true,
+      clearError: true,
+      parseCurrent: 0,
+      parseTotal: 0,
+    );
+
+    final ImportPayload? payload;
     try {
       final registry = opts.format == ImportFormat.csv
           ? await _buildPresetRegistry()
           : null;
       final parser = _parserFor(opts.format, registry: registry);
-      final ImportPayload payload;
-      if (parser is CsvImportParser) {
-        payload = await parser.parse(
-          bytes,
-          options: opts,
-          customMappingOverride: state.fieldMapping,
-          profileFileBytes: state.additionalFileBytes,
-        );
-      } else {
-        payload = await parser.parse(bytes, options: opts);
-      }
-
-      if (payload.isEmpty) {
-        final errorMsg = payload.warnings.isNotEmpty
-            ? payload.warnings.first.message
-            : 'No data could be parsed from the file';
-        state = state.copyWith(isLoading: false, error: errorMsg);
-        return;
-      }
-
-      // Run duplicate checking
-      final dupResult = await _checkDuplicates(payload);
-
-      // Build default selections: all selected, minus duplicates
-      final selections = <ImportEntityType, Set<int>>{};
-      for (final type in payload.availableTypes) {
-        final items = payload.entitiesOf(type);
-        final allIndices = Set<int>.from(List.generate(items.length, (i) => i));
-
-        if (type == ImportEntityType.dives) {
-          // Exclude dives matched as duplicates
-          selections[type] = allIndices.difference(
-            Set<int>.from(dupResult.diveMatches.keys),
-          );
-        } else {
-          // Exclude items flagged as duplicates
-          final dups = dupResult.duplicates[type] ?? const {};
-          selections[type] = allIndices.difference(dups);
-        }
-      }
-
-      state = state.copyWith(
-        isLoading: false,
-        payload: payload,
-        duplicateResult: dupResult,
-        selections: selections,
-        currentStep: ImportWizardStep.review,
+      final ImportPayload? parsed = await token.untilCancelled(
+        parser is CsvImportParser
+            ? parser.parse(
+                bytes,
+                options: opts,
+                customMappingOverride: state.fieldMapping,
+                profileFileBytes: state.additionalFileBytes,
+              )
+            : parser.parse(bytes, options: opts),
       );
-    } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        error: 'Failed to parse file: $e',
+      payload = parsed == null
+          ? null
+          : await token.untilCancelled(
+              _applySurfacingPressureRule(parsed, cancelToken: token),
+            );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to parse import file',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      throw _fail(_l10n.universalImport_error_parseFailed('$e'));
+    }
+    if (payload == null) throw _parseCancelled(token);
+
+    // The per-row warnings are English transformer strings, so a CSV whose
+    // every row was skipped is summarised rather than shown its first one.
+    if (payload.isEmpty) {
+      throw _fail(
+        emptyPayloadMessage(
+          _l10n,
+          payload.warnings,
+          mapsColumns: opts.format.mapsColumns,
+        ),
       );
     }
+
+    _installPayload(payload);
+  }
+
+  /// Back to Confirm Source for a file whose parse was stopped.
+  ImportStepCancelled _parseCancelled(ImportCancellationToken token) {
+    if (_ownsState(token)) {
+      state = state.copyWith(
+        isLoading: false,
+        currentStep: ImportWizardStep.sourceConfirmation,
+      );
+    }
+    return const ImportStepCancelled();
+  }
+
+  /// Makes [payload] the one the review steps act on, with every row
+  /// selected. Shared by file parsing and [setExternalPayload] so both leave
+  /// the notifier in the same state.
+  void _installPayload(ImportPayload payload, {int remotePhotoCount = 0}) {
+    state = state.copyWith(
+      isLoading: false,
+      payload: payload,
+      clearDiverMapping: true,
+      selections: _defaultSelections(payload),
+      currentStep: ImportWizardStep.review,
+      remotePhotoCount: remotePhotoCount,
+    );
+  }
+
+  /// Installs a payload built outside file parsing, by a source that
+  /// fetches it itself (divelogs.de).
+  ///
+  /// Goes through the same surfacing-pressure rule a parsed file does. Photo
+  /// decisions from any earlier import are cleared, and [remotePhotoCount]
+  /// tells the Photos step how many photos the source will download at import
+  /// time. The caller only hands over a payload with something in it; an
+  /// empty fetch is its own message.
+  Future<void> setExternalPayload(
+    ImportPayload payload, {
+    int remotePhotoCount = 0,
+  }) async {
+    state = state.copyWith(
+      clearError: true,
+      photoPathsByBaseName: const {},
+      unmatchedPhotoCount: 0,
+      photosSkipped: false,
+      clearPhotoResolution: true,
+      clearPhotoFolderPath: true,
+      clearBundledPhotoFolderPath: true,
+    );
+    _installPayload(
+      await _applySurfacingPressureRule(payload),
+      remotePhotoCount: remotePhotoCount,
+    );
+  }
+
+  /// Record [message] on the state and return the failure to throw.
+  ///
+  /// The state copy is what the steps already on screen render; the throw is
+  /// what stops the wizard advancing past them.
+  ///
+  /// Anything a previous attempt parsed goes with it. A user can walk back to
+  /// Confirm Source, change the source and confirm again, so a failure here
+  /// can land on top of an earlier success -- and every gate past this point
+  /// reads that payload, so leaving it would carry a superseded import
+  /// forward under a message saying the current one failed.
+  ImportStepFailure _fail(String message) {
+    state = state.copyWith(
+      isLoading: false,
+      error: message,
+      clearPayload: true,
+      selections: const {},
+    );
+    return ImportStepFailure(message);
   }
 
   ImportParser _parserFor(ImportFormat format, {PresetRegistry? registry}) {
-    return switch (format) {
-      ImportFormat.csv => CsvImportParser(
+    if (format == ImportFormat.csv) {
+      return CsvImportParser(
         customMapping: state.fieldMapping,
         pipeline: registry != null ? CsvPipeline(registry: registry) : null,
-      ),
-      ImportFormat.uddf => UddfImportParser(),
-      ImportFormat.subsurfaceXml => SubsurfaceXmlParser(),
-      ImportFormat.fit => const FitImportParser(),
-      ImportFormat.shearwaterDb => ShearwaterCloudParser(),
-      _ => const PlaceholderParser(),
-    };
+      );
+    }
+    return _parserForFormat(format);
   }
 
-  Future<ImportDuplicateResult> _checkDuplicates(ImportPayload payload) async {
-    const checker = ImportDuplicateChecker();
+  /// Default review selections: everything selected. Duplicates are the
+  /// wizard's to flag, through the import adapter's `checkDuplicates`.
+  Map<ImportEntityType, Set<int>> _defaultSelections(ImportPayload payload) => {
+    for (final type in payload.availableTypes)
+      type: {for (var i = 0; i < payload.entitiesOf(type).length; i++) i},
+  };
 
-    final existingTrips = await _ref.read(allTripsProvider.future);
-    final existingSites = await _ref.read(sitesProvider.future);
-    final existingEquipment = await _ref.read(allEquipmentProvider.future);
-    final existingBuddies = await _ref.read(allBuddiesProvider.future);
-    final existingDiveCenters = await _ref.read(allDiveCentersProvider.future);
-    final existingCertifications = await _ref.read(
-      allCertificationsProvider.future,
-    );
-    final existingTags = await _ref.read(tagsProvider.future);
-    final existingDiveTypes = await _ref.read(diveTypesProvider.future);
-    final diveRepo = _ref.read(diveRepositoryProvider);
-    final existingDives = await diveRepo.getAllDives();
-
-    return checker.check(
-      payload: payload,
-      existingDives: existingDives,
-      existingSites: existingSites,
-      existingTrips: existingTrips,
-      existingEquipment: existingEquipment,
-      existingBuddies: existingBuddies,
-      existingDiveCenters: existingDiveCenters,
-      existingCertifications: existingCertifications,
-      existingTags: existingTags,
-      existingDiveTypes: existingDiveTypes,
-    );
+  /// Read cylinder end pressure at the moment of surfacing rather than at the
+  /// end of the recording, when the diver has that on (issue #1092). Applied
+  /// to the finished payload so every format is covered at one seam, and after
+  /// the parsers have run so a parser that derives other figures from the
+  /// source's own start/end pair (FIT cylinder volume) still sees them.
+  ///
+  /// A start or end pressure taken from a transmitter dropout is replaced
+  /// first, whatever the preference (issue #2441): it is wrong for every
+  /// diver, and the surfacing rule should see the corrected value.
+  ///
+  /// Walks every sample of every dive on this isolate, so it gives way as it
+  /// goes rather than stalling the wizard on a large logbook (#3854).
+  Future<ImportPayload> _applySurfacingPressureRule(
+    ImportPayload payload, {
+    ImportCancellationToken? cancelToken,
+  }) {
+    final trim = _ref.read(settingsProvider).trimTankPressureAtSurfacing;
+    return rewriteDivesInSlices(payload, (dive) {
+      final deglitched = deglitchDiveTankPressures(dive);
+      return trim ? trimDiveTankPressuresAtSurfacing(deglitched) : deglitched;
+    }, cancelToken: cancelToken);
   }
 
   // -- Step 3: Review (Selection Management) --
@@ -493,221 +1352,53 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     );
   }
 
-  /// Set the duplicate resolution for a specific dive index.
-  ///
-  /// When [resolution] is [DiveDuplicateResolution.consolidate] or
-  /// [DiveDuplicateResolution.importAsNew], the dive index is added to the
-  /// selection so it participates in the import step. When [resolution] is
-  /// [DiveDuplicateResolution.skip], it is removed from the selection.
-  void setDiveResolution(int index, DiveDuplicateResolution resolution) {
-    final updatedResolutions = Map<int, DiveDuplicateResolution>.from(
-      state.diveResolutions,
-    )..[index] = resolution;
+  // -- Divers step (issue #1893) --
 
-    final currentSelection = Set<int>.from(
-      state.selectionFor(ImportEntityType.dives),
-    );
-    if (resolution == DiveDuplicateResolution.skip) {
-      currentSelection.remove(index);
-    } else {
-      currentSelection.add(index);
-    }
-
+  /// Seeds the Divers step's choices for a multi-diver payload. A mapping
+  /// already present is kept, so walking Back and Next never resets choices
+  /// the user made; a fresh parse clears it first.
+  void initDiverMapping({
+    required List<Diver> profiles,
+    required String activeDiverId,
+  }) {
+    final parsed = state.parsedPayload;
+    if (parsed == null || !parsed.needsDiverMapping) return;
+    if (state.diverMapping.isNotEmpty) return;
     state = state.copyWith(
-      diveResolutions: updatedResolutions,
-      selections: {
-        ...state.selections,
-        ImportEntityType.dives: currentSelection,
-      },
+      diverMapping: defaultDiverMapping(
+        sourceDivers: parsed.sourceDivers,
+        profiles: profiles,
+        activeDiverId: activeDiverId,
+      ),
     );
   }
 
-  // -- Step 4: Import --
-
-  /// Perform the import with current selections.
-  Future<void> performImport() async {
-    final payload = state.payload;
-    if (payload == null) return;
-
+  void setDiverTarget(String sourceKey, DiverTarget target) {
     state = state.copyWith(
-      currentStep: ImportWizardStep.importing,
-      isImporting: true,
-      clearError: true,
-    );
-
-    try {
-      final currentDiver = await _ref.read(currentDiverProvider.future);
-      if (currentDiver == null) {
-        state = state.copyWith(
-          isImporting: false,
-          error: 'Please create a diver profile before importing',
-        );
-        return;
-      }
-
-      // Partition dive selections: consolidate vs normal import.
-      final consolidateIndices = <int>{};
-      final normalDiveSelection = Set<int>.from(
-        state.selectionFor(ImportEntityType.dives),
-      );
-      for (final entry in state.diveResolutions.entries) {
-        if (entry.value == DiveDuplicateResolution.consolidate) {
-          consolidateIndices.add(entry.key);
-          normalDiveSelection.remove(entry.key);
-        }
-      }
-
-      // Convert to UDDF format for reuse of UddfEntityImporter
-      final uddfData = _toUddfResult(payload);
-      final uddfSelections = _toUddfSelections({
-        ...state.selections,
-        ImportEntityType.dives: normalDiveSelection,
-      });
-
-      final repos = ImportRepositories(
-        tripRepository: _ref.read(tripRepositoryProvider),
-        equipmentRepository: _ref.read(equipmentRepositoryProvider),
-        equipmentSetRepository: _ref.read(equipmentSetRepositoryProvider),
-        buddyRepository: _ref.read(buddyRepositoryProvider),
-        diveCenterRepository: _ref.read(diveCenterRepositoryProvider),
-        certificationRepository: _ref.read(certificationRepositoryProvider),
-        tagRepository: _ref.read(tagRepositoryProvider),
-        diveTypeRepository: _ref.read(diveTypeRepositoryProvider),
-        siteRepository: _ref.read(siteRepositoryProvider),
-        diveRepository: _ref.read(diveRepositoryProvider),
-        tankPressureRepository: _ref.read(tankPressureRepositoryProvider),
-        courseRepository: _ref.read(courseRepositoryProvider),
-      );
-
-      final settings = _ref.read(settingsProvider);
-      final resolver = DefaultTankPresetResolver(
-        repository: _ref.read(tankPresetRepositoryProvider),
-      );
-      final defaultTankPreset = await resolver.resolve(
-        settings.defaultTankPreset,
-      );
-      final importer = UddfEntityImporter(
-        defaultTankPreset: defaultTankPreset,
-        defaultStartPressure: settings.defaultStartPressure,
-        applyDefaultTankToImports: settings.applyDefaultTankToImports,
-      );
-      final result = await importer.import(
-        data: uddfData,
-        selections: uddfSelections,
-        repositories: repos,
-        diverId: currentDiver.id,
-        onProgress: (phase, current, total) {
-          state = state.copyWith(
-            importPhase: phase.name,
-            importCurrent: current,
-            importTotal: total,
-          );
-        },
-      );
-
-      // Run consolidations for dives marked with the consolidate resolution.
-      var consolidatedCount = 0;
-      if (consolidateIndices.isNotEmpty) {
-        final diveRepo = _ref.read(diveRepositoryProvider);
-        final diveItems = payload.entitiesOf(ImportEntityType.dives);
-        consolidatedCount = await performConsolidations(
-          indices: consolidateIndices,
-          diveItems: diveItems,
-          duplicateResult: state.duplicateResult,
-          diveRepository: diveRepo,
-        );
-      }
-
-      _invalidateProviders();
-
-      final counts = <ImportEntityType, int>{
-        if ((result.dives + consolidatedCount) > 0)
-          ImportEntityType.dives: result.dives + consolidatedCount,
-        if (result.sites > 0) ImportEntityType.sites: result.sites,
-        if (result.trips > 0) ImportEntityType.trips: result.trips,
-        if (result.equipment > 0) ImportEntityType.equipment: result.equipment,
-        if (result.equipmentSets > 0)
-          ImportEntityType.equipmentSets: result.equipmentSets,
-        if (result.buddies > 0) ImportEntityType.buddies: result.buddies,
-        if (result.diveCenters > 0)
-          ImportEntityType.diveCenters: result.diveCenters,
-        if (result.certifications > 0)
-          ImportEntityType.certifications: result.certifications,
-        if (result.courses > 0) ImportEntityType.courses: result.courses,
-        if (result.tags > 0) ImportEntityType.tags: result.tags,
-        if (result.diveTypes > 0) ImportEntityType.diveTypes: result.diveTypes,
-      };
-
-      state = state.copyWith(
-        currentStep: ImportWizardStep.summary,
-        isImporting: false,
-        importCounts: counts,
-      );
-    } catch (e) {
-      state = state.copyWith(isImporting: false, error: 'Import failed: $e');
-    }
-  }
-
-  // -- Adapter Helpers --
-
-  static UddfImportResult _toUddfResult(ImportPayload payload) {
-    return UddfImportResult(
-      dives: payload.entitiesOf(ImportEntityType.dives),
-      sites: payload.entitiesOf(ImportEntityType.sites),
-      trips: payload.entitiesOf(ImportEntityType.trips),
-      equipment: payload.entitiesOf(ImportEntityType.equipment),
-      buddies: payload.entitiesOf(ImportEntityType.buddies),
-      diveCenters: payload.entitiesOf(ImportEntityType.diveCenters),
-      certifications: payload.entitiesOf(ImportEntityType.certifications),
-      tags: payload.entitiesOf(ImportEntityType.tags),
-      customDiveTypes: payload.entitiesOf(ImportEntityType.diveTypes),
-      equipmentSets: payload.entitiesOf(ImportEntityType.equipmentSets),
-      courses: payload.entitiesOf(ImportEntityType.courses),
+      diverMapping: {...state.diverMapping, sourceKey: target},
     );
   }
 
-  static UddfImportSelections _toUddfSelections(
-    Map<ImportEntityType, Set<int>> sel,
-  ) {
-    return UddfImportSelections(
-      trips: sel[ImportEntityType.trips] ?? const {},
-      equipment: sel[ImportEntityType.equipment] ?? const {},
-      buddies: sel[ImportEntityType.buddies] ?? const {},
-      diveCenters: sel[ImportEntityType.diveCenters] ?? const {},
-      certifications: sel[ImportEntityType.certifications] ?? const {},
-      tags: sel[ImportEntityType.tags] ?? const {},
-      diveTypes: sel[ImportEntityType.diveTypes] ?? const {},
-      sites: sel[ImportEntityType.sites] ?? const {},
-      equipmentSets: sel[ImportEntityType.equipmentSets] ?? const {},
-      dives: sel[ImportEntityType.dives] ?? const {},
-      courses: sel[ImportEntityType.courses] ?? const {},
+  /// Splits the parsed payload across profiles per the diver mapping,
+  /// always starting from the parsed payload. A photo resolution is keyed by
+  /// media index, so it is dropped when the media list changes under it.
+  void applyDiverMapping({required String activeDiverId}) {
+    final parsed = state.parsedPayload;
+    if (parsed == null || !parsed.needsDiverMapping) return;
+    final expanded = PayloadDiverExpander.expand(
+      parsed,
+      state.diverMapping,
+      activeDiverId: activeDiverId,
     );
-  }
-
-  // -- Provider Invalidation --
-
-  void _invalidateProviders() {
-    _ref.invalidate(sitesProvider);
-    _ref.invalidate(sitesWithCountsProvider);
-    _ref.invalidate(siteListNotifierProvider);
-    _ref.invalidate(allBuddiesProvider);
-    _ref.invalidate(buddyListNotifierProvider);
-    _ref.invalidate(allEquipmentProvider);
-    _ref.invalidate(activeEquipmentProvider);
-    _ref.invalidate(retiredEquipmentProvider);
-    _ref.invalidate(serviceDueEquipmentProvider);
-    _ref.invalidate(equipmentListNotifierProvider);
-    _ref.invalidate(equipmentSetsProvider);
-    _ref.invalidate(allTripsProvider);
-    _ref.invalidate(allDiveCentersProvider);
-    _ref.invalidate(allCertificationsProvider);
-    _ref.invalidate(diveTypesProvider);
-    _ref.invalidate(tagsProvider);
-    _ref.invalidate(diveListNotifierProvider);
-    _ref.invalidate(paginatedDiveListProvider);
-    _ref.invalidate(diveStatisticsProvider);
-    _ref.invalidate(diveRecordsProvider);
-    _ref.invalidate(allBuddiesWithDiveCountProvider);
+    final mediaChanged = !const DeepCollectionEquality().equals(
+      expanded.entitiesOf(ImportEntityType.media),
+      state.payload?.entitiesOf(ImportEntityType.media),
+    );
+    state = state.copyWith(
+      sourcePayload: parsed,
+      payload: expanded,
+      clearPhotoResolution: mediaChanged,
+    );
   }
 
   /// Clear the external-load flag after the wizard has consumed it.
@@ -715,8 +1406,20 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     state = state.copyWith(wasLoadedExternally: false);
   }
 
+  @visibleForTesting
+  void debugSetFilesForTest(List<PickedImportFile> files) {
+    state = state.copyWith(
+      files: files,
+      currentStep: ImportWizardStep.sourceConfirmation,
+    );
+  }
+
   void reset() {
+    // A Garmin download still running belongs to the session being reset.
+    _garminRun++;
+    final staleTempDirs = state.zipTempDirPaths;
     state = const UniversalImportState();
+    _deleteTempDirs(staleTempDirs);
   }
 }
 
@@ -726,5 +1429,39 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
 
 final universalImportNotifierProvider =
     StateNotifierProvider<UniversalImportNotifier, UniversalImportState>((ref) {
-      return UniversalImportNotifier(ref);
+      return UniversalImportNotifier(
+        ref,
+        garminDeviceDetector: GarminDeviceDetector(
+          mtpSource: ref.read(garminMtpSourceProvider),
+        ),
+        garminDownloadHistory: ref.read(garminDownloadHistoryProvider),
+      );
     });
+
+/// Garmin dive computers currently mounted as USB drives. Empty on mobile or
+/// when none is connected; the import UI shows the Garmin option only when a
+/// device is actually present, so it stays hidden for everyone else.
+final garminDevicesProvider = FutureProvider.autoDispose<List<GarminDevice>>((
+  ref,
+) async {
+  if (!GarminDeviceDetector.isSupportedPlatform) return const [];
+  return GarminDeviceDetector(
+    mtpSource: ref.watch(garminMtpSourceProvider),
+  ).detect();
+});
+
+/// Where each Garmin's download marker is kept: on its saved computer
+/// (issue #4223).
+final garminDownloadHistoryProvider = Provider<GarminDownloadHistory>((ref) {
+  return RepositoryGarminDownloadHistory(
+    ref.watch(diveComputerRepositoryProvider),
+    diverId: () async => (await ref.read(currentDiverProvider.future))?.id,
+  );
+});
+
+/// Reads Garmin watches that connect over MTP. Windows only (issue #4223);
+/// null everywhere else, where the plugin has no MTP reader.
+final garminMtpSourceProvider = Provider<GarminMtpSource?>((ref) {
+  if (!GarminMtpSource.isSupportedPlatform) return null;
+  return PigeonGarminMtpSource();
+});

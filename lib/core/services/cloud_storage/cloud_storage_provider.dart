@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 /// Information about a file stored in cloud storage
@@ -35,9 +36,76 @@ class CloudStorageException implements Exception {
 
   const CloudStorageException(this.message, [this.cause, this.stackTrace]);
 
+  /// Whether the server refused this account: a revoked grant, a missing
+  /// scope, a wrong key. Sync and backup offer Sign in again for these alone
+  /// (issue #3811), so an outage, a quota or having no session on this device
+  /// must never set it. A type rather than text: the media stores classify by
+  /// substring on [message], and provider words must stay out of that.
+  bool get accessRefused => false;
+
+  /// User-facing message that appends the underlying [cause] when present.
+  ///
+  /// The top-level [message] is intentionally generic (e.g. "Could not reach
+  /// S3 endpoint ..."); the [cause] carries the actionable transport detail
+  /// (TLS handshake / certificate / socket errors). Unlike [toString] this
+  /// omits the class-name prefix, so it is safe to show directly in a
+  /// snackbar.
+  String get displayMessage => '$message${_causeSuffix(cause)}';
+
   @override
-  String toString() =>
-      'CloudStorageException: $message${cause != null ? ' ($cause)' : ''}';
+  String toString() => 'CloudStorageException: $message${_causeSuffix(cause)}';
+
+  /// `' (<cause>)'` for a non-null [cause], else `''`.
+  ///
+  /// Prefers the cause's own (informative) `toString` -- which carries the
+  /// actionable detail like `CERTIFICATE_VERIFY_FAILED` -- but falls back to
+  /// [Error.safeToString] if that throws, so an error-display path can never
+  /// itself throw. (A bare [Error.safeToString] is not used because it
+  /// renders exceptions as "Instance of '...'", discarding the detail.)
+  static String _causeSuffix(Object? cause) {
+    if (cause == null) return '';
+    try {
+      return ' ($cause)';
+    } catch (_) {
+      return ' (${Error.safeToString(cause)})';
+    }
+  }
+}
+
+/// A [CloudStorageException] raised because the server refused the account.
+class CloudAccessRefusedException extends CloudStorageException {
+  const CloudAccessRefusedException(
+    super.message, [
+    super.cause,
+    super.stackTrace,
+  ]);
+
+  @override
+  bool get accessRefused => true;
+}
+
+/// A sign-in that came back as an account other than the one expected. Raised
+/// before anything of that account is kept (issue #3811): a device holds one
+/// Google and one Dropbox account, and the provider id does not say which, so
+/// syncing on would write this library into someone's other Drive.
+class CloudAccountMismatchException extends CloudStorageException {
+  const CloudAccountMismatchException(this.signedInAs)
+    : super('Signed in to a different account');
+
+  final String signedInAs;
+}
+
+/// Whether [error] is the server refusing the account.
+bool isAccessRefused(Object? error) =>
+    error is CloudStorageException && error.accessRefused;
+
+/// Whether [actual] is the account [expected] names. With nothing to compare
+/// on either side, it is taken to be: a row from before identities were
+/// recorded, or a grant that names no account.
+bool isSameAccount(String? expected, String? actual) {
+  final wanted = expected?.trim().toLowerCase() ?? '';
+  final got = actual?.trim().toLowerCase() ?? '';
+  return wanted.isEmpty || got.isEmpty || wanted == got;
 }
 
 /// Abstract interface for cloud storage providers (iCloud, Google Drive, etc.)
@@ -96,6 +164,25 @@ abstract class CloudStorageProvider {
   /// Throws [CloudStorageException] if the file doesn't exist or download fails.
   Future<Uint8List> downloadFile(String fileId);
 
+  /// Upload a local file to cloud storage.
+  ///
+  /// The path-based twin of [uploadFile] for large artifacts (database
+  /// backups): providers override it to stream from disk so the whole file is
+  /// never resident in memory. [CloudStorageProviderMixin] supplies a
+  /// buffering fallback that delegates to [uploadFile].
+  Future<UploadResult> uploadFileFromPath(
+    String sourcePath,
+    String filename, {
+    String? folderId,
+  });
+
+  /// Download a file from cloud storage straight to [destinationPath].
+  ///
+  /// The path-based twin of [downloadFile]; same memory rationale as
+  /// [uploadFileFromPath]. Implementations must not leave a partial file at
+  /// [destinationPath] on failure.
+  Future<void> downloadToFile(String fileId, String destinationPath);
+
   /// Get information about a file
   ///
   /// [fileId] The ID of the file
@@ -141,9 +228,51 @@ abstract class CloudStorageProvider {
   Future<String> getOrCreateSyncFolder();
 }
 
+/// A provider whose [CloudStorageProvider.createFolder] writes (WebDAV's
+/// MKCOL) and that can look a folder up without creating it. Read-only
+/// paths, such as measuring a shared library, ask this instead.
+abstract interface class FolderLookup {
+  /// The id [CloudStorageProvider.createFolder] would return for
+  /// [folderName], or null when that folder does not exist. Creates nothing.
+  Future<String?> findFolder(String folderName, {String? parentFolderId});
+}
+
 /// Mixin providing common functionality for cloud storage providers
-mixin CloudStorageProviderMixin {
+mixin CloudStorageProviderMixin implements CloudStorageProvider {
   static const String syncFolderName = 'Submersion Sync';
+
+  /// Buffering fallback: reads the source into memory and delegates to
+  /// [uploadFile]. Providers with a streaming transport override this.
+  @override
+  Future<UploadResult> uploadFileFromPath(
+    String sourcePath,
+    String filename, {
+    String? folderId,
+  }) async {
+    final data = await File(sourcePath).readAsBytes();
+    return uploadFile(data, filename, folderId: folderId);
+  }
+
+  /// Buffering fallback: downloads into memory via [downloadFile] and spills
+  /// to [destinationPath]. Providers with a streaming transport override
+  /// this. Deletes a partial destination on failure so callers never see a
+  /// truncated file.
+  @override
+  Future<void> downloadToFile(String fileId, String destinationPath) async {
+    final bytes = await downloadFile(fileId);
+    final dest = File(destinationPath);
+    try {
+      await dest.writeAsBytes(bytes, flush: true);
+    } catch (_) {
+      try {
+        if (await dest.exists()) await dest.delete();
+      } catch (_) {
+        // Best-effort cleanup; the original error is the one that matters.
+      }
+      rethrow;
+    }
+  }
+
   static const String syncFileStem = 'submersion_sync';
   static const String canonicalSyncFileName = '$syncFileStem.json';
   static const String syncFilePrefix = '${syncFileStem}_';

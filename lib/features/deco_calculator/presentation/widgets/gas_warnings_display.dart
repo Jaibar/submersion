@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 import 'package:submersion/features/deco_calculator/presentation/providers/deco_calculator_providers.dart';
 
@@ -16,8 +17,7 @@ class GasWarningsDisplay extends ConsumerWidget {
     final ppO2 = ref.watch(calcPpO2Provider);
     final mod = ref.watch(calcMODProvider);
     final end = ref.watch(calcENDProvider);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
@@ -65,7 +65,11 @@ class GasWarningsDisplay extends ConsumerWidget {
                   child: _buildMetric(
                     context,
                     label: 'ppO₂',
-                    value: units.formatPressure(ppO2),
+                    // ppO2 is always shown in bar, never the diver's tank
+                    // pressure unit, matching the planner's ppO2 warnings.
+                    value:
+                        '${formatFixedForDisplay(ppO2, 2)} '
+                        '${PressureUnit.bar.symbol}',
                     status: ppO2Status,
                     tooltip: _getPpO2Tooltip(context, ppO2),
                   ),
@@ -77,7 +81,7 @@ class GasWarningsDisplay extends ConsumerWidget {
                   child: _buildMetric(
                     context,
                     label: 'MOD',
-                    value: units.formatDepth(mod),
+                    value: units.formatDepthFloor(mod),
                     status: modStatus,
                     tooltip: modStatus == WarningStatus.ok
                         ? context.l10n.decoCalculator_modSafe

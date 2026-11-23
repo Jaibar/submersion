@@ -7,14 +7,16 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
 import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/editing/buddy_new_sitting.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
-import 'package:submersion/features/buddies/presentation/pages/buddy_edit_page.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_list_page.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
@@ -22,6 +24,7 @@ import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.d
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 
 // ---------------------------------------------------------------------------
 // Mock notifiers
@@ -71,6 +74,10 @@ Widget _buildTestWidget({
             builder: (context, state) => const Scaffold(body: Text('new')),
           ),
           GoRoute(
+            path: 'swap',
+            builder: (context, state) => const Scaffold(body: Text('SWAP')),
+          ),
+          GoRoute(
             path: ':id',
             builder: (context, state) => const Scaffold(body: Text('detail')),
           ),
@@ -107,7 +114,11 @@ void main() {
     }) {
       return [
         sharedPreferencesProvider.overrideWithValue(prefs),
-        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        // The view mode is read from the diver's saved settings (#3748).
+        settingsProvider.overrideWith(
+          (ref) =>
+              MockSettingsNotifier(AppSettings(buddyListViewMode: viewMode)),
+        ),
         currentDiverIdProvider.overrideWith(
           (ref) => MockCurrentDiverIdNotifier(),
         ),
@@ -117,7 +128,6 @@ void main() {
         buddyListNotifierProvider.overrideWith(
           (ref) => _MockBuddyListNotifier(),
         ),
-        buddyListViewModeProvider.overrideWith((ref) => viewMode),
         buddyTableConfigProvider.overrideWith(
           (ref) => _TestBuddyTableConfigNotifier(),
         ),
@@ -140,6 +150,35 @@ void main() {
       expect(find.byType(MasterDetailScaffold), findsNothing);
     });
 
+    testWidgets('the swap action opens the swap screen (#3728)', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(400, 800);
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(_buildTestWidget(overrides: baseOverrides()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Swap with a buddy'));
+      await tester.pumpAndSettle();
+      expect(find.text('SWAP'), findsOneWidget);
+    });
+
+    testWidgets('table mode also has the swap action', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        _buildTestWidget(
+          overrides: baseOverrides(viewMode: ListViewMode.table),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Swap with a buddy'), findsOneWidget);
+    });
+
     testWidgets('renders TableModeLayout in table mode', (tester) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(1200, 800);
@@ -156,6 +195,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TableModeLayout), findsOneWidget);
+      // Table mode titles the list with its entry count (#2669).
+      expect(
+        tester
+            .widget<TableModeLayout>(find.byType(TableModeLayout))
+            .appBarSubtitle,
+        isNotNull,
+      );
       expect(find.byType(MasterDetailScaffold), findsNothing);
     });
 
@@ -295,7 +341,7 @@ void main() {
       await tester.tap(find.byIcon(Icons.search));
       await tester.pumpAndSettle();
 
-      // The search delegate should open, showing a search bar
+      // The search row opens under the app bar
       expect(find.byType(TextField), findsOneWidget);
     });
 
@@ -345,6 +391,94 @@ void main() {
       expect(find.text('Detailed'), findsOneWidget);
       expect(find.text('Compact'), findsOneWidget);
       expect(find.text('Table'), findsOneWidget);
+    });
+
+    // Table mode has no app bar inside the list, so "Select items" lives in
+    // the page header's overflow menu and drives the list through the
+    // controller the page hands it (issue #2775).
+    group('table mode "Select items"', () {
+      Future<void> pumpTablePage(WidgetTester tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          _buildTestWidget(
+            overrides: baseOverrides(viewMode: ListViewMode.table),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shows no separate Select strip above the table', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+        expect(find.byIcon(Icons.checklist), findsNothing);
+      });
+
+      testWidgets('is the first overflow entry and enters selection', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        await tester.tap(find.byIcon(Icons.more_vert));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+          lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+        );
+
+        await tester.tap(find.byKey(selectItemsMenuKey));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+        expect(find.text('0 selected'), findsOneWidget);
+      });
+
+      testWidgets('leaves the entry out while selecting', (tester) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+
+        // The header's overflow, not the selection bar's.
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byIcon(Icons.more_vert),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Detailed'), findsOneWidget);
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+      });
+
+      testWidgets('selection does not outlive leaving table mode', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(BuddyListPage)),
+        );
+        container
+            .read(settingsProvider.notifier)
+            .setBuddyListViewMode(ListViewMode.detailed);
+        await tester.pumpAndSettle();
+        container
+            .read(settingsProvider.notifier)
+            .setBuddyListViewMode(ListViewMode.table);
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      });
     });
 
     testWidgets('table mode popup menu changes view mode', (tester) async {
@@ -522,8 +656,8 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      // The create builder closure body was invoked, creating BuddyEditPage
-      expect(find.byType(BuddyEditPage), findsOneWidget);
+      // The create builder closure body was invoked, creating BuddyDetailPage
+      expect(find.byType(BuddyDetailPage), findsOneWidget);
     });
 
     testWidgets('table mode edit builder invoked via edit query param', (
@@ -553,8 +687,80 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      // The edit builder closure body was invoked, creating BuddyEditPage
-      expect(find.byType(BuddyEditPage), findsOneWidget);
+      // The edit builder closure body was invoked, creating BuddyDetailPage
+      expect(find.byType(BuddyDetailPage), findsOneWidget);
     });
+  });
+
+  // A new buddy opens on the buddy page behind the phase 3 switch (issue
+  // #4527, phase 3, plan 11).
+  testWidgets("the pane's new buddy is the page", (tester) async {
+    void onSaved(String id) {}
+    void onCancel() {}
+    late BuildContext context;
+    await tester.pumpWidget(
+      Builder(
+        builder: (c) {
+          context = c;
+          return const SizedBox.shrink();
+        },
+      ),
+    );
+    final page = newBuddyPane(context, onSaved, onCancel) as BuddyDetailPage;
+    expect(page.embedded, isTrue);
+    expect(page.newBuddy, isNotNull);
+    expect(page.onCreated, same(onSaved));
+    expect(page.onCreateCancelled, same(onCancel));
+  });
+
+  testWidgets('Add on a phone opens the new buddy once created', (
+    tester,
+  ) async {
+    final created = Buddy(
+      id: 'n1',
+      name: 'Kai',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+    final router = GoRouter(
+      initialLocation: '/buddies',
+      routes: [
+        GoRoute(
+          path: '/buddies',
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () =>
+                  openNewBuddy(context, seed: const NewBuddySeed(name: 'Kai')),
+              child: const Text('add'),
+            ),
+          ),
+          routes: [
+            GoRoute(
+              path: 'new',
+              builder: (context, state) => Scaffold(
+                body: TextButton(
+                  // The page pops the buddy itself.
+                  onPressed: () => context.pop(created),
+                  child: Text('NEW ${(state.extra as Map?)?['name']}'),
+                ),
+              ),
+            ),
+            GoRoute(
+              path: ':id',
+              builder: (_, state) =>
+                  Text('BUDDY ${state.pathParameters['id']}'),
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('add'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('NEW Kai'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('BUDDY n1'), findsOneWidget);
   });
 }

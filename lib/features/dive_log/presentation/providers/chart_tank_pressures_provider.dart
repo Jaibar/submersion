@@ -1,0 +1,128 @@
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/data/services/estimated_tank_pressure_synthesizer.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show TankPressurePoint;
+import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_data_retention.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+/// The tank pressure curves the profile chart surfaces draw.
+///
+/// A module of its own: [activeSourceTankPressuresProvider] needs
+/// `activeSourceProfileProvider`, which already imports `dive_providers`,
+/// so neither of these can live there without an import cycle.
+
+/// The per-tank pressure curves the profile chart draws for [diveId]: the
+/// active source's computer's own series on a multi-source dive, the plain
+/// [tankPressuresProvider] union otherwise.
+///
+/// Tank-pressure twin of [activeSourceProfileProvider]. Two computers paired
+/// to one transmitter both log the same cylinder, and consolidation files
+/// both series under one tank because the tanks match on gas mix. The
+/// unscoped read interleaves them, and since the two computers sample on
+/// offset seconds the single line alternates between them every sample: a
+/// fuzzy band wherever they disagree by a fraction of a bar (#543's
+/// pressure counterpart). Chart surfaces read this. SAC and the buoyancy
+/// twins read [tankPressuresProvider], which takes the primary source for
+/// any stretch two sources recorded (#2440); only the exports keep every
+/// reading the dive holds.
+final activeSourceTankPressuresProvider = FutureProvider.autoDispose
+    .family<Map<String, List<TankPressurePoint>>, String>((ref, diveId) {
+      final active = ref.watch(activeSourceProfileProvider(diveId));
+      if (active == null) {
+        return ref.watch(tankPressuresProvider(diveId).future);
+      }
+      final repository = ref.watch(tankPressureRepositoryProvider);
+      // Same tick as tankPressuresProvider: tank_pressure_series writes.
+      ref.invalidateSelfWhen(
+        ref.watch(diveRepositoryProvider).watchAnalysisInputChanges(),
+      );
+      return repository.getTankPressuresForComputer(
+        diveId,
+        active.computerId,
+        sourceId: active.sourceId,
+      );
+    });
+
+/// Real per-tank pressures augmented with in-memory linear estimates for tanks
+/// that have start/end pressures but no transmitter data. Chart-only; the
+/// estimates are never persisted, so SAC analysis and exports (which read the
+/// repository directly) still see real measured data only.
+final estimatedTankPressuresProvider = FutureProvider.autoDispose
+    .family<EstimatedTankPressures, String>((ref, diveId) async {
+      retainDiveData(ref);
+      // Start the independent fetches concurrently to avoid a request waterfall
+      // on the chart load path.
+      final realFuture = ref.watch(
+        activeSourceTankPressuresProvider(diveId).future,
+      );
+      final diveFuture = ref.watch(diveProvider(diveId).future);
+      final switchesFuture = ref.watch(gasSwitchesProvider(diveId).future);
+      // The series the chart draws, and so the one its gas strip reads: its
+      // computer's switches and its own time bounds. Another computer's
+      // record of a switch must not start this one's estimated drop, nor its
+      // recording's length stretch it (#4300). Null is one series of every
+      // source, drawn from dive.profile.
+      final active = ref.watch(activeSourceProfileProvider(diveId));
+      // Read synchronously, before the first await, so the dependency is
+      // registered while the provider is certainly still alive.
+      final showEstimates = ref.watch(
+        settingsProvider.select((s) => s.defaultShowEstimatedTankPressure),
+      );
+      final real = await realFuture;
+      final dive = await diveFuture;
+      if (dive == null) {
+        return EstimatedTankPressures(real, const <String>{});
+      }
+      // A gauge (bottom-timer) dive models no gas at all, so a synthesized
+      // pressure trace would be fabricated rather than measured (issue #731).
+      // Real transmitter samples, if the dive has any, still pass through.
+      if (dive.isGauge) {
+        return EstimatedTankPressures(real, const <String>{});
+      }
+      // The diver can switch estimates off entirely (issue #731). Gating here
+      // rather than at the chart means the series never exists, so no legend
+      // chip, tooltip row, or "(est.)" label survives anywhere.
+      if (!showEstimates) {
+        return EstimatedTankPressures(real, const <String>{});
+      }
+      final inputs = computerGasInputs(
+        dive,
+        gasSwitches: await switchesFuture,
+        computerId: active?.computerId,
+      );
+      final drawn = active?.points ?? dive.profile;
+      return synthesizeEstimatedTankPressures(
+        existing: real,
+        tanks: inputs.tanks,
+        gasSwitches: inputs.gasSwitches,
+        onLoop: dive.isRebreather,
+        diveDurationSeconds: drawn.isEmpty ? 0 : drawn.last.timestamp,
+        firstSampleSeconds: drawn.isEmpty ? 0 : drawn.first.timestamp,
+      );
+    });
+
+/// The pressure lines the profile chart draws: [estimated] (the measured
+/// series with their estimates) once it has loaded, else the [measured]
+/// series alone, so the chart still draws what was recorded while the
+/// estimates load or if they fail. Null when neither has loaded.
+EstimatedTankPressures? chartTankSeries(
+  EstimatedTankPressures? estimated,
+  Map<String, List<TankPressurePoint>>? measured,
+) =>
+    estimated ??
+    (measured == null ? null : EstimatedTankPressures(measured, const {}));
+
+/// [chartTankSeries] for [diveId]. Every profile chart and the Cylinders
+/// card, which follows the chart's cursor (issue #4291), read their lines
+/// through this, so they always draw the same ones.
+EstimatedTankPressures? watchChartTankSeries(WidgetRef ref, String diveId) =>
+    chartTankSeries(
+      ref.watch(estimatedTankPressuresProvider(diveId).select((a) => a.value)),
+      ref.watch(
+        activeSourceTankPressuresProvider(diveId).select((a) => a.value),
+      ),
+    );

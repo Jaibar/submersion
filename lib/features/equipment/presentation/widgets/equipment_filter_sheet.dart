@@ -1,0 +1,492 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/features/equipment/presentation/providers/equipment_share_providers.dart';
+import 'package:submersion/shared/widgets/sheet_messenger_scope.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/domain/query_node.dart' show QueryNode;
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_attr_condition.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_filter_state.dart';
+import 'package:submersion/features/equipment/domain/models/service_due_filter_display.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_choice_attribute_filter.dart';
+import 'package:submersion/features/equipment/query/equipment_filter_query.dart';
+import 'package:submersion/features/equipment/query/equipment_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/query_sheet_section.dart';
+import 'package:submersion/features/settings/presentation/pages/equipment_default_view_page.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_type_icon.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_location_filter_section.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
+
+/// Open the equipment filter panel.
+///
+/// Every layout routes through here, so the three top-bar icons (phone app
+/// bar, master-detail compact bar, table mode) cannot drift apart.
+Future<void> showEquipmentFilterSheet(BuildContext context, WidgetRef ref) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (_) => EquipmentFilterSheet(ref: ref),
+  );
+}
+
+/// Bottom sheet for filtering the equipment list by status and category.
+///
+/// Edits a local draft so nothing moves under the diver while they choose;
+/// [equipmentFilterProvider] is written only on Apply, the same contract the
+/// dive and site filter sheets use.
+class EquipmentFilterSheet extends ConsumerStatefulWidget {
+  final WidgetRef ref;
+
+  const EquipmentFilterSheet({super.key, required this.ref});
+
+  @override
+  ConsumerState<EquipmentFilterSheet> createState() =>
+      _EquipmentFilterSheetState();
+}
+
+/// The widget-key suffix for a severity's choice chip. [ServiceDueFilter.any]
+/// keeps the key the combined Service Due chip has always had.
+String _severityKey(ServiceDueFilter severity) => switch (severity) {
+  ServiceDueFilter.any => 'serviceDue',
+  ServiceDueFilter.overdue => 'serviceOverdue',
+  ServiceDueFilter.dueSoon => 'serviceDueSoon',
+};
+
+class _EquipmentFilterSheetState extends ConsumerState<EquipmentFilterSheet> {
+  // Local draft, mirroring EquipmentFilterState.
+  EquipmentStatus? _status;
+  bool _allStatuses = false;
+  ServiceDueFilter? _serviceDue;
+  EquipmentType? _type;
+  List<EquipmentAttrCondition> _attrConditions = const [];
+  Set<String> _tagIds = const {};
+  Set<String> _locationNames = const {};
+  bool _noLocation = false;
+  EquipmentOwnerFilter _owner = EquipmentOwnerFilter.all;
+
+  /// The advanced part (#2365): typed, built or applied from a saved query.
+  QueryNode? _query;
+
+  @override
+  void initState() {
+    super.initState();
+    final filter = widget.ref.read(equipmentFilterProvider);
+    _status = filter.status;
+    _allStatuses = filter.allStatuses;
+    _serviceDue = filter.serviceDue;
+    _type = filter.type;
+    _attrConditions = filter.attrConditions;
+    _tagIds = filter.tagIds;
+    _locationNames = filter.locationNames;
+    _noLocation = filter.noLocation;
+    _owner = filter.owner;
+    _query = filter.query;
+  }
+
+  /// Conditions belong to a category, so picking another one drops them.
+  void _selectType(EquipmentType? type) {
+    setState(() {
+      if (type != _type) _attrConditions = const [];
+      _type = type;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, scrollController) {
+        return Container(
+          decoration: BoxDecoration(
+            color: colorScheme.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        context.l10n.equipment_filter_title,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      TextButton(
+                        onPressed: _clearAll,
+                        child: Text(context.l10n.equipment_filter_clearAll),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(),
+                Expanded(
+                  child: SheetMessengerScope(
+                    child: ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        QuerySheetSection(
+                          subject: QuerySubject.equipment,
+                          root: equipmentQueryEntity,
+                          value: _query,
+                          onChanged: (node) => setState(() => _query = node),
+                          saveNode: _draft().toSavedQuery(),
+                          onLoad: _loadSaved,
+                        ),
+                        const SizedBox(height: 24),
+                        _buildStatusSection(),
+                        const SizedBox(height: 24),
+                        _buildOwnerSection(),
+                        _buildCategorySection(),
+                        _buildTagSection(),
+                        EquipmentLocationFilterSection(
+                          locationNames: _locationNames,
+                          noLocation: _noLocation,
+                          onChanged: (ids, none) => setState(() {
+                            _locationNames = ids;
+                            _noLocation = none;
+                          }),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Outside the ListView: as lazy children the actions were
+                // never built on desktop and looked clipped (#989).
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surface,
+                    boxShadow: [
+                      BoxShadow(
+                        color: colorScheme.shadow.withValues(alpha: 0.1),
+                        blurRadius: 4,
+                        offset: const Offset(0, -2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Text(context.l10n.equipment_filter_cancel),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: FilledButton(
+                          key: const ValueKey('equipment_filter_apply'),
+                          onPressed: _applyFilters,
+                          child: Text(context.l10n.equipment_filter_apply),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// The status axis: a single choice, so the chips behave like radio buttons
+  /// -- the list can only read one provider.
+  Widget _buildStatusSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                context.l10n.equipment_filter_section_status,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            // Opens over the panel, which keeps its draft; the list follows
+            // the new default as soon as it is saved (#2628).
+            TextButton(
+              key: const ValueKey('equipment_filter_editDefault'),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const EquipmentDefaultViewPage(),
+                ),
+              ),
+              child: Text(context.l10n.equipment_filter_editDefault),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            // The default view: the diver's chosen statuses (#636, #2628).
+            ChoiceChip(
+              key: const ValueKey('equipment_filter_status_current'),
+              label: Text(context.l10n.equipment_list_filterCurrent),
+              selected: !_allStatuses && _status == null && _serviceDue == null,
+              onSelected: (_) => setState(() {
+                _status = null;
+                _allStatuses = false;
+                _serviceDue = null;
+              }),
+            ),
+            // Every status, retired and sold included (#2590).
+            ChoiceChip(
+              key: const ValueKey('equipment_filter_status_all'),
+              label: Text(context.l10n.equipment_list_filterAll),
+              selected: _allStatuses,
+              onSelected: (_) => setState(() {
+                _status = null;
+                _allStatuses = true;
+                _serviceDue = null;
+              }),
+            ),
+            // The severities are the states the home strip's service chips
+            // seed, so the diver can reach and re-select them by hand.
+            for (final severity in ServiceDueFilter.values)
+              ChoiceChip(
+                key: ValueKey(
+                  'equipment_filter_status_${_severityKey(severity)}',
+                ),
+                label: Text(severity.localizedName(context.l10n)),
+                selected: _serviceDue == severity,
+                onSelected: (selected) => setState(() {
+                  _serviceDue = selected ? severity : null;
+                  if (selected) {
+                    _status = null;
+                    _allStatuses = false;
+                  }
+                }),
+              ),
+            // needsService is excluded: the computed Service Due choice above
+            // is what divers actually mean by it.
+            for (final status in EquipmentStatus.values.where(
+              (s) => s != EquipmentStatus.needsService,
+            ))
+              ChoiceChip(
+                key: ValueKey('equipment_filter_status_${status.name}'),
+                label: Text(status.localizedName(context.l10n)),
+                selected: _status == status,
+                onSelected: (selected) => setState(() {
+                  _status = selected ? status : null;
+                  if (selected) {
+                    _serviceDue = null;
+                    _allStatuses = false;
+                  }
+                }),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// The category axis (#1274). Only categories the diver owns are offered,
+  /// plus the current selection even if the gear behind it is gone, so the
+  /// filter is always clearable from here.
+  Widget _buildCategorySection() {
+    final owned = ref.watch(ownedEquipmentTypesProvider);
+    final types = EquipmentType.values
+        .where((t) => owned.contains(t) || t == _type)
+        .sortedByLocalizedName(context.l10n);
+
+    if (types.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          context.l10n.equipment_filter_section_category,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            ChoiceChip(
+              key: const ValueKey('equipment_filter_type_all'),
+              label: Text(context.l10n.equipment_list_typeFilterAll),
+              selected: _type == null,
+              onSelected: (_) => _selectType(null),
+            ),
+            for (final type in types)
+              ChoiceChip(
+                key: ValueKey('equipment_filter_type_${type.name}'),
+                avatar: Icon(equipmentTypeIcon(type), size: 18),
+                label: Text(type.localizedName(context.l10n)),
+                selected: _type == type,
+                onSelected: (selected) => _selectType(selected ? type : null),
+              ),
+          ],
+        ),
+        // The picked category's choice fields (#1805), e.g. Hose type.
+        if (_type case final selected?)
+          EquipmentChoiceAttributeFilter(
+            type: selected,
+            conditions: _attrConditions,
+            onChanged: (next) => setState(() => _attrConditions = next),
+          ),
+      ],
+    );
+  }
+
+  /// Equipment tags (issue #1942), any-of. Offers every equipment tag plus
+  /// any tag already selected, so a filter on a tag that has since lost its
+  /// equipment scope is still clearable from here.
+  Widget _buildTagSection() {
+    final tags = (ref.watch(tagsProvider).value ?? const <Tag>[])
+        .where((t) => t.appliesTo(TagScope.equipment) || _tagIds.contains(t.id))
+        .toList();
+    if (tags.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            context.l10n.equipment_filter_section_tags,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final tag in tags)
+                FilterChip(
+                  key: ValueKey('equipment_filter_tag_${tag.id}'),
+                  avatar: CircleAvatar(backgroundColor: tag.color, radius: 6),
+                  label: Text(tag.name),
+                  selected: _tagIds.contains(tag.id),
+                  onSelected: (selected) => setState(() {
+                    _tagIds = selected
+                        ? {..._tagIds, tag.id}
+                        : _tagIds.where((id) => id != tag.id).toSet();
+                  }),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Clears the draft only; the list stays as it is until Apply.
+  void _clearAll() {
+    setState(() {
+      _status = null;
+      _allStatuses = false;
+      _serviceDue = null;
+      _type = null;
+      _attrConditions = const [];
+      _tagIds = const {};
+      _locationNames = const {};
+      _noLocation = false;
+      _owner = EquipmentOwnerFilter.all;
+      _query = null;
+    });
+  }
+
+  /// A saved search is the whole search (#2989, spec 5.4): the controls
+  /// return to the default view rather than be ANDed with it. One naming
+  /// the status shows every status, so its conditions decide. Whose gear to
+  /// show is the diver's view, never saved, so it stays.
+  void _loadSaved(QueryNode? node) => setState(() {
+    _status = null;
+    _allStatuses = node != null && constrainsEquipmentStatus(node);
+    _serviceDue = null;
+    _type = null;
+    _attrConditions = const [];
+    _tagIds = const {};
+    _query = node;
+  });
+
+  /// The filter as the sheet shows it: what Apply writes and Save stores.
+  EquipmentFilterState _draft() => EquipmentFilterState(
+    status: _status,
+    allStatuses: _allStatuses,
+    serviceDue: _serviceDue,
+    type: _type,
+    attrConditions: _attrConditions,
+    tagIds: _tagIds,
+    locationNames: _locationNames,
+    noLocation: _noLocation,
+    owner: _owner,
+    query: _query,
+  );
+
+  void _applyFilters() {
+    widget.ref.read(equipmentFilterProvider.notifier).state = _draft();
+    Navigator.of(context).pop();
+  }
+
+  /// Whose gear to show (issue #2046), offered only with two or more
+  /// profiles.
+  Widget _buildOwnerSection() {
+    if (!ref.watch(hasMultipleDiversProvider)) {
+      return const SizedBox.shrink();
+    }
+    final l10n = context.l10n;
+    final labels = {
+      EquipmentOwnerFilter.all: l10n.equipment_filter_owner_all,
+      EquipmentOwnerFilter.mine: l10n.equipment_filter_owner_mine,
+      EquipmentOwnerFilter.sharedWithMe: l10n.equipment_sharedWithMe,
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            l10n.equipment_filter_section_owner,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final entry in labels.entries)
+                ChoiceChip(
+                  key: ValueKey('equipment_filter_owner_${entry.key.name}'),
+                  label: Text(entry.value),
+                  selected: _owner == entry.key,
+                  onSelected: (_) => setState(() => _owner = entry.key),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

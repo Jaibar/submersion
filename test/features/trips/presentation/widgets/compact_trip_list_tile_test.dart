@@ -1,15 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/widgets/compact_trip_list_tile.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
+import '../../../../helpers/mock_providers.dart';
 import '../../../../helpers/test_app.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
 
 TripWithStats _makeTrip({
   String name = 'Test Trip',
   int diveCount = 5,
-  int totalBottomTime = 0,
+  int totalRuntime = 0,
 }) {
   final now = DateTime(2025, 6, 1);
   return TripWithStats(
@@ -23,15 +27,24 @@ TripWithStats _makeTrip({
       updatedAt: now,
     ),
     diveCount: diveCount,
-    totalBottomTime: totalBottomTime,
+    totalRuntime: totalRuntime,
   );
 }
+
+// The tile watches settingsProvider for the diver's date format. The real
+// notifier reaches for DiverSettingsRepository and a DatabaseService this
+// harness never starts, and its constructor load is unlistened, so a failure
+// would escape to the zone and fail whichever test is running at the time.
+List<dynamic> _settingsOverrides() => [
+  settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+];
 
 void main() {
   group('CompactTripListTile', () {
     testWidgets('renders trip name and date range', (tester) async {
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
             tripWithStats: _makeTrip(name: 'Palau Adventure'),
             onTap: () {},
@@ -47,6 +60,7 @@ void main() {
     testWidgets('renders dive count', (tester) async {
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
             tripWithStats: _makeTrip(diveCount: 12),
             onTap: () {},
@@ -60,9 +74,10 @@ void main() {
     testWidgets('renders bottom time when non-zero', (tester) async {
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
             // 3600 seconds = 1h 0m
-            tripWithStats: _makeTrip(totalBottomTime: 3600),
+            tripWithStats: _makeTrip(totalRuntime: 3600),
             onTap: () {},
           ),
         ),
@@ -75,8 +90,9 @@ void main() {
     testWidgets('hides bottom time when zero', (tester) async {
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
-            tripWithStats: _makeTrip(totalBottomTime: 0),
+            tripWithStats: _makeTrip(totalRuntime: 0),
             onTap: () {},
           ),
         ),
@@ -88,6 +104,7 @@ void main() {
     testWidgets('shows selected color when isSelected is true', (tester) async {
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
             tripWithStats: _makeTrip(),
             isSelected: true,
@@ -104,6 +121,7 @@ void main() {
       var tapped = false;
       await tester.pumpWidget(
         testApp(
+          overrides: _settingsOverrides(),
           child: CompactTripListTile(
             tripWithStats: _makeTrip(),
             onTap: () => tapped = true,
@@ -114,5 +132,22 @@ void main() {
       await tester.tap(find.byType(InkWell).first);
       expect(tapped, isTrue);
     });
+  });
+
+  testWidgets('chevron ends one card padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: _settingsOverrides(),
+        child: CompactTripListTile(tripWithStats: _makeTrip(), onTap: () {}),
+      ),
+    );
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: recordCardBounds(tester),
+      padding: kRecordCardCompactPadding,
+    );
   });
 }

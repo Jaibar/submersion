@@ -1,7 +1,43 @@
 import 'package:equatable/equatable.dart';
 import 'package:flutter/material.dart';
 
-/// Tag entity for organizing dives
+import 'package:submersion/core/database/tag_scope_tables.dart';
+import 'package:submersion/features/tags/domain/tag_palette.dart';
+
+/// Where a tag is offered (issues #1765, #1942, #1970). A tag applies to at
+/// least one. Member order follows [tagScopeTables], which is the display order.
+enum TagScope {
+  dives,
+  sites,
+  equipment,
+  media,
+  documents;
+
+  /// Every scope: where a tag the user creates is offered, so it can be
+  /// reused on dives, sites, media and the rest alike (issue #4407).
+  /// Narrowing it is a choice made in Manage Tags. A constant, so it can be
+  /// a default parameter; a test keeps it equal to [values], so a new scope
+  /// must be added here too.
+  static const Set<TagScope> everywhere = {
+    dives,
+    sites,
+    equipment,
+    media,
+    documents,
+  };
+
+  /// Where this scope stores its flag and its links.
+  TagScopeTable get table => switch (this) {
+    TagScope.dives => diveTagScopeTable,
+    TagScope.sites => siteTagScopeTable,
+    TagScope.equipment => equipmentTagScopeTable,
+    TagScope.media => mediaTagScopeTable,
+    TagScope.documents => documentTagScopeTable,
+  };
+}
+
+/// Tag entity for organizing dives, dive sites, equipment, media and
+/// documents
 class Tag extends Equatable {
   final String id;
   final String? diverId;
@@ -10,6 +46,11 @@ class Tag extends Equatable {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// Where the tag is offered (issues #1765, #1942, #1970). Never empty once
+  /// stored:
+  /// TagRepository rejects a tag with no scope. Treat as read-only.
+  final Set<TagScope> scopes;
+
   const Tag({
     required this.id,
     this.diverId,
@@ -17,27 +58,26 @@ class Tag extends Equatable {
     this.colorHex,
     required this.createdAt,
     required this.updatedAt,
+    // A tag built without scopes is offered everywhere, as any new tag is
+    // (issue #4407).
+    this.scopes = TagScope.everywhere,
   });
 
-  /// Get the color as a Flutter Color object
-  Color get color {
-    if (colorHex == null || colorHex!.isEmpty) {
-      return Colors.blue; // Default color
-    }
-    try {
-      final hex = colorHex!.replaceFirst('#', '');
-      return Color(int.parse('FF$hex', radix: 16));
-    } catch (_) {
-      return Colors.blue;
-    }
-  }
+  /// The colour the tag is drawn in. A tag with no usable colour (one an
+  /// import created, say) is drawn as the palette Blue (issue #4384).
+  Color get color => drawnTagColor(colorHex);
 
-  /// Create a new tag with a default color
+  /// Whether the tag is offered where [scope] is.
+  bool appliesTo(TagScope scope) => scopes.contains(scope);
+
+  /// Create a new tag with a default color, offered in [scopes]: everywhere
+  /// when null, as every new tag is unless narrowed (issue #4407).
   factory Tag.create({
     required String id,
     required String name,
     String? diverId,
     String? colorHex,
+    Set<TagScope>? scopes,
   }) {
     final now = DateTime.now();
     return Tag(
@@ -47,6 +87,7 @@ class Tag extends Equatable {
       colorHex: colorHex,
       createdAt: now,
       updatedAt: now,
+      scopes: scopes ?? TagScope.everywhere,
     );
   }
 
@@ -57,6 +98,7 @@ class Tag extends Equatable {
     String? colorHex,
     DateTime? createdAt,
     DateTime? updatedAt,
+    Set<TagScope>? scopes,
   }) {
     return Tag(
       id: id ?? this.id,
@@ -65,6 +107,7 @@ class Tag extends Equatable {
       colorHex: colorHex ?? this.colorHex,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      scopes: scopes ?? this.scopes,
     );
   }
 
@@ -76,6 +119,7 @@ class Tag extends Equatable {
     colorHex,
     createdAt,
     updatedAt,
+    scopes,
   ];
 }
 

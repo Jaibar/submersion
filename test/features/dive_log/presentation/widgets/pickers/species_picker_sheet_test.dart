@@ -1,0 +1,165 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/species_picker_sheet.dart';
+import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+const _ray = Species(
+  id: 'sp-ray',
+  commonName: 'Eagle Ray',
+  scientificName: 'Aetobatus narinari',
+  category: SpeciesCategory.ray,
+);
+const _turtle = Species(
+  id: 'sp-turtle',
+  commonName: 'Green Turtle',
+  category: SpeciesCategory.turtle,
+);
+
+Future<void> _pump(
+  WidgetTester tester, {
+  List<Species> all = const [_ray, _turtle],
+  List<Species> byCategory = const [_turtle],
+  List<Species> searchResults = const [],
+  void Function(Species, SightingAmount, String)? onSpeciesSelected,
+}) async {
+  tester.view.physicalSize = const Size(900, 1800);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        allSpeciesProvider.overrideWith((ref) async => all),
+        speciesByCategoryProvider.overrideWith(
+          (ref, category) async => byCategory,
+        ),
+        speciesSearchProvider.overrideWith((ref, query) async => searchResults),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: SpeciesPickerSheet(
+            scrollController: ScrollController(),
+            onSpeciesSelected: onSpeciesSelected ?? (_, _, _) {},
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  testWidgets('lists species with scientific names and categories', (
+    tester,
+  ) async {
+    await _pump(tester);
+    expect(find.text('Add Species'), findsOneWidget);
+    expect(find.text('Eagle Ray'), findsOneWidget);
+    expect(find.text('Aetobatus narinari'), findsOneWidget);
+    expect(find.text('Green Turtle'), findsOneWidget);
+    expect(find.text('All'), findsOneWidget);
+  });
+
+  testWidgets('category chip filters via the category provider', (
+    tester,
+  ) async {
+    await _pump(tester, byCategory: const [_turtle]);
+    await tester.tap(find.widgetWithText(FilterChip, 'Turtle'));
+    await tester.pumpAndSettle();
+    expect(find.text('Green Turtle'), findsOneWidget);
+    expect(find.text('Eagle Ray'), findsNothing);
+  });
+
+  testWidgets('search routes through the search provider', (tester) async {
+    await _pump(tester, searchResults: const [_ray]);
+    await tester.enterText(find.byType(TextField).first, 'eagle');
+    await tester.pumpAndSettle();
+    expect(find.text('Eagle Ray'), findsOneWidget);
+    expect(find.text('Green Turtle'), findsNothing);
+
+    // Clearing the search restores the full list.
+    await tester.tap(find.byIcon(Icons.clear));
+    await tester.pumpAndSettle();
+    expect(find.text('Green Turtle'), findsOneWidget);
+  });
+
+  testWidgets('the dialog starts at Seen with no number shown', (tester) async {
+    // Issue #4337: the dialog no longer shows a "1" the diver did not pick.
+    SightingAmount? amount;
+    await _pump(tester, onSpeciesSelected: (_, a, _) => amount = a);
+    await tester.tap(find.text('Eagle Ray'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1'), findsNothing);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(amount, (abundance: SightingAbundance.seen, count: 1));
+  });
+
+  testWidgets('a REEF group is collected from the dialog', (tester) async {
+    SightingAmount? amount;
+    await _pump(tester, onSpeciesSelected: (_, a, _) => amount = a);
+    await tester.tap(find.text('Eagle Ray'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Few'));
+    await tester.pump();
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(amount, (abundance: SightingAbundance.few, count: 1));
+  });
+
+  testWidgets('selecting a species collects count and notes via the dialog', (
+    tester,
+  ) async {
+    Species? picked;
+    SightingAmount? amount;
+    String? notes;
+    await _pump(
+      tester,
+      onSpeciesSelected: (species, a, n) {
+        picked = species;
+        amount = a;
+        notes = n;
+      },
+    );
+    await tester.tap(find.text('Eagle Ray'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Exact'));
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.add_circle_outline));
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.add_circle_outline));
+    await tester.pump();
+    expect(find.text('3'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.remove_circle_outline));
+    await tester.pump();
+    expect(find.text('2'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).last, 'cruising the wall');
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    expect(picked?.id, 'sp-ray');
+    expect(amount, (abundance: SightingAbundance.exact, count: 2));
+    expect(notes, 'cruising the wall');
+  });
+
+  testWidgets('empty search results offer adding a custom species', (
+    tester,
+  ) async {
+    await _pump(tester, searchResults: const []);
+    await tester.enterText(find.byType(TextField).first, 'wobbegong');
+    await tester.pumpAndSettle();
+    expect(find.text('No species found'), findsOneWidget);
+    expect(find.textContaining('wobbegong'), findsWidgets);
+  });
+}

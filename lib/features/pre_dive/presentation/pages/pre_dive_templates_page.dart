@@ -1,0 +1,210 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/built_ins/built_in_catalog.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_checklist_template.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/hidden_built_ins_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/built_in_show_column.dart';
+import 'package:submersion/shared/widgets/fab_clearance.dart';
+
+/// Settings page listing pre-dive checklist templates: built-ins, which
+/// open read-only and can be cloned, plus fully editable user templates.
+class PreDiveTemplatesPage extends ConsumerWidget {
+  const PreDiveTemplatesPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final templatesAsync = ref.watch(preDiveTemplatesProvider);
+    final templates = templatesAsync.value;
+
+    return Scaffold(
+      appBar: AppBar(title: Text(context.l10n.preDive_templates_title)),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => context.push('/pre-dive-checklists/new'),
+        icon: const Icon(Icons.add),
+        label: Text(context.l10n.checklists_templates_addTemplate),
+      ),
+      body: templates == null
+          ? Center(
+              child: templatesAsync.hasError
+                  ? Text(templatesAsync.error.toString())
+                  : const CircularProgressIndicator(),
+            )
+          : templates.isEmpty
+          ? Center(child: Text(context.l10n.preDive_templates_empty))
+          : Column(
+              children: [
+                // Built-in and custom templates share one list, so the
+                // header carries only the "Show" label (issue #401). Each
+                // row's menu button sits after the switch.
+                const BuiltInShowColumnHeader(trailingInset: 48, top: 8),
+                Expanded(
+                  child: ListView.separated(
+                    padding: kFabListPadding,
+                    itemCount: templates.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) =>
+                        _TemplateTile(template: templates[index]),
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+class _TemplateTile extends ConsumerWidget {
+  final PreDiveChecklistTemplate template;
+
+  const _TemplateTile({required this.template});
+
+  Future<void> _clone(BuildContext context, WidgetRef ref) async {
+    final l10n = context.l10n;
+    final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
+    await ref
+        .read(preDiveTemplateRepositoryProvider)
+        .cloneTemplate(
+          template.id,
+          diverId: diverId,
+          newName: template.name + l10n.preDive_templates_cloneSuffix,
+        );
+  }
+
+  Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
+    final l10n = context.l10n;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(l10n.preDive_templates_delete),
+        content: Text(l10n.preDive_templates_deleteConfirm),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(l10n.common_action_cancel),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(l10n.common_action_delete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await ref
+          .read(preDiveTemplateRepositoryProvider)
+          .deleteTemplate(template.id);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final subtitleParts = [
+      if (template.category != null) template.category!,
+      if (template.strictOrder) l10n.preDive_templates_strictOrderBadge,
+    ];
+    final subtitleText = subtitleParts.isEmpty
+        ? (template.description.isEmpty ? null : template.description)
+        : subtitleParts.join(' - ');
+
+    final isHidden =
+        template.isBuiltIn &&
+        ref
+            .watch(hiddenBuiltInIdsProvider(BuiltInCatalog.preDiveTemplates))
+            .contains(template.id);
+    final disabled = Theme.of(context).disabledColor;
+
+    // The built-in badge sits in the subtitle rather than in trailing: a
+    // ListTile measures its trailing widget against the full tile width, so a
+    // translated badge label there starves the title column (issue #935).
+    return ListTile(
+      // A hidden built-in stays listed so it can be shown again (issue #401).
+      textColor: isHidden ? disabled : null,
+      iconColor: isHidden ? disabled : null,
+      leading: Icon(template.isBuiltIn ? Icons.lock_outline : Icons.fact_check),
+      title: Text(template.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+      isThreeLine: template.isBuiltIn && subtitleText != null,
+      subtitle: subtitleText == null && !template.isBuiltIn
+          ? null
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (subtitleText != null) Text(subtitleText),
+                if (template.isBuiltIn)
+                  Chip(
+                    label: Text(l10n.preDive_templates_builtInBadge),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+              ],
+            ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (template.isBuiltIn)
+            BuiltInShowSwitch(
+              switchKey: builtInShowSwitchKey(
+                BuiltInCatalog.preDiveTemplates,
+                template.id,
+              ),
+              shown: !isHidden,
+              onChanged: (shown) => ref
+                  .read(settingsProvider.notifier)
+                  .setBuiltInHidden(
+                    BuiltInCatalog.preDiveTemplates,
+                    template.id,
+                    !shown,
+                  ),
+            ),
+          // A fixed 48-wide slot: the header's trailingInset assumes it, and
+          // on desktop the button alone shrinks to 40.
+          SizedBox(
+            width: kMinInteractiveDimension,
+            child: PopupMenuButton<String>(
+              onSelected: (value) {
+                switch (value) {
+                  case 'open':
+                    context.push('/pre-dive-checklists/${template.id}/edit');
+                  case 'clone':
+                    _clone(context, ref);
+                  case 'delete':
+                    _confirmDelete(context, ref);
+                }
+              },
+              itemBuilder: (context) => [
+                if (template.isBuiltIn)
+                  PopupMenuItem(
+                    value: 'open',
+                    child: Text(l10n.preDive_templates_view),
+                  ),
+                PopupMenuItem(
+                  value: 'clone',
+                  child: Text(l10n.preDive_templates_clone),
+                ),
+                if (!template.isBuiltIn)
+                  PopupMenuItem(
+                    value: 'delete',
+                    child: Text(l10n.preDive_templates_delete),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      // Built-ins open too. The destination renders read-only for them
+      // (PreDiveTemplateEditPage._readOnly), so the diver can read what a
+      // default actually checks before deciding whether to clone it -- the
+      // old null tap made the defaults unreadable until cloned.
+      onTap: () => context.push('/pre-dive-checklists/${template.id}/edit'),
+    );
+  }
+}

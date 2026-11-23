@@ -1,7 +1,14 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_observation_repository.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_observation.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/transmitters/domain/entities/transmitter.dart';
+import 'package:submersion/features/transmitters/data/repositories/transmitter_repository.dart';
 
 import '../../../../helpers/test_database.dart';
 
@@ -41,8 +48,15 @@ void main() {
       brand: brand,
       model: model,
       serialNumber: serialNumber,
-      size: size,
       status: status,
+      attributes: [
+        if (size != null)
+          EquipmentAttribute.curated(
+            equipmentId: id,
+            key: 'size',
+            valueText: size,
+          ),
+      ],
       purchaseDate: purchaseDate,
       purchasePrice: purchasePrice,
       purchaseCurrency: purchaseCurrency,
@@ -178,6 +192,331 @@ void main() {
         expect(result.length, equals(1));
         expect(result[0].name, equals('Active Reg'));
       });
+
+      test('excludes status-retired gear even when isActive was never flipped '
+          '(#636)', () async {
+        await repository.createEquipment(
+          createTestEquipment(name: 'Active Reg'),
+        );
+        // Legacy inconsistency: the edit page used to set status=retired
+        // while leaving isActive=true, so existing rows can carry both.
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Status-Retired Reg',
+            status: EquipmentStatus.retired,
+            isActive: true,
+          ),
+        );
+
+        final result = await repository.getActiveEquipment();
+
+        expect(result.map((e) => e.name).toList(), ['Active Reg']);
+      });
+
+      test('keeps spare gear (#1803)', () async {
+        // Spare is hidden only by the dive pickers that opt in. The active
+        // list also feeds the default Equipment list, service clocks and
+        // reminders, and spare gear still belongs in all of those.
+        await repository.createEquipment(
+          createTestEquipment(name: 'Active Reg'),
+        );
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Spare Hose',
+            status: EquipmentStatus.spare,
+          ),
+        );
+
+        final result = await repository.getActiveEquipment();
+
+        expect(result.map((e) => e.name).toSet(), {'Active Reg', 'Spare Hose'});
+        expect(
+          result.singleWhere((e) => e.name == 'Spare Hose').status,
+          EquipmentStatus.spare,
+          reason: 'the status must round-trip through the TEXT column',
+        );
+      });
+    });
+
+    group('retirement keeps status and isActive in sync (#636)', () {
+      test('retireEquipment writes the retired status too', () async {
+        final item = await repository.createEquipment(
+          createTestEquipment(name: 'Old Reg'),
+        );
+
+        await repository.retireEquipment(item.id);
+
+        final stored = await repository.getEquipmentById(item.id);
+        expect(stored!.isActive, isFalse);
+        expect(stored.status, EquipmentStatus.retired);
+        expect(await repository.getActiveEquipment(), isEmpty);
+        expect((await repository.getRetiredEquipment()).map((e) => e.name), [
+          'Old Reg',
+        ]);
+      });
+
+      test('reactivateEquipment clears a retired status', () async {
+        final item = await repository.createEquipment(
+          createTestEquipment(name: 'Back In Service'),
+        );
+        await repository.retireEquipment(item.id);
+
+        await repository.reactivateEquipment(item.id);
+
+        final stored = await repository.getEquipmentById(item.id);
+        expect(stored!.isActive, isTrue);
+        expect(stored.status, EquipmentStatus.active);
+        expect((await repository.getActiveEquipment()).map((e) => e.name), [
+          'Back In Service',
+        ]);
+      });
+
+      test('reactivateEquipment leaves a non-retired status alone', () async {
+        final item = await repository.createEquipment(
+          createTestEquipment(
+            name: 'Needs Service Reg',
+            status: EquipmentStatus.needsService,
+            isActive: false,
+          ),
+        );
+
+        await repository.reactivateEquipment(item.id);
+
+        final stored = await repository.getEquipmentById(item.id);
+        expect(stored!.isActive, isTrue);
+        expect(
+          stored.status,
+          EquipmentStatus.needsService,
+          reason: 'reactivating is not a declaration that the item is fit',
+        );
+      });
+
+      test('sold gear drops out of the active list like retired', () async {
+        await repository.createEquipment(createTestEquipment(name: 'Kept Reg'));
+        // A synced row can carry status=sold with isActive never flipped.
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Sold Reg',
+            status: EquipmentStatus.sold,
+            isActive: true,
+          ),
+        );
+
+        expect((await repository.getActiveEquipment()).map((e) => e.name), [
+          'Kept Reg',
+        ]);
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.sold,
+          )).map((e) => e.name),
+          ['Sold Reg'],
+        );
+      });
+
+      test('sold gear is not lumped in with retired gear', () async {
+        await repository.createEquipment(
+          createTestEquipment(name: 'Retired Reg', isActive: false),
+        );
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Sold Reg',
+            status: EquipmentStatus.sold,
+            isActive: false,
+          ),
+        );
+
+        // Sold is isActive=false too, but it is its own terminal state:
+        // it must not surface under the retired list or the Retired filter.
+        expect((await repository.getRetiredEquipment()).map((e) => e.name), [
+          'Retired Reg',
+        ]);
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.retired,
+          )).map((e) => e.name),
+          ['Retired Reg'],
+        );
+      });
+
+      test('reactivateEquipment clears a sold status', () async {
+        final item = await repository.createEquipment(
+          createTestEquipment(
+            name: 'Bought It Back',
+            status: EquipmentStatus.sold,
+            isActive: false,
+          ),
+        );
+
+        await repository.reactivateEquipment(item.id);
+
+        final stored = await repository.getEquipmentById(item.id);
+        expect(stored!.isActive, isTrue);
+        expect(stored.status, EquipmentStatus.active);
+        expect((await repository.getActiveEquipment()).map((e) => e.name), [
+          'Bought It Back',
+        ]);
+      });
+
+      test('a non-retired status filter matches only that status', () async {
+        await repository.createEquipment(
+          createTestEquipment(name: 'Active Reg'),
+        );
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Loaned Reg',
+            status: EquipmentStatus.loaned,
+          ),
+        );
+        await repository.createEquipment(
+          createTestEquipment(name: 'Retired Reg', isActive: false),
+        );
+
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.loaned,
+          )).map((e) => e.name),
+          ['Loaned Reg'],
+          reason:
+              'only the Retired filter widens to the legacy isActive flag; '
+              'other statuses match on status alone',
+        );
+      });
+
+      test('the Spare filter matches only spare gear (#1803)', () async {
+        await repository.createEquipment(
+          createTestEquipment(name: 'Active Reg'),
+        );
+        await repository.createEquipment(
+          createTestEquipment(
+            name: 'Spare Hose',
+            status: EquipmentStatus.spare,
+          ),
+        );
+        await repository.createEquipment(
+          createTestEquipment(name: 'Retired Reg', isActive: false),
+        );
+
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.spare,
+          )).map((e) => e.name),
+          ['Spare Hose'],
+        );
+      });
+
+      test('retiring and reactivating stage the row for sync', () async {
+        final item = await repository.createEquipment(
+          createTestEquipment(name: 'Synced Reg'),
+        );
+        final db = DatabaseService.instance.database;
+
+        Future<int> pendingCount() async {
+          final rows = await db.select(db.syncRecords).get();
+          return rows
+              .where(
+                (r) => r.entityType == 'equipment' && r.recordId == item.id,
+              )
+              .length;
+        }
+
+        // createEquipment already staged it; clear so the assertion is about
+        // retire/reactivate rather than the create.
+        await db.delete(db.syncRecords).go();
+        expect(await pendingCount(), 0);
+
+        await repository.retireEquipment(item.id);
+        expect(
+          await pendingCount(),
+          1,
+          reason:
+              'an unsynced retirement leaves the item active on every other '
+              'device, which now also keeps it in the active-gear queries',
+        );
+
+        await db.delete(db.syncRecords).go();
+        await repository.reactivateEquipment(item.id);
+        expect(await pendingCount(), 1);
+      });
+
+      test('legacy isActive-only retirements still list as retired', () async {
+        // Written by the pre-fix retire path: isActive false, status active.
+        await repository.createEquipment(
+          createTestEquipment(name: 'Legacy Retired', isActive: false),
+        );
+
+        expect((await repository.getRetiredEquipment()).map((e) => e.name), [
+          'Legacy Retired',
+        ]);
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.retired,
+          )).map((e) => e.name),
+          ['Legacy Retired'],
+          reason:
+              'the Retired filter must not hide items that only ever had '
+              'isActive flipped',
+        );
+      });
+    });
+
+    group('wanted gear (#2025)', () {
+      Future<EquipmentItem> wanted(String name, {bool isActive = false}) =>
+          repository.createEquipment(
+            createTestEquipment(
+              name: name,
+              status: EquipmentStatus.wanted,
+              isActive: isActive,
+            ),
+          );
+
+      test('is not active gear, even with isActive left true', () async {
+        await repository.createEquipment(createTestEquipment(name: 'Owned'));
+        await wanted('Wishlist Wing');
+        await wanted('Odd Row', isActive: true);
+
+        expect((await repository.getActiveEquipment()).map((e) => e.name), [
+          'Owned',
+        ]);
+      });
+
+      test('is not retired gear', () async {
+        await repository.createEquipment(
+          createTestEquipment(name: 'Retired Reg', isActive: false),
+        );
+        await wanted('Wishlist Wing');
+
+        expect((await repository.getRetiredEquipment()).map((e) => e.name), [
+          'Retired Reg',
+        ]);
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.retired,
+          )).map((e) => e.name),
+          ['Retired Reg'],
+        );
+      });
+
+      test('is listed under its own status', () async {
+        await repository.createEquipment(createTestEquipment(name: 'Owned'));
+        await wanted('Wishlist Wing');
+
+        expect(
+          (await repository.getEquipmentByStatus(
+            EquipmentStatus.wanted,
+          )).map((e) => e.name),
+          ['Wishlist Wing'],
+        );
+      });
+
+      test('reactivate leaves a wanted row alone', () async {
+        final item = await wanted('Wishlist Wing');
+
+        await repository.reactivateEquipment(item.id);
+
+        final stored = await repository.getEquipmentById(item.id);
+        expect(stored!.status, EquipmentStatus.wanted);
+        expect(stored.isActive, isFalse);
+      });
     });
 
     group('getRetiredEquipment', () {
@@ -254,7 +593,90 @@ void main() {
           completes,
         );
       });
+
+      test('deletes an item a cylinder is linked to, staging the tank for '
+          'sync', () async {
+        // The transmitter registry writes dive_tanks.equipment_id. Deleting
+        // the item must clear that link rather than fail on it, and the
+        // cleared tank must reach peers like any other tank edit.
+        final cylinder = await repository.createEquipment(
+          createTestEquipment(name: 'Blue AL80', type: EquipmentType.tank),
+        );
+        final db = DatabaseService.instance.database;
+        await db.customStatement(
+          'INSERT INTO dives (id, dive_date_time, created_at, updated_at) '
+          "VALUES ('d1', 1000, 1000, 1000)",
+        );
+        await db.customStatement(
+          'INSERT INTO dive_tanks (id, dive_id, equipment_id) '
+          "VALUES ('t1', 'd1', ?), ('t2', 'd1', NULL)",
+          [cylinder.id],
+        );
+
+        await repository.deleteEquipment(cylinder.id);
+
+        expect(await repository.getEquipmentById(cylinder.id), isNull);
+        final tank = await db
+            .customSelect("SELECT equipment_id FROM dive_tanks WHERE id = 't1'")
+            .getSingle();
+        expect(tank.read<String?>('equipment_id'), isNull);
+        final pending = await db.select(db.syncRecords).get();
+        final pendingTanks = pending
+            .where((r) => r.entityType == 'diveTanks')
+            .map((r) => r.recordId);
+        expect(pendingTanks, ['t1'], reason: 'an unlinked tank is untouched');
+        // The pending tank is exported on its own. The dive did not change,
+        // and re-stamping it would let this stale copy overwrite a newer edit
+        // to it made on another device.
+        expect(pending.where((r) => r.entityType == 'dives'), isEmpty);
+        final dive = await db
+            .customSelect("SELECT hlc FROM dives WHERE id = 'd1'")
+            .getSingle();
+        expect(dive.read<String?>('hlc'), isNull, reason: 'not re-stamped');
+      });
     });
+
+    test(
+      'deleting a regulator a cylinder breathed from stages that tank',
+      () async {
+        // The regulator link already set null on delete (v202); the cleared
+        // tank still has to reach peers.
+        final reg = await repository.createEquipment(
+          createTestEquipment(name: 'Apeks XTX'),
+        );
+        final db = DatabaseService.instance.database;
+        await db.customStatement(
+          'INSERT INTO dives (id, dive_date_time, created_at, updated_at) '
+          "VALUES ('d2', 1000, 1000, 1000)",
+        );
+        await db.customStatement(
+          'INSERT INTO dive_tanks (id, dive_id, regulator_equipment_id) '
+          "VALUES ('t3', 'd2', ?)",
+          [reg.id],
+        );
+
+        await repository.deleteEquipment(reg.id);
+
+        final tank = await db
+            .customSelect(
+              "SELECT regulator_equipment_id FROM dive_tanks WHERE id = 't3'",
+            )
+            .getSingle();
+        expect(tank.read<String?>('regulator_equipment_id'), isNull);
+        final pending = await db.select(db.syncRecords).get();
+        expect(
+          pending
+              .where((r) => r.entityType == 'diveTanks')
+              .map((r) => r.recordId),
+          ['t3'],
+        );
+        expect(
+          pending.where((r) => r.entityType == 'dives'),
+          isEmpty,
+          reason: 'the tank travels on its own; the dive is not re-stamped',
+        );
+      },
+    );
 
     group('retireEquipment', () {
       test('should mark equipment as inactive', () async {
@@ -407,36 +829,179 @@ void main() {
       });
     });
 
-    group('getEquipmentWithServiceDue', () {
-      test('should return equipment with service overdue', () async {
-        // Equipment with service overdue
-        await repository.createEquipment(
-          createTestEquipment(
-            name: 'Overdue Reg',
-            lastServiceDate: DateTime.now().subtract(const Duration(days: 400)),
-            serviceIntervalDays: 365,
-          ),
-        );
+    group('legacy service interval', () {
+      test(
+        'createEquipment mirrors a legacy interval onto the service ledger',
+        () async {
+          final created = await repository.createEquipment(
+            createTestEquipment(
+              name: 'Imported Reg',
+              lastServiceDate: DateTime(2020, 6, 1),
+              serviceIntervalDays: 365,
+            ),
+          );
 
-        // Equipment not due
-        await repository.createEquipment(
-          createTestEquipment(
-            name: 'Fresh Reg',
-            lastServiceDate: DateTime.now().subtract(const Duration(days: 30)),
-            serviceIntervalDays: 365,
-          ),
-        );
+          final schedules = await ServiceScheduleRepository()
+              .getSchedulesForEquipment(created.id);
+          final legacy = schedules.firstWhere(
+            (s) => s.id == 'legacy-svc-${created.id}',
+          );
 
-        // Equipment with no service date
-        await repository.createEquipment(
-          createTestEquipment(name: 'No Service Date'),
-        );
+          expect(legacy.serviceKindId, equals('general-service'));
+          expect(legacy.intervalDays, equals(365));
+          expect(legacy.anchorDate, equals(DateTime(2020, 6, 1)));
+        },
+      );
 
-        final results = await repository.getEquipmentWithServiceDue();
+      test(
+        'createEquipment adds no legacy clock without an interval',
+        () async {
+          final created = await repository.createEquipment(
+            createTestEquipment(name: 'Plain Reg'),
+          );
 
-        expect(results.length, equals(1));
-        expect(results[0].name, equals('Overdue Reg'));
-      });
+          final schedules = await ServiceScheduleRepository()
+              .getSchedulesForEquipment(created.id);
+
+          expect(
+            schedules.where((s) => s.id == 'legacy-svc-${created.id}'),
+            isEmpty,
+          );
+        },
+      );
     });
+  });
+
+  test('child parts: active by default, retired ones on request', () async {
+    // The condition engine needs retired cells to know who occupied a
+    // slot; the children card and the clocks want only what is fitted.
+    final ccr = await repository.createEquipment(
+      const EquipmentItem(id: '', name: 'CCR', type: EquipmentType.rebreather),
+    );
+    final fitted = await repository.createEquipment(
+      EquipmentItem(
+        id: '',
+        name: 'Fitted',
+        type: EquipmentType.o2Cell,
+        parentEquipmentId: ccr.id,
+      ),
+    );
+    final old = await repository.createEquipment(
+      EquipmentItem(
+        id: '',
+        name: 'Old',
+        type: EquipmentType.o2Cell,
+        parentEquipmentId: ccr.id,
+      ),
+    );
+    await repository.retireEquipment(old.id);
+    expect((await repository.getChildEquipment(ccr.id)).map((c) => c.id), [
+      fitted.id,
+    ]);
+    expect(
+      (await repository.getChildEquipment(
+        ccr.id,
+        includeRetired: true,
+      )).map((c) => c.id).toSet(),
+      {fitted.id, old.id},
+    );
+  });
+
+  test('deleting a cylinder clears and stages the registry rows that feed it, '
+      'and deleting the transmitter item deletes its row (#3676)', () async {
+    // A registry row names the cylinder it feeds and the transmitter item
+    // it is. SQLite nulls the cylinder link on delete but moves no clock,
+    // so a peer kept the stale link; the delete clears and stages the row.
+    // The transmitter item is the row's one entry, so deleting it deletes
+    // the row too (#3676).
+    final tx = await repository.createEquipment(
+      const EquipmentItem(id: '', name: 'Tx', type: EquipmentType.transmitter),
+    );
+    final tank = await repository.createEquipment(
+      const EquipmentItem(id: '', name: 'AL80', type: EquipmentType.tank),
+    );
+    final now = DateTime.utc(2026);
+    await TransmitterRepository().create(
+      Transmitter(
+        id: 'r1',
+        transmitterSerial: '180777',
+        label: 'Left',
+        equipmentId: tank.id,
+        transmitterEquipmentId: tx.id,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    final db = DatabaseService.instance.database;
+    await db.delete(db.syncRecords).go();
+
+    await repository.deleteEquipment(tank.id);
+    final row = await TransmitterRepository().getById('r1');
+    expect(row!.equipmentId, isNull);
+    expect(row.transmitterEquipmentId, tx.id);
+    expect(
+      (await db.select(db.syncRecords).get())
+          .where((r) => r.entityType == 'transmitters')
+          .map((r) => r.recordId),
+      ['r1'],
+    );
+
+    await repository.deleteEquipment(tx.id);
+    expect(await TransmitterRepository().getById('r1'), isNull);
+    expect(
+      (await db.select(db.deletionLog).get())
+          .where((r) => r.entityType == 'transmitters')
+          .map((r) => r.recordId),
+      ['r1'],
+    );
+  });
+
+  test('deleting an item tombstones its condition findings', () async {
+    // equipment_findings syncs and goes by cascade like the check-ins; a
+    // peer that never hears of the delete keeps the finding.
+    final reg = await repository.createEquipment(
+      const EquipmentItem(id: '', name: 'Reg', type: EquipmentType.regulator),
+    );
+    final db = DatabaseService.instance.database;
+    await db.customStatement(
+      'INSERT INTO equipment_findings (id, equipment_id, rule_id, severity, '
+      'evidence_fingerprint, engine_version, created_at) '
+      "VALUES ('f1', ?, 'issueRecurring', 'caution', 'fp', 1, 1)",
+      [reg.id],
+    );
+
+    await repository.deleteEquipment(reg.id);
+
+    final tombstones = await db.select(db.deletionLog).get();
+    expect(
+      tombstones.any(
+        (t) => t.entityType == 'equipmentFindings' && t.recordId == 'f1',
+      ),
+      isTrue,
+    );
+  });
+
+  test('deleting an item tombstones its check-ins', () async {
+    // equipment_observations is a synced root whose rows go by cascade;
+    // without a tombstone a peer keeps the check-in and it can reappear.
+    final reg = await repository.createEquipment(
+      const EquipmentItem(id: '', name: 'Reg', type: EquipmentType.regulator),
+    );
+    final observation = await EquipmentObservationRepository().create(
+      equipmentId: reg.id,
+      observedAt: DateTime.utc(2026, 1, 1),
+      status: ObservationStatus.ok,
+    );
+    await repository.deleteEquipment(reg.id);
+    final db = DatabaseService.instance.database;
+    final tombstones = await db.select(db.deletionLog).get();
+    expect(
+      tombstones.any(
+        (t) =>
+            t.entityType == 'equipmentObservations' &&
+            t.recordId == observation.id,
+      ),
+      isTrue,
+    );
   });
 }

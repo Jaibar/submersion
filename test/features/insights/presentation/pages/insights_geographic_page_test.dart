@@ -1,0 +1,264 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_geographic_page.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_filter_provider.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/semantics_finders.dart';
+import '../../../../helpers/test_app.dart';
+import '../recording_insights_repository.dart';
+
+void main() {
+  Future<void> pumpPage(
+    WidgetTester tester, {
+    required Future<List<RankingItem>> Function() countries,
+    required Future<List<RankingItem>> Function() regions,
+    required Future<List<RankingItem>> Function() trips,
+    bool embedded = true,
+  }) async {
+    tester.view.physicalSize = const Size(1200, 3200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final base = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...base,
+          countriesVisitedProvider.overrideWith((ref) => countries()),
+          regionsExploredProvider.overrideWith((ref) => regions()),
+          divesPerTripProvider.overrideWith((ref) => trips()),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: embedded
+              ? const Scaffold(body: InsightsGeographicPage(embedded: true))
+              : const InsightsGeographicPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  RankingItem item(String name, int count) =>
+      RankingItem(id: name, name: name, count: count);
+
+  testWidgets('summarises each ranking for screen readers', (tester) async {
+    await pumpPage(
+      tester,
+      countries: () async => [item('Bonaire', 12), item('Mexico', 4)],
+      regions: () async => [item('Caribbean', 16)],
+      trips: () async => [
+        item('Klein Bonaire week', 9),
+        item('Cozumel', 4),
+        item('Cenotes', 3),
+      ],
+    );
+
+    expect(
+      findSemanticsLabelled('2 countries. Top: Bonaire with 12 dives'),
+      findsOneWidget,
+    );
+    expect(
+      findSemanticsLabelled('1 regions. Top: Caribbean with 16 dives'),
+      findsOneWidget,
+    );
+    expect(
+      findSemanticsLabelled('3 trips. Top: Klein Bonaire week with 9 dives'),
+      findsOneWidget,
+    );
+  });
+
+  // Issue #4385: a long ranking shows ten rows and opens the rest behind
+  // Show all, and the summary counts every row, not the ten shown.
+  testWidgets('a long ranking shows ten rows and opens the rest', (
+    tester,
+  ) async {
+    await pumpPage(
+      tester,
+      countries: () async => [
+        for (var i = 0; i < 14; i++) item('Country $i', 30 - i),
+      ],
+      regions: () async => [item('Caribbean', 16)],
+      trips: () async => const [],
+    );
+
+    expect(
+      findSemanticsLabelled('14 countries. Top: Country 0 with 30 dives'),
+      findsOneWidget,
+    );
+    expect(find.text('Country 9'), findsOneWidget);
+    expect(find.text('Country 10'), findsNothing);
+
+    await tester.tap(find.text('Show all'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Country 13'), findsOneWidget);
+    expect(find.text('Show less'), findsOneWidget);
+  });
+
+  testWidgets('an empty ranking reads its empty message', (tester) async {
+    await pumpPage(
+      tester,
+      countries: () async => const [],
+      regions: () async => const [],
+      trips: () async => const [],
+    );
+
+    expect(findSemanticsLabelled('No countries visited'), findsOneWidget);
+    expect(findSemanticsLabelled('No regions explored'), findsOneWidget);
+    expect(findSemanticsLabelled('No trip data'), findsOneWidget);
+  });
+
+  testWidgets('shows a per-section error when a query fails', (tester) async {
+    await pumpPage(
+      tester,
+      countries: () async => throw Exception('countries'),
+      regions: () async => throw Exception('regions'),
+      trips: () async => throw Exception('trips'),
+    );
+
+    expect(find.text('Failed to load country data'), findsOneWidget);
+    expect(find.text('Failed to load region data'), findsOneWidget);
+    expect(find.text('Failed to load trip data'), findsOneWidget);
+  });
+
+  testWidgets('the full page has its own app bar', (tester) async {
+    await pumpPage(
+      tester,
+      countries: () async => const [],
+      regions: () async => const [],
+      trips: () async => const [],
+      embedded: false,
+    );
+
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.text('Geographic'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  group('drill-through (#2623)', () {
+    late RecordingInsightsRepository repository;
+
+    setUp(() => repository = RecordingInsightsRepository());
+
+    Future<ProviderContainer> pumpRouted(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1200, 3200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final router = GoRouter(
+        initialLocation: '/insights',
+        routes: [
+          GoRoute(
+            path: '/insights',
+            builder: (_, _) => const InsightsGeographicPage(),
+          ),
+          GoRoute(path: '/dives', builder: (_, _) => const Text('dive list')),
+        ],
+      );
+      final base = await getBaseOverrides();
+      await tester.pumpWidget(
+        testAppRouter(
+          router: router,
+          locale: const Locale('en'),
+          overrides: [
+            ...base,
+            insightsFilterProvider.overrideWith(
+              (ref) => const DiveFilterState(minDepth: 18),
+            ),
+            countriesVisitedProvider.overrideWith(
+              (ref) async => [item('Bonaire', 12)],
+            ),
+            regionsExploredProvider.overrideWith(
+              (ref) async => [
+                RankingItem(
+                  id: 'Yucatan',
+                  name: 'Yucatan',
+                  count: 4,
+                  subtitle: 'Mexico',
+                ),
+              ],
+            ),
+            divesPerTripProvider.overrideWith((ref) async => const []),
+            insightsRepositoryProvider.overrideWithValue(repository),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return ProviderScope.containerOf(
+        tester.element(find.byType(InsightsGeographicPage)),
+      );
+    }
+
+    ConditionNode site(String column, String value) => ConditionNode(
+      FieldPath(['site', column]),
+      QueryOp.eq,
+      StringValue(value),
+    );
+
+    testWidgets('a country opens its dives under the Insights filter', (
+      tester,
+    ) async {
+      final container = await pumpRouted(tester);
+
+      await tester.tap(find.text('Bonaire'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('dive list'), findsOneWidget);
+      expect(repository.lastFilter?.minDepth, 18);
+      expect(repository.lastFilter?.query, site('country', 'Bonaire'));
+      final filter = container.read(diveFilterProvider);
+      expect(filter.diveIds, ['d1']);
+      expect(filter.diveIdsLabel, 'Countries Visited: Bonaire');
+    });
+
+    testWidgets('a region row names its country to screen readers', (
+      tester,
+    ) async {
+      await pumpRouted(tester);
+
+      // Two regions can share a name, so the button label carries the
+      // country that tells them apart (and that the tap filters on).
+      expect(
+        findSemanticsLabelled('Yucatan, Mexico, rank 1, 4 dives'),
+        findsOneWidget,
+      );
+      expect(
+        findSemanticsLabelled('Bonaire, rank 1, 12 dives'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a region opens its dives in its own country', (tester) async {
+      final container = await pumpRouted(tester);
+
+      await tester.tap(find.text('Yucatan'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('dive list'), findsOneWidget);
+      expect(repository.lastFilter?.minDepth, 18);
+      expect(
+        repository.lastFilter?.query,
+        AndNode([site('region', 'Yucatan'), site('country', 'Mexico')]),
+      );
+      expect(
+        container.read(diveFilterProvider).diveIdsLabel,
+        'Regions Explored: Yucatan, Mexico',
+      );
+    });
+  });
+}

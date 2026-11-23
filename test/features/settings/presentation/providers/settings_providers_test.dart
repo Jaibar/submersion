@@ -1,8 +1,32 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/dive_detail_sections.dart';
+import 'package:submersion/core/deco/entities/cns_calculation_method.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 void main() {
+  group('AppSettings cnsCalculationMethod', () {
+    test('defaults to shearwater', () {
+      const settings = AppSettings();
+      expect(settings.cnsCalculationMethod, CnsCalculationMethod.shearwater);
+    });
+
+    test('copyWith updates cnsCalculationMethod', () {
+      const settings = AppSettings();
+      final updated = settings.copyWith(
+        cnsCalculationMethod: CnsCalculationMethod.subsurface,
+      );
+      expect(updated.cnsCalculationMethod, CnsCalculationMethod.subsurface);
+    });
+
+    test('copyWith preserves cnsCalculationMethod when not specified', () {
+      const settings = AppSettings(
+        cnsCalculationMethod: CnsCalculationMethod.classic,
+      );
+      final updated = settings.copyWith(themePresetId: 'dark');
+      expect(updated.cnsCalculationMethod, CnsCalculationMethod.classic);
+    });
+  });
+
   group('AppSettings defaultTankPreset', () {
     test('has al80 as default', () {
       const settings = AppSettings();
@@ -33,10 +57,32 @@ void main() {
     });
   });
 
-  group('AppSettings diveDetailSections', () {
-    test('defaults to all 17 sections visible', () {
+  group('AppSettings defaultShowGasTimeline', () {
+    test('defaults to false', () {
       const settings = AppSettings();
-      expect(settings.diveDetailSections.length, 17);
+      expect(settings.defaultShowGasTimeline, isFalse);
+    });
+
+    test('copyWith updates defaultShowGasTimeline', () {
+      const settings = AppSettings();
+      final updated = settings.copyWith(defaultShowGasTimeline: true);
+      expect(updated.defaultShowGasTimeline, isTrue);
+    });
+
+    test('copyWith preserves defaultShowGasTimeline when not specified', () {
+      const settings = AppSettings(defaultShowGasTimeline: true);
+      final updated = settings.copyWith(themePresetId: 'dark');
+      expect(updated.defaultShowGasTimeline, isTrue);
+    });
+  });
+
+  group('AppSettings diveDetailSections', () {
+    test('defaults to all sections visible', () {
+      const settings = AppSettings();
+      expect(
+        settings.diveDetailSections.length,
+        DiveDetailSectionId.values.length,
+      );
       expect(settings.diveDetailSections.every((s) => s.visible), true);
     });
 
@@ -48,7 +94,7 @@ void main() {
           visible: true,
         ),
         const DiveDetailSectionConfig(
-          id: DiveDetailSectionId.decoO2,
+          id: DiveDetailSectionId.decoStatus,
           visible: false,
         ),
       ];
@@ -67,7 +113,10 @@ void main() {
         ],
       );
       final updated = settings.copyWith(clearDiveDetailSections: true);
-      expect(updated.diveDetailSections.length, 17);
+      expect(
+        updated.diveDetailSections.length,
+        DiveDetailSectionId.values.length,
+      );
       expect(updated.diveDetailSections.every((s) => s.visible), true);
     });
 
@@ -118,7 +167,10 @@ void main() {
           clearDiveDetailSections: true,
         );
         // Clear flag wins — should be defaults, not the custom list
-        expect(updated.diveDetailSections.length, 17);
+        expect(
+          updated.diveDetailSections.length,
+          DiveDetailSectionId.values.length,
+        );
         expect(updated.diveDetailSections.every((s) => s.visible), true);
       },
     );
@@ -160,6 +212,25 @@ void main() {
       expect(settings.diveDetailSections[0].visible, false);
       expect(settings.diveDetailSections[1].id, DiveDetailSectionId.media);
       expect(settings.diveDetailSections[1].visible, true);
+    });
+  });
+
+  group('AppSettings autoTagImports', () {
+    test('has true as default', () {
+      const settings = AppSettings();
+      expect(settings.autoTagImports, true);
+    });
+
+    test('copyWith updates autoTagImports', () {
+      const settings = AppSettings();
+      final updated = settings.copyWith(autoTagImports: false);
+      expect(updated.autoTagImports, false);
+    });
+
+    test('copyWith without the field preserves the current value', () {
+      const settings = AppSettings(autoTagImports: false);
+      final updated = settings.copyWith(themePresetId: 'dark');
+      expect(updated.autoTagImports, false);
     });
   });
 }

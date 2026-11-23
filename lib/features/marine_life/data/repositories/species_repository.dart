@@ -4,28 +4,61 @@ import 'package:uuid/uuid.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/dive_stats_scope.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/marine_life/data/services/builtin_species_seed_version_store.dart';
 import 'package:submersion/features/marine_life/data/services/species_seed_service.dart';
+import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
+import 'package:submersion/core/services/shared_library/library_edit_stamper.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart'
     as domain;
 
 class SpeciesRepository {
   AppDatabase get _db => DatabaseService.instance.database;
   final SyncRepository _syncRepository = SyncRepository();
+  final LibraryEditStamper _libraryStamper = LibraryEditStamper();
   final _uuid = const Uuid();
 
-  /// Get all species
-  Future<List<domain.Species>> getAllSpecies() async {
+  /// Get all species, or only those of [ids] when named (Global Search's
+  /// few rows, issue #4247).
+  Future<List<domain.Species>> getAllSpecies({List<String>? ids}) async {
+    if (ids != null && ids.isEmpty) return const [];
     final query = _db.select(_db.species)
       ..orderBy([
         (t) => OrderingTerm.asc(t.category),
-        (t) => OrderingTerm.asc(t.commonName),
+        (t) => OrderingTerm.asc(t.commonName.collate(Collate.noCase)),
       ]);
+    if (ids != null) query.where((t) => t.id.isIn(ids));
 
     final rows = await query.get();
-    return rows.map((row) => _mapRowToSpecies(row)).toList();
+    return sortedByText(
+      rows,
+      (r) => r.commonName,
+      groupOf: (r) => r.category,
+    ).map((row) => _mapRowToSpecies(row)).toList();
   }
+
+  /// Emits whenever the `species` table changes so list providers can
+  /// refresh after a sync or any other write.
+  Stream<void> watchSpeciesChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.species));
+
+  /// Emits whenever the `sightings` table changes so aggregate providers can
+  /// refresh after a sync or any other write.
+  Stream<void> watchSightingChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.sightings));
+
+  /// Emits whenever the `site_species` table changes, which is where a site's
+  /// expected species live. Curating that list never touches `species`, so
+  /// [watchSpeciesChanges] alone leaves the expected list stale after an add
+  /// or a remove.
+  Stream<void> watchSiteSpeciesChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.siteSpecies));
 
   /// Get species by category
   Future<List<domain.Species>> getSpeciesByCategory(
@@ -33,24 +66,29 @@ class SpeciesRepository {
   ) async {
     final query = _db.select(_db.species)
       ..where((t) => t.category.equals(category.name))
-      ..orderBy([(t) => OrderingTerm.asc(t.commonName)]);
+      ..orderBy([
+        (t) => OrderingTerm.asc(t.commonName.collate(Collate.noCase)),
+      ]);
 
     final rows = await query.get();
-    return rows.map((row) => _mapRowToSpecies(row)).toList();
+    return sortedByText(
+      rows,
+      (r) => r.commonName,
+    ).map((row) => _mapRowToSpecies(row)).toList();
   }
 
   /// Search species by name or taxonomy class
   Future<List<domain.Species>> searchSpecies(String query) async {
-    final searchTerm = '%${query.toLowerCase()}%';
+    final searchTerm = '%${foldForSearch(query)}%';
 
     final results = await _db
         .customSelect(
           '''
       SELECT * FROM species
-      WHERE LOWER(common_name) LIKE ?
-         OR LOWER(scientific_name) LIKE ?
-         OR LOWER(taxonomy_class) LIKE ?
-      ORDER BY category ASC, common_name ASC
+      WHERE search_fold(common_name) LIKE ?
+         OR search_fold(scientific_name) LIKE ?
+         OR search_fold(taxonomy_class) LIKE ?
+      ORDER BY category ASC, common_name COLLATE NOCASE ASC
       LIMIT 50
     ''',
           variables: [
@@ -61,7 +99,11 @@ class SpeciesRepository {
         )
         .get();
 
-    return results.map(_mapRawRowToSpecies).toList();
+    return sortedByText(
+      results,
+      (r) => r.data['common_name'] as String,
+      groupOf: (r) => r.data['category'],
+    ).map(_mapRawRowToSpecies).toList();
   }
 
   /// Get species by ID
@@ -78,20 +120,8 @@ class SpeciesRepository {
     required SpeciesCategory category,
   }) async {
     // Try to find existing species with same name
-    final existing = await _db
-        .customSelect(
-          '''
-      SELECT * FROM species
-      WHERE LOWER(common_name) = ?
-      LIMIT 1
-    ''',
-          variables: [Variable.withString(commonName.toLowerCase())],
-        )
-        .getSingleOrNull();
-
-    if (existing != null) {
-      return _mapRawRowToSpecies(existing);
-    }
+    final existing = await findSpeciesByCommonName(commonName);
+    if (existing.isNotEmpty) return existing.first;
 
     // Create new species
     final id = _uuid.v4();
@@ -121,14 +151,59 @@ class SpeciesRepository {
     );
   }
 
+  /// The species whose scientific name equals [scientificName], ignoring
+  /// case, or null. Lets a lookup select an existing row (built-in or
+  /// custom) instead of creating a twin.
+  Future<domain.Species?> findSpeciesByScientificName(
+    String scientificName,
+  ) async {
+    final needle = scientificName.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    final row = await _db
+        .customSelect(
+          'SELECT id FROM species WHERE unicode_lower(scientific_name) = ? '
+          'ORDER BY is_built_in DESC, rowid LIMIT 1',
+          variables: [Variable.withString(needle)],
+        )
+        .getSingleOrNull();
+    if (row == null) return null;
+    return getSpeciesById(row.data['id'] as String);
+  }
+
+  /// Every species whose common name equals [commonName], ignoring case,
+  /// built-in rows first and then in the order they were added.
+  ///
+  /// unicode_lower, not LOWER: the built-in folds ASCII only, so "Étoile"
+  /// and "étoile" never compared equal in SQL and each import minted a
+  /// twin (#3032).
+  Future<List<domain.Species>> findSpeciesByCommonName(
+    String commonName,
+  ) async {
+    final needle = commonName.trim();
+    if (needle.isEmpty) return const [];
+    final rows = await _db
+        .customSelect(
+          '''
+      SELECT * FROM species
+      WHERE unicode_lower(common_name) = ?
+      ORDER BY is_built_in DESC, rowid
+    ''',
+          variables: [Variable.withString(needle.toLowerCase())],
+        )
+        .get();
+    return rows.map(_mapRawRowToSpecies).toList();
+  }
+
   /// Add sighting to a dive
   Future<domain.Sighting> addSighting({
     required String diveId,
     required String speciesId,
+    SightingAbundance abundance = SightingAbundance.seen,
     int count = 1,
     String notes = '',
   }) async {
     final id = _uuid.v4();
+    final stored = _storedCount(abundance, count);
     await _db
         .into(_db.sightings)
         .insert(
@@ -136,7 +211,8 @@ class SpeciesRepository {
             id: Value(id),
             diveId: Value(diveId),
             speciesId: Value(speciesId),
-            count: Value(count),
+            abundance: Value(abundance.storageValue),
+            count: Value(stored),
             notes: Value(notes),
           ),
         );
@@ -163,10 +239,26 @@ class SpeciesRepository {
       speciesId: speciesId,
       speciesName: species?.commonName ?? 'Unknown',
       speciesCategory: species?.category,
-      count: count,
+      abundance: abundance,
+      count: stored,
       notes: notes,
     );
   }
+
+  /// The count a sighting stores: the number itself for an exact count, and
+  /// 1 for Seen and the REEF groups, so a reader that only knows the count
+  /// shows no made-up number.
+  static int _storedCount(SightingAbundance abundance, int count) =>
+      abundance == SightingAbundance.exact ? (count < 1 ? 1 : count) : 1;
+
+  /// [companion] with [sighting]'s abundance and stored count.
+  static SightingsCompanion _withAmount(
+    SightingsCompanion companion,
+    domain.Sighting sighting,
+  ) => companion.copyWith(
+    abundance: Value(sighting.abundance.storageValue),
+    count: Value(_storedCount(sighting.abundance, sighting.count)),
+  );
 
   /// Get sightings for a dive
   Future<List<domain.Sighting>> getSightingsForDive(String diveId) async {
@@ -177,26 +269,137 @@ class SpeciesRepository {
       FROM sightings s
       JOIN species sp ON s.species_id = sp.id
       WHERE s.dive_id = ?
-      ORDER BY sp.category ASC, sp.common_name ASC
+      ORDER BY sp.category ASC, sp.common_name COLLATE NOCASE ASC
     ''',
           variables: [Variable.withString(diveId)],
         )
         .get();
 
-    return results.map((row) {
-      return domain.Sighting(
-        id: row.data['id'] as String,
-        diveId: row.data['dive_id'] as String,
-        speciesId: row.data['species_id'] as String,
-        speciesName: row.data['common_name'] as String,
-        speciesCategory: SpeciesCategory.values.firstWhere(
-          (c) => c.name == row.data['category'],
-          orElse: () => SpeciesCategory.other,
-        ),
-        count: row.data['count'] as int,
-        notes: (row.data['notes'] as String?) ?? '',
-      );
-    }).toList();
+    return sortedByText(
+      results,
+      (r) => r.data['common_name'] as String,
+      groupOf: (r) => r.data['category'],
+    ).map(_sightingFromRow).toList();
+  }
+
+  /// The sighting [id], on whichever dive it is, or null.
+  Future<domain.Sighting?> getSightingById(String id) async {
+    final row = await _db
+        .customSelect(
+          'SELECT s.*, sp.common_name, sp.category '
+          'FROM sightings s '
+          'JOIN species sp ON s.species_id = sp.id '
+          'WHERE s.id = ?',
+          variables: [Variable.withString(id)],
+        )
+        .getSingleOrNull();
+    return row == null ? null : _sightingFromRow(row);
+  }
+
+  static domain.Sighting _sightingFromRow(QueryRow row) => domain.Sighting(
+    id: row.data['id'] as String,
+    diveId: row.data['dive_id'] as String,
+    speciesId: row.data['species_id'] as String,
+    speciesName: row.data['common_name'] as String,
+    speciesCategory: SpeciesCategory.values.firstWhere(
+      (c) => c.name == row.data['category'],
+      orElse: () => SpeciesCategory.other,
+    ),
+    abundance: SightingAbundance.fromStorage(row.data['abundance'] as String?),
+    count: row.data['count'] as int,
+    notes: (row.data['notes'] as String?) ?? '',
+  );
+
+  /// Batched variant of [getSightingsForDive]: one query for many dives.
+  /// Returns a map keyed by dive id; dives without sightings are absent.
+  ///
+  /// The dive ids are queried in chunks so the bound-variable count never
+  /// exceeds SQLite's default limit (999) on very large trips.
+  Future<Map<String, List<domain.Sighting>>> getSightingsForDives(
+    List<String> diveIds,
+  ) async {
+    if (diveIds.isEmpty) return {};
+
+    const chunkSize = 900; // safely under SQLite's 999 bound-variable limit
+    final byDive = <String, List<domain.Sighting>>{};
+
+    for (var start = 0; start < diveIds.length; start += chunkSize) {
+      final end = (start + chunkSize < diveIds.length)
+          ? start + chunkSize
+          : diveIds.length;
+      final chunk = diveIds.sublist(start, end);
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+      final results = await _db
+          .customSelect(
+            '''
+      SELECT s.*, sp.common_name, sp.category
+      FROM sightings s
+      JOIN species sp ON s.species_id = sp.id
+      WHERE s.dive_id IN ($placeholders)
+      ORDER BY sp.category ASC, sp.common_name COLLATE NOCASE ASC
+    ''',
+            variables: [for (final id in chunk) Variable.withString(id)],
+          )
+          .get();
+
+      for (final row in sortedByText(
+        results,
+        (r) => r.data['common_name'] as String,
+        groupOf: (r) => r.data['category'],
+      )) {
+        final sighting = domain.Sighting(
+          id: row.data['id'] as String,
+          diveId: row.data['dive_id'] as String,
+          speciesId: row.data['species_id'] as String,
+          speciesName: row.data['common_name'] as String,
+          speciesCategory: SpeciesCategory.values.firstWhere(
+            (c) => c.name == row.data['category'],
+            orElse: () => SpeciesCategory.other,
+          ),
+          abundance: SightingAbundance.fromStorage(
+            row.data['abundance'] as String?,
+          ),
+          count: row.data['count'] as int,
+          notes: (row.data['notes'] as String?) ?? '',
+        );
+        byDive.putIfAbsent(sighting.diveId, () => []).add(sighting);
+      }
+    }
+    return byDive;
+  }
+
+  /// Each species a sighting on one of [diveIds] names, once, in the same
+  /// order as [getAllSpecies].
+  ///
+  /// A UDDF export declares these so every `speciesref` its dives carry
+  /// resolves (issue #4578). The dive ids bind one SQL variable each, so a
+  /// whole logbook is read in [seriesIdChunks] runs.
+  Future<List<domain.Species>> getSpeciesSightedOnDives(
+    List<String> diveIds,
+  ) async {
+    if (diveIds.isEmpty) return const [];
+
+    final byId = <String, Specy>{};
+    for (final chunk in seriesIdChunks(diveIds)) {
+      final sighted = _db.selectOnly(_db.sightings)
+        ..addColumns([_db.sightings.speciesId])
+        ..where(_db.sightings.diveId.isIn(chunk));
+      final rows = await (_db.select(
+        _db.species,
+      )..where((t) => t.id.isInQuery(sighted))).get();
+      for (final row in rows) {
+        byId[row.id] = row;
+      }
+    }
+    // Rows from several chunks arrive in no order, and [sortedByText] only
+    // re-sorts within runs of one category, so group them first.
+    final byCategory = byId.values.toList()
+      ..sort((a, b) => a.category.compareTo(b.category));
+    return sortedByText(
+      byCategory,
+      (r) => r.commonName,
+      groupOf: (r) => r.category,
+    ).map(_mapRowToSpecies).toList();
   }
 
   /// Update sighting
@@ -204,10 +407,7 @@ class SpeciesRepository {
     await (_db.update(
       _db.sightings,
     )..where((t) => t.id.equals(sighting.id))).write(
-      SightingsCompanion(
-        count: Value(sighting.count),
-        notes: Value(sighting.notes),
-      ),
+      _withAmount(SightingsCompanion(notes: Value(sighting.notes)), sighting),
     );
     final now = DateTime.now().millisecondsSinceEpoch;
     await _syncRepository.markRecordPending(
@@ -274,78 +474,237 @@ class SpeciesRepository {
     SyncEventBus.notifyLocalChange();
   }
 
-  /// Seed built-in species from the bundled JSON asset.
-  ///
-  /// Uses INSERT OR IGNORE keyed on stable sp_ IDs for idempotent seeding.
-  /// Safe to call on every app launch.
-  Future<void> seedBuiltInSpecies() async {
-    final builtInSpecies = await SpeciesSeedService.loadBundledSpecies();
+  Future<void> _bumpDive(String diveId, int now) async {
+    await (_db.update(_db.dives)..where((t) => t.id.equals(diveId))).write(
+      DivesCompanion(updatedAt: Value(now)),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'dives',
+      recordId: diveId,
+      localUpdatedAt: now,
+    );
+  }
 
-    await _db.batch((batch) {
-      for (final species in builtInSpecies) {
-        batch.insert(
-          _db.species,
-          SpeciesCompanion(
-            id: Value(species.id),
-            commonName: Value(species.commonName),
-            scientificName: Value(species.scientificName),
-            category: Value(species.category.name),
-            taxonomyClass: Value(species.taxonomyClass),
-            description: Value(species.description),
-            isBuiltIn: const Value(true),
-          ),
-          mode: InsertMode.insertOrIgnore,
+  /// Add each sighting template to every dive (fresh id + diveId per dive).
+  /// No notify/transaction — BulkDiveEditService owns those.
+  Future<void> bulkAddSightings(
+    List<String> diveIds,
+    List<domain.Sighting> sightings,
+  ) async {
+    if (diveIds.isEmpty || sightings.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final diveId in diveIds) {
+      for (final sighting in sightings) {
+        final id = _uuid.v4();
+        await _db
+            .into(_db.sightings)
+            .insert(
+              _withAmount(
+                SightingsCompanion(
+                  id: Value(id),
+                  diveId: Value(diveId),
+                  speciesId: Value(sighting.speciesId),
+                  notes: Value(sighting.notes),
+                ),
+                sighting,
+              ),
+            );
+        await _syncRepository.markRecordPending(
+          entityType: 'sightings',
+          recordId: id,
+          localUpdatedAt: now,
         );
       }
+      await _bumpDive(diveId, now);
+    }
+  }
+
+  /// Replace each dive's sightings with [sightings]. No notify/transaction.
+  Future<void> bulkReplaceSightings(
+    List<String> diveIds,
+    List<domain.Sighting> sightings,
+  ) async {
+    if (diveIds.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final diveId in diveIds) {
+      final existing = await (_db.select(
+        _db.sightings,
+      )..where((t) => t.diveId.equals(diveId))).get();
+      await (_db.delete(
+        _db.sightings,
+      )..where((t) => t.diveId.equals(diveId))).go();
+      for (final row in existing) {
+        await _syncRepository.logDeletion(
+          entityType: 'sightings',
+          recordId: row.id,
+        );
+      }
+      for (final sighting in sightings) {
+        final id = _uuid.v4();
+        await _db
+            .into(_db.sightings)
+            .insert(
+              _withAmount(
+                SightingsCompanion(
+                  id: Value(id),
+                  diveId: Value(diveId),
+                  speciesId: Value(sighting.speciesId),
+                  notes: Value(sighting.notes),
+                ),
+                sighting,
+              ),
+            );
+        await _syncRepository.markRecordPending(
+          entityType: 'sightings',
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+      await _bumpDive(diveId, now);
+    }
+  }
+
+  /// Seed built-in species from the bundled JSON asset.
+  ///
+  /// Every launch runs the cheap INSERT OR IGNORE batch keyed on the stable
+  /// sp_ ids, which refills a wiped table. When [versionStore] reports a
+  /// version below the asset's, the batch becomes an upsert that also
+  /// rewrites rows the diver never touched (`hlc IS NULL`: every edit path
+  /// stamps an hlc, the seed never does), so catalog corrections reach
+  /// existing installs while edits survive. A built-in row the diver deleted
+  /// comes back at the next catalog version.
+  Future<void> seedBuiltInSpecies({
+    BuiltInSpeciesSeedVersionStore? versionStore,
+  }) async {
+    final catalog = await SpeciesSeedService.loadBundledCatalog();
+    final store = versionStore;
+    final upgrade =
+        store != null && await store.appliedVersion() < catalog.version;
+
+    await _db.batch((batch) {
+      for (final species in catalog.species) {
+        final companion = SpeciesCompanion(
+          id: Value(species.id),
+          commonName: Value(species.commonName),
+          scientificName: Value(species.scientificName),
+          category: Value(species.category.name),
+          taxonomyClass: Value(species.taxonomyClass),
+          description: Value(species.description),
+          isBuiltIn: const Value(true),
+        );
+        if (upgrade) {
+          batch.insert(
+            _db.species,
+            companion,
+            onConflict: DoUpdate<$SpeciesTable, Specy>(
+              (old) => companion,
+              where: (old) => old.hlc.isNull(),
+            ),
+          );
+        } else {
+          batch.insert(_db.species, companion, mode: InsertMode.insertOrIgnore);
+        }
+      }
     });
+
+    if (upgrade) {
+      await store.markApplied(catalog.version);
+    }
   }
 
   /// Reset built-in species to their default values.
   ///
-  /// Deletes all built-in species that are not referenced by sightings,
-  /// then re-seeds from the JSON asset. Species with existing sightings
-  /// are preserved but updated to match the latest bundled data.
+  /// Deletes all built-in species that nothing references, then re-seeds
+  /// from the JSON asset. A species with a sighting, a photo tag or an
+  /// expected-species entry is preserved but updated to match the latest
+  /// bundled data: deleting it would cascade those rows away.
+  ///
+  /// An edited built-in row exports (issue #3669), so every row the diver
+  /// had edited is marked pending once restored: the bundled text then
+  /// replaces the edit on the diver's other devices too. That stamps an hlc,
+  /// so later catalog versions leave those rows alone until the next reset.
   Future<void> resetBuiltInSpecies() async {
     final builtInSpecies = await SpeciesSeedService.loadBundledSpecies();
 
-    // Update existing built-in species that have sightings
-    final inUseResults = await _db.customSelect('''
-      SELECT DISTINCT species_id FROM sightings
-      WHERE species_id IN (
-        SELECT id FROM species WHERE is_built_in = 1
-      )
-    ''').get();
-    final inUseIds = inUseResults
-        .map((r) => r.data['species_id'] as String)
-        .toSet();
+    // One transaction: a reset cut short must not leave a restored row with
+    // its hlc cleared and no pending mark, which would never publish.
+    await _db.transaction(() async {
+      // Every edit path stamps an hlc and the seed never does.
+      final editedResults = await _db.customSelect('''
+        SELECT id FROM species WHERE is_built_in = 1 AND hlc IS NOT NULL
+      ''').get();
+      final editedIds = editedResults
+          .map((r) => r.data['id'] as String)
+          .toSet();
 
-    // Delete built-in species not referenced by sightings
-    await _db.customStatement('''
-      DELETE FROM species
-      WHERE is_built_in = 1
-      AND id NOT IN (SELECT DISTINCT species_id FROM sightings)
-    ''');
+      // Species ids that diver data points at. media_species and site_species
+      // both reference species ON DELETE CASCADE, so a reset that deleted a
+      // row they name would silently drop photo tags and expected species.
+      const referencedIds = '''
+        SELECT species_id FROM sightings
+        UNION SELECT species_id FROM media_species
+        UNION SELECT species_id FROM site_species
+      ''';
 
-    // Update in-use built-in species to match bundled data
-    for (final species in builtInSpecies) {
-      if (inUseIds.contains(species.id)) {
-        await (_db.update(
-          _db.species,
-        )..where((t) => t.id.equals(species.id))).write(
-          SpeciesCompanion(
-            commonName: Value(species.commonName),
-            scientificName: Value(species.scientificName),
-            category: Value(species.category.name),
-            taxonomyClass: Value(species.taxonomyClass),
-            description: Value(species.description),
-            isBuiltIn: const Value(true),
-          ),
+      // Update existing built-in species that are in use
+      final inUseResults = await _db.customSelect('''
+        SELECT id FROM species
+        WHERE is_built_in = 1 AND id IN ($referencedIds)
+      ''').get();
+      final inUseIds = inUseResults.map((r) => r.data['id'] as String).toSet();
+
+      // Drop every pending record a past edit left, for the rows about to be
+      // deleted as well as the restored ones; the edited rows are marked
+      // pending afresh below, carrying the restored text.
+      await _db.customStatement('''
+        DELETE FROM sync_records
+        WHERE entity_type = 'species'
+        AND record_id IN (SELECT id FROM species WHERE is_built_in = 1)
+      ''');
+
+      // Delete built-in species nothing references
+      await _db.customStatement('''
+        DELETE FROM species
+        WHERE is_built_in = 1
+        AND id NOT IN ($referencedIds)
+      ''');
+
+      // Update in-use built-in species to match bundled data
+      for (final species in builtInSpecies) {
+        if (inUseIds.contains(species.id)) {
+          await (_db.update(
+            _db.species,
+          )..where((t) => t.id.equals(species.id))).write(
+            SpeciesCompanion(
+              commonName: Value(species.commonName),
+              scientificName: Value(species.scientificName),
+              category: Value(species.category.name),
+              taxonomyClass: Value(species.taxonomyClass),
+              description: Value(species.description),
+              isBuiltIn: const Value(true),
+              // Restored to the bundle means untouched again, so the next
+              // catalog version may update it. A row the diver had edited is
+              // re-stamped below so the restore reaches other devices.
+              hlc: const Value(null),
+            ),
+          );
+        }
+      }
+
+      // Re-seed (INSERT OR IGNORE handles species that still exist)
+      await seedBuiltInSpecies();
+
+      // Publish the restored text of every edited row still in the catalog.
+      final catalogIds = builtInSpecies.map((s) => s.id).toSet();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final id in editedIds.where(catalogIds.contains)) {
+        await _syncRepository.markRecordPending(
+          entityType: 'species',
+          recordId: id,
+          localUpdatedAt: now,
         );
       }
-    }
-
-    // Re-seed (INSERT OR IGNORE handles species that still exist)
-    await seedBuiltInSpecies();
+    });
 
     SyncEventBus.notifyLocalChange();
   }
@@ -354,20 +713,24 @@ class SpeciesRepository {
   // Species CRUD Methods
   // ===========================================================================
 
-  /// Create a custom (non-built-in) species
+  /// Creates a custom (non-built-in) species, under [id] when one is given
+  /// (a new species' page makes its id before Save; issue #4527, phase 3,
+  /// plan 11), else under a new one.
   Future<domain.Species> createSpecies({
+    String? id,
     required String commonName,
     String? scientificName,
     required SpeciesCategory category,
     String? taxonomyClass,
     String? description,
   }) async {
-    final id = _uuid.v4();
+    final givenId = id;
+    final speciesId = givenId == null || givenId.isEmpty ? _uuid.v4() : givenId;
     await _db
         .into(_db.species)
         .insert(
           SpeciesCompanion(
-            id: Value(id),
+            id: Value(speciesId),
             commonName: Value(commonName),
             scientificName: Value(scientificName),
             category: Value(category.name),
@@ -380,13 +743,13 @@ class SpeciesRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     await _syncRepository.markRecordPending(
       entityType: 'species',
-      recordId: id,
+      recordId: speciesId,
       localUpdatedAt: now,
     );
     SyncEventBus.notifyLocalChange();
 
     return domain.Species(
-      id: id,
+      id: speciesId,
       commonName: commonName,
       scientificName: scientificName,
       category: category,
@@ -418,10 +781,20 @@ class SpeciesRepository {
     SyncEventBus.notifyLocalChange();
   }
 
-  /// Delete a species. Throws if the species is referenced by sightings.
-  Future<void> deleteSpecies(String id) async {
+  /// Delete a species. Throws if the species is referenced by sightings or
+  /// photo tags, so no `media_species` row can exist by the time the row
+  /// goes (unlike `site_species`, which is derived and cleared here).
+  Future<void> deleteSpecies(String id) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.deletedRecord,
+    body: () => _deleteSpeciesInner(id),
+  );
+
+  Future<void> _deleteSpeciesInner(String id) async {
     if (await isSpeciesInUse(id)) {
-      throw Exception('Cannot delete species that is referenced by sightings');
+      throw Exception(
+        'Cannot delete species that is referenced by sightings or photo tags',
+      );
     }
 
     // Also remove from site_species
@@ -436,14 +809,59 @@ class SpeciesRepository {
   }
 
   /// Check if a species is referenced by any sightings
+  /// Sighting counts for every species that has at least one sighting.
+  ///
+  /// One GROUP BY rather than a per-row [isSpeciesInUse] call, so a list can
+  /// decide which species are deletable without N queries. Species absent
+  /// from the map have no sightings.
+  Future<Map<String, int>> sightingCountsBySpecies() async {
+    final rows = await _db
+        .customSelect(
+          'SELECT species_id, COUNT(*) as count FROM sightings '
+          'GROUP BY species_id',
+        )
+        .get();
+    return {
+      for (final row in rows)
+        row.data['species_id'] as String: row.data['count'] as int,
+    };
+  }
+
+  /// Whether anything references the species: a sighting on a dive or a
+  /// tag on a photo. Both are diver data, so both block deletion.
   Future<bool> isSpeciesInUse(String id) async {
     final result = await _db
         .customSelect(
-          'SELECT COUNT(*) as count FROM sightings WHERE species_id = ?',
-          variables: [Variable.withString(id)],
+          '''
+      SELECT
+        (SELECT COUNT(*) FROM sightings WHERE species_id = ?) +
+        (SELECT COUNT(*) FROM media_species WHERE species_id = ?) AS count
+    ''',
+          variables: [Variable.withString(id), Variable.withString(id)],
         )
         .getSingle();
     return (result.data['count'] as int) > 0;
+  }
+
+  /// Whether any site lists the species as expected there (diver data the
+  /// species delete would otherwise clear with it).
+  Future<bool> isSpeciesOnAnySite(String id) async {
+    final row = await _db
+        .customSelect(
+          'SELECT EXISTS(SELECT 1 FROM site_species WHERE species_id = ?) '
+          'AS used',
+          variables: [Variable.withString(id)],
+        )
+        .getSingle();
+    return row.read<int>('used') == 1;
+  }
+
+  /// The species row's sync clock, or null.
+  Future<String?> hlcOf(String id) async {
+    final row = await (_db.select(
+      _db.species,
+    )..where((t) => t.id.equals(id))).getSingleOrNull();
+    return row?.hlc;
   }
 
   // ===========================================================================
@@ -451,9 +869,23 @@ class SpeciesRepository {
   // ===========================================================================
 
   /// Get species spotted at a site (derived from actual dive sightings)
+  ///
+  /// [excludeDiveId] leaves one dive's sightings out of the counts: the dive
+  /// editor suggests what *other* dives at the site saw (issue #4383), and a
+  /// saved dive's own sightings would otherwise count toward its suggestions.
+  ///
+  /// [statsScope] limits the counts to dives in the statistics, as the site
+  /// page's "Spotted here" does. The editor's suggestions pass false: a dive
+  /// kept out of the statistics still saw what it logged. Planned dives never
+  /// count either way, because nothing was seen on a dive not yet made.
   Future<List<domain.SiteSpeciesSummary>> getSpeciesSpottedAtSite(
-    String siteId,
-  ) async {
+    String siteId, {
+    String? excludeDiveId,
+    bool statsScope = true,
+  }) async {
+    final scope = statsScope
+        ? DiveStatsScope.and(alias: 'd')
+        : ' AND d.is_planned = 0';
     final results = await _db
         .customSelect(
           '''
@@ -462,15 +894,25 @@ class SpeciesRepository {
         sp.common_name,
         sp.category,
         COUNT(*) as sighting_count,
+        COALESCE(SUM(CASE s.abundance
+          WHEN 'few' THEN 2
+          WHEN 'many' THEN 11
+          WHEN 'abundant' THEN 101
+          ELSE s.count
+        END), 0) as animal_count,
         COUNT(DISTINCT d.id) as dive_count
       FROM sightings s
       JOIN species sp ON s.species_id = sp.id
       JOIN dives d ON s.dive_id = d.id
-      WHERE d.site_id = ?
+      WHERE d.site_id = ?$scope
+        ${excludeDiveId == null ? '' : 'AND d.id <> ?'}
       GROUP BY sp.id
       ORDER BY sighting_count DESC, sp.common_name ASC
     ''',
-          variables: [Variable.withString(siteId)],
+          variables: [
+            Variable.withString(siteId),
+            if (excludeDiveId != null) Variable.withString(excludeDiveId),
+          ],
         )
         .get();
 
@@ -483,6 +925,7 @@ class SpeciesRepository {
           orElse: () => SpeciesCategory.other,
         ),
         sightingCount: row.data['sighting_count'] as int,
+        animalCount: row.data['animal_count'] as int,
         diveCount: row.data['dive_count'] as int,
       );
     }).toList();
@@ -499,13 +942,17 @@ class SpeciesRepository {
       FROM site_species ss
       JOIN species sp ON ss.species_id = sp.id
       WHERE ss.site_id = ?
-      ORDER BY sp.category ASC, sp.common_name ASC
+      ORDER BY sp.category ASC, sp.common_name COLLATE NOCASE ASC
     ''',
           variables: [Variable.withString(siteId)],
         )
         .get();
 
-    return results.map((row) {
+    return sortedByText(
+      results,
+      (r) => r.data['common_name'] as String,
+      groupOf: (r) => r.data['category'],
+    ).map((row) {
       return domain.SiteSpeciesEntry(
         id: row.data['id'] as String,
         siteId: row.data['site_id'] as String,
@@ -524,11 +971,21 @@ class SpeciesRepository {
   }
 
   /// Add expected species to a site
+  /// [stampLibrary] false is for the shared site library bridge, which applies a
+  /// pulled list whose clocks it writes itself (issue #2567).
   Future<domain.SiteSpeciesEntry> addExpectedSpecies({
     required String siteId,
     required String speciesId,
     String notes = '',
+    bool stampLibrary = true,
+    String? actingDiverId,
   }) async {
+    // A library site [actingDiverId] may not edit (issue #2567); the bridge
+    // applying a pulled list does not stamp.
+    if (stampLibrary &&
+        !await _libraryStamper.mayEdit(siteId, actingDiverId: actingDiverId)) {
+      throw StateError('site $siteId is not this profile to edit');
+    }
     final id = _uuid.v4();
     final now = DateTime.now().millisecondsSinceEpoch;
 
@@ -545,10 +1002,15 @@ class SpeciesRepository {
         );
 
     await _syncRepository.markRecordPending(
-      entityType: 'site_species',
+      entityType: 'siteSpecies',
       recordId: id,
       localUpdatedAt: now,
     );
+    if (stampLibrary) {
+      await _libraryStamper.stamp(siteId, {
+        'species',
+      }, actingDiverId: actingDiverId);
+    }
     SyncEventBus.notifyLocalChange();
 
     final species = await getSpeciesById(speciesId);
@@ -564,7 +1026,17 @@ class SpeciesRepository {
   }
 
   /// Remove expected species from a site
-  Future<void> removeExpectedSpecies(String siteId, String speciesId) async {
+  /// [stampLibrary] as for [addExpectedSpecies].
+  Future<void> removeExpectedSpecies(
+    String siteId,
+    String speciesId, {
+    bool stampLibrary = true,
+    String? actingDiverId,
+  }) async {
+    if (stampLibrary &&
+        !await _libraryStamper.mayEdit(siteId, actingDiverId: actingDiverId)) {
+      return;
+    }
     final existing = await _db
         .customSelect(
           'SELECT id FROM site_species WHERE site_id = ? AND species_id = ?',
@@ -579,12 +1051,22 @@ class SpeciesRepository {
       final id = existing.data['id'] as String;
       await (_db.delete(_db.siteSpecies)..where((t) => t.id.equals(id))).go();
       await _syncRepository.logDeletion(
-        entityType: 'site_species',
+        entityType: 'siteSpecies',
         recordId: id,
       );
+      if (stampLibrary) {
+        await _libraryStamper.stamp(siteId, {
+          'species',
+        }, actingDiverId: actingDiverId);
+      }
       SyncEventBus.notifyLocalChange();
     }
   }
+
+  /// Whether the profile [actingDiverId] may change [siteId]'s lists: a
+  /// shared library site only as its role there allows (issue #2567).
+  Future<bool> mayEditSite(String siteId, {String? actingDiverId}) =>
+      _libraryStamper.mayEdit(siteId, actingDiverId: actingDiverId);
 
   /// Remove all expected species from a site
   Future<void> removeAllExpectedSpeciesForSite(String siteId) async {
@@ -598,7 +1080,7 @@ class SpeciesRepository {
 
     for (final row in existing) {
       await _syncRepository.logDeletion(
-        entityType: 'site_species',
+        entityType: 'siteSpecies',
         recordId: row.id,
       );
     }

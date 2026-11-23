@@ -18,15 +18,55 @@ class UddfImportResult {
   final List<Map<String, dynamic>> trips;
   final List<Map<String, dynamic>> tags;
   final List<Map<String, dynamic>> customDiveTypes;
+  final List<Map<String, dynamic>> customDiveRoles;
+
+  /// Custom site type definitions (`id`, `name`, `sortOrder`), issue #1765.
+  final List<Map<String, dynamic>> customSiteTypes;
+
+  /// The diver's custom service kinds from a full backup (issue #2651):
+  /// definitions, matched to the importing library by id then name.
+  final List<Map<String, dynamic>> serviceKinds;
   final List<Map<String, dynamic>> diveComputers;
   final List<Map<String, dynamic>> equipmentSets;
   final List<Map<String, dynamic>> courses;
+
+  /// Cylinder fills from a Submersion fills CSV (passports phase 5): rows
+  /// keyed by fill id and passport id, stored by CsvFillImporter.
+  final List<Map<String, dynamic>> fills;
+
+  /// Certification currency rows from a full backup (issue #2267): custom
+  /// rules, and the prefs and ledger events whose `certificationRef` names
+  /// a `<cert>` in the same file.
+  final List<Map<String, dynamic>> currencyRules;
+  final List<Map<String, dynamic>> currencyPrefs;
+  final List<Map<String, dynamic>> currencyEvents;
 
   /// The original filename of the imported file (e.g. "my_dives.uddf").
   ///
   /// Set by the caller after parsing so that downstream consumers (such as
   /// [UddfEntityImporter]) can record it on [DiveDataSource] records.
   final String? sourceFileName;
+
+  /// Per-source provenance records, keyed by the `<source diveref>` value
+  /// (for example `dive_7f3a...`), each list sorted by ordinal.
+  ///
+  /// Carries every `dive_data_sources` column the exporter wrote, plus
+  /// `rawData` where a `<divecomputerdump>` paired with the entry. Empty for
+  /// any file that was not written by Submersion with raw data enabled.
+  final Map<String, List<Map<String, dynamic>>> dataSourcesByDiveRef;
+
+  /// Dumps that could not be attached to a source record: no resolvable dive
+  /// link, an unreadable payload, or a payload over the size ceiling.
+  ///
+  /// Counted rather than thrown, because one bad dump in someone else's file
+  /// must not cost the user the rest of the import.
+  final int unpairedDumps;
+
+  /// Dives that pointed at a dive site the file never described, so they
+  /// were imported without one (#2209). Counted here rather than raised as a
+  /// warning because this service predates `ImportWarning`; `UddfImportParser`
+  /// turns it into the summary's `sitesUnresolved` notice.
+  final int divesMissingSite;
 
   const UddfImportResult({
     this.dives = const [],
@@ -43,10 +83,20 @@ class UddfImportResult {
     this.trips = const [],
     this.tags = const [],
     this.customDiveTypes = const [],
+    this.customDiveRoles = const [],
+    this.customSiteTypes = const [],
+    this.serviceKinds = const [],
     this.diveComputers = const [],
     this.equipmentSets = const [],
     this.courses = const [],
+    this.fills = const [],
+    this.currencyRules = const [],
+    this.currencyPrefs = const [],
+    this.currencyEvents = const [],
     this.sourceFileName,
+    this.dataSourcesByDiveRef = const {},
+    this.unpairedDumps = 0,
+    this.divesMissingSite = 0,
   });
 
   /// Check if any data was imported
@@ -64,9 +114,16 @@ class UddfImportResult {
       trips.isEmpty &&
       tags.isEmpty &&
       customDiveTypes.isEmpty &&
+      customDiveRoles.isEmpty &&
+      customSiteTypes.isEmpty &&
+      serviceKinds.isEmpty &&
       diveComputers.isEmpty &&
       equipmentSets.isEmpty &&
-      courses.isEmpty;
+      courses.isEmpty &&
+      fills.isEmpty &&
+      currencyRules.isEmpty &&
+      currencyPrefs.isEmpty &&
+      currencyEvents.isEmpty;
 
   /// Get total count of all items
   int get totalItems =>
@@ -83,9 +140,14 @@ class UddfImportResult {
       trips.length +
       tags.length +
       customDiveTypes.length +
+      customDiveRoles.length +
       diveComputers.length +
       equipmentSets.length +
-      courses.length;
+      courses.length +
+      fills.length +
+      currencyRules.length +
+      currencyPrefs.length +
+      currencyEvents.length;
 
   /// Summary string for display
   String get summary {
@@ -110,13 +172,37 @@ class UddfImportResult {
     if (customDiveTypes.isNotEmpty) {
       parts.add('${customDiveTypes.length} custom dive types');
     }
+    if (customDiveRoles.isNotEmpty) {
+      parts.add('${customDiveRoles.length} custom dive roles');
+    }
     if (species.isNotEmpty) parts.add('${species.length} species');
     if (serviceRecords.isNotEmpty) {
       parts.add('${serviceRecords.length} service records');
     }
     if (courses.isNotEmpty) parts.add('${courses.length} courses');
+    if (fills.isNotEmpty) parts.add('${fills.length} fills');
+    if (currencyRules.isNotEmpty) {
+      parts.add('${currencyRules.length} currency rules');
+    }
     if (settings.isNotEmpty) parts.add('${settings.length} settings');
     return parts.isEmpty ? 'No data' : parts.join(', ');
+  }
+
+  /// The entries in [byDiveRef] belonging to the dive whose `<dive id>` the
+  /// parser kept as [diveRef] (its `sourceUuid`).
+  ///
+  /// Submersion's own export writes `<dive id="dive_<uuid>">` and the parser
+  /// keeps that attribute verbatim, so the ref is already prefixed. A file
+  /// whose dive ids are bare needs the prefix added. Both shapes are tried
+  /// rather than assuming either, and in one place, so the parser attaching
+  /// entries to a dive and the importer reading them cannot resolve a dive
+  /// differently.
+  static List<Map<String, dynamic>> sourcesForDive(
+    Map<String, List<Map<String, dynamic>>> byDiveRef,
+    String? diveRef,
+  ) {
+    if (diveRef == null) return const [];
+    return byDiveRef[diveRef] ?? byDiveRef['dive_$diveRef'] ?? const [];
   }
 
   /// Returns a copy with [sourceFileName] replaced.
@@ -136,10 +222,20 @@ class UddfImportResult {
       trips: trips,
       tags: tags,
       customDiveTypes: customDiveTypes,
+      customDiveRoles: customDiveRoles,
+      customSiteTypes: customSiteTypes,
+      serviceKinds: serviceKinds,
       diveComputers: diveComputers,
       equipmentSets: equipmentSets,
       courses: courses,
+      fills: fills,
+      currencyRules: currencyRules,
+      currencyPrefs: currencyPrefs,
+      currencyEvents: currencyEvents,
       sourceFileName: sourceFileName,
+      dataSourcesByDiveRef: dataSourcesByDiveRef,
+      unpairedDumps: unpairedDumps,
+      divesMissingSite: divesMissingSite,
     );
   }
 }

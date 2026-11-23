@@ -1,12 +1,28 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/core/router/section_navigation.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/router/back_navigation.dart';
+import 'package:submersion/core/theme/feature_accent_colors.dart';
 import 'package:submersion/features/auto_update/presentation/widgets/update_banner.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/download_providers.dart';
 import 'package:submersion/features/dive_computer/presentation/widgets/download_exit_dialog.dart';
+import 'package:submersion/features/gps_log/presentation/widgets/gps_recording_strip.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/global_drop_target.dart';
+import 'package:submersion/shared/widgets/master_detail/list_memory_scope.dart';
+import 'package:submersion/shared/widgets/nav/nav_bar_label_fit.dart';
+import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
+import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
+import 'package:submersion/shared/widgets/nav/nav_selection.dart';
+import 'package:submersion/shared/widgets/nav/nav_slot_count.dart';
+import 'package:submersion/shared/widgets/shell_chrome_scope.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_exit_confirm.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_exit_entries.dart';
 
 class MainScaffold extends ConsumerStatefulWidget {
   final Widget child;
@@ -18,62 +34,117 @@ class MainScaffold extends ConsumerStatefulWidget {
 }
 
 class _MainScaffoldState extends ConsumerState<MainScaffold> {
-  /// When true, the user has manually collapsed the rail (overrides auto-extend)
-  bool _isCollapsed = false;
+  /// Manual override for the rail's expanded/collapsed state, set by tapping
+  /// the collapse arrow. `null` means "no manual override yet, follow
+  /// [navAlwaysHideLabelsDesktopProvider]'s default"; a non-null value means
+  /// the user overrode it for this session (#1424), same as before this
+  /// setting existed -- it is not persisted, so it resets on restart.
+  bool? _isCollapsedOverride;
 
-  // Routes that appear in the "More" menu on mobile
-  static const _moreRoutes = [
-    '/equipment',
-    '/buddies',
-    '/dive-centers',
-    '/certifications',
-    '/courses',
-    '/statistics',
-    '/planning',
-    '/transfer',
-    '/settings',
-  ];
+  /// Hide requests from pages inside the shell, such as the media viewer's
+  /// fullscreen mode (#1087).
+  final ShellChromeController _chromeController = ShellChromeController();
 
+  void _onChromeChanged() => setState(() {});
+
+  @override
+  void initState() {
+    super.initState();
+    _chromeController.addListener(_onChromeChanged);
+  }
+
+  @override
+  void dispose() {
+    _chromeController
+      ..removeListener(_onChromeChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  /// The shell navigator's pages, fenced off as a semantics node of their own.
+  ///
+  /// Every page route paints a modal barrier, and a modal barrier blocks the
+  /// semantics of everything painted before it, up to the nearest semantics
+  /// boundary. Nothing in the shell was one, so the rail and the banners,
+  /// all painted before the page, fell out of the semantics tree and a
+  /// screen reader could not reach them (issue #4166). The boundary keeps the
+  /// barrier's reach inside the shell navigator, where its routes stack.
+  static Widget _pageArea(Widget page) =>
+      Semantics(container: true, child: page);
+
+  /// The layout while a page holds a hide request: the page alone, edge to
+  /// edge, with no rail, bottom bar, banner, strip or SafeArea inset.
+  ///
+  /// Moving [MainScaffold.child] between this and the chromed layout keeps
+  /// every page on the shell navigator alive: go_router builds that
+  /// navigator with a GlobalKey (ShellRoute.navigatorKey), so the element is
+  /// reparented rather than rebuilt.
+  Widget _buildChromelessScaffold() =>
+      Scaffold(body: GlobalDropTarget(child: _pageArea(widget.child)));
+
+  /// Builds a per-destination accent color lookup for the navigation surfaces.
+  ///
+  /// Returns null for every id while the toggle is off, and for ids with no
+  /// palette entry -- which is how the `more` sentinel stays uncolored. A null
+  /// result leaves the icon on its Material 3 default.
+  ///
+  /// Pass `watch: false` from transient surfaces (the overflow sheet) that are
+  /// built outside the scaffold's own build phase.
+  Color? Function(String) _navAccentLookup(
+    BuildContext context, {
+    bool watch = true,
+  }) {
+    final enabled = watch
+        ? ref.watch(accentNavIconsProvider)
+        : ref.read(accentNavIconsProvider);
+    if (!enabled) return (_) => null;
+    final accents = Theme.of(context).extension<FeatureAccentColors>();
+    return (id) => accents?.of(id);
+  }
+
+  /// The index of the most specific destination for the current location
+  /// (see `navMatchScore`), so a nav shortcut (#2936) wins over the section
+  /// its page sits in. On phone the bar slots and the More sheet compete
+  /// together, and a winner in the sheet selects More.
+  ///
+  /// [railDestinations] is only read when [isWideScreen] is true, and
+  /// [primaryDestinations] and [overflowDestinations] only when it is false,
+  /// so the caller may pass empty lists for the surface it is not rendering
+  /// rather than subscribing to that surface's order.
   int _calculateSelectedIndex(
     BuildContext context, {
     required bool isWideScreen,
+    required List<NavDestination> railDestinations,
+    required List<NavDestination> primaryDestinations,
+    required List<NavDestination> overflowDestinations,
   }) {
-    final location = GoRouterState.of(context).uri.path;
-
-    if (isWideScreen) {
-      // Wide screen: All items in the rail
-      if (location.startsWith('/dashboard')) return 0;
-      if (location.startsWith('/dives')) return 1;
-      if (location.startsWith('/sites')) return 2;
-      if (location.startsWith('/trips')) return 3;
-      if (location.startsWith('/equipment')) return 4;
-      if (location.startsWith('/buddies')) return 5;
-      if (location.startsWith('/dive-centers')) return 6;
-      if (location.startsWith('/certifications')) return 7;
-      if (location.startsWith('/courses')) return 8;
-      if (location.startsWith('/statistics')) return 9;
-      if (location.startsWith('/planning')) return 10;
-      if (location.startsWith('/transfer')) return 11;
-      if (location.startsWith('/settings')) return 12;
-      return 0;
-    } else {
-      // Mobile: Dashboard, Dives, Sites, Trips, More
-      if (location.startsWith('/dashboard')) return 0;
-      if (location.startsWith('/dives')) return 1;
-      if (location.startsWith('/sites')) return 2;
-      if (location.startsWith('/trips')) return 3;
-      // Check if current route is in "More" menu
-      for (final route in _moreRoutes) {
-        if (location.startsWith(route)) return 4;
-      }
-      return 0;
-    }
+    final location = GoRouterState.of(context).uri;
+    return isWideScreen
+        ? railSelectedIndex(railDestinations, location)
+        : phoneSelectedIndex(
+            primary: primaryDestinations,
+            overflow: overflowDestinations,
+            location: location,
+          );
   }
 
+  /// Handles a tap on the rail or the bottom bar.
+  ///
+  /// [destinations] is the list that rendered the tapped control, captured in
+  /// the same build. Re-reading the provider here instead would let the order
+  /// change between render and tap and resolve [index] against a different
+  /// list, routing somewhere the user did not tap. The window is real: the
+  /// download confirmation below suspends this method for as long as the user
+  /// takes to answer, and a sync applying a remote settings change or a
+  /// cold-start load landing in that gap would swap the list out.
   Future<void> _onDestinationSelected(
     int index, {
-    required bool isWideScreen,
+    required List<NavDestination> destinations,
+    List<NavDestination> overflow = const [],
   }) async {
+    if (index < 0 || index >= destinations.length) return;
+    final destination = destinations[index];
+
     // Guard: if a download is in progress, confirm before navigating away
     final isDownloading = ref.read(downloadNotifierProvider).isDownloading;
     if (isDownloading) {
@@ -83,79 +154,47 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
       if (!mounted) return;
     }
 
-    if (isWideScreen) {
-      switch (index) {
-        case 0:
-          context.go('/dashboard');
-          break;
-        case 1:
-          context.go('/dives');
-          break;
-        case 2:
-          context.go('/sites');
-          break;
-        case 3:
-          context.go('/trips');
-          break;
-        case 4:
-          context.go('/equipment');
-          break;
-        case 5:
-          context.go('/buddies');
-          break;
-        case 6:
-          context.go('/dive-centers');
-          break;
-        case 7:
-          context.go('/certifications');
-          break;
-        case 8:
-          context.go('/courses');
-          break;
-        case 9:
-          context.go('/statistics');
-          break;
-        case 10:
-          context.go('/planning');
-          break;
-        case 11:
-          context.go('/transfer');
-          break;
-        case 12:
-          context.go('/settings');
-          break;
-      }
-    } else {
-      // Mobile navigation: Dashboard, Dives, Sites, Trips, More
-      switch (index) {
-        case 0:
-          context.go('/dashboard');
-          break;
-        case 1:
-          context.go('/dives');
-          break;
-        case 2:
-          context.go('/sites');
-          break;
-        case 3:
-          context.go('/trips');
-          break;
-        case 4:
-          _showMoreMenu(context);
-          break;
-      }
+    // The bottom bar's last entry is the `more` sentinel, which opens the
+    // overflow sheet rather than routing. The rail never contains it.
+    if (destination.id == 'more') {
+      _showMoreMenu(context, overflow);
+      return;
     }
+    if (destination.route.isEmpty) return;
+    await context.goGuarded(destination.route);
   }
 
-  void _showMoreMenu(BuildContext context) {
+  /// [overflow] is captured by the caller in the same build that rendered the
+  /// tapped bottom bar, matching [destinations] in [_onDestinationSelected]:
+  /// reading the provider fresh here could resolve against a slot count that
+  /// changed (e.g. a rotation) while the sheet was opening.
+  void _showMoreMenu(BuildContext context, List<NavDestination> overflow) {
+    final navAccent = _navAccentLookup(context, watch: false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      // Scroll-controlled means the sheet has no height ceiling, and a dozen
+      // overflow destinations are taller than a phone screen. Left alone the
+      // sheet grew to y=0, putting its title and close button under the
+      // Android status bar (issue #1480). The safe area keeps it clear of the
+      // status bar and cutouts; the height cap leaves a strip of scrim above
+      // it so tapping outside stays an obvious way out.
+      useSafeArea: true,
+      constraints: BoxConstraints(
+        maxHeight:
+            MediaQuery.of(context).size.height * kNavSheetMaxHeightFraction,
+      ),
+      // Not redundant with useSafeArea: that inserts SafeArea(bottom: false),
+      // so the sheet deliberately runs to the bottom edge of the screen. This
+      // one supplies the bottom inset the outer one skips, keeping the last
+      // tile clear of the home indicator. Nothing is applied twice -- a
+      // SafeArea strips the padding it consumes out of the MediaQuery, so the
+      // horizontal insets are already zero by the time this one reads them.
       builder: (sheetContext) => SafeArea(
         child: Column(
+          key: const ValueKey('navOverflowSheetBody'),
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Fixed header
             Padding(
               padding: const EdgeInsets.all(16),
               child: Row(
@@ -174,85 +213,33 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
               ),
             ),
             const Divider(height: 1),
-            // Scrollable menu items
             Flexible(
               child: ListView(
                 shrinkWrap: true,
                 children: [
-                  ListTile(
-                    leading: const Icon(Icons.backpack),
-                    title: Text(sheetContext.l10n.nav_equipment),
+                  // The sheet closes first; the question is asked from the
+                  // shell, which outlives it (issue #4436).
+                  DemoExitSheetTile(
                     onTap: () {
                       Navigator.pop(sheetContext);
-                      context.go('/equipment');
+                      confirmAndExitDemo(context, ref);
                     },
                   ),
-                  ListTile(
-                    leading: const Icon(Icons.people),
-                    title: Text(sheetContext.l10n.nav_buddies),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/buddies');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.store),
-                    title: Text(sheetContext.l10n.nav_diveCenters),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/dive-centers');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.card_membership),
-                    title: Text(sheetContext.l10n.nav_certifications),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/certifications');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.school),
-                    title: Text(sheetContext.l10n.nav_courses),
-                    subtitle: Text(sheetContext.l10n.nav_coursesSubtitle),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/courses');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.bar_chart),
-                    title: Text(sheetContext.l10n.nav_statistics),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/statistics');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.edit_calendar),
-                    title: Text(sheetContext.l10n.nav_planning),
-                    subtitle: Text(sheetContext.l10n.nav_planningSubtitle),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/planning');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.sync_alt),
-                    title: Text(sheetContext.l10n.nav_transfer),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/transfer');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.settings),
-                    title: Text(sheetContext.l10n.nav_settings),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      context.go('/settings');
-                    },
-                  ),
+                  for (final destination in overflow)
+                    ListTile(
+                      leading: Icon(
+                        destination.icon,
+                        color: navAccent(destination.accentId),
+                      ),
+                      title: Text(destination.label(sheetContext.l10n)),
+                      subtitle: destination.subtitle != null
+                          ? Text(destination.subtitle!(sheetContext.l10n))
+                          : null,
+                      onTap: () {
+                        Navigator.pop(sheetContext);
+                        context.goGuarded(destination.route);
+                      },
+                    ),
                   const SizedBox(height: 8),
                 ],
               ),
@@ -265,18 +252,87 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
+    // Last-resort handler for the Android system back button.
+    //
+    // go_router's popRoute() tries navigators innermost-first: its
+    // _findCurrentNavigators() collects [root, ...shells] and returns them
+    // reversed. So the shell's inner Navigator -- and any PopScope on the
+    // page it currently shows, such as EditFormScaffold's unsaved-changes
+    // guard -- gets to pop or decline before this ever runs.
+    //
+    // This PopScope is registered on the ROOT navigator's shell page, which
+    // makes it the LAST candidate. It therefore only fires when nothing can
+    // pop, the normal state after any context.go() because go() replaces the
+    // stack instead of pushing onto it. Without this fallback the press falls
+    // through to SystemNavigator.pop() and closes the app (#647).
+    final upLocation = resolveUpLocation(GoRouterState.of(context).uri);
+    return PopScope(
+      // Only the dashboard resolves to null, so only the dashboard exits.
+      canPop: upLocation == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || upLocation == null) return;
+        context.go(upLocation);
+      },
+      // Lives as long as the shell, so a record opened or a diver switched
+      // anywhere in it keeps the lists' memory straight (#3301).
+      child: ListMemoryScope(
+        child: ShellChromeScope(
+          controller: _chromeController,
+          child: _chromeController.isHidden
+              ? _buildChromelessScaffold()
+              : _buildScaffold(context),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
+    final viewSize = MediaQuery.sizeOf(context);
+    final screenWidth = viewSize.width;
     final isWideScreen = screenWidth >= 800;
     final isDesktopExtended = screenWidth >= 1200;
+    final navAccent = _navAccentLookup(context);
+    // Each surface reads its own setting (#3222); only one of the two is
+    // ever rendered per build, matching how railDestinations below only
+    // watches its provider on wide screens.
+    final alwaysHideLabels = isWideScreen
+        ? ref.watch(navAlwaysHideLabelsDesktopProvider).value ?? false
+        : ref.watch(navAlwaysHideLabelsPhoneProvider).value ?? false;
+    // Watched only on wide screens: building this provider kicks off a
+    // settings read for the rail order, and a phone never renders a rail.
+    // Riverpod rebuilds subscriptions each build, so a resize into rail
+    // width picks it up on that build.
+    final railDestinations = isWideScreen
+        ? ref.watch(navRailDestinationsProvider)
+        : const <NavDestination>[];
+    // Only computed on narrow screens, mirroring railDestinations above: a
+    // rail never renders the primary/overflow split, so a wide build has no
+    // reason to subscribe to the phone order or the slot-count inputs.
+    final primarySlotCount = isWideScreen
+        ? kMinPhonePrimarySlotCount
+        : currentPhonePrimarySlotCount(ref, viewSize);
+    final primaryDestinations = isWideScreen
+        ? const <NavDestination>[]
+        : ref.watch(navPrimaryDestinationsProvider(primarySlotCount));
+    final overflowDestinations = isWideScreen
+        ? const <NavDestination>[]
+        : ref.watch(navOverflowDestinationsProvider(primarySlotCount));
     final selectedIndex = _calculateSelectedIndex(
       context,
       isWideScreen: isWideScreen,
+      railDestinations: railDestinations,
+      primaryDestinations: primaryDestinations,
+      overflowDestinations: overflowDestinations,
     );
 
     if (isWideScreen) {
       // Desktop/Tablet layout with NavigationRail
-      // Only allow collapse toggle when screen is wide enough for extended mode
-      final showExtended = isDesktopExtended && !_isCollapsed;
+      // Only allow collapse toggle when screen is wide enough for extended mode.
+      // With no manual override yet, the always-hide-labels setting decides
+      // whether the rail starts extended (#1424); the arrow below can always
+      // override that for the rest of this session.
+      final isCollapsed = _isCollapsedOverride ?? alwaysHideLabels;
+      final showExtended = isDesktopExtended && !isCollapsed;
 
       return Scaffold(
         body: GlobalDropTarget(
@@ -296,19 +352,21 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
                           child: NavigationRail(
                             extended: showExtended,
                             minExtendedWidth: 190,
+                            trailing: const DemoExitRailButton(),
+                            trailingAtBottom: true,
                             leading: isDesktopExtended
                                 ? IconButton(
                                     icon: Icon(
-                                      _isCollapsed
+                                      isCollapsed
                                           ? Icons.keyboard_double_arrow_right
                                           : Icons.keyboard_double_arrow_left,
                                     ),
-                                    tooltip: _isCollapsed
+                                    tooltip: isCollapsed
                                         ? context.l10n.nav_tooltip_expandMenu
                                         : context.l10n.nav_tooltip_collapseMenu,
                                     onPressed: () {
                                       setState(() {
-                                        _isCollapsed = !_isCollapsed;
+                                        _isCollapsedOverride = !isCollapsed;
                                       });
                                     },
                                   )
@@ -317,76 +375,29 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
                             onDestinationSelected: (index) =>
                                 _onDestinationSelected(
                                   index,
-                                  isWideScreen: true,
+                                  destinations: railDestinations,
                                 ),
                             destinations: [
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.home_outlined),
-                                selectedIcon: const Icon(Icons.home),
-                                label: Text(context.l10n.nav_home),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.scuba_diving_outlined),
-                                selectedIcon: const Icon(Icons.scuba_diving),
-                                label: Text(context.l10n.nav_dives),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.location_on_outlined),
-                                selectedIcon: const Icon(Icons.location_on),
-                                label: Text(context.l10n.nav_sites),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.flight_outlined),
-                                selectedIcon: const Icon(Icons.flight),
-                                label: Text(context.l10n.nav_trips),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.backpack_outlined),
-                                selectedIcon: const Icon(Icons.backpack),
-                                label: Text(context.l10n.nav_equipment),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.people_outlined),
-                                selectedIcon: const Icon(Icons.people),
-                                label: Text(context.l10n.nav_buddies),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.store_outlined),
-                                selectedIcon: const Icon(Icons.store),
-                                label: Text(context.l10n.nav_diveCenters),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(
-                                  Icons.card_membership_outlined,
+                              for (final destination in railDestinations)
+                                NavigationRailDestination(
+                                  icon: _railIcon(
+                                    Icon(
+                                      destination.icon,
+                                      color: navAccent(destination.accentId),
+                                    ),
+                                    label: destination.label(context.l10n),
+                                    labelsHidden: !showExtended,
+                                  ),
+                                  selectedIcon: _railIcon(
+                                    Icon(
+                                      destination.selectedIcon,
+                                      color: navAccent(destination.accentId),
+                                    ),
+                                    label: destination.label(context.l10n),
+                                    labelsHidden: !showExtended,
+                                  ),
+                                  label: Text(destination.label(context.l10n)),
                                 ),
-                                selectedIcon: const Icon(Icons.card_membership),
-                                label: Text(context.l10n.nav_certifications),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.school_outlined),
-                                selectedIcon: const Icon(Icons.school),
-                                label: Text(context.l10n.nav_courses),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.bar_chart_outlined),
-                                selectedIcon: const Icon(Icons.bar_chart),
-                                label: Text(context.l10n.nav_statistics),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.edit_calendar_outlined),
-                                selectedIcon: const Icon(Icons.edit_calendar),
-                                label: Text(context.l10n.nav_planning),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.sync_alt_outlined),
-                                selectedIcon: const Icon(Icons.sync_alt),
-                                label: Text(context.l10n.nav_transfer),
-                              ),
-                              NavigationRailDestination(
-                                icon: const Icon(Icons.settings_outlined),
-                                selectedIcon: const Icon(Icons.settings),
-                                label: Text(context.l10n.nav_settings),
-                              ),
                             ],
                           ),
                         ),
@@ -399,7 +410,8 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
                   child: Column(
                     children: [
                       const UpdateBanner(),
-                      Expanded(child: widget.child),
+                      Expanded(child: _pageArea(widget.child)),
+                      const GpsRecordingStrip(),
                     ],
                   ),
                 ),
@@ -416,40 +428,104 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
         child: Column(
           children: [
             const UpdateBanner(),
-            Expanded(child: widget.child),
+            Expanded(child: _pageArea(widget.child)),
+            const GpsRecordingStrip(),
           ],
         ),
       ),
-      bottomNavigationBar: NavigationBar(
+      bottomNavigationBar: _buildMobileNavBar(
+        context,
+        selectedIndex,
+        primary: primaryDestinations,
+        overflow: overflowDestinations,
+        alwaysHideLabels: alwaysHideLabels,
+      ),
+    );
+  }
+
+  /// Names a rail icon on hover or long-press while the rail hides its labels.
+  ///
+  /// NavigationRailDestination has no tooltip of its own (NavigationBar
+  /// does), so a collapsed rail would otherwise leave its icons unnamed. The
+  /// tooltip skips semantics because the rail already announces the label.
+  Widget _railIcon(
+    Icon icon, {
+    required String label,
+    required bool labelsHidden,
+  }) {
+    if (!labelsHidden) return icon;
+    final isRtl = Directionality.of(context) == TextDirection.rtl;
+    return Tooltip(
+      message: label,
+      excludeFromSemantics: true,
+      positionDelegate: (position) => _besideRail(position, towardsLeft: isRtl),
+      child: icon,
+    );
+  }
+
+  /// Places a rail tooltip beside the rail, vertically centred on its icon,
+  /// so it never covers the neighbouring destinations above or below.
+  static Offset _besideRail(
+    TooltipPositionContext position, {
+    required bool towardsLeft,
+  }) {
+    // Clears the rail's selection indicator, which is wider than the icon.
+    const gap = 36.0;
+    final tooltip = position.tooltipSize;
+    final x = towardsLeft
+        ? position.target.dx - gap - tooltip.width
+        : position.target.dx + gap;
+    final y = position.target.dy - tooltip.height / 2;
+    return Offset(
+      x.clamp(0.0, math.max(0.0, position.overlaySize.width - tooltip.width)),
+      y.clamp(0.0, math.max(0.0, position.overlaySize.height - tooltip.height)),
+    );
+  }
+
+  Widget _buildMobileNavBar(
+    BuildContext context,
+    int selectedIndex, {
+    required List<NavDestination> primary,
+    required List<NavDestination> overflow,
+    required bool alwaysHideLabels,
+  }) {
+    final navAccent = _navAccentLookup(context);
+    final labels = [
+      for (final destination in primary) destination.label(context.l10n),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) => NavigationBar(
         selectedIndex: selectedIndex,
-        onDestinationSelected: (index) =>
-            _onDestinationSelected(index, isWideScreen: false),
+        labelBehavior: alwaysHideLabels
+            ? NavigationDestinationLabelBehavior.alwaysHide
+            : NavigationDestinationLabelBehavior.alwaysShow,
+        // Long words (German "Tauchplätze") would otherwise split between
+        // two letters on a narrow phone (#4336).
+        labelTextStyle: alwaysHideLabels
+            ? null
+            : fittedNavBarLabelTextStyle(
+                context,
+                labels: labels,
+                barWidth: constraints.maxWidth,
+              ),
+        onDestinationSelected: (index) => _onDestinationSelected(
+          index,
+          destinations: primary,
+          overflow: overflow,
+        ),
         destinations: [
-          NavigationDestination(
-            icon: const Icon(Icons.home_outlined),
-            selectedIcon: const Icon(Icons.home),
-            label: context.l10n.nav_home,
-          ),
-          NavigationDestination(
-            icon: const Icon(Icons.scuba_diving_outlined),
-            selectedIcon: const Icon(Icons.scuba_diving),
-            label: context.l10n.nav_dives,
-          ),
-          NavigationDestination(
-            icon: const Icon(Icons.location_on_outlined),
-            selectedIcon: const Icon(Icons.location_on),
-            label: context.l10n.nav_sites,
-          ),
-          NavigationDestination(
-            icon: const Icon(Icons.flight_outlined),
-            selectedIcon: const Icon(Icons.flight),
-            label: context.l10n.nav_trips,
-          ),
-          NavigationDestination(
-            icon: const Icon(Icons.more_horiz_outlined),
-            selectedIcon: const Icon(Icons.more_horiz),
-            label: context.l10n.nav_more,
-          ),
+          for (final (index, destination) in primary.indexed)
+            NavigationDestination(
+              icon: Icon(
+                destination.icon,
+                color: navAccent(destination.accentId),
+              ),
+              selectedIcon: Icon(
+                destination.selectedIcon,
+                color: navAccent(destination.accentId),
+              ),
+              label: labels[index],
+            ),
         ],
       ),
     );

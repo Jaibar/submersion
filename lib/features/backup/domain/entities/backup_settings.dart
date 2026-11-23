@@ -1,24 +1,110 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/services/accounts/account_kind.dart';
+import 'package:submersion/features/backup/domain/entities/backup_copy_account.dart';
+
 /// How often automatic backups should run
 enum BackupFrequency { daily, weekly, monthly }
 
+/// Where the most recent backup was written, so Settings > Data can say
+/// where the copy is without guessing from settings changed since.
+enum LastBackupDestination {
+  /// The app's own backups folder on this device.
+  device,
+
+  /// A backup folder the diver chose.
+  folder,
+
+  /// This device, plus a copy that reached the cloud.
+  cloud,
+
+  /// A file the diver saved somewhere with Save to file.
+  file,
+}
+
 /// User-configurable backup settings
 class BackupSettings extends Equatable {
+  /// The [retentionCount] that means "keep every backup" (issue #4535).
+  ///
+  /// Stored as a huge count rather than 0 or a separate flag: an older build
+  /// reads the same key as a plain count, so it keeps everything too, where
+  /// 0 would make it delete every unpinned backup.
+  static const int keepAllRetentionCount = 1 << 30;
+
+  /// The largest count a diver can type. Anything stored above it is shown
+  /// as Keep all, never as a number.
+  static const int maxCustomRetentionCount = 9999;
+
   final bool enabled;
   final BackupFrequency frequency;
   final int retentionCount;
   final DateTime? lastBackupTime;
   final bool cloudBackupEnabled;
   final String? backupLocation;
+  final bool backupEncryptionEnabled;
+
+  /// When the last scheduled (automatic) backup failed, if it did. Counts
+  /// only while newer than [lastBackupTime]: any later success clears it.
+  final DateTime? lastScheduledFailureAt;
+  final String? lastScheduledFailureMessage;
+
+  /// Cloud backup is on but the most recent backup did not reach the cloud.
+  final bool lastCloudCopyMissing;
+
+  /// The server refused that copy, so signing in again would help (#3811).
+  final bool lastCloudCopyNeedsSignIn;
+
+  /// Where the most recent backup went, or null before the first backup
+  /// made by a version that records it.
+  final LastBackupDestination? lastBackupDestination;
+
+  /// The connected account the last backup reached: its main copy's, else
+  /// its first extra copy's (issue #3782). Settings > Data names the account
+  /// the copy is in, not the one the copy goes to today. Null for any other
+  /// destination.
+  final String? lastBackupCloudAccountId;
+
+  /// The roster row the cloud copy goes to, with its kind; both null means
+  /// the copy goes to the same account as sync (spec section 7.3). The kind
+  /// travels with the id so the scheduled backup, which has no database
+  /// registry, can still build the provider.
+  final String? copyAccountId;
+  final AccountKind? copyAccountKind;
+
+  /// The cloud folder the "count backups from all devices" switch was
+  /// confirmed for (issue #3503): its account id, or `provider:<id>` when the
+  /// account is unknown; null when the switch is off. Kept as the folder
+  /// rather than a flag so a different backup folder reads as off until the
+  /// diver confirms it too.
+  final String? crossDeviceRetentionAccount;
+
+  /// Accounts each backup is also copied to, beside the main copy (issue
+  /// #3782). They are copied to only while [cloudBackupEnabled] is on.
+  final List<BackupCopyAccount> extraCopyAccounts;
+
+  /// The extra accounts the most recent backup did not reach. Every backup
+  /// rewrites it.
+  final List<String> lastExtraCopyMissingIds;
 
   const BackupSettings({
     this.enabled = false,
     this.frequency = BackupFrequency.weekly,
     this.retentionCount = 10,
     this.lastBackupTime,
-    this.cloudBackupEnabled = true,
+    this.cloudBackupEnabled = false,
     this.backupLocation,
+    this.backupEncryptionEnabled = false,
+    this.lastScheduledFailureAt,
+    this.lastScheduledFailureMessage,
+    this.lastCloudCopyMissing = false,
+    this.lastCloudCopyNeedsSignIn = false,
+    this.lastBackupDestination,
+    this.lastBackupCloudAccountId,
+    this.copyAccountId,
+    this.copyAccountKind,
+    this.crossDeviceRetentionAccount,
+    this.extraCopyAccounts = const [],
+    this.lastExtraCopyMissingIds = const [],
   });
 
   BackupSettings copyWith({
@@ -28,6 +114,18 @@ class BackupSettings extends Equatable {
     DateTime? lastBackupTime,
     bool? cloudBackupEnabled,
     String? backupLocation,
+    bool? backupEncryptionEnabled,
+    DateTime? lastScheduledFailureAt,
+    String? lastScheduledFailureMessage,
+    bool? lastCloudCopyMissing,
+    bool? lastCloudCopyNeedsSignIn,
+    LastBackupDestination? lastBackupDestination,
+    String? lastBackupCloudAccountId,
+    String? copyAccountId,
+    AccountKind? copyAccountKind,
+    String? crossDeviceRetentionAccount,
+    List<BackupCopyAccount>? extraCopyAccounts,
+    List<String>? lastExtraCopyMissingIds,
   }) {
     return BackupSettings(
       enabled: enabled ?? this.enabled,
@@ -36,6 +134,26 @@ class BackupSettings extends Equatable {
       lastBackupTime: lastBackupTime ?? this.lastBackupTime,
       cloudBackupEnabled: cloudBackupEnabled ?? this.cloudBackupEnabled,
       backupLocation: backupLocation ?? this.backupLocation,
+      backupEncryptionEnabled:
+          backupEncryptionEnabled ?? this.backupEncryptionEnabled,
+      lastScheduledFailureAt:
+          lastScheduledFailureAt ?? this.lastScheduledFailureAt,
+      lastScheduledFailureMessage:
+          lastScheduledFailureMessage ?? this.lastScheduledFailureMessage,
+      lastCloudCopyMissing: lastCloudCopyMissing ?? this.lastCloudCopyMissing,
+      lastCloudCopyNeedsSignIn:
+          lastCloudCopyNeedsSignIn ?? this.lastCloudCopyNeedsSignIn,
+      lastBackupDestination:
+          lastBackupDestination ?? this.lastBackupDestination,
+      lastBackupCloudAccountId:
+          lastBackupCloudAccountId ?? this.lastBackupCloudAccountId,
+      copyAccountId: copyAccountId ?? this.copyAccountId,
+      copyAccountKind: copyAccountKind ?? this.copyAccountKind,
+      crossDeviceRetentionAccount:
+          crossDeviceRetentionAccount ?? this.crossDeviceRetentionAccount,
+      extraCopyAccounts: extraCopyAccounts ?? this.extraCopyAccounts,
+      lastExtraCopyMissingIds:
+          lastExtraCopyMissingIds ?? this.lastExtraCopyMissingIds,
     );
   }
 
@@ -51,12 +169,23 @@ class BackupSettings extends Equatable {
     }
   }
 
+  /// Whether automatic removal is off: every backup is kept.
+  bool get keepsAll => countKeepsAll(retentionCount);
+
+  /// Whether a stored retention [count] means Keep all.
+  static bool countKeepsAll(int count) => count > maxCustomRetentionCount;
+
   /// Whether a backup is due based on lastBackupTime and frequency
   bool get isBackupDue {
     if (!enabled) return false;
     if (lastBackupTime == null) return true;
     return DateTime.now().difference(lastBackupTime!) >= frequencyDuration;
   }
+
+  /// Whether the cross-device rule applies to the cloud folder [folderKey]
+  /// names (`BackupServiceRetention.crossDeviceRetentionAccountKey`).
+  bool crossDeviceRetentionFor(String folderKey) =>
+      crossDeviceRetentionAccount == folderKey;
 
   @override
   List<Object?> get props => [
@@ -66,5 +195,17 @@ class BackupSettings extends Equatable {
     lastBackupTime,
     cloudBackupEnabled,
     backupLocation,
+    backupEncryptionEnabled,
+    lastScheduledFailureAt,
+    lastScheduledFailureMessage,
+    lastCloudCopyMissing,
+    lastCloudCopyNeedsSignIn,
+    lastBackupDestination,
+    lastBackupCloudAccountId,
+    copyAccountId,
+    copyAccountKind,
+    crossDeviceRetentionAccount,
+    extraCopyAccounts,
+    lastExtraCopyMissingIds,
   ];
 }

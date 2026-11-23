@@ -1,26 +1,61 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
+import 'package:flutter/foundation.dart' show compute, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
 
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/features/buddies/domain/services/buddy_card_codec.dart';
+import 'package:submersion/features/buddies/presentation/utils/open_buddy_card.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/media/data/services/media_file_types.dart';
+import 'package:submersion/features/media/presentation/helpers/media_drop_destination.dart';
+import 'package:submersion/features/media/presentation/helpers/media_drop_import.dart';
+import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_import_review_page.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
+import 'package:submersion/features/import_wizard/presentation/suunto_file_import_navigation.dart';
+import 'package:submersion/features/universal_import/data/services/batch_parse_service.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/services/incoming_file_handler.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_job_provider.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+import 'package:submersion/core/platform/desktop_target_platform.dart';
 
 /// Wraps content with a desktop drag-and-drop target that navigates to the
 /// import wizard when a supported file is dropped.
 ///
+/// Photos and videos are not dive logs. Dropped on a screen that takes them
+/// (the Media section, a dive, a site; see [mediaDropDestinationFor]) they
+/// open that screen's media importer instead; dropped anywhere else they
+/// earn a hint saying where to drop them (issue #2488). A drop mixing both
+/// kinds sends each kind its own way, the media first.
+///
+/// This is the window's only drop target on purpose: desktop_drop delivers
+/// every drop to every live target, including those hidden under a pushed
+/// page, so screens cannot simply nest their own.
+///
 /// On non-desktop platforms, this widget passes through [child] unchanged.
 /// Shows a frosted glass overlay when a file is dragged over the app.
 class GlobalDropTarget extends ConsumerStatefulWidget {
-  const GlobalDropTarget({super.key, required this.child});
+  const GlobalDropTarget({
+    super.key,
+    required this.child,
+    this.onMediaDrop = importDroppedMedia,
+  });
 
   final Widget child;
+
+  /// Imports dropped photos and videos; a seam for tests, which cannot drive
+  /// the photo picker the default opens.
+  final MediaDropHandler onMediaDrop;
 
   @override
   ConsumerState<GlobalDropTarget> createState() => _GlobalDropTargetState();
@@ -30,11 +65,8 @@ class _GlobalDropTargetState extends ConsumerState<GlobalDropTarget> {
   bool _isDragging = false;
 
   static bool get _isDesktop {
-    if (kIsWeb) return false;
-    final platform = defaultTargetPlatform;
-    return platform == TargetPlatform.windows ||
-        platform == TargetPlatform.macOS ||
-        platform == TargetPlatform.linux;
+    if (HostPlatform.isWeb) return false;
+    return isDesktopTargetPlatform(defaultTargetPlatform);
   }
 
   @override
@@ -48,7 +80,14 @@ class _GlobalDropTargetState extends ConsumerState<GlobalDropTarget> {
       onDragExited: (_) {
         if (mounted) setState(() => _isDragging = false);
       },
-      onDragDone: (details) => _handleDrop(details),
+      onDragDone: (details) {
+        if (!demoSealGuard(context, DemoSealedFeature.fileImport)) {
+          // No drag-exit follows a drop, so the overlay is cleared here.
+          setState(() => _isDragging = false);
+          return;
+        }
+        _handleDrop(details);
+      },
       child: Stack(
         children: [widget.child, if (_isDragging) const _FrostedDropOverlay()],
       ),
@@ -62,46 +101,160 @@ class _GlobalDropTargetState extends ConsumerState<GlobalDropTarget> {
 
     // Check wizard-active BEFORE reading bytes to avoid unnecessary I/O and
     // to ensure the "wizard active" message always takes precedence over a
-    // read-failure snackbar.
+    // read-failure snackbar. An open photo picker counts too: a second one
+    // opened over it would clear the files the first has staged.
     if (!mounted) return;
-    final currentPath = GoRouterState.of(context).uri.path;
-    if (currentPath.startsWith('/transfer/import-wizard')) {
+    final routerState = GoRouterState.of(context);
+    final currentPath = routerState.uri.path;
+    if (isImportWizardRoute(currentPath) ||
+        ref.read(importJobProvider).isRunning ||
+        ref.read(openPhotoPickerSessionsProvider).value > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(context.l10n.dropTarget_error_wizardActive)),
       );
       return;
     }
+    final mediaDestination = mediaDropDestinationFor(context, ref);
 
-    // Read the first file only
-    final xFile = details.files.first;
+    // Split the drop into photos and videos and dive logs, expanding any
+    // dropped folders into the files of each kind they hold. A folder is
+    // searched for media even where media cannot go, so a folder of photos
+    // dropped there earns the hint rather than ending in silence.
+    final mediaPaths = <String>[];
+    final diveLogPaths = <String>[];
+    for (final xFile in details.files) {
+      final path = xFile.path;
+      if (path.isEmpty) continue;
+      if (FileSystemEntity.isDirectorySync(path)) {
+        mediaPaths.addAll(await compute(scanFolderForMediaFiles, path));
+        diveLogPaths.addAll(await scanFolderForImportableFiles(path));
+      } else if (isLinkableMediaPath(path)) {
+        mediaPaths.add(path);
+      } else {
+        diveLogPaths.add(path);
+      }
+    }
+    if (!mounted) return;
+
+    if (mediaPaths.isNotEmpty) {
+      if (mediaDestination == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(context.l10n.dropTarget_error_mediaNeedsDestination),
+          ),
+        );
+      } else {
+        // Awaited, so dive logs in the same drop open their wizard only
+        // after the media importer closes, rather than underneath it.
+        await widget.onMediaDrop(context, ref, mediaDestination, mediaPaths);
+        if (!mounted) return;
+      }
+    }
+
+    await _importDiveLogs(diveLogPaths);
+  }
+
+  /// Sends dropped dive-log files to the import wizard.
+  Future<void> _importDiveLogs(List<String> dropped) async {
+    if (dropped.isEmpty || !mounted) return;
+    // Buddy cards in a drop of several files open on their own.
+    final (:cards, others: paths) = splitBuddyCardPaths(dropped);
+    if (dropped.length > 1) {
+      for (final path in cards) {
+        await _openBuddyCardFile(path);
+        if (!mounted) return;
+      }
+    } else {
+      paths.addAll(cards);
+    }
+    if (paths.isEmpty) return;
+    // Re-read: a media import that ran first may have moved the user on.
+    final currentPath = GoRouterState.of(context).uri.path;
+
+    // Asked again where the shared import state is written: the scan and
+    // media work above may have taken long enough for an import to start.
+    bool isImportRunning() => ref.read(importJobProvider).isRunning;
+
+    if (paths.length > 1) {
+      final shouldNavigate = await handleIncomingFiles(
+        paths: paths,
+        currentPath: currentPath,
+        notifier: ref.read(universalImportNotifierProvider.notifier),
+        messenger: ScaffoldMessenger.of(context),
+        isImportRunning: isImportRunning,
+        wizardActiveMessage: context.l10n.dropTarget_error_wizardActive,
+      );
+      if (!mounted || !shouldNavigate) return;
+      context.push('/transfer/import-wizard');
+      return;
+    }
+
+    // Single file: keep the existing byte-based path (share-intent parity).
     final Uint8List bytes;
     try {
-      bytes = await xFile.readAsBytes();
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.dropTarget_error_readFailed)),
-        );
-      }
+      bytes = await File(paths.first).readAsBytes();
+    } catch (e) {
+      // Logged even when the target is gone; only the snackbar needs it.
+      reportIncomingFileError(
+        e,
+        messenger: mounted ? ScaffoldMessenger.of(context) : null,
+        readFailedMessage: mounted
+            ? context.l10n.dropTarget_error_readFailed
+            : null,
+      );
       return;
     }
 
     if (!mounted) return;
 
-    final shouldNavigate = await handleIncomingFile(
+    final fileName = p.basename(paths.first);
+    final outcome = await handleIncomingFile(
       bytes: bytes,
-      fileName: xFile.name,
+      fileName: fileName,
       currentPath: currentPath,
       notifier: ref.read(universalImportNotifierProvider.notifier),
       messenger: ScaffoldMessenger.of(context),
+      isImportRunning: isImportRunning,
+      wizardActiveMessage: context.l10n.dropTarget_error_wizardActive,
       unsupportedFileMessage: context.l10n.dropTarget_error_unsupportedFile,
     );
 
     if (!mounted) return;
 
-    if (shouldNavigate) {
-      context.go('/transfer/import-wizard');
+    switch (outcome) {
+      case IncomingFileOutcome.navigateToWizard:
+        context.push('/transfer/import-wizard');
+      case IncomingFileOutcome.navigateToNavTrackReview:
+        await navigateToNavTrackReview(context, bytes, fileName: fileName);
+      case IncomingFileOutcome.navigateToSuuntoFileImport:
+        await openSuuntoFileImport(context, [
+          SuuntoJsonFile(name: fileName, bytes: bytes),
+        ]);
+      case IncomingFileOutcome.buddyCard:
+        openBuddyCard(context, BuddyCardCodec.decodeFull(bytes));
+      case IncomingFileOutcome.none:
+        break;
     }
+  }
+
+  /// Opens the buddy card in the file at [path], or says it is unreadable.
+  Future<void> _openBuddyCardFile(String path) async {
+    final Uint8List bytes;
+    try {
+      bytes = await File(path).readAsBytes();
+    } catch (e) {
+      reportIncomingFileError(
+        e,
+        messenger: mounted ? ScaffoldMessenger.of(context) : null,
+        readFailedMessage: mounted
+            ? context.l10n.dropTarget_error_readFailed
+            : null,
+      );
+      return;
+    }
+    if (!mounted) return;
+    // Awaited: the next card opens once this one's preview closes.
+    await openBuddyCard(context, BuddyCardCodec.decodeFull(bytes));
   }
 }
 

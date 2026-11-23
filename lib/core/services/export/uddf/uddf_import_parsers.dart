@@ -1,7 +1,43 @@
 import 'package:xml/xml.dart';
 
 import 'package:submersion/core/constants/enums.dart' as enums;
+import 'package:submersion/core/services/export/uddf/uddf_gas_mix_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_partial_pressure.dart';
+import 'package:submersion/core/services/export/uddf/uddf_service_clock_writers.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+
+/// Normalizes a raw UDDF `<tankvolume>` value to liters (#158).
+///
+/// UDDF 3.2.3 defines tankvolume in CUBIC METERS, but exporters disagree:
+/// spec-conformant tools write 0.0111 for an 11.1 L tank, Diving Log 6.x
+/// writes 0.111 (10x off), and legacy Submersion exports wrote plain liters.
+/// A plausibility ladder keyed to real tank sizes (roughly 1-45 L water
+/// capacity) disambiguates the three conventions; implausible values are
+/// stored unchanged rather than guessed at.
+///
+/// The ladder cannot be exact for every input: 0.045 < raw <= 0.45 is
+/// genuinely ambiguous between a Diving Log 4.5-45 L tank and a
+/// spec-conformant 45-450 L one, and it resolves toward Diving Log because
+/// small cylinders are far more common than 45 L+ single-tank records.
+/// Exports that declare their unit never hit that ambiguity: they set
+/// [strictCubicMeters] and are converted exactly. Submersion exports made
+/// BEFORE the unit was declared wrote liters, carry no declaration, and so
+/// fall through to the ladder, which reads them correctly.
+double normalizeUddfTankVolumeToLiters(
+  double raw, {
+  bool strictCubicMeters = false,
+}) {
+  if (raw <= 0) return raw;
+  // A file that DECLARES its unit needs no guessing, so any volume
+  // round-trips exactly -- including tanks above the ladder's range. The
+  // >= 1 guard is a backstop against a mislabelled file: 1 m3 is 1000 L,
+  // which is not a tank, so such a value is liters whatever the label says.
+  if (strictCubicMeters && raw < 1.0) return raw * 1000;
+  if (raw <= 0.045) return raw * 1000; // spec cubic meters
+  if (raw <= 0.45) return raw * 100; // Diving Log 10x-off quirk
+  if (raw <= 45) return raw; // legacy liter exports
+  return raw;
+}
 
 /// Static parser methods for UDDF entity elements.
 ///
@@ -9,6 +45,198 @@ import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 /// from UDDF XML elements into maps.
 class UddfImportParsers {
   UddfImportParsers._();
+
+  // An integer followed by a fractional part of nothing but zeros, e.g.
+  // "15.0" or "15.000". Captures the integer so it can be parsed exactly.
+  static final RegExp _zeroFractionPattern = RegExp(r'^([+-]?\d+)\.0*$');
+
+  // A trip name of the form "<location><non-breaking space><ISO date>", which
+  // is how Subsurface's UDDF exporter names a trip. The location half is
+  // optional: a trip with no location exports as just the separator and the
+  // date, and Dart counts U+00A0 as whitespace, so by the time the name has
+  // been read and trimmed the separator is gone and only the date is left.
+  static final RegExp _tripNamePattern = RegExp(
+    r'^(?:(.*)\u00A0)?(\d{4}-\d{2}-\d{2})$',
+  );
+
+  /// Parses a UDDF integer-semantics value, tolerating the float
+  /// serialization several exporters emit.
+  ///
+  /// UDDF types fields like `<divetime>` and `<diveduration>` as integers,
+  /// but exporters built on JavaScript runtimes write them as floats
+  /// (Oceanic Plus emits `<divetime>15.0</divetime>`; MacDive emits
+  /// `<diveduration>60.00</diveduration>`), because 15 and 15.0 are the
+  /// same value there. [int.tryParse] rejects any decimal point, so those
+  /// fields silently fell back to 0 or were dropped entirely -- a profile
+  /// imported from Oceanic Plus had every waypoint stamped at t=0.
+  ///
+  /// Parsing leniently here fixes the whole class of defect without
+  /// requiring the file to be attributed to a known vendor first, which
+  /// matters because vendor fingerprints fail silently: Oceanic Plus omits
+  /// `<generator><name>`, leaving only a locale-dependent homepage URL to
+  /// match on.
+  ///
+  /// Returns null when [text] is null, blank, non-numeric, or non-finite.
+  /// Genuinely fractional input is rounded to nearest.
+  static int? parseUddfInt(String? text) {
+    if (text == null) return null;
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+
+    final asInt = int.tryParse(trimmed);
+    if (asInt != null) return asInt;
+
+    // Strip a fractional part that is nothing but zeros, so the value keeps
+    // exact integer semantics. Going through a double would lose precision
+    // above 2^53 ("9007199254740993.0" comes back as ...992) for values Dart
+    // ints represent exactly. Anything with a real fraction, an exponent or
+    // stray characters falls through to the double path below.
+    final zeroFraction = _zeroFractionPattern.firstMatch(trimmed);
+    if (zeroFraction != null) {
+      final exact = int.tryParse(zeroFraction.group(1)!);
+      if (exact != null) return exact;
+    }
+
+    final asDouble = double.tryParse(trimmed);
+    // double.tryParse succeeds on "NaN" and "Infinity", and calling round()
+    // on either throws UnsupportedError. Guarding here keeps one malformed
+    // element from aborting the entire import.
+    if (asDouble == null || !asDouble.isFinite) return null;
+    return asDouble.round();
+  }
+
+  /// Parses a UDDF decimal value, rejecting non-finite input.
+  ///
+  /// [double.tryParse] succeeds on "NaN", "Infinity" and "-Infinity", so a
+  /// value that is only null-checked reaches the database intact. NaN is the
+  /// dangerous one: it compares false against everything including itself,
+  /// so it silently poisons totals, averages and range checks downstream
+  /// rather than failing where it was introduced.
+  ///
+  /// Returns null when [text] is null, blank, non-numeric or non-finite.
+  static double? parseUddfDouble(String? text) {
+    if (text == null) return null;
+    final value = double.tryParse(text.trim());
+    if (value == null || !value.isFinite) return null;
+    return value;
+  }
+
+  /// Reads a dive's own entry or exit fix, the `<{side}latitude>` and
+  /// `<{side}longitude>` pair `UddfExportBuilders.buildDiveGpsElements`
+  /// writes into [parent].
+  ///
+  /// Returns null unless both halves are present, finite and on the globe. A
+  /// lone latitude is not a position, and treating it as one would also stop
+  /// the importer falling back to the dive's `<source>` coordinates.
+  static ({double latitude, double longitude})? parseDiveGps(
+    XmlElement parent,
+    String side,
+  ) {
+    final latitude = parseUddfDouble(getElementText(parent, '${side}latitude'));
+    final longitude = parseUddfDouble(
+      getElementText(parent, '${side}longitude'),
+    );
+    if (latitude == null || longitude == null) return null;
+    if (latitude.abs() > 90 || longitude.abs() > 180) return null;
+    return (latitude: latitude, longitude: longitude);
+  }
+
+  /// Removes `diveData['profile']` when it is the outline Submersion's own
+  /// UDDF writers invented for a dive with no recorded samples (issue
+  /// #1874), so backups written before that fix stop restoring it.
+  ///
+  /// Those writers put a (0 s, 0 m) waypoint first on every dive and, when
+  /// the dive had a duration and a greatest depth but no samples, followed it
+  /// with the greatest depth at 20% of the duration, the average depth (or
+  /// 0.7 x the greatest) at 80%, and the surface at 100%. Only that exact
+  /// shape, or the lone first waypoint, is dropped, and only in a document
+  /// whose `<generator>` names Submersion; any other file or shape keeps its
+  /// profile. Call it once the dive's `maxDepth` and `avgDepth` are parsed,
+  /// since the invented depths were derived from them.
+  static void dropInventedSubmersionProfile(
+    XmlElement diveElement,
+    Map<String, dynamic> diveData,
+  ) {
+    final profile = diveData['profile'];
+    if (profile is! List<Map<String, dynamic>>) return;
+    if (!writtenBySubmersion(diveElement)) return;
+    if (_isInventedOutline(
+      profile,
+      maxDepth: diveData['maxDepth'] as double?,
+      avgDepth: diveData['avgDepth'] as double?,
+    )) {
+      diveData.remove('profile');
+    }
+  }
+
+  /// The `<tankdata>` id a `<gasswitch>`'s `<tankref>` names among [tanks].
+  ///
+  /// Submersion's full backup declares each cylinder as `tank_<id>` but has
+  /// always written the switch's `<tankref>` as the bare `<id>`, so every
+  /// recorded switch failed to resolve on restore and was dropped (issue
+  /// #1878). A ref that matches a declared tank as written is kept; a bare
+  /// one is mapped to its `tank_` form only when that tank is declared.
+  static String? resolveGasSwitchTankRef(
+    String? ref,
+    List<Map<String, dynamic>> tanks,
+  ) {
+    final trimmed = ref?.trim();
+    if (trimmed == null || trimmed.isEmpty) return ref;
+    bool declared(String id) => tanks.any((t) => t['uddfTankId'] == id);
+    if (declared(trimmed)) return trimmed;
+    final prefixed = 'tank_$trimmed';
+    return declared(prefixed) ? prefixed : trimmed;
+  }
+
+  /// Whether the document holding [element] declares any `<tankdata>`.
+  ///
+  /// Submersion's dives-only export wrote none before #1875, so in such a
+  /// file the starting-mix `<switchmix>` is the only record of a dive's
+  /// cylinder. Cached per document: a backup asks once for every dive.
+  static bool documentDeclaresTanks(XmlElement element) {
+    final document = element.document;
+    if (document == null) return false;
+    return _declaresTanks[document] ??= document
+        .findAllElements('tankdata')
+        .isNotEmpty;
+  }
+
+  static final _declaresTanks = Expando<bool>('declaresTanks');
+
+  /// Whether the document holding [element] was written by Submersion, the
+  /// only producer whose writer quirks the importer undoes.
+  static bool writtenBySubmersion(XmlElement element) =>
+      element.document?.rootElement
+          .getElement('generator')
+          ?.getElement('name')
+          ?.innerText
+          .trim() ==
+      'Submersion';
+
+  static bool _isInventedOutline(
+    List<Map<String, dynamic>> profile, {
+    required double? maxDepth,
+    required double? avgDepth,
+  }) {
+    (int, double)? at(int i) => switch (profile[i]) {
+      {'timestamp': final int t, 'depth': final double d} => (t, d),
+      _ => null,
+    };
+    bool near(double a, double b) => (a - b).abs() < 1e-9;
+
+    if (profile.isEmpty || at(0) != (0, 0.0)) return false;
+    if (profile.length == 1) return true;
+    if (profile.length != 4 || maxDepth == null) return false;
+    final (descent, bottom, end) = (at(1), at(2), at(3));
+    if (descent == null || bottom == null || end == null) return false;
+    final duration = end.$1;
+    return duration > 0 &&
+        end.$2 == 0 &&
+        descent.$1 == (duration * 0.2).toInt() &&
+        near(descent.$2, maxDepth) &&
+        bottom.$1 == (duration * 0.8).toInt() &&
+        near(bottom.$2, avgDepth ?? maxDepth * 0.7);
+  }
 
   static void assignGasMixToTankIfMissing({
     required List<Map<String, dynamic>> tanks,
@@ -39,16 +267,225 @@ class UddfImportParsers {
         : element?.innerText.trim();
   }
 
+  /// Reads a dive computer's vendor from a `<divecomputer>` element.
+  ///
+  /// UDDF nests the vendor as `<manufacturer><name>`, alongside optional
+  /// address and contact children, so the nested `<name>` is read first.
+  ///
+  /// The bare-text fallback keeps exporters that write
+  /// `<manufacturer>Shearwater</manufacturer>` working, but applies only when
+  /// the element has no child elements at all: `innerText` walks the whole
+  /// subtree, so a `<manufacturer>` carrying only an address would otherwise
+  /// yield a vendor of "VancouverCanada".
+  static String? getManufacturerName(XmlElement computerElement) {
+    final manufacturer = computerElement
+        .findElements('manufacturer')
+        .firstOrNull;
+    if (manufacturer == null) return null;
+    final named = getElementText(manufacturer, 'name');
+    if (named != null) return named;
+    if (manufacturer.childElements.isNotEmpty) return null;
+    final text = manufacturer.innerText.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  /// Maximum O2 cells the profile schema can hold (o2Sensor1..o2Sensor6).
+  static const int maxO2Sensors = 6;
+
+  /// Reads the dive mode from a `<divemode>` child of [parent].
+  ///
+  /// UDDF's own form is an empty element carrying the circuit in a `type`
+  /// attribute (`<divemode type="closedcircuit" />`), while our exporter
+  /// writes the enum name as inner text. Both appear at dive level, on
+  /// `<rebreather>` and on waypoints, so both are read wherever the element
+  /// occurs.
+  static enums.DiveMode? parseDiveModeIn(XmlElement parent) {
+    final element = parent.findElements('divemode').firstOrNull;
+    if (element == null) return null;
+
+    return parseUddfDiveMode(element.innerText) ??
+        parseUddfDiveMode(element.getAttribute('type'));
+  }
+
+  /// Resolves a UDDF circuit name to a dive mode.
+  ///
+  /// UDDF spells the circuit out (`closedcircuit`), while our own exporter
+  /// writes the enum name (`ccr`), so both are accepted. Apnea has no
+  /// equivalent mode and stays unresolved rather than being forced to gauge.
+  static enums.DiveMode? parseUddfDiveMode(String? value) {
+    final normalized = value?.trim().toLowerCase();
+    if (normalized == null || normalized.isEmpty) return null;
+
+    return switch (normalized) {
+      'closedcircuit' => enums.DiveMode.ccr,
+      'semiclosedcircuit' => enums.DiveMode.scr,
+      'opencircuit' => enums.DiveMode.oc,
+      _ => parseEnumValue(normalized, enums.DiveMode.values),
+    };
+  }
+
+  /// Parses a UDDF partial pressure into bar.
+  ///
+  /// The spec mandates Pascal (`1.27e5` for 1.27 bar), but exporters are
+  /// inconsistent: Shearwater Cloud writes plain bar (`0.849999964`), and
+  /// Submersion wrote bar until issue #4198. The two differ by 10^5, so the
+  /// magnitude decides the unit. No breathable partial pressure reaches 100
+  /// bar, and 100 Pa (0.001 bar) is not a plausible reading either, so
+  /// anything above the threshold is Pascal.
+  static double? parsePartialPressureBar(String? text) {
+    if (text == null) return null;
+    final value = double.tryParse(text.trim());
+    // double.tryParse accepts "NaN" and "Infinity", and neither is a reading.
+    if (value == null || !value.isFinite || value <= 0) return null;
+    if (value <= UddfPartialPressure.maxBar) return value;
+    // Shifted as text rather than divided, so a value Submersion wrote comes
+    // back as the exact double it stored (issue #4198).
+    return UddfPartialPressure.barFromPascalText(text) ?? value / 100000;
+  }
+
+  /// Ordered O2 cell ids declared in the document.
+  ///
+  /// AP Diving declares them under `diver/owner/equipment/rebreather`, but the
+  /// lookup is document-wide so an exporter that puts them elsewhere still
+  /// resolves. Per-waypoint cell readings reference these ids, so declaration
+  /// order — not the order the readings appear in a waypoint — determines
+  /// which cell a reading belongs to.
+  ///
+  /// Read once per document: every dive with samples asks, and a walk of the
+  /// whole document per dive is quadratic in a large backup.
+  static List<String> parseO2SensorOrder(XmlDocument document) =>
+      _o2SensorOrder[document] ??= List.unmodifiable(
+        document
+            .findAllElements('o2sensor')
+            .map((sensor) => sensor.getAttribute('id')?.trim())
+            .whereType<String>()
+            .where((id) => id.isNotEmpty),
+      );
+
+  static final _o2SensorOrder = Expando<List<String>>('o2SensorOrder');
+
+  /// Reads per-cell O2 readings from a waypoint, in bar, indexed by cell.
+  ///
+  /// Handles both the published `<measuredpo2 ref="...">` form and the
+  /// unpublished 3.3.0 draft `<ppo2 ref="...">` rename that AP Diving's
+  /// DiveSight emits. Readings whose `ref` matches no declared sensor fall
+  /// back to the order they appear in the waypoint, so an export that omits
+  /// the `<rebreather>` block still yields usable curves.
+  static Map<int, double> parseO2SensorReadings(
+    XmlElement waypoint,
+    List<String> sensorOrder,
+  ) => _readingsByCell(
+    [...waypoint.findElements('measuredpo2'), ...waypoint.findElements('ppo2')],
+    sensorOrder,
+    (element) => parsePartialPressureBar(element.innerText),
+  );
+
+  /// Reads per-cell millivolt readings from a waypoint, indexed by cell.
+  ///
+  /// UDDF has no element for them. Submersion writes each in a
+  /// `<measuredmillivolts ref>` naming the same cell as its `<measuredpo2>`
+  /// (issue #4178), so they resolve against the same declarations.
+  static Map<int, int> parseO2SensorMillivolts(
+    XmlElement waypoint,
+    List<String> sensorOrder,
+  ) => _readingsByCell(
+    waypoint.findElements('measuredmillivolts'),
+    sensorOrder,
+    (element) => parseUddfInt(element.innerText),
+  );
+
+  static Map<int, T> _readingsByCell<T>(
+    Iterable<XmlElement> elements,
+    List<String> sensorOrder,
+    T? Function(XmlElement element) parse,
+  ) {
+    final readings = <int, T>{};
+    final unresolved = <T>[];
+
+    for (final element in elements) {
+      final ref = element.getAttribute('ref')?.trim();
+      // A bare <ppo2> with no ref is our own exporter's aggregate value,
+      // not a cell reading.
+      if (ref == null || ref.isEmpty) continue;
+
+      final value = parse(element);
+      if (value == null) continue;
+
+      final index = sensorOrder.indexOf(ref);
+      if (index >= 0) {
+        if (index < maxO2Sensors) readings[index] = value;
+      } else {
+        unresolved.add(value);
+      }
+    }
+
+    for (final value in unresolved) {
+      var slot = 0;
+      while (readings.containsKey(slot)) {
+        slot++;
+      }
+      if (slot >= maxO2Sensors) break;
+      readings[slot] = value;
+    }
+
+    return readings;
+  }
+
   static GasMix parseGasMix(XmlElement mixElement) {
     final o2Text = getElementText(mixElement, 'o2');
     final heText = getElementText(mixElement, 'he');
+    // A share that is no finite number ("NaN", "Infinity") reads as
+    // unreadable, so it can neither be stored nor decide the scale below.
+    final o2Value = parseUddfDouble(o2Text);
+    final heValue = parseUddfDouble(heText);
 
-    // UDDF stores gas values as fractions (0.21 for 21%).
-    final o2 = o2Text != null ? (double.tryParse(o2Text) ?? 0.21) * 100 : 21.0;
-    final he = heText != null ? (double.tryParse(heText) ?? 0.0) * 100 : 0.0;
+    // UDDF stores gas values as fractions (0.21 for 21%), but some programs
+    // write percentages (21). No fraction is over 1, so a mix with a value
+    // over 1 is taken as percentages (issue #4705). Deciding for the whole
+    // mix keeps a small helium share such as `<he>1</he>` beside
+    // `<o2>21</o2>` at 1% instead of reading it alone as the fraction 100%.
+    // The tolerance keeps a writer's binary noise on pure oxygen
+    // (1.0000000000000002) a fraction rather than 1% O2. Times 100 it stays
+    // within GasMix.tolerancePercent, so a value taken as a fraction never
+    // becomes a share GasMix.isPossible refuses.
+    const fractionCeiling = 1 + GasMix.tolerancePercent / 100;
+    final scale =
+        (o2Value ?? 0) > fractionCeiling || (heValue ?? 0) > fractionCeiling
+        ? 1
+        : 100;
+    final o2 = o2Text != null
+        ? UddfGasMixWriters.cleanPercent(o2Value != null ? o2Value * scale : 21)
+        : 21.0;
+    final he = heText != null
+        ? UddfGasMixWriters.cleanPercent((heValue ?? 0.0) * scale)
+        : 0.0;
 
     return GasMix(o2: o2, he: he);
   }
+
+  /// A datetime carrying trailing timezone info: a "Z", or an offset in any
+  /// of the shapes ISO 8601 allows ("+02:00", "+0200", "+02"). Group 1 is the
+  /// datetime with that suffix removed.
+  ///
+  /// Requiring a clock time in front of the offset is what makes the compact
+  /// forms safe to strip: the trailing "-05" of a bare "2008-09-05" cannot be
+  /// mistaken for one. Without the compact forms the suffix survived,
+  /// [DateTime.parse] applied the offset, and the wall clock was stored
+  /// shifted by it ("08:42:30+0200" landed as 06:42:30).
+  ///
+  /// The time is captured rather than asserted with a lookbehind, because
+  /// this package builds for web too, where a Dart RegExp becomes a JS one
+  /// and lookbehind throws on Safari older than 16.4. A static final field
+  /// would take UDDF import down entirely on first use there.
+  static final RegExp _timeZoneSuffixPattern = RegExp(
+    r'^(.*\d{2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*(?:Z|[+-]\d{2}:?\d{2}|[+-]\d{2})$',
+  );
+
+  /// A date carrying no time, optionally followed by the "T" separator that
+  /// an exporter leaves dangling when the time is unknown.
+  static final RegExp _dateWithoutTimePattern = RegExp(
+    r'^(\d{4}-\d{2}-\d{2})[T ]?$',
+  );
 
   /// Parse a UDDF datetime string using the wall-clock-as-UTC convention.
   ///
@@ -56,12 +493,29 @@ class UddfImportParsers {
   /// computer (e.g. "2024-06-15T08:42:00"). Any timezone suffix is ignored
   /// and the date/time components are stored verbatim as a UTC DateTime so
   /// that they survive a DB round-trip unchanged.
+  ///
+  /// A value with no time is read as midnight on that date. Subsurface builds
+  /// this element as `concat(@date, 'T', @time)`, so a dive logged by hand
+  /// with no entry time exports as a bare "2008-09-05T" that
+  /// [DateTime.parse] rejects. Returning null for those let the caller fall
+  /// back to the import clock, which stamped every such dive with the day it
+  /// was imported rather than the day it was dived (#239).
   static DateTime? parseDiveDateTime(String? text) {
-    if (text == null || text.isEmpty) return null;
+    if (text == null) return null;
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
     // Strip any trailing timezone info (Z, +HH:MM, -HH:MM, etc.)
-    final bare = text.split(RegExp(r'[Z+\-](?=\d{2}:\d{2}$)|Z$')).first;
-    final dt = DateTime.tryParse(bare);
-    if (dt == null) return null;
+    final bare =
+        _timeZoneSuffixPattern.firstMatch(trimmed)?.group(1) ?? trimmed;
+    var dt = DateTime.tryParse(bare);
+    if (dt == null) {
+      final dateWithoutTime = _dateWithoutTimePattern
+          .firstMatch(bare)
+          ?.group(1);
+      if (dateWithoutTime == null) return null;
+      dt = DateTime.tryParse(dateWithoutTime);
+      if (dt == null) return null;
+    }
     return DateTime.utc(
       dt.year,
       dt.month,
@@ -165,14 +619,56 @@ class UddfImportParsers {
       if (expiryDate != null) {
         owner['insuranceExpiryDate'] = DateTime.tryParse(expiryDate);
       }
+      owner['insuranceEmergencyPhone'] = getElementText(
+        insuranceElement,
+        'emergencyphone',
+      );
+      owner['insurancePhone'] = getElementText(insuranceElement, 'phone');
     }
   }
 
+  /// Reads one trip element.
+  ///
+  /// Handles both shapes in circulation: Submersion writes each trip as its
+  /// own `<divetrip>` carrying the trip fields directly, while UDDF 3.2 (and
+  /// Subsurface's exporter) nests `<trip>` elements inside a single
+  /// `<divetrip>` container and hangs the name and notes off a `<trippart>`.
   static Map<String, dynamic> parseTrip(XmlElement tripElement) {
     final trip = <String, dynamic>{};
 
-    trip['name'] = getElementText(tripElement, 'name') ?? '';
-    trip['notes'] = getElementText(tripElement, 'notes') ?? '';
+    final tripPart = tripElement.findElements('trippart').firstOrNull;
+    // getElementText already trims, but the name is matched against a
+    // pattern below, so trim once here and use that value throughout.
+    final rawName =
+        (getElementText(tripElement, 'name') ??
+                (tripPart == null ? null : getElementText(tripPart, 'name')) ??
+                '')
+            .trim();
+
+    // Subsurface has no trip-name field of its own, so its exporter builds
+    // one as "<location>\u00A0<start date>". Recovering the two halves keeps
+    // the trip out of the library named after a date, and gives it a date to
+    // fall back on when no dive of the trip was imported.
+    String? locationFromName;
+    var name = rawName;
+    final nameParts = _tripNamePattern.firstMatch(rawName);
+    if (nameParts != null) {
+      final location = nameParts.group(1)?.trim();
+      final nameDate = DateTime.tryParse(nameParts.group(2)!);
+      if (nameDate != null) {
+        trip['_nameDate'] = nameDate;
+        if (location != null && location.isNotEmpty) {
+          name = location;
+          locationFromName = location;
+        }
+      }
+    }
+
+    trip['name'] = name;
+    trip['notes'] =
+        getElementText(tripElement, 'notes') ??
+        (tripPart == null ? null : getElementText(tripPart, 'notes')) ??
+        '';
 
     // Parse date range
     final dateOfTrip = tripElement.findElements('dateoftrip').firstOrNull;
@@ -195,8 +691,13 @@ class UddfImportParsers {
 
     // Parse geography
     final geographyElement = tripElement.findElements('geography').firstOrNull;
-    if (geographyElement != null) {
-      trip['location'] = getElementText(geographyElement, 'location');
+    final location = geographyElement == null
+        ? null
+        : getElementText(geographyElement, 'location');
+    if (location != null) {
+      trip['location'] = location;
+    } else if (locationFromName != null) {
+      trip['location'] = locationFromName;
     }
 
     return trip;
@@ -223,8 +724,89 @@ class UddfImportParsers {
 
     tag['name'] = getElementText(tagElement, 'name') ?? '';
     tag['colorHex'] = getElementText(tagElement, 'color');
+    // Where the tag is offered (issues #1765, #1942); null when a file predates it.
+    tag['appliesToDives'] = _parseBool(
+      getElementText(tagElement, 'appliestodives'),
+    );
+    tag['appliesToSites'] = _parseBool(
+      getElementText(tagElement, 'appliestosites'),
+    );
+    tag['appliesToEquipment'] = _parseBool(
+      getElementText(tagElement, 'appliestoequipment'),
+    );
+    // Media and document scopes (issue #1970). The links do not travel in
+    // UDDF, but a tag's scopes survive a round trip.
+    tag['appliesToMedia'] = _parseBool(
+      getElementText(tagElement, 'appliestomedia'),
+    );
+    tag['appliesToDocuments'] = _parseBool(
+      getElementText(tagElement, 'appliestodocuments'),
+    );
 
     return tag;
+  }
+
+  static bool? _parseBool(String? text) => switch (text?.trim().toLowerCase()) {
+    'true' || '1' => true,
+    'false' || '0' => false,
+    _ => null,
+  };
+
+  /// Every `<sitefeature>` inside a `<site>` (issue #2200), as the maps the
+  /// importer restores. Carried on the site map for the same reason the
+  /// classification refs are: the import wizard keeps only entity lists.
+  ///
+  /// `type` stays the raw stored name so a feature type written by a newer
+  /// build round-trips through an older one unchanged. A feature without
+  /// usable coordinates or a type is dropped rather than restored at 0,0.
+  static List<Map<String, dynamic>> parseSiteFeatures(XmlElement siteElement) {
+    final features = <Map<String, dynamic>>[];
+    for (final element
+        in siteElement
+            .findElements('sitefeatures')
+            .expand((s) => s.findElements('sitefeature'))) {
+      final typeName = getElementText(element, 'type')?.trim();
+      if (typeName == null || typeName.isEmpty) continue;
+      final geography = element.findElements('geography').firstOrNull;
+      if (geography == null) continue;
+      final latitude = parseUddfDouble(getElementText(geography, 'latitude'));
+      final longitude = parseUddfDouble(getElementText(geography, 'longitude'));
+      if (latitude == null || longitude == null) continue;
+      features.add(
+        <String, dynamic>{
+          'typeName': typeName,
+          'name': getElementText(element, 'name') ?? '',
+          'latitude': latitude,
+          'longitude': longitude,
+          'bearingDeg': parseUddfDouble(getElementText(element, 'bearing')),
+          'depthMeters': parseUddfDouble(getElementText(element, 'depth')),
+          'notes': getElementText(element, 'notes') ?? '',
+        }..removeWhere((_, value) => value == null),
+      );
+    }
+    return features;
+  }
+
+  /// The `<tagref>` values of [parent]'s own `<tags>` child (issues #1765,
+  /// #1942). `findElements` matches direct children only, so a check-in's
+  /// `<tags>` inside an item's `<observations>` is never read as the item's.
+  static List<String> _tagRefsOf(XmlElement parent) => [
+    for (final ref
+        in parent.findElements('tags').expand((s) => s.findElements('tagref')))
+      if (ref.innerText.trim().isNotEmpty) ref.innerText.trim(),
+  ];
+
+  /// A custom site type definition from `<sitetypes>` (issue #1765):
+  /// `{id, name, sortOrder}`, or empty when the element lacks an id or name.
+  static Map<String, dynamic> parseSiteTypeElement(XmlElement element) {
+    final id = element.getAttribute('id');
+    final name = getElementText(element, 'name');
+    if (id == null || id.isEmpty || name == null || name.isEmpty) return {};
+    return {
+      'id': id,
+      'name': name,
+      'sortOrder': int.tryParse(getElementText(element, 'sortorder') ?? ''),
+    };
   }
 
   static Map<String, dynamic> parseDiveTypeElement(XmlElement typeElement) {
@@ -238,13 +820,33 @@ class UddfImportParsers {
 
     final sortOrder = getElementText(typeElement, 'sortorder');
     if (sortOrder != null) {
-      diveType['sortOrder'] = int.tryParse(sortOrder) ?? 0;
+      diveType['sortOrder'] = parseUddfInt(sortOrder) ?? 0;
     }
 
     final isBuiltIn = getElementText(typeElement, 'isbuiltin');
     diveType['isBuiltIn'] = isBuiltIn?.toLowerCase() == 'true';
 
     return diveType;
+  }
+
+  static Map<String, dynamic> parseDiveRoleElement(XmlElement roleElement) {
+    final diveRole = <String, dynamic>{};
+    final roleId = roleElement.getAttribute('id');
+    if (roleId != null) {
+      diveRole['id'] = roleId;
+    }
+
+    diveRole['name'] = getElementText(roleElement, 'name') ?? '';
+
+    final sortOrder = getElementText(roleElement, 'sortorder');
+    if (sortOrder != null) {
+      diveRole['sortOrder'] = parseUddfInt(sortOrder) ?? 0;
+    }
+
+    final isBuiltIn = getElementText(roleElement, 'isbuiltin');
+    diveRole['isBuiltIn'] = isBuiltIn?.toLowerCase() == 'true';
+
+    return diveRole;
   }
 
   static Map<String, dynamic> parseDiveComputer(XmlElement computerElement) {
@@ -306,16 +908,22 @@ class UddfImportParsers {
     course['location'] = getElementText(courseElement, 'location');
     course['notes'] = getElementText(courseElement, 'notes') ?? '';
 
-    // Parse link refs for certification and instructor buddy
+    // Parse link refs for the earned certifications (one link each since
+    // #2515) and the instructor buddy
+    final certRefs = <String>[];
     for (final linkElement in courseElement.findElements('link')) {
       final ref = linkElement.getAttribute('ref');
       if (ref != null) {
         if (ref.startsWith('cert_')) {
-          course['certificationRef'] = ref;
+          certRefs.add(ref);
         } else if (ref.startsWith('buddy_')) {
           course['instructorRef'] = ref;
         }
       }
+    }
+    if (certRefs.isNotEmpty) {
+      course['certificationRefs'] = certRefs;
+      course['certificationRef'] = certRefs.first;
     }
 
     return course;
@@ -345,8 +953,45 @@ class UddfImportParsers {
       equipmentSet['equipmentRefs'] = itemRefs;
     }
 
+    // The sets this one includes (issue #4525), as set refs in order.
+    final includesElement = setElement.findElements('includes').firstOrNull;
+    if (includesElement != null) {
+      final setRefs = <String>[
+        for (final setRef in includesElement.findElements('setref'))
+          if (setRef.innerText.trim().isNotEmpty) setRef.innerText.trim(),
+      ];
+      if (setRefs.isNotEmpty) equipmentSet['includedSetRefs'] = setRefs;
+    }
+
     return equipmentSet;
   }
+
+  /// One `<component>` of the private `<components>` block (issue #1487):
+  /// an assembly template row, both ends as prefixed equipment refs.
+  static Map<String, dynamic> parseComponent(XmlElement element) => {
+    'parentRef': element.getAttribute('parent') ?? '',
+    'componentRef': element.getAttribute('component') ?? '',
+    'role': getElementText(element, 'role') ?? '',
+    'sortOrder': int.tryParse(element.getAttribute('order') ?? '') ?? 0,
+  };
+
+  /// The private `<gearlinks>` block: per dive ref, the gear rows that
+  /// carry provenance (the assembly they came through, the set applied).
+  static Map<String, List<Map<String, String?>>> parseGearLinks(
+    XmlElement gearlinks,
+  ) => {
+    for (final dive in gearlinks.findElements('dive'))
+      if (dive.getAttribute('ref') case final ref? when ref.isNotEmpty)
+        ref: [
+          for (final link in dive.findElements('link'))
+            if (link.getAttribute('item') case final item? when item.isNotEmpty)
+              {
+                'itemRef': item,
+                'viaRef': link.getAttribute('via'),
+                'setRef': link.getAttribute('set'),
+              },
+        ],
+  };
 
   static Map<String, dynamic> parseFullBuddy(XmlElement buddyElement) {
     final buddy = <String, dynamic>{};
@@ -370,21 +1015,27 @@ class UddfImportParsers {
       buddy['phone'] = getElementText(personalElement, 'phone');
     }
 
+    // Where the buddy is from (issue #4457), from the UDDF address.
+    final addressElement = buddyElement.findElements('address').firstOrNull;
+    if (addressElement != null) {
+      buddy['country'] = getElementText(addressElement, 'country');
+    }
+
     final certElement = buddyElement.findElements('certification').firstOrNull;
     if (certElement != null) {
       final level = getElementText(certElement, 'level');
+      // A name that matches no built-in stays as text: the importer finds
+      // or creates the custom agency it names (issue #690).
       if (level != null) {
-        buddy['certificationLevel'] = parseEnumValue(
-          level,
-          enums.CertificationLevel.values,
-        );
+        buddy['certificationLevel'] =
+            parseEnumValue(level, enums.CertificationLevel.values) ??
+            _nonBlank(level);
       }
       final agency = getElementText(certElement, 'agency');
       if (agency != null) {
-        buddy['certificationAgency'] = parseEnumValue(
-          agency,
-          enums.CertificationAgency.values,
-        );
+        buddy['certificationAgency'] =
+            parseEnumValue(agency, enums.CertificationAgency.values) ??
+            _nonBlank(agency);
       }
     }
 
@@ -416,11 +1067,30 @@ class UddfImportParsers {
     site['accessNotes'] = getElementText(siteElement, 'accessnotes');
     site['mooringNumber'] = getElementText(siteElement, 'mooringnumber');
     site['parkingInfo'] = getElementText(siteElement, 'parkinginfo');
+    site['catalogueId'] = getElementText(siteElement, 'catalogueid');
+    site['catalogueAnswers'] = getElementText(siteElement, 'catalogueanswers');
 
     final additionalNotes = getElementText(siteElement, 'sitenotesadditional');
     if (additionalNotes != null) {
       site['notes'] = additionalNotes;
     }
+
+    // Site types and tags (issue #1765). Carried on the site map because
+    // the import wizard keeps only entity lists.
+    final typeRefs = [
+      for (final ref
+          in siteElement
+              .findElements('sitetypes')
+              .expand((s) => s.findElements('sitetyperef')))
+        if (ref.innerText.trim().isNotEmpty) ref.innerText.trim(),
+    ];
+    if (typeRefs.isNotEmpty) site['siteTypeRefs'] = typeRefs;
+    final tagRefs = _tagRefsOf(siteElement);
+    if (tagRefs.isNotEmpty) site['tagRefs'] = tagRefs;
+
+    // Site features (issue #2200), on the site map for the same reason.
+    final siteFeatures = parseSiteFeatures(siteElement);
+    if (siteFeatures.isNotEmpty) site['siteFeatures'] = siteFeatures;
 
     return site;
   }
@@ -469,13 +1139,55 @@ class UddfImportParsers {
 
     final serviceInterval = getElementText(itemElement, 'serviceintervaldays');
     if (serviceInterval != null) {
-      item['serviceIntervalDays'] = int.tryParse(serviceInterval);
+      item['serviceIntervalDays'] = parseUddfInt(serviceInterval);
     }
 
     final isActive = getElementText(itemElement, 'isactive');
     item['isActive'] = isActive?.toLowerCase() != 'false';
 
     item['notes'] = getElementText(itemElement, 'notes') ?? '';
+
+    // Condition phase 3a: the parent link and the check-ins. Kept raw
+    // (uddf ids and tag names) for the entity importer to resolve.
+    item['parentRef'] = getElementText(itemElement, 'parentref');
+    // The item's tag identity (issue #2651); adopted by the entity
+    // importer only into an empty slot.
+    item['passportId'] = getElementText(itemElement, 'passportid');
+    // The item's service clocks (issue #2651), restored after the item.
+    // Absent in a file from before them, so the item keeps its defaults.
+    if (UddfServiceClockWriters.parseSchedules(itemElement)
+        case final schedules?) {
+      item['serviceSchedules'] = schedules;
+    }
+    final observationsElement = itemElement
+        .findElements('observations')
+        .firstOrNull;
+    if (observationsElement != null) {
+      item['observations'] = [
+        for (final o in observationsElement.findElements('observation'))
+          {
+            // Wall clock, like a dive date: a zoneless value must not be
+            // read as the importing device's local time.
+            'observedAt': parseDiveDateTime(getElementText(o, 'date')),
+            'diveRef': getElementText(o, 'diveref'),
+            'status': getElementText(o, 'status'),
+            'tags': [
+              for (final t
+                  in o
+                      .findElements('tags')
+                      .expand((e) => e.findElements('tag')))
+                t.innerText.trim(),
+            ],
+            'note': getElementText(o, 'note') ?? '',
+          },
+      ];
+    }
+
+    // Tags (issue #1942), carried on the map because the import wizard
+    // keeps only entity lists. The entity importer links them once the
+    // file's tags exist.
+    final tagRefs = _tagRefsOf(itemElement);
+    if (tagRefs.isNotEmpty) item['tagRefs'] = tagRefs;
 
     return item;
   }
@@ -490,16 +1202,19 @@ class UddfImportParsers {
     cert['name'] = getElementText(certElement, 'name');
 
     final agencyStr = getElementText(certElement, 'agency');
+    // Text that names no built-in is kept for the importer, which resolves
+    // it to a custom agency or level (issue #690).
     if (agencyStr != null) {
-      cert['agency'] = parseEnumValue(
-        agencyStr,
-        enums.CertificationAgency.values,
-      );
+      cert['agency'] =
+          parseEnumValue(agencyStr, enums.CertificationAgency.values) ??
+          _nonBlank(agencyStr);
     }
 
     final levelStr = getElementText(certElement, 'level');
     if (levelStr != null) {
-      cert['level'] = parseEnumValue(levelStr, enums.CertificationLevel.values);
+      cert['level'] =
+          parseEnumValue(levelStr, enums.CertificationLevel.values) ??
+          _nonBlank(levelStr);
     }
 
     cert['cardNumber'] = getElementText(certElement, 'cardnumber');
@@ -587,6 +1302,7 @@ class UddfImportParsers {
       );
     }
 
+    spec['taxonomyClass'] = getElementText(specElement, 'taxonomyclass');
     spec['description'] = getElementText(specElement, 'description');
 
     return spec;
@@ -600,12 +1316,19 @@ class UddfImportParsers {
     }
 
     record['equipmentRef'] = getElementText(recordElement, 'equipmentref');
+    // The service kind the record fulfils (issue #2651).
+    record['serviceKindRef'] = getElementText(recordElement, 'servicekind');
 
-    final serviceType = getElementText(recordElement, 'servicetype');
-    if (serviceType != null) {
-      record['serviceType'] = parseEnumValue(
-        serviceType,
-        enums.ServiceType.values,
+    // Files exported before v160 spell this 'servicetype'. UDDF files have no
+    // version handshake and live on disk indefinitely, so both spellings are
+    // read forever rather than behind a version gate.
+    final serviceCategory =
+        getElementText(recordElement, 'servicecategory') ??
+        getElementText(recordElement, 'servicetype');
+    if (serviceCategory != null) {
+      record['serviceCategory'] = parseEnumValue(
+        serviceCategory,
+        enums.ServiceCategory.values,
       );
     }
 
@@ -632,4 +1355,10 @@ class UddfImportParsers {
 
     return record;
   }
+}
+
+/// [text] trimmed, or null when it is blank.
+String? _nonBlank(String text) {
+  final trimmed = text.trim();
+  return trimmed.isEmpty ? null : trimmed;
 }

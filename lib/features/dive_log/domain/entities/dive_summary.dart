@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 
@@ -11,30 +12,69 @@ import 'package:submersion/features/tags/domain/entities/tag.dart';
 class DiveSummary extends Equatable {
   final String id;
   final int? diveNumber;
+  final String? name;
   final DateTime dateTime;
   final DateTime? entryTime;
   final double? maxDepth;
   final Duration? bottomTime;
+
+  /// What the dive measured ([Dive.measuredRuntime]), not the stored column:
+  /// null for a dive with only a bottom time.
   final Duration? runtime;
   final double? waterTemp;
   final int? rating;
   final bool isFavorite;
-  final String diveTypeId;
+
+  /// Excluded from every descriptive statistic (#526). Surfaced in the
+  /// dive list so the diver can see which dives are not being counted.
+  final bool excludedFromStats;
+
+  /// Excluded from SAC/RMV and gas-mix aggregates only (#1272).
+  final bool excludedFromGasStats;
+
+  /// A planned dive awaiting its dive computer data (issue #2002). Shown
+  /// with a marker in the list and never numbered until promoted.
+  final bool isPlanned;
+
+  /// A dive marked at the site that waits for its dive computer readings
+  /// (issue #637). Shown with a marker in the list and never numbered
+  /// until it is filled.
+  final bool isDraft;
+
+  /// A draft whose diver has not tapped "Surfaced" yet: no exit time.
+  final bool isOpenDraft;
+  final DiveMode diveMode;
+  final List<String> diveTypeIds;
   final List<Tag> tags;
 
   // Site fields (from LEFT JOIN, avoids loading full DiveSite object)
   final String? siteName;
   final String? siteCountry;
+
+  /// The site's stored ISO country code (issue #4426).
+  final String? siteCountryCode;
   final String? siteRegion;
   final double? siteLatitude;
   final double? siteLongitude;
 
+  // Trip fields (from LEFT JOIN trips). Four scalars, deliberately not a Trip
+  // object: a list row must never drag a full entity behind it.
+  final String? tripId;
+  final String? tripName;
+  final DateTime? tripStartDate;
+  final DateTime? tripEndDate;
+
   // Cursor field for pagination: COALESCE(entry_time, dive_date_time)
   final int sortTimestamp;
+
+  /// Count of non-dismissed safety review findings (drives the quiet
+  /// list badge). Zero when unanalyzed or clean.
+  final int safetyFindingCount;
 
   const DiveSummary({
     required this.id,
     this.diveNumber,
+    this.name,
     required this.dateTime,
     this.entryTime,
     this.maxDepth,
@@ -43,14 +83,26 @@ class DiveSummary extends Equatable {
     this.waterTemp,
     this.rating,
     this.isFavorite = false,
-    this.diveTypeId = 'recreational',
+    this.excludedFromStats = false,
+    this.excludedFromGasStats = false,
+    this.isPlanned = false,
+    this.isDraft = false,
+    this.isOpenDraft = false,
+    this.diveMode = DiveMode.oc,
+    this.diveTypeIds = const ['recreational'],
     this.tags = const [],
     this.siteName,
     this.siteCountry,
+    this.siteCountryCode,
     this.siteRegion,
     this.siteLatitude,
     this.siteLongitude,
+    this.tripId,
+    this.tripName,
+    this.tripStartDate,
+    this.tripEndDate,
     required this.sortTimestamp,
+    this.safetyFindingCount = 0,
   });
 
   /// Creates a DiveSummary from a full Dive entity.
@@ -63,23 +115,46 @@ class DiveSummary extends Equatable {
     return DiveSummary(
       id: dive.id,
       diveNumber: dive.diveNumber,
+      name: dive.name,
       dateTime: dive.dateTime,
       entryTime: dive.entryTime,
       maxDepth: dive.maxDepth,
       bottomTime: dive.bottomTime,
-      runtime: dive.runtime,
+      runtime: dive.measuredRuntime,
       waterTemp: dive.waterTemp,
       rating: dive.rating,
       isFavorite: dive.isFavorite,
-      diveTypeId: dive.diveTypeId,
+      excludedFromStats: dive.excludedFromStats,
+      excludedFromGasStats: dive.excludedFromGasStats,
+      isPlanned: dive.isPlanned,
+      isDraft: dive.isDraft,
+      isOpenDraft: dive.isDraft && dive.exitTime == null,
+      diveMode: dive.diveMode,
+      diveTypeIds: dive.diveTypeIds,
       tags: dive.tags,
       siteName: dive.site?.name,
       siteCountry: dive.site?.country,
+      siteCountryCode: dive.site?.countryCode,
       siteRegion: dive.site?.region,
       siteLatitude: dive.site?.location?.latitude,
       siteLongitude: dive.site?.location?.longitude,
+      tripId: dive.tripId ?? dive.trip?.id,
+      tripName: dive.trip?.name,
+      tripStartDate: dive.trip?.startDate,
+      tripEndDate: dive.trip?.endDate,
       sortTimestamp: ts.millisecondsSinceEpoch,
+      // Optimistic conversions can't know the count; the next DB read
+      // corrects it.
+      safetyFindingCount: 0,
     );
+  }
+
+  /// User-defined name, normalized for display: trimmed, with empty or
+  /// whitespace-only values treated as unset (null). Mirrors
+  /// [Dive.effectiveName].
+  String? get effectiveName {
+    final trimmed = name?.trim();
+    return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
   }
 
   /// Formatted location string matching DiveSite.locationString
@@ -94,9 +169,14 @@ class DiveSummary extends Equatable {
     return parts.isEmpty ? null : parts.join(', ');
   }
 
+  /// Representative (first) dive type slug. Always present (>= 1 invariant).
+  String get diveTypeId =>
+      diveTypeIds.isEmpty ? 'recreational' : diveTypeIds.first;
+
   DiveSummary copyWith({
     String? id,
     int? diveNumber,
+    String? name,
     DateTime? dateTime,
     DateTime? entryTime,
     double? maxDepth,
@@ -105,18 +185,31 @@ class DiveSummary extends Equatable {
     double? waterTemp,
     int? rating,
     bool? isFavorite,
-    String? diveTypeId,
+    bool? excludedFromStats,
+    bool? excludedFromGasStats,
+    bool? isPlanned,
+    bool? isDraft,
+    bool? isOpenDraft,
+    DiveMode? diveMode,
+    List<String>? diveTypeIds,
     List<Tag>? tags,
     String? siteName,
     String? siteCountry,
+    String? siteCountryCode,
     String? siteRegion,
     double? siteLatitude,
     double? siteLongitude,
+    String? tripId,
+    String? tripName,
+    DateTime? tripStartDate,
+    DateTime? tripEndDate,
     int? sortTimestamp,
+    int? safetyFindingCount,
   }) {
     return DiveSummary(
       id: id ?? this.id,
       diveNumber: diveNumber ?? this.diveNumber,
+      name: name ?? this.name,
       dateTime: dateTime ?? this.dateTime,
       entryTime: entryTime ?? this.entryTime,
       maxDepth: maxDepth ?? this.maxDepth,
@@ -125,14 +218,26 @@ class DiveSummary extends Equatable {
       waterTemp: waterTemp ?? this.waterTemp,
       rating: rating ?? this.rating,
       isFavorite: isFavorite ?? this.isFavorite,
-      diveTypeId: diveTypeId ?? this.diveTypeId,
+      excludedFromStats: excludedFromStats ?? this.excludedFromStats,
+      excludedFromGasStats: excludedFromGasStats ?? this.excludedFromGasStats,
+      isPlanned: isPlanned ?? this.isPlanned,
+      isDraft: isDraft ?? this.isDraft,
+      isOpenDraft: isOpenDraft ?? this.isOpenDraft,
+      diveMode: diveMode ?? this.diveMode,
+      diveTypeIds: diveTypeIds ?? this.diveTypeIds,
       tags: tags ?? this.tags,
       siteName: siteName ?? this.siteName,
       siteCountry: siteCountry ?? this.siteCountry,
+      siteCountryCode: siteCountryCode ?? this.siteCountryCode,
       siteRegion: siteRegion ?? this.siteRegion,
       siteLatitude: siteLatitude ?? this.siteLatitude,
       siteLongitude: siteLongitude ?? this.siteLongitude,
+      tripId: tripId ?? this.tripId,
+      tripName: tripName ?? this.tripName,
+      tripStartDate: tripStartDate ?? this.tripStartDate,
+      tripEndDate: tripEndDate ?? this.tripEndDate,
       sortTimestamp: sortTimestamp ?? this.sortTimestamp,
+      safetyFindingCount: safetyFindingCount ?? this.safetyFindingCount,
     );
   }
 
@@ -140,6 +245,7 @@ class DiveSummary extends Equatable {
   List<Object?> get props => [
     id,
     diveNumber,
+    name,
     dateTime,
     entryTime,
     maxDepth,
@@ -148,14 +254,26 @@ class DiveSummary extends Equatable {
     waterTemp,
     rating,
     isFavorite,
-    diveTypeId,
+    excludedFromStats,
+    excludedFromGasStats,
+    isPlanned,
+    isDraft,
+    isOpenDraft,
+    diveMode,
+    diveTypeIds,
     tags,
     siteName,
     siteCountry,
+    siteCountryCode,
     siteRegion,
     siteLatitude,
     siteLongitude,
+    tripId,
+    tripName,
+    tripStartDate,
+    tripEndDate,
     sortTimestamp,
+    safetyFindingCount,
   ];
 }
 
@@ -185,7 +303,23 @@ class PaginatedDiveListState extends Equatable {
   final bool isLoadingMore;
   final bool hasMore;
   final DiveSummaryCursor? nextCursor;
+
+  /// Dives the active filter selects, across every page.
   final int totalCount;
+
+  /// Dives the list holds with no filter, for the "34 of 812 dives" title
+  /// (#2669). Loaded only when these rows were loaded under an active filter,
+  /// and null otherwise, so it also says which of the two the rows are.
+  final int? unfilteredTotalCount;
+
+  /// The last attempt to load another page failed.
+  ///
+  /// Distinguishes "still fetching" from "gave up", so the list can offer a
+  /// retry instead of a spinner that will never resolve on its own (#1610).
+  final bool loadMoreFailed;
+
+  /// Bumped each time the rows are reloaded from the top, not when a page is appended.
+  final int revision;
 
   const PaginatedDiveListState({
     this.dives = const [],
@@ -193,6 +327,9 @@ class PaginatedDiveListState extends Equatable {
     this.hasMore = true,
     this.nextCursor,
     this.totalCount = 0,
+    this.unfilteredTotalCount,
+    this.loadMoreFailed = false,
+    this.revision = 0,
   });
 
   PaginatedDiveListState copyWith({
@@ -201,7 +338,10 @@ class PaginatedDiveListState extends Equatable {
     bool? hasMore,
     DiveSummaryCursor? nextCursor,
     int? totalCount,
+    int? unfilteredTotalCount,
     bool clearNextCursor = false,
+    bool? loadMoreFailed,
+    int? revision,
   }) {
     return PaginatedDiveListState(
       dives: dives ?? this.dives,
@@ -209,6 +349,9 @@ class PaginatedDiveListState extends Equatable {
       hasMore: hasMore ?? this.hasMore,
       nextCursor: clearNextCursor ? null : (nextCursor ?? this.nextCursor),
       totalCount: totalCount ?? this.totalCount,
+      unfilteredTotalCount: unfilteredTotalCount ?? this.unfilteredTotalCount,
+      loadMoreFailed: loadMoreFailed ?? this.loadMoreFailed,
+      revision: revision ?? this.revision,
     );
   }
 
@@ -219,5 +362,8 @@ class PaginatedDiveListState extends Equatable {
     hasMore,
     nextCursor,
     totalCount,
+    unfilteredTotalCount,
+    loadMoreFailed,
+    revision,
   ];
 }

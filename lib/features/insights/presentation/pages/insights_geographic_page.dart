@@ -1,0 +1,172 @@
+import 'package:flutter/material.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/features/insights/presentation/insights_dive_filters.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/widgets/expandable_ranking_list.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
+import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+class InsightsGeographicPage extends ConsumerWidget {
+  final bool embedded;
+
+  const InsightsGeographicPage({super.key, this.embedded = false});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final content = SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildCountriesSection(context, ref),
+          const SizedBox(height: 16),
+          _buildRegionsSection(context, ref),
+          const SizedBox(height: 16),
+          _buildTripsSection(context, ref),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_geographic_appBar_title,
+      body: content,
+    );
+  }
+
+  Widget _buildCountriesSection(BuildContext context, WidgetRef ref) {
+    final countriesAsync = ref.watch(countriesVisitedProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_geographic_countries_title,
+      subtitle: context.l10n.insights_geographic_countries_subtitle,
+      child: countriesAsync.when(
+        data: (data) {
+          final summary = data.isNotEmpty
+              ? context.l10n.insights_geographic_countries_summary(
+                  data.length,
+                  data.first.name,
+                  data.first.count,
+                )
+              : context.l10n.insights_geographic_countries_empty;
+          return Semantics(
+            label: summary,
+            child: ExpandableRankingList(
+              items: data,
+              countLabel: context.l10n.insights_ranking_countLabel_dives,
+              onItemTap: (item) => openFilteredChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_geographic_countries_title,
+                row: item.name,
+                narrow: (scope) => countryDivesFilter(scope, item.name),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_geographic_countries_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRegionsSection(BuildContext context, WidgetRef ref) {
+    final regionsAsync = ref.watch(regionsExploredProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_geographic_regions_title,
+      subtitle: context.l10n.insights_geographic_regions_subtitle,
+      child: regionsAsync.when(
+        data: (data) {
+          final summary = data.isNotEmpty
+              ? context.l10n.insights_geographic_regions_summary(
+                  data.length,
+                  data.first.name,
+                  data.first.count,
+                )
+              : context.l10n.insights_geographic_regions_empty;
+          return Semantics(
+            label: summary,
+            child: ExpandableRankingList(
+              items: data,
+              countLabel: context.l10n.insights_ranking_countLabel_dives,
+              // A region row carries its country as the subtitle.
+              onItemTap: (item) => openFilteredChartDives(
+                context,
+                ref,
+                chart: context.l10n.insights_geographic_regions_title,
+                // Regions are counted per country, so two rows can share a
+                // name.
+                row: item.subtitle == null
+                    ? item.name
+                    : '${item.name}, ${item.subtitle}',
+                narrow: (scope) => regionDivesFilter(
+                  scope,
+                  region: item.name,
+                  country: item.subtitle,
+                ),
+              ),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_geographic_regions_error,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTripsSection(BuildContext context, WidgetRef ref) {
+    final tripsAsync = ref.watch(divesPerTripProvider);
+
+    return StatSectionCard(
+      title: context.l10n.insights_geographic_trips_title,
+      subtitle: context.l10n.insights_geographic_trips_subtitle,
+      child: tripsAsync.when(
+        data: (data) {
+          final summary = data.isNotEmpty
+              ? context.l10n.insights_geographic_trips_summary(
+                  data.length,
+                  data.first.name,
+                  data.first.count,
+                )
+              : context.l10n.insights_geographic_trips_empty;
+          return Semantics(
+            label: summary,
+            child: ExpandableRankingList(
+              items: data,
+              countLabel: context.l10n.insights_ranking_countLabel_dives,
+              onItemTap: (item) => context.push('/trips/${item.id}'),
+            ),
+          );
+        },
+        loading: () => const SizedBox(
+          height: 200,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (_, _) => StatEmptyState(
+          icon: Icons.error_outline,
+          message: context.l10n.insights_geographic_trips_error,
+        ),
+      ),
+    );
+  }
+}

@@ -1,6 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 
 import '../../../../helpers/test_database.dart';
 
@@ -50,6 +54,72 @@ void main() {
   }
 
   group('DiveCenterRepository', () {
+    group('logo', () {
+      final logo = Uint8List.fromList([1, 2, 3]);
+
+      test('a created center keeps its logo', () async {
+        final created = await repository.createDiveCenter(
+          createTestCenter(name: 'Blue Reef').copyWith(logo: logo),
+        );
+
+        final read = await repository.getDiveCenterById(created.id);
+        expect(read!.logo, [1, 2, 3]);
+      });
+
+      test('updating with logo null removes it', () async {
+        final created = await repository.createDiveCenter(
+          createTestCenter(name: 'Blue Reef').copyWith(logo: logo),
+        );
+
+        await repository.updateDiveCenter(created.copyWith(logo: null));
+
+        final read = await repository.getDiveCenterById(created.id);
+        expect(read!.logo, isNull);
+      });
+
+      test('the search results read the logo', () async {
+        await repository.createDiveCenter(
+          createTestCenter(name: 'Blue Reef').copyWith(logo: logo),
+        );
+
+        final found = await repository.searchDiveCenters('blue');
+        expect(found.single.logo, [1, 2, 3]);
+      });
+
+      test('dives at one center share one logo instance', () async {
+        final center = await repository.createDiveCenter(
+          createTestCenter(name: 'Blue Reef').copyWith(logo: logo),
+        );
+        final dives = DiveRepository();
+        final at = DateTime(2024, 1, 1, 10);
+        await dives.createDive(Dive(id: '', dateTime: at, diveCenter: center));
+        await dives.createDive(Dive(id: '', dateTime: at, diveCenter: center));
+
+        final all = await dives.getAllDives();
+        expect(all, hasLength(2));
+        expect(all.first.diveCenter!.logo, [1, 2, 3]);
+        // ProfileAvatar's image cache is keyed by the byte list's identity,
+        // so one shared instance means one decode however many dives.
+        expect(
+          identical(all.first.diveCenter!.logo, all.last.diveCenter!.logo),
+          isTrue,
+        );
+      });
+
+      test('a single dive read carries its center logo', () async {
+        final center = await repository.createDiveCenter(
+          createTestCenter(name: 'Blue Reef').copyWith(logo: logo),
+        );
+        final dives = DiveRepository();
+        final dive = await dives.createDive(
+          Dive(id: '', dateTime: DateTime(2024, 1, 1), diveCenter: center),
+        );
+
+        final read = await dives.getDiveById(dive.id);
+        expect(read!.diveCenter!.logo, [1, 2, 3]);
+      });
+    });
+
     group('createDiveCenter', () {
       test(
         'should create a new center with generated ID when ID is empty',
@@ -125,6 +195,31 @@ void main() {
         final result = await repository.getDiveCenterById('non-existent-id');
 
         expect(result, isNull);
+      });
+    });
+
+    group('getDiveCentersByIds', () {
+      test(
+        'finds every id across chunks and passes over a missing one',
+        () async {
+          final ids = [
+            for (final name in ['A', 'B', 'C'])
+              (await repository.createDiveCenter(
+                createTestCenter(name: name),
+              )).id,
+          ];
+
+          final found = await repository.getDiveCentersByIds([
+            ...ids,
+            'non-existent-id',
+          ]);
+
+          expect(found.map((c) => c.name), unorderedEquals(['A', 'B', 'C']));
+        },
+      );
+
+      test('asks nothing for no ids', () async {
+        expect(await repository.getDiveCentersByIds(const []), isEmpty);
       });
     });
 
@@ -322,16 +417,36 @@ void main() {
       });
     });
 
-    group('getDiveCountForCenter', () {
-      test('should return 0 when center has no dives', () async {
-        final center = await repository.createDiveCenter(
-          createTestCenter(name: 'New Center'),
-        );
+    group('getDiveCountsByCenter', () {
+      test('should be empty when no dive names a center', () async {
+        await repository.createDiveCenter(createTestCenter(name: 'New Center'));
 
-        final count = await repository.getDiveCountForCenter(center.id);
-
-        expect(count, equals(0));
+        expect(await repository.getDiveCountsByCenter(), isEmpty);
       });
+
+      test(
+        'should count each center and leave out one with no dives',
+        () async {
+          final busy = await repository.createDiveCenter(
+            createTestCenter(name: 'Busy'),
+          );
+          final other = await repository.createDiveCenter(
+            createTestCenter(name: 'Other'),
+          );
+          await repository.createDiveCenter(createTestCenter(name: 'Quiet'));
+          final dives = DiveRepository();
+          final at = DateTime(2024, 1, 1, 10);
+          await dives.createDive(Dive(id: '', dateTime: at, diveCenter: busy));
+          await dives.createDive(Dive(id: '', dateTime: at, diveCenter: busy));
+          await dives.createDive(Dive(id: '', dateTime: at, diveCenter: other));
+          await dives.createDive(Dive(id: '', dateTime: at));
+
+          expect(await repository.getDiveCountsByCenter(), {
+            busy.id: 2,
+            other.id: 1,
+          });
+        },
+      );
     });
 
     group('getCountries', () {
@@ -376,5 +491,44 @@ void main() {
         expect(countries, equals(['USA']));
       });
     });
+  });
+
+  test('fill hours round-trip through both mappers and clear', () async {
+    final created = await repository.createDiveCenter(
+      createTestCenter(
+        name: 'Dive Friends',
+      ).copyWith(fillOpensAt: 480, fillClosesAt: 1020),
+    );
+    final byId = await repository.getDiveCenterById(created.id);
+    expect(byId!.fillOpensAt, 480);
+    expect(byId.fillClosesAt, 1020);
+    final found = await repository.searchDiveCenters('Dive Friends');
+    expect(found.single.fillClosesAt, 1020);
+
+    await repository.updateDiveCenter(
+      byId.copyWith(fillOpensAt: null, fillClosesAt: null),
+    );
+    final cleared = await repository.getDiveCenterById(created.id);
+    expect(cleared!.fillOpensAt, isNull);
+    expect(cleared.fillClosesAt, isNull);
+  });
+
+  test('isPermanentlyClosed round-trips (#3379)', () async {
+    final created = await repository.createDiveCenter(
+      createTestCenter(
+        name: 'Toucan Diving',
+      ).copyWith(isPermanentlyClosed: true),
+    );
+
+    final byId = await repository.getDiveCenterById(created.id);
+    expect(byId!.isPermanentlyClosed, isTrue);
+    final listed = await repository.getAllDiveCenters();
+    expect(listed.single.isPermanentlyClosed, isTrue);
+
+    await repository.updateDiveCenter(
+      byId.copyWith(isPermanentlyClosed: false),
+    );
+    final reopened = await repository.getDiveCenterById(created.id);
+    expect(reopened!.isPermanentlyClosed, isFalse);
   });
 }

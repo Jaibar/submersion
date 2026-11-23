@@ -1,0 +1,197 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart' show DiveProfileEvent;
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/domain/services/profile_event_mapper.dart';
+
+void main() {
+  group('mapDiveProfileEventToProfileEvent source field', () {
+    test('reads source=imported from DB row', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'setpointChange',
+        severity: 'info',
+        description: null,
+        depth: null,
+        value: 1.2,
+        tankId: null,
+        source: 'imported',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.source, EventSource.imported);
+      expect(domain.eventType, ProfileEventType.setpointChange);
+      expect(domain.value, 1.2);
+    });
+
+    test('reads source=computed from DB row', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'ascentRateWarning',
+        severity: 'warning',
+        description: null,
+        depth: null,
+        value: 18.0,
+        tankId: null,
+        source: 'computed',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.source, EventSource.computed);
+    });
+
+    test('reads source=user from DB row', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'bookmark',
+        severity: 'info',
+        description: 'interesting moment',
+        depth: 20.0,
+        value: null,
+        tankId: null,
+        source: 'user',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.source, EventSource.user);
+      expect(domain.description, 'interesting moment');
+    });
+
+    test('unknown source string falls back to imported', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'bookmark',
+        severity: 'info',
+        description: null,
+        depth: null,
+        value: null,
+        tankId: null,
+        source: 'gibberish',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.source, EventSource.imported);
+    });
+
+    test('roundtrip: computed event from DB preserves source', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 500,
+        eventType: 'ascentRateCritical',
+        severity: 'alert',
+        description: null,
+        depth: 5.0,
+        value: 22.0,
+        tankId: null,
+        source: 'computed',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(
+        domain.source,
+        EventSource.computed,
+        reason: 'DB source=computed must NOT default to imported on read',
+      );
+    });
+  });
+
+  // Task 11: the mapper must carry computerId through so the profile chart
+  // can filter events by the multi-computer toggle bar.
+  group('mapDiveProfileEventToProfileEvent computerId field', () {
+    test('reads a non-null computerId from the DB row', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'bookmark',
+        severity: 'info',
+        description: null,
+        depth: null,
+        value: null,
+        tankId: null,
+        source: 'imported',
+        computerId: 'comp-uuid-1',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.computerId, 'comp-uuid-1');
+    });
+
+    test('a null computerId (primary/manual) maps to null', () {
+      const dbEvent = DiveProfileEvent(
+        id: 'e1',
+        diveId: 'd1',
+        timestamp: 100,
+        eventType: 'bookmark',
+        severity: 'info',
+        description: null,
+        depth: null,
+        value: null,
+        tankId: null,
+        source: 'imported',
+        createdAt: 1700000000000,
+      );
+      final domain = mapDiveProfileEventToProfileEvent(dbEvent);
+      expect(domain.computerId, isNull);
+    });
+  });
+
+  group('withComputerManufacturers (#1523)', () {
+    ProfileEvent event(String id, String? computerId) => ProfileEvent(
+      id: id,
+      diveId: 'd1',
+      timestamp: 60,
+      eventType: ProfileEventType.lowGas,
+      computerId: computerId,
+      createdAt: DateTime.utc(2026),
+    );
+
+    test('stamps each event with its computer\'s manufacturer', () async {
+      final lookups = <String>[];
+      final result = await withComputerManufacturers(
+        [event('a', 'c1'), event('b', 'c2'), event('c', 'c1')],
+        (id) async {
+          lookups.add(id);
+          return {'c1': 'Suunto', 'c2': 'Shearwater'}[id];
+        },
+      );
+      expect(result.map((e) => e.computerManufacturer), [
+        'Suunto',
+        'Shearwater',
+        'Suunto',
+      ]);
+      expect(result.map((e) => e.id), ['a', 'b', 'c']);
+      expect(lookups..sort(), ['c1', 'c2'], reason: 'one lookup per computer');
+    });
+
+    test(
+      'leaves an event with no computer, or an unknown one, unstamped',
+      () async {
+        final result = await withComputerManufacturers([
+          event('a', null),
+          event('b', 'gone'),
+        ], (id) async => null);
+        expect(result.map((e) => e.computerManufacturer), [null, null]);
+      },
+    );
+
+    test('a failed lookup leaves that computer\'s events unstamped instead '
+        'of failing the events', () async {
+      final result = await withComputerManufacturers(
+        [event('a', 'c1'), event('b', 'c2')],
+        (id) async =>
+            id == 'c1' ? throw StateError('db read failed') : 'Suunto',
+      );
+      expect(result.map((e) => e.computerManufacturer), [null, 'Suunto']);
+    });
+  });
+}

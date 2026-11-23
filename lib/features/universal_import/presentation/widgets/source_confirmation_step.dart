@@ -4,6 +4,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/parse_progress.dart';
 
 /// Step 1: Show detection result and let user confirm or override.
 class SourceConfirmationStep extends ConsumerStatefulWidget {
@@ -30,6 +31,48 @@ class _SourceConfirmationStepState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // The wizard stays on this step until the parse is done.
+          if (state.isLoading) ...[
+            const ParseProgress(),
+            const SizedBox(height: 16),
+          ],
+
+          // A parse that failed on the way out of this step leaves its reason
+          // here. The wizard stays put in that case, so this is where the user
+          // is standing and where the reason has to appear.
+          if (state.error != null) ...[
+            Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ExcludeSemantics(
+                    child: Icon(
+                      Icons.error_outline,
+                      size: 20,
+                      color: theme.colorScheme.onErrorContainer,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      state.error!,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
           // File info
           if (state.fileName != null) ...[
             Text(
@@ -125,25 +168,32 @@ class _SourceConfirmationStepState
 
           const SizedBox(height: 12),
 
-          // Override section (collapsed by default)
-          _OverrideSection(
-            selectedOverride: SourceOverrideOption.findMatch(
-              selectedOverride,
-              state.pendingFormatOverride,
+          // Override section (collapsed by default). A parse already has its
+          // answer, so a change here could only be ignored.
+          ExcludeFocus(
+            excluding: state.isLoading,
+            child: IgnorePointer(
+              ignoring: state.isLoading,
+              child: _OverrideSection(
+                selectedOverride: SourceOverrideOption.findMatch(
+                  selectedOverride,
+                  state.pendingFormatOverride,
+                ),
+                onChanged: (option) {
+                  final notifier = ref.read(
+                    universalImportNotifierProvider.notifier,
+                  );
+                  if (option != null) {
+                    notifier.setPendingSourceOverride(
+                      option.sourceApp,
+                      format: option.format,
+                    );
+                  } else {
+                    notifier.setPendingSourceOverride(null);
+                  }
+                },
+              ),
             ),
-            onChanged: (option) {
-              final notifier = ref.read(
-                universalImportNotifierProvider.notifier,
-              );
-              if (option != null) {
-                notifier.setPendingSourceOverride(
-                  option.sourceApp,
-                  format: option.format,
-                );
-              } else {
-                notifier.setPendingSourceOverride(null);
-              }
-            },
           ),
         ],
       ),

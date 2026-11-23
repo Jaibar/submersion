@@ -1,0 +1,104 @@
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/dive_type_label.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/environment_enum_display.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/domain/time_of_day_bucket.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+/// On-screen text for the distribution keys the statistics repository emits.
+///
+/// The repository returns stable, locale-independent keys rather than display
+/// text -- the contract the visibility distribution already follows (see
+/// `visibilityDistributionLabel`). Two reasons:
+///
+/// 1. The time-of-day buckets are `TimeOfDayBucket` keys, which the chart
+///    also looks its fixed colours up by, so a translated key would lose its
+///    colour.
+/// 2. Water type, entry method and dive type are stored enum names and slugs,
+///    which sync, CSV export and the field extractor all carry verbatim.
+///
+/// An unrecognized key can only come from a repository change, so it is
+/// surfaced verbatim rather than mapped onto some other bucket.
+
+/// Localized name for a time-of-day bucket key.
+///
+/// Keys are the `TimeOfDayBucket` keys; see
+/// `InsightsRepository.getDivesByTimeOfDay`.
+String timeOfDayDistributionLabel(String key, AppLocalizations l10n) =>
+    switch (TimeOfDayBucket.fromKey(key)) {
+      TimeOfDayBucket.dawn => l10n.insights_timePatterns_timeOfDay_dawn,
+      TimeOfDayBucket.morning => l10n.insights_timePatterns_timeOfDay_morning,
+      TimeOfDayBucket.afternoon =>
+        l10n.insights_timePatterns_timeOfDay_afternoon,
+      TimeOfDayBucket.dusk => l10n.insights_timePatterns_timeOfDay_dusk,
+      TimeOfDayBucket.night => l10n.insights_timePatterns_timeOfDay_night,
+      null => key,
+    };
+
+/// Localized name for a stored [WaterType] enum name, or for
+/// [kNotRecordedDistributionKey].
+String waterTypeDistributionLabel(String key, AppLocalizations l10n) =>
+    key == kNotRecordedDistributionKey
+    ? l10n.insights_chart_notRecorded
+    : WaterType.values
+              .where((w) => w.name == key)
+              .firstOrNull
+              ?.localizedName(l10n) ??
+          key;
+
+/// Localized name for a stored [EntryMethod] enum name, or for
+/// [kNotRecordedDistributionKey].
+String entryMethodDistributionLabel(String key, AppLocalizations l10n) =>
+    key == kNotRecordedDistributionKey
+    ? l10n.insights_chart_notRecorded
+    : EntryMethod.values
+              .where((e) => e.name == key)
+              .firstOrNull
+              ?.localizedName(l10n) ??
+          key;
+
+/// Localized name for a dive-type id.
+///
+/// Built-in slugs resolve through the shared translation table; a custom type
+/// keeps the diver's own name when [typesById] (the loaded `dive_types` rows)
+/// is given -- see [diveTypeLabel]'s tier 1. An empty id means the join row
+/// carries no type.
+String diveTypeDistributionLabel(
+  String key,
+  AppLocalizations l10n, {
+  Map<String, DiveTypeEntity>? typesById,
+}) => key.isEmpty
+    ? l10n.insights_summary_diveTypes_unknown
+    : diveTypeLabel(l10n, key, typesById: typesById);
+
+/// Short localized month names, January first, shared by every Insights
+/// surface that labels months.
+List<String> insightsMonthLabels(AppLocalizations l10n) => [
+  l10n.insights_timePatterns_month_jan,
+  l10n.insights_timePatterns_month_feb,
+  l10n.insights_timePatterns_month_mar,
+  l10n.insights_timePatterns_month_apr,
+  l10n.insights_timePatterns_month_may,
+  l10n.insights_timePatterns_month_jun,
+  l10n.insights_timePatterns_month_jul,
+  l10n.insights_timePatterns_month_aug,
+  l10n.insights_timePatterns_month_sep,
+  l10n.insights_timePatterns_month_oct,
+  l10n.insights_timePatterns_month_nov,
+  l10n.insights_timePatterns_month_dec,
+];
+
+/// [segments] with every label replaced by [label] applied to its key.
+List<DistributionSegment> localizeDistribution(
+  List<DistributionSegment> segments,
+  String Function(String key) label,
+) => [
+  for (final segment in segments)
+    DistributionSegment(
+      label: label(segment.label),
+      count: segment.count,
+      percentage: segment.percentage,
+      totalDurationSeconds: segment.totalDurationSeconds,
+    ),
+];

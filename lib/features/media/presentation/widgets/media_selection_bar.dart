@@ -1,0 +1,195 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/helpers/media_move_to_dive.dart';
+import 'package:submersion/features/media/presentation/helpers/media_share_helper.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/tags/data/services/bulk_tag_service.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_link_providers.dart';
+import 'package:submersion/features/tags/presentation/widgets/bulk_tag_sheet.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/bulk_action.dart';
+import 'package:submersion/shared/selection/selection_app_bar.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+
+final _log = LoggerService.forClass(MediaSelectionBar);
+
+/// The library's contextual bar while a selection is active.
+///
+/// The chrome -- count, close, select all, deselect all, and the overflow --
+/// comes from the shared [SelectionAppBar], so the library cannot drift from
+/// every other selectable surface. This widget contributes only the
+/// media-specific bulk actions and the logic behind them.
+class MediaSelectionBar extends ConsumerWidget {
+  const MediaSelectionBar({
+    super.key,
+    required this.controller,
+    required this.selectableIds,
+    required this.selectedItems,
+  });
+
+  /// The library's selection state machine, shared with the view that hosts
+  /// this bar.
+  final SelectionController controller;
+
+  /// Every id currently on screen, which is what Select All checks.
+  final List<String> selectableIds;
+
+  /// The currently selected items, resolved by the caller from the visible
+  /// entries so share/unlink operate on real MediaItems.
+  final List<MediaItem> selectedItems;
+
+  List<String> get _ids => selectedItems.map((m) => m.id).toList();
+
+  /// The library's one destructive action.
+  ///
+  /// A dive or a site can unlink from its own side and leave the row alive
+  /// for the other one, but the library IS every side at once: unlinking
+  /// here clears every link the row has, and a row with no link cannot stay
+  /// in the library. So the row, its cloud proxies and its thumbnails go,
+  /// and only the original source file is left alone. That single outcome is
+  /// why this surface no longer carries an unlink-per-link pair alongside a
+  /// separate Delete.
+  ///
+  /// Routed through the unlink service's labelled entry, so it reads in
+  /// History as one Unlink (issue #4527), and from there through the
+  /// deletion coordinator, so the remote-blob delete intent is enqueued
+  /// before the rows die (orphan-prevention spec 5.2).
+  Future<BulkActionOutcome> _unlinkSelected(
+    BuildContext context,
+    WidgetRef ref,
+  ) async {
+    final ids = _ids;
+    if (ids.isEmpty) return BulkActionOutcome.cancelled;
+
+    // Everything else an unlink discards is derived and rebuilds from the
+    // source file on a re-link. A caption and the favorite flag live only in
+    // Submersion's own row, so they are the part worth naming.
+    final Set<String> atRisk;
+    try {
+      atRisk = await ref.read(mediaRepositoryProvider).idsWithUserMetadata(ids);
+    } catch (error, stackTrace) {
+      _log.error('Unlink failed', error: error, stackTrace: stackTrace);
+      if (context.mounted) _showUnlinkFailed(context);
+      return BulkActionOutcome.failed;
+    }
+    if (!context.mounted) return BulkActionOutcome.cancelled;
+
+    final l10n = context.l10n;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.media_library_unlinkConfirmTitle(ids.length)),
+        content: Text(
+          atRisk.isEmpty
+              ? l10n.media_library_unlinkConfirmBody
+              : '${l10n.media_library_unlinkConfirmBody}\n\n'
+                    '${l10n.media_library_unlinkMetadataNote(atRisk.length)}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(l10n.common_action_cancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(l10n.media_library_unlinkSelected),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return BulkActionOutcome.cancelled;
+
+    try {
+      await ref.read(mediaUnlinkServiceProvider).unlinkFromLibrary(ids);
+      return BulkActionOutcome.completed;
+    } catch (error, stackTrace) {
+      _log.error('Unlink failed', error: error, stackTrace: stackTrace);
+      if (context.mounted) _showUnlinkFailed(context);
+      return BulkActionOutcome.failed;
+    }
+  }
+
+  /// Says Unlink failed; the selection stays, to try again.
+  void _showUnlinkFailed(BuildContext context) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.l10n.media_library_unlinkFailed),
+        backgroundColor: Theme.of(context).colorScheme.error,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+
+    // [onDelete] is null and Unlink is an ordinary action because this
+    // surface has no control named Delete: unlinking here destroys the rows,
+    // but calling it Delete would claim the source files go too, and they do
+    // not. The shared bar's safety property is kept by other means --
+    // [maxInlineActions] is 2, so the two benign actions hold the inline
+    // slots and the destructive one is reached by open-then-choose, the same
+    // deliberate gesture the baseline delete entry requires.
+    // A browser shares what it has and changes no link or tag (#4121).
+    final canWrite = ref.watch(deviceCapabilitiesProvider).mediaAttach;
+    return SelectionAppBar(
+      controller: controller,
+      selectableIds: selectableIds,
+      shell: SelectionBarShell.pane,
+      onDelete: null,
+      maxInlineActions: 2,
+      actions: [
+        BulkAction(
+          id: 'share',
+          icon: Icons.share,
+          label: l10n.common_action_share,
+          onInvoke: () async =>
+              await shareMediaItems(context, ref, selectedItems)
+              ? BulkActionOutcome.completed
+              : BulkActionOutcome.failed,
+        ),
+        if (canWrite)
+          BulkAction(
+            id: 'move_to_dive',
+            icon: Icons.drive_file_move_outline,
+            label: l10n.media_library_moveToDive,
+            onInvoke: () => moveMediaToDive(context, ref, selectedItems),
+          ),
+        if (canWrite)
+          BulkAction(
+            id: 'edit_tags',
+            icon: Icons.label_outline,
+            label: l10n.tags_action_edit,
+            onInvoke: () => showBulkTagSheet(
+              context,
+              ref,
+              scope: TagScope.media,
+              service: BulkTagService(
+                ref.read(tagLinkRepositoryProvider(TagScope.media)),
+                itemTable: 'media',
+              ),
+              itemIds: _ids,
+              labels: (
+                confirmAdding: l10n.media_bulkTags_confirmAdding,
+                confirmRemoving: l10n.media_bulkTags_confirmRemoving,
+                empty: l10n.media_bulkTags_empty,
+              ),
+            ),
+          ),
+        if (canWrite)
+          BulkAction(
+            id: 'unlink',
+            icon: Icons.link_off,
+            label: l10n.media_library_unlinkSelected,
+            isDestructive: true,
+            onInvoke: () => _unlinkSelected(context, ref),
+          ),
+      ],
+    );
+  }
+}

@@ -1,0 +1,590 @@
+import 'package:meta/meta.dart';
+
+import 'package:submersion/core/query/compiler/sql_templates.dart';
+import 'package:submersion/core/query/domain/query_errors.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/registry/query_entity.dart';
+import 'package:submersion/core/query/registry/query_field.dart';
+import 'package:submersion/core/query/registry/query_registry.dart';
+import 'package:submersion/core/query/registry/query_relation.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/core/util/wall_clock_utc.dart';
+
+/// One compiled query, in the two spellings its consumers need.
+@immutable
+class CompiledQuery {
+  /// A boolean expression over [rootAlias], or empty for "match all".
+  final String where;
+  final List<Object?> params;
+
+  /// Every table the expression reads (root, relation targets, junctions,
+  /// tables a field or template declares), for change ticks and
+  /// `readsFrom`.
+  final Set<String> tablesTouched;
+  final String table;
+  final String idColumn;
+  final String rootAlias;
+
+  const CompiledQuery({
+    required this.where,
+    required this.params,
+    required this.tablesTouched,
+    required this.table,
+    required this.idColumn,
+    required this.rootAlias,
+  });
+
+  bool get isEmpty => where.isEmpty;
+
+  /// `SELECT alias.id FROM table alias [WHERE where]`, for `id IN (...)`
+  /// consumers. Binds the same [params].
+  String idSubquery() =>
+      'SELECT $rootAlias.$idColumn FROM $table $rootAlias'
+      '${isEmpty ? '' : ' WHERE $where'}';
+}
+
+/// Compiles a VALIDATED tree (spec Unit 4). Anything the validator would
+/// reject throws [QueryCompileError], which is a programming error, not
+/// user input. Every value is a bind parameter; only registry fragments and
+/// aliases are interpolated.
+///
+/// [diverId] narrows every dive the query reaches from outside the root to
+/// that diver's: a hop into an entity with `scopesHopsToDiver`, and a
+/// field's own dive subquery (`{diver:<alias>}`). The root itself stays the
+/// caller's to scope. With no [diverId], a dive root narrows them to its
+/// own diver's instead (every dive path scopes its root to the active
+/// diver), and any other root reads every diver's, as a query always did.
+CompiledQuery compileQuery(
+  QueryNode? node,
+  QueryEntity root,
+  QueryRegistry registry, {
+  String rootAlias = 'r0',
+  String? diverId,
+}) {
+  final column = root.diverScopeColumn;
+  final ctx = _Ctx(
+    registry,
+    diverId,
+    diverMatch: diverId != null
+        ? '= ?'
+        // IS, so a legacy dive with no diver still reaches its own kind.
+        : root.scopesHopsToDiver && column != null
+        ? 'IS $rootAlias.$column'
+        : null,
+  )..tables.add(root.table);
+  final where = node == null ? '' : ctx.emit(node, root, rootAlias);
+  return CompiledQuery(
+    where: where,
+    params: List.unmodifiable(ctx.params),
+    tablesTouched: Set.unmodifiable(ctx.tables),
+    table: root.table,
+    idColumn: root.idColumn,
+    rootAlias: rootAlias,
+  );
+}
+
+class _Ctx {
+  final QueryRegistry registry;
+  final String? diverId;
+
+  /// How a reached dive's diver column compares with the scope: `= ?`
+  /// (binding [diverId]), `IS <root>.diver_id`, or null for no scope.
+  final String? diverMatch;
+  final params = <Object?>[];
+  final tables = <String>{};
+  int _aliasCounter = 0;
+
+  /// Relation hops the enclosing scoped groups already crossed; nesting
+  /// counts against [kMaxPathHops] like a path does.
+  int _depth = 0;
+
+  _Ctx(this.registry, this.diverId, {required this.diverMatch});
+
+  String nextAlias() => 'r${++_aliasCounter}';
+
+  String emit(QueryNode n, QueryEntity entity, String alias) => switch (n) {
+    AndNode(:final children) => _group(children, ' AND ', entity, alias),
+    OrNode(:final children) => _group(children, ' OR ', entity, alias),
+    // Two-valued: a NULL operand (an unrecorded column under LIKE or a
+    // comparison) counts as "did not match", so its negation keeps the
+    // row. SQL's own NOT NULL is NULL and would drop it.
+    NotNode(:final child) => '(NOT COALESCE(${emit(child, entity, alias)}, 0))',
+    TextNode(:final words) => _text(words, entity, alias),
+    ScopedNode(:final path, :final inner) => _scoped(
+      path,
+      inner,
+      entity,
+      alias,
+    ),
+    ConditionNode(:final path, :final op, :final value) => _condition(
+      path,
+      op,
+      value,
+      entity,
+      alias,
+    ),
+  };
+
+  String _group(
+    List<QueryNode> children,
+    String joiner,
+    QueryEntity entity,
+    String alias,
+  ) {
+    if (children.isEmpty) throw QueryCompileError('empty group');
+    return '(${children.map((c) => emit(c, entity, alias)).join(joiner)})';
+  }
+
+  String _text(List<String> words, QueryEntity entity, String alias) {
+    if (words.isEmpty) throw QueryCompileError('empty text');
+    if (entity.textSearchSql.isEmpty) {
+      throw QueryCompileError(
+        '${entity.table} declares no text search columns',
+      );
+    }
+    tables.addAll(entity.textSearchTables);
+    // One node is one search term: a bare word, or a quoted phrase (or a
+    // builder text row) whose words must appear together, in order. Bare
+    // words arrive as separate one-word nodes under an AND (#2773).
+    final raw = words.join(' ');
+    // Folded here, the column by search_fold in each template: LIKE folds
+    // ASCII case only, so "écueil" missed "Écueil" (#3032) and "jeremie"
+    // missed "Jérémie" (#4498).
+    final term = '%${escapeLike(foldForSearch(raw))}%';
+    final alts = <String>[];
+    for (final t in entity.textSearchSql) {
+      alts.add(substituteRow(t, alias));
+      for (var i = 0; i < countPlaceholders(t); i++) {
+        params.add(term);
+      }
+    }
+    for (final e in entity.textSearchExpansions) {
+      final values = e.values(raw).toList();
+      if (values.isEmpty) continue;
+      final marks = List.filled(values.length, '?').join(', ');
+      alts.add(substituteRow(e.sql, alias).replaceAll('{values}', marks));
+      params.addAll(values);
+    }
+    return '((${alts.join(' OR ')}))';
+  }
+
+  /// Wraps [inner] (a function of the leaf alias) in one EXISTS per hop.
+  /// A null [inner] is a bare existence test.
+  String _hops(
+    List<QueryRelation> hops,
+    String fromAlias,
+    String Function(String leafAlias)? inner,
+  ) {
+    if (hops.isEmpty) return inner!(fromAlias);
+    final rel = hops.first;
+    final target = registry.entityFor(rel.target);
+    tables.add(target.table);
+    tables.addAll(rel.tables);
+    final to = nextAlias();
+    final join = substituteJoin(rel.joinSql, fromAlias, to);
+    final filter = rel.targetFilterSql == null
+        ? ''
+        : ' AND (${substituteJoin(rel.targetFilterSql!, fromAlias, to)})';
+    // Bound before [rest], whose binds come after it in the text.
+    final scope = _hopScope(target, to);
+    final rest = hops.length == 1 && inner == null
+        ? ''
+        : ' AND ${_hops(hops.sublist(1), to, inner)}';
+    return 'EXISTS (SELECT 1 FROM ${target.table} $to '
+        'WHERE $join$filter$scope$rest)';
+  }
+
+  /// The active diver's rows alone, on a hop into an entity that asks for
+  /// it; binds the diver.
+  String _hopScope(QueryEntity target, String alias) {
+    final column = target.diverScopeColumn;
+    if (diverMatch == null || !target.scopesHopsToDiver || column == null) {
+      return '';
+    }
+    if (diverId != null) params.add(diverId);
+    return ' AND $alias.$column $diverMatch';
+  }
+
+  /// A field fragment over [alias], its diver token bound in place. Call it
+  /// where the fragment is written, so its binds precede the value's.
+  String _field(String template, String alias) {
+    final row = substituteRow(template, alias);
+    if (diverId != null) {
+      for (final _ in kDiverToken.allMatches(row)) {
+        params.add(diverId);
+      }
+    }
+    return substituteDiver(row, match: diverMatch);
+  }
+
+  String _scoped(
+    FieldPath path,
+    QueryNode inner,
+    QueryEntity entity,
+    String alias,
+  ) {
+    final res = _resolve(path, entity);
+    final rel = res.terminalRelation;
+    if (rel == null) {
+      throw QueryCompileError('scoped path $path must end in a relation');
+    }
+    final leaf = registry.entityFor(rel.target);
+    final outer = _depth;
+    _depth = outer + res.hops.length;
+    if (_depth > kMaxPathHops) {
+      throw QueryCompileError(
+        'nested groups cross more than $kMaxPathHops hops',
+      );
+    }
+    try {
+      return '(${_hops(res.hops, alias, (a) => emit(inner, leaf, a))})';
+    } finally {
+      _depth = outer;
+    }
+  }
+
+  String _condition(
+    FieldPath path,
+    QueryOp op,
+    QueryValue? value,
+    QueryEntity entity,
+    String alias,
+  ) {
+    final res = _resolve(path, entity);
+    if (_depth + res.hops.length > kMaxPathHops) {
+      throw QueryCompileError('$path crosses more than $kMaxPathHops hops');
+    }
+    final field = res.field;
+    if (field == null) {
+      return _relationCondition(res, op, value, alias, path);
+    }
+    tables.addAll(field.tables);
+    // A field predicate is already parenthesised; only a hop chain needs
+    // its own pair around the EXISTS.
+    final body = _hops(
+      res.hops,
+      alias,
+      (a) => _fieldPredicate(field, op, value, a),
+    );
+    return res.hops.isEmpty ? body : '($body)';
+  }
+
+  String _relationCondition(
+    PathResolution res,
+    QueryOp op,
+    QueryValue? value,
+    String alias,
+    FieldPath path,
+  ) {
+    final rel = res.terminalRelation!;
+    final target = registry.entityFor(rel.target);
+    switch (op) {
+      case QueryOp.eq:
+      case QueryOp.neq:
+        // Like scalar `!=`, `site != X` needs a related row: a dive with no
+        // site is not "a site other than X" (`site:none` asks for that).
+        // Bound inside the hop, after any diver scope the hop binds.
+        final sym = op == QueryOp.eq ? '=' : '!=';
+        final hit = _hops(res.hops, alias, (a) {
+          params.add((value as RefValue).id);
+          return '$a.${target.idColumn} $sym ?';
+        });
+        return '($hit)';
+      case QueryOp.inList:
+        final items = (value as ListValue).items;
+        final ph = List.filled(items.length, '?').join(', ');
+        final hit = _hops(res.hops, alias, (a) {
+          for (final v in items) {
+            params.add((v as RefValue).id);
+          }
+          return '$a.${target.idColumn} IN ($ph)';
+        });
+        return '($hit)';
+      case QueryOp.isSet:
+        // `:any` is the exact complement of `:none`, so a relation whose
+        // emptiness counts a legacy scalar (buddies, weights) counts it as
+        // present too.
+        if (rel.emptySql != null && res.hops.length == 1) {
+          tables.add(target.table);
+          tables.addAll(rel.tables);
+          return '(NOT ${substituteJoin(rel.emptySql!, alias, '_unused')})';
+        }
+        return '(${_hops(res.hops, alias, null)})';
+      case QueryOp.isEmpty:
+        if (rel.emptySql != null && res.hops.length == 1) {
+          tables.add(target.table);
+          tables.addAll(rel.tables);
+          return '(${substituteJoin(rel.emptySql!, alias, '_unused')})';
+        }
+        return '(NOT ${_hops(res.hops, alias, null)})';
+      default:
+        throw QueryCompileError('$op on relation $path');
+    }
+  }
+
+  PathResolution _resolve(FieldPath path, QueryEntity entity) {
+    final res = resolvePath(registry, entity, path);
+    if (res.error != null) throw QueryCompileError(res.error!.message);
+    return res;
+  }
+
+  String _fieldPredicate(
+    QueryField f,
+    QueryOp op,
+    QueryValue? value,
+    String alias,
+  ) {
+    // Each read of the column is expanded where it is written, before the
+    // value it is compared with is bound (its diver token binds too).
+    String col() => _field(f.sql, alias);
+    switch (op) {
+      case QueryOp.isEmpty:
+        return '(${_field(f.emptySql, alias)})';
+      case QueryOp.isSet:
+        return '(NOT (${_field(f.emptySql, alias)}))';
+      case QueryOp.between:
+        // A reversed pair (from JSON or the builder) still means the range.
+        final items = _ascending((value as ListValue).items);
+        final exact =
+            '(${_shownCmp(f, col, '>=', items[0])} '
+            'AND ${_shownCmp(f, col, '<=', items[1])})';
+        final range = f.rangeSql;
+        if (range == null) return exact;
+        return '($exact OR (${col()} IS NULL '
+            'AND ${_cmp(f, () => _field(range.low, alias), '>=', items[0])} '
+            'AND ${_cmp(f, () => _field(range.high, alias), '<=', items[1])}))';
+      case QueryOp.inList:
+        if (value is DateRangeValue) return _dateRange(col, value, f);
+        final items = (value as ListValue).items;
+        if (items.any(_hasGrain)) {
+          // Each value as shown is a band, so the list is their union. Every
+          // band reads the column itself, so no read is made up front: one
+          // left unused would still bind its diver token.
+          final each = [
+            for (final v in items)
+              _hasGrain(v)
+                  ? '(${_shownBand(col, v as NumberValue)})'
+                  : '(${_exactEq(f, col, v)})',
+          ];
+          return '(${each.join(' OR ')})';
+        }
+        final c = col();
+        if (f.type == FieldType.text) {
+          for (final v in items) {
+            params.add((v as StringValue).value);
+          }
+          final ph = List.filled(items.length, 'unicode_lower(?)').join(', ');
+          return '(unicode_lower($c) IN ($ph))';
+        }
+        for (final v in items) {
+          params.add(_bind(f, v));
+        }
+        return '($c IN (${List.filled(items.length, '?').join(', ')}))';
+      case QueryOp.contains:
+        final c = col();
+        // Folds accents as a bare word does (#4498); `=` and `in` fold case
+        // alone, since they ask for one spelling.
+        final needle = foldForSearch((value as StringValue).value);
+        params.add('%${escapeLike(needle)}%');
+        return "(search_fold($c) LIKE ? ESCAPE '\\')";
+      case QueryOp.eq:
+      case QueryOp.neq:
+        return _equality(f, col, op, value!, alias);
+      case QueryOp.lt:
+      case QueryOp.lte:
+      case QueryOp.gt:
+      case QueryOp.gte:
+        final sym = switch (op) {
+          QueryOp.lt => '<',
+          QueryOp.lte => '<=',
+          QueryOp.gt => '>',
+          _ => '>=',
+        };
+        final exact = '(${_shownCmp(f, col, sym, value!)})';
+        final range = f.rangeSql;
+        if (range == null) return exact;
+        // The whole range must satisfy the bound: its low end for a lower
+        // bound, its exclusive high end for an upper one (every value below
+        // a high end of X is below X, so `< X` needs high <= X). Only a row
+        // with no value is read as a range, as every other reader does.
+        final (end, endSym) = switch (sym) {
+          '>' || '>=' => (range.low, sym),
+          _ => (range.high, '<='),
+        };
+        return '($exact OR (${col()} IS NULL '
+            'AND ${_cmp(f, () => _field(end, alias), endSym, value)}))';
+    }
+  }
+
+  String _equality(
+    QueryField f,
+    String Function() col,
+    QueryOp op,
+    QueryValue value,
+    String alias,
+  ) {
+    final positive = op == QueryOp.eq;
+    if (f.type == FieldType.bool) {
+      final want = (value as BoolValue).value == positive;
+      if (f.boolSql != null) {
+        final sql = want ? f.boolSql!.whenTrue : f.boolSql!.whenFalse;
+        return '(${_field(sql, alias)})';
+      }
+      final c = col();
+      params.add(want ? 1 : 0);
+      return '($c = ?)';
+    }
+    if (f.type == FieldType.date) {
+      final day = (value as DateValue).day;
+      final from = col();
+      params.add(_ms(day, f.dateFrame));
+      final to = col();
+      params.add(_ms(_plusDay(day), f.dateFrame));
+      final eq = '($from >= ? AND $to < ?)';
+      return positive ? eq : '(NOT $eq)';
+    }
+    if (f.type == FieldType.text) {
+      final c = col();
+      params.add((value as StringValue).value);
+      // unicode_lower, not LOWER(): the built-in folds ASCII only (#3032).
+      return positive
+          ? '(unicode_lower($c) = unicode_lower(?))'
+          : '(unicode_lower($c) != unicode_lower(?))';
+    }
+    if (_hasGrain(value)) {
+      if (positive) return '(${_shownBand(col, value as NumberValue)})';
+      // Read in the order the SQL is written, so each read's diver token
+      // binds before the band's values.
+      final present = col();
+      final band = _shownBand(col, value as NumberValue);
+      return '(($present) IS NOT NULL AND NOT $band)';
+    }
+    if (positive) return '(${_exactEq(f, col, value)})';
+    // SQL's `col != ?` is already false for NULL; the explicit test keeps
+    // the intent readable in the plan and matches the golden.
+    final present = col();
+    final c = col();
+    params.add(_bind(f, value));
+    return '(($present) IS NOT NULL AND $c != ?)';
+  }
+
+  static List<QueryValue> _ascending(List<QueryValue> pair) {
+    final reversed = switch ((pair[0], pair[1])) {
+      (final NumberValue x, final NumberValue y) => x.value > y.value,
+      (final DateValue x, final DateValue y) => x.day.isAfter(y.day),
+      _ => false,
+    };
+    return reversed ? [pair[1], pair[0]] : pair;
+  }
+
+  String _exactEq(QueryField f, String Function() read, QueryValue v) {
+    final c = read();
+    params.add(_bind(f, v));
+    return '$c = ?';
+  }
+
+  static bool _hasGrain(QueryValue v) => v is NumberValue && v.grain != null;
+
+  /// The stored values the app shows as [v] (issue #4398): half a grain
+  /// either side, its edges open or closed as the display rounds a tie.
+  String _shownBand(String Function() read, NumberValue v) {
+    final half = v.grain! / 2;
+    final (loIn, hiIn) = _tiesIn(v);
+    final lo = read();
+    params.add(v.value - half);
+    final hi = read();
+    params.add(v.value + half);
+    return '($lo ${loIn ? '>=' : '>'} ? AND $hi ${hiIn ? '<=' : '<'} ?)';
+  }
+
+  /// Whether each edge of [v]'s band is shown as [v]. The display rounds a
+  /// tie away from zero (toStringAsFixed), so a positive value keeps its
+  /// lower edge, a negative one its upper edge, and zero neither: 27.05
+  /// shows as 27.1, -1.25 as -1.3, and both -0.05 and 0.05 leave 0.0. The
+  /// sign is the one shown: Fahrenheit's offset makes 31.9 F a negative
+  /// Celsius value, and stored values do land exactly on its band's edges.
+  static (bool, bool) _tiesIn(NumberValue v) {
+    final sign = v.shown ?? v.value;
+    return (sign > 0, sign < 0);
+  }
+
+  /// [_cmp] for a number typed at display precision: the bound moves to the
+  /// edge of the band shown as [v], so `< 27.1` stops below everything shown
+  /// as 27.1 and `<= 27.1` takes all of it in (issue #4398).
+  String _shownCmp(
+    QueryField f,
+    String Function() read,
+    String sym,
+    QueryValue v,
+  ) {
+    if (!_hasGrain(v)) return _cmp(f, read, sym, v);
+    final half = (v as NumberValue).grain! / 2;
+    final (loIn, hiIn) = _tiesIn(v);
+    // Above the band starts past its upper edge, or at it when that tie is
+    // not shown as v; the other three bounds mirror that.
+    final (edge, bound) = switch (sym) {
+      '>' => (hiIn ? '>' : '>=', v.value + half),
+      '>=' => (loIn ? '>=' : '>', v.value - half),
+      '<' => (loIn ? '<' : '<=', v.value - half),
+      _ => (hiIn ? '<=' : '<', v.value + half),
+    };
+    final c = read();
+    params.add(bound);
+    return '$c $edge ?';
+  }
+
+  String _cmp(QueryField f, String Function() read, String sym, QueryValue v) {
+    final col = read();
+    if (f.type == FieldType.date) {
+      final day = (v as DateValue).day;
+      // Half-open day bounds: `<= day` keeps the whole day, `> day` starts
+      // the day after, mirroring DiveFilterState's endDateBoundMs.
+      switch (sym) {
+        case '<':
+          params.add(_ms(day, f.dateFrame));
+          return '$col < ?';
+        case '<=':
+          params.add(_ms(_plusDay(day), f.dateFrame));
+          return '$col < ?';
+        case '>':
+          params.add(_ms(_plusDay(day), f.dateFrame));
+          return '$col >= ?';
+        default:
+          params.add(_ms(day, f.dateFrame));
+          return '$col >= ?';
+      }
+    }
+    params.add(_bind(f, v));
+    return '$col $sym ?';
+  }
+
+  String _dateRange(String Function() col, DateRangeValue r, QueryField f) {
+    final from = col();
+    params.add(_ms(r.start, f.dateFrame));
+    final to = col();
+    params.add(_ms(_plusDay(r.end), f.dateFrame));
+    return '($from >= ? AND $to < ?)';
+  }
+
+  Object? _bind(QueryField f, QueryValue v) => switch (v) {
+    NumberValue(:final value) => value,
+    StringValue(:final value) => value,
+    BoolValue(:final value) => value ? 1 : 0,
+    EnumValue(:final name) => f.enumSqlValues?[name] ?? name,
+    RefValue(:final id) => id,
+    DateValue(:final day) => _ms(day, f.dateFrame),
+    DateRangeValue() ||
+    ListValue() => throw QueryCompileError('cannot bind $v'),
+  };
+
+  /// The start of calendar day [day] in the column's frame.
+  int _ms(DateTime day, DateFrame frame) => switch (frame) {
+    DateFrame.wallClockUtc => wallClockUtcDayStart(day).millisecondsSinceEpoch,
+    DateFrame.localInstant => DateTime(
+      day.year,
+      day.month,
+      day.day,
+    ).millisecondsSinceEpoch,
+  };
+  DateTime _plusDay(DateTime day) => DateTime(day.year, day.month, day.day + 1);
+}

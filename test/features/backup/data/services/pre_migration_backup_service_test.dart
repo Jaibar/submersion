@@ -126,6 +126,30 @@ void main() {
       expect(f.prefs.getHistory(), isEmpty);
     });
 
+    test('skips when stored > target (newer database, no-op)', () async {
+      final f = await _makeFixture();
+      addTearDown(f.dispose);
+      final service = PreMigrationBackupService(
+        livePathProvider: () async => f.livePath,
+        backupsDirProvider: () async => f.backupsDir,
+        preferences: f.prefs,
+        clock: () => DateTime.utc(2026, 7, 28),
+        idGenerator: () => 'x',
+      );
+
+      // A database written by a newer app version: the startup version guard
+      // rejects it before Drift opens, so no backup must be taken and the
+      // file must not be touched.
+      await service.backupIfMigrationPending(
+        stored: 137,
+        target: 136,
+        appVersion: '1.8.0.5601',
+      );
+
+      expect(await Directory(f.backupsDir).list().isEmpty, isTrue);
+      expect(f.prefs.getHistory(), isEmpty);
+    });
+
     test('skips when live DB file does not exist', () async {
       final f = await _makeFixture();
       addTearDown(f.dispose);
@@ -226,67 +250,95 @@ void main() {
 
   group('retention prune', () {
     test(
-      'keeps newest 3 unpinned pre-migration backups, deletes older',
+      'keeps the lowest fromSchemaVersion copy in place of the third-newest',
       () async {
+        // Recoverability runs oldest-first: the copy that matters is the one
+        // whose schema is low enough for an older build to open, which is the
+        // lowest fromSchemaVersion, not the third-newest by timestamp.
         final f = await _makeFixture();
         addTearDown(f.dispose);
-        for (var i = 0; i < 4; i++) {
-          final ts = DateTime.utc(2026, 1, 1 + i);
-          final name = '${_ts(ts)}-v$i-v${i + 1}.db';
-          final file = File(p.join(f.backupsDir, name));
-          await file.writeAsBytes([i]);
-          await f.prefs.addRecord(
-            BackupRecord(
-              id: 'r$i',
-              filename: name,
-              timestamp: ts,
-              sizeBytes: 1,
-              location: BackupLocation.local,
-              localPath: file.path,
-              type: BackupType.preMigration,
-              fromSchemaVersion: i,
-              toSchemaVersion: i + 1,
-            ),
-          );
-        }
-
-        final service = PreMigrationBackupService(
-          livePathProvider: () async => f.livePath,
-          backupsDirProvider: () async => f.backupsDir,
-          preferences: f.prefs,
-          clock: () => DateTime.utc(2026, 4, 12, 8, 12, 1),
-          idGenerator: () => 'new',
+        await _seedPreMigration(f, id: 'floor', day: 1, fromSchemaVersion: 175);
+        await _seedPreMigration(f, id: 'mid', day: 2, fromSchemaVersion: 180);
+        await _seedPreMigration(f, id: 'third', day: 3, fromSchemaVersion: 185);
+        await _seedPreMigration(
+          f,
+          id: 'second',
+          day: 4,
+          fromSchemaVersion: 188,
         );
 
-        await service.backupIfMigrationPending(
-          stored: 63,
-          target: 64,
-          appVersion: '1.6.0.1241',
-        );
+        await _runMigration(f, stored: 190, target: 191);
 
-        final remaining = f.prefs
-            .getHistory()
-            .where((r) => r.type == BackupType.preMigration)
-            .toList();
+        final remaining = _preMigrationIds(f);
+        expect(
+          remaining,
+          hasLength(3),
+          reason: 'the retained count must not change',
+        );
+        expect(remaining, containsAll(<String>['new', 'second', 'floor']));
+        expect(remaining, isNot(contains('third')));
+        expect(remaining, isNot(contains('mid')));
+        expect(await _preMigrationFile(f, 'floor').exists(), isTrue);
+        expect(await _preMigrationFile(f, 'mid').exists(), isFalse);
+        expect(await _preMigrationFile(f, 'third').exists(), isFalse);
+      },
+    );
+
+    test(
+      'prefers the newer copy when two share the lowest fromSchemaVersion',
+      () async {
+        // Both open in the same older build, so the tie goes to the one
+        // holding more of the diver's data.
+        final f = await _makeFixture();
+        addTearDown(f.dispose);
+        await _seedPreMigration(
+          f,
+          id: 'older-175',
+          day: 1,
+          fromSchemaVersion: 175,
+        );
+        await _seedPreMigration(
+          f,
+          id: 'newer-175',
+          day: 2,
+          fromSchemaVersion: 175,
+        );
+        await _seedPreMigration(f, id: 'v180', day: 3, fromSchemaVersion: 180);
+        await _seedPreMigration(f, id: 'v185', day: 4, fromSchemaVersion: 185);
+
+        await _runMigration(f, stored: 190, target: 191);
+
+        final remaining = _preMigrationIds(f);
         expect(remaining, hasLength(3));
-        expect(
-          remaining.map((r) => r.id),
-          containsAll(<String>['new', 'r3', 'r2']),
+        expect(remaining, containsAll(<String>['new', 'v185', 'newer-175']));
+        expect(remaining, isNot(contains('older-175')));
+      },
+    );
+
+    test(
+      'a record with no fromSchemaVersion never takes the floor slot',
+      () async {
+        // Legacy records predate the schema pair. Reading a missing version as
+        // the lowest would keep a copy whose openability is unknown and delete
+        // the one that is known to work.
+        final f = await _makeFixture();
+        addTearDown(f.dispose);
+        await _seedPreMigration(
+          f,
+          id: 'legacy',
+          day: 1,
+          fromSchemaVersion: null,
         );
-        expect(remaining.map((r) => r.id), isNot(contains('r0')));
-        expect(remaining.map((r) => r.id), isNot(contains('r1')));
-        expect(
-          await File(
-            p.join(f.backupsDir, '${_ts(DateTime.utc(2026, 1, 1))}-v0-v1.db'),
-          ).exists(),
-          isFalse,
-        );
-        expect(
-          await File(
-            p.join(f.backupsDir, '${_ts(DateTime.utc(2026, 1, 2))}-v1-v2.db'),
-          ).exists(),
-          isFalse,
-        );
+        await _seedPreMigration(f, id: 'floor', day: 2, fromSchemaVersion: 175);
+        await _seedPreMigration(f, id: 'v180', day: 3, fromSchemaVersion: 180);
+        await _seedPreMigration(f, id: 'v185', day: 4, fromSchemaVersion: 185);
+
+        await _runMigration(f, stored: 190, target: 191);
+
+        final remaining = _preMigrationIds(f);
+        expect(remaining, hasLength(3));
+        expect(remaining, containsAll(<String>['new', 'v185', 'floor']));
+        expect(remaining, isNot(contains('legacy')));
       },
     );
 
@@ -448,6 +500,171 @@ void main() {
     });
   });
 
+  group('fallback to default location', () {
+    test('falls back to the default backups dir when the preferred location '
+        'cannot be created', () async {
+      // Reproduces the iOS report: the stored custom backup_location is an
+      // iCloud-Drive path whose security scope is gone, so resolving/creating
+      // it throws EPERM. With a fallback provider the pre-migration backup
+      // must still succeed by writing into the app sandbox instead of
+      // bricking startup.
+      final tmp = await Directory.systemTemp.createTemp('pmbs_fallback_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'submersion.db'));
+      await live.writeAsBytes(List<int>.generate(512, (i) => i % 256));
+      final fallbackDir = Directory(p.join(tmp.path, 'default_backups'));
+      SharedPreferences.setMockInitialValues({});
+      final prefs = BackupPreferences(await SharedPreferences.getInstance());
+
+      final service = PreMigrationBackupService(
+        livePathProvider: () async => live.path,
+        backupsDirProvider: () async => throw const FileSystemException(
+          'Creation failed',
+          '/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs',
+          OSError('Operation not permitted', 1),
+        ),
+        fallbackBackupsDirProvider: () async => fallbackDir.path,
+        preferences: prefs,
+        clock: () => DateTime.utc(2026, 4, 12, 8, 12, 1),
+        idGenerator: () => 'fallback-id',
+      );
+
+      await service.backupIfMigrationPending(
+        stored: 63,
+        target: 64,
+        appVersion: '1.6.0.1241',
+      );
+
+      const expectedName = '20260412-081201000-v63-v64.db';
+      final backupFile = File(p.join(fallbackDir.path, expectedName));
+      expect(
+        await backupFile.exists(),
+        isTrue,
+        reason: 'backup should land in the fallback directory',
+      );
+      expect(await backupFile.readAsBytes(), await live.readAsBytes());
+      final history = prefs.getHistory();
+      expect(history, hasLength(1));
+      expect(history.single.localPath, backupFile.path);
+    });
+
+    test(
+      'rethrows when both preferred and fallback locations are unusable',
+      () async {
+        final tmp = await Directory.systemTemp.createTemp('pmbs_fb_fail_');
+        addTearDown(() => tmp.delete(recursive: true));
+        final live = File(p.join(tmp.path, 'submersion.db'));
+        await live.writeAsBytes([1, 2, 3]);
+        // Fallback path is a regular file, so creating it as a dir fails too.
+        final conflicting = File(p.join(tmp.path, 'not-a-dir'));
+        await conflicting.writeAsBytes([0]);
+        SharedPreferences.setMockInitialValues({});
+        final prefs = BackupPreferences(await SharedPreferences.getInstance());
+
+        final service = PreMigrationBackupService(
+          livePathProvider: () async => live.path,
+          backupsDirProvider: () async =>
+              throw const FileSystemException('primary unavailable'),
+          fallbackBackupsDirProvider: () async => conflicting.path,
+          preferences: prefs,
+          clock: () => DateTime.utc(2026, 4, 12),
+          idGenerator: () => 'id',
+        );
+
+        await expectLater(
+          service.backupIfMigrationPending(
+            stored: 63,
+            target: 64,
+            appVersion: '1.6.0.1241',
+          ),
+          throwsA(isA<BackupFailedException>()),
+        );
+      },
+    );
+
+    test(
+      'without a fallback provider, a preferred-location failure still throws',
+      () async {
+        // Preserves the original (no-fallback) contract used by callers that
+        // want strict behavior.
+        final tmp = await Directory.systemTemp.createTemp('pmbs_no_fb_');
+        addTearDown(() => tmp.delete(recursive: true));
+        final live = File(p.join(tmp.path, 'submersion.db'));
+        await live.writeAsBytes([1, 2, 3]);
+        SharedPreferences.setMockInitialValues({});
+        final prefs = BackupPreferences(await SharedPreferences.getInstance());
+
+        final service = PreMigrationBackupService(
+          livePathProvider: () async => live.path,
+          backupsDirProvider: () async =>
+              throw const FileSystemException('primary unavailable'),
+          preferences: prefs,
+          clock: () => DateTime.utc(2026, 4, 12),
+          idGenerator: () => 'id',
+        );
+
+        await expectLater(
+          service.backupIfMigrationPending(
+            stored: 63,
+            target: 64,
+            appVersion: '1.6.0.1241',
+          ),
+          throwsA(isA<BackupFailedException>()),
+        );
+      },
+    );
+
+    test(
+      'falls back when the preferred dir exists but the copy into it fails',
+      () async {
+        // The variant the reporter could also hit: an iCloud dir that EXISTS
+        // but whose write scope is gone. create() is a no-op (it exists) and
+        // the copy into it throws -- the fallback must still rescue startup.
+        final tmp = await Directory.systemTemp.createTemp('pmbs_copyfail_');
+        addTearDown(() => tmp.delete(recursive: true));
+        final live = File(p.join(tmp.path, 'submersion.db'));
+        await live.writeAsBytes(List<int>.generate(256, (i) => i % 256));
+        final preferred = Directory(p.join(tmp.path, 'preferred'));
+        await preferred.create();
+        await Process.run('chmod', ['000', preferred.path]);
+        addTearDown(() => Process.run('chmod', ['755', preferred.path]));
+        final fallback = Directory(p.join(tmp.path, 'fallback'));
+        SharedPreferences.setMockInitialValues({});
+        final prefs = BackupPreferences(await SharedPreferences.getInstance());
+
+        final service = PreMigrationBackupService(
+          livePathProvider: () async => live.path,
+          backupsDirProvider: () async => preferred.path,
+          fallbackBackupsDirProvider: () async => fallback.path,
+          preferences: prefs,
+          clock: () => DateTime.utc(2026, 4, 12, 8, 12, 1),
+          idGenerator: () => 'copyfail-id',
+        );
+
+        await service.backupIfMigrationPending(
+          stored: 63,
+          target: 64,
+          appVersion: '1.6.0.1241',
+        );
+
+        final landed = File(
+          p.join(fallback.path, '20260412-081201000-v63-v64.db'),
+        );
+        expect(
+          await landed.exists(),
+          isTrue,
+          reason: 'backup should land in the fallback when the copy fails',
+        );
+        final history = prefs.getHistory();
+        expect(history, hasLength(1));
+        expect(history.single.localPath, landed.path);
+      },
+      skip: Platform.isWindows
+          ? 'chmod-based permission denial is not portable to Windows'
+          : null,
+    );
+  });
+
   group('construction', () {
     test('default idGenerator produces a UUID-shaped id', () async {
       final f = await _makeFixture();
@@ -509,3 +726,59 @@ String _ts(DateTime utc) {
       '${two(utc.hour)}${two(utc.minute)}${two(utc.second)}'
       '${three(utc.millisecond)}';
 }
+
+/// Registers an unpinned pre-migration record backed by a real file, named
+/// after [id] so prune assertions can look for it on disk. [day] places the
+/// record in January 2026, so a higher day is a newer copy.
+Future<void> _seedPreMigration(
+  _Fixture f, {
+  required String id,
+  required int day,
+  required int? fromSchemaVersion,
+}) async {
+  final file = _preMigrationFile(f, id);
+  await file.writeAsBytes([day]);
+  await f.prefs.addRecord(
+    BackupRecord(
+      id: id,
+      filename: p.basename(file.path),
+      timestamp: DateTime.utc(2026, 1, day),
+      sizeBytes: 1,
+      location: BackupLocation.local,
+      localPath: file.path,
+      type: BackupType.preMigration,
+      fromSchemaVersion: fromSchemaVersion,
+      toSchemaVersion: fromSchemaVersion == null ? null : fromSchemaVersion + 1,
+    ),
+  );
+}
+
+File _preMigrationFile(_Fixture f, String id) =>
+    File(p.join(f.backupsDir, '$id.db'));
+
+/// Runs one pre-migration backup, registered as 'new' and newer than anything
+/// [_seedPreMigration] writes, so the prune it triggers can be observed.
+Future<void> _runMigration(
+  _Fixture f, {
+  required int stored,
+  required int target,
+}) async {
+  final service = PreMigrationBackupService(
+    livePathProvider: () async => f.livePath,
+    backupsDirProvider: () async => f.backupsDir,
+    preferences: f.prefs,
+    clock: () => DateTime.utc(2026, 4, 12, 8, 12, 1),
+    idGenerator: () => 'new',
+  );
+  await service.backupIfMigrationPending(
+    stored: stored,
+    target: target,
+    appVersion: '1.6.0.1241',
+  );
+}
+
+List<String> _preMigrationIds(_Fixture f) => f.prefs
+    .getHistory()
+    .where((r) => r.type == BackupType.preMigration)
+    .map((r) => r.id)
+    .toList();

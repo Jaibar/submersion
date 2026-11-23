@@ -1,0 +1,334 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_picker.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+final _now = DateTime(2024, 1, 1);
+
+final _testRoles = [
+  for (final (i, id) in DiveRole.builtInIds.indexed)
+    DiveRole(
+      id: id,
+      name: id,
+      isBuiltIn: true,
+      sortOrder: i,
+      createdAt: _now,
+      updatedAt: _now,
+    ),
+];
+
+Widget _buildPicker({
+  List<BuddyWithRole> selectedBuddies = const [],
+  List<String> diverRoleIds = const [],
+  ValueChanged<List<String>>? onDiverRoleChanged,
+  Diver? diver,
+  String? diveOwnerId,
+  Map<String, Diver> diversById = const {},
+}) {
+  return ProviderScope(
+    overrides: [
+      allDiveRolesProvider.overrideWith((ref) async => _testRoles),
+      allBuddiesProvider.overrideWith((ref) async => const <Buddy>[]),
+      currentDiverProvider.overrideWith((ref) async => diver),
+      diverByIdProvider.overrideWith((ref, id) async => diversById[id]),
+    ],
+    child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: BuddyPicker(
+          selectedBuddies: selectedBuddies,
+          onChanged: (_) {},
+          diverRoleIds: diverRoleIds,
+          onDiverRoleChanged: onDiverRoleChanged,
+          diveOwnerId: diveOwnerId,
+        ),
+      ),
+    ),
+  );
+}
+
+Uint8List _jpeg() {
+  final image = img.Image(width: 32, height: 32);
+  img.fill(image, color: img.ColorRgb8(10, 20, 30));
+  return Uint8List.fromList(img.encodeJpg(image, quality: 80));
+}
+
+void _useTallScreen(WidgetTester tester) {
+  tester.view.physicalSize = const Size(640, 1400);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+}
+
+/// The Me chip's label is a two-line [Column], and [RawChip] force-redirects
+/// every hit onto the geometric centre of that label, which falls on the role
+/// line rather than on the name. Tapping `find.text('Me')` therefore derives an
+/// offset that never hit-tests the name itself, so target the chip that
+/// actually handles the gesture.
+Finder get _meChip =>
+    find.ancestor(of: find.text('Me'), matching: find.byType(InputChip));
+
+void main() {
+  testWidgets('Me chip hidden when onDiverRoleChanged is null', (tester) async {
+    await tester.pumpWidget(_buildPicker());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Me'), findsNothing);
+    expect(find.text('Set my role'), findsNothing);
+  });
+
+  testWidgets('Me chip shows Set my role when no role is set', (tester) async {
+    await tester.pumpWidget(_buildPicker(onDiverRoleChanged: (_) {}));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Me'), findsOneWidget);
+    expect(find.text('Set my role'), findsOneWidget);
+  });
+
+  testWidgets('Me chip shows the diver name and localized role when set', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.rearGuardId],
+        onDiverRoleChanged: (_) {},
+        diver: Diver(
+          id: 'diver-1',
+          name: 'Eric G',
+          createdAt: _now,
+          updatedAt: _now,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Eric G'), findsOneWidget);
+    expect(find.text('Rear Guard'), findsOneWidget);
+  });
+
+  testWidgets('tapping Me chip and choosing a role calls onDiverRoleChanged '
+      'with its id', (tester) async {
+    _useTallScreen(tester);
+    List<String>? changed;
+    await tester.pumpWidget(
+      _buildPicker(onDiverRoleChanged: (v) => changed = v),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_meChip);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Rear Guard'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(changed, [DiveRole.rearGuardId]);
+  });
+
+  testWidgets('choosing No role calls onDiverRoleChanged with no roles', (
+    tester,
+  ) async {
+    _useTallScreen(tester);
+    List<String>? changed;
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.rearGuardId],
+        onDiverRoleChanged: (v) => changed = v,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_meChip);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('No role'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(changed, isEmpty);
+  });
+
+  testWidgets('Me chip shows the diver photo when they have one', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.rearGuardId],
+        onDiverRoleChanged: (_) {},
+        diver: Diver(
+          id: 'diver-1',
+          name: 'Eric G',
+          photo: _jpeg(),
+          createdAt: _now,
+          updatedAt: _now,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
+    expect(avatar.photo, isNotNull);
+  });
+
+  testWidgets('Me chip keeps the person icon when the diver has no photo', (
+    tester,
+  ) async {
+    // Deliberately NOT initials: this chip has always shown a generic icon,
+    // and only a real photo should change its appearance.
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.rearGuardId],
+        onDiverRoleChanged: (_) {},
+        diver: Diver(
+          id: 'diver-1',
+          name: 'Eric G',
+          createdAt: _now,
+          updatedAt: _now,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.person), findsOneWidget);
+    expect(find.byType(ProfileAvatar), findsNothing);
+  });
+
+  testWidgets('the Me chip shows every role, joined (#1221)', (tester) async {
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.diveGuideId, DiveRole.diveMasterId],
+        onDiverRoleChanged: (_) {},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Dive Guide, Divemaster'), findsOneWidget);
+  });
+
+  testWidgets('ticking a second role returns both (#1221)', (tester) async {
+    _useTallScreen(tester);
+    List<String>? changed;
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.diveMasterId],
+        onDiverRoleChanged: (v) => changed = v,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_meChip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dive Guide'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(changed, [DiveRole.diveGuideId, DiveRole.diveMasterId]);
+  });
+
+  testWidgets('Me chip shows the dive owner, not the active diver (#4458)', (
+    tester,
+  ) async {
+    final ownerPhoto = _jpeg();
+    await tester.pumpWidget(
+      _buildPicker(
+        diverRoleIds: const [DiveRole.rearGuardId],
+        onDiverRoleChanged: (_) {},
+        diver: Diver(
+          id: 'active',
+          name: 'Active Diver',
+          photo: _jpeg(),
+          createdAt: _now,
+          updatedAt: _now,
+        ),
+        diveOwnerId: 'owner',
+        diversById: {
+          'owner': Diver(
+            id: 'owner',
+            name: 'Owner',
+            photo: ownerPhoto,
+            createdAt: _now,
+            updatedAt: _now,
+          ),
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
+    expect(avatar.photo, same(ownerPhoto));
+    expect(find.text('Owner'), findsOneWidget);
+    expect(find.text('Active Diver'), findsNothing);
+  });
+
+  testWidgets('Me chip draws a placeholder while the owner loads', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          allDiveRolesProvider.overrideWith((ref) async => _testRoles),
+          allBuddiesProvider.overrideWith((ref) async => const <Buddy>[]),
+          currentDiverProvider.overrideWith((ref) async => null),
+          diverByIdProvider.overrideWith(
+            (ref, id) => Completer<Diver?>().future,
+          ),
+        ],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: BuddyPicker(
+              selectedBuddies: const [],
+              onChanged: (_) {},
+              diverRoleIds: const [DiveRole.rearGuardId],
+              onDiverRoleChanged: (_) {},
+              diveOwnerId: 'owner',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Me'), findsNothing);
+    expect(find.byIcon(Icons.person), findsNothing);
+    expect(find.text('Rear Guard'), findsOneWidget);
+    // A screen reader still hears whose roles these are. The chip merges its
+    // label lines into one node, so match the word.
+    expect(find.bySemanticsLabel(RegExp(r'\bMe\b')), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('Me chip says Me when the diver has a blank name', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildPicker(
+        onDiverRoleChanged: (_) {},
+        diver: Diver(id: 'd', name: '  ', createdAt: _now, updatedAt: _now),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Me'), findsOneWidget);
+  });
+}

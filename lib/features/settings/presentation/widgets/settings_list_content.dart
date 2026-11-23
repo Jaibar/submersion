@@ -1,25 +1,39 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/theme/feature_accent_colors.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/widgets/set_up_device/settings_root_set_up_card.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_mode_provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
 
 /// Settings section data model.
+///
+/// Row colors are not stored here: they resolve at build time from the
+/// [FeatureAccentColors] palette under the `settings-<id>` key, so the
+/// settings root and the rest of the app share one source of truth.
 class SettingsSection {
   final String id;
   final IconData icon;
   final String title;
   final String subtitle;
-  final Color? color;
 
   const SettingsSection({
     required this.id,
     required this.icon,
     required this.title,
     required this.subtitle,
-    this.color,
   });
+}
+
+/// Resolves a settings row's accent, falling back to the theme's primary
+/// color when the palette has no entry for the section.
+Color settingsSectionColor(BuildContext context, String sectionId) {
+  final accents = Theme.of(context).extension<FeatureAccentColors>();
+  return accents?.of('settings-$sectionId') ??
+      Theme.of(context).colorScheme.primary;
 }
 
 /// List of all settings sections.
@@ -29,65 +43,91 @@ const settingsSections = [
     icon: Icons.info_outline,
     title: 'About',
     subtitle: 'App info & licenses',
-    color: Colors.blueGrey,
   ),
   SettingsSection(
     id: 'appearance',
     icon: Icons.palette,
     title: 'Appearance',
     subtitle: 'Theme & display',
-    color: Colors.pink,
   ),
   SettingsSection(
     id: 'data',
     icon: Icons.storage,
     title: 'Data',
-    subtitle: 'Backup, restore & storage',
-    color: Colors.green,
+    subtitle: 'Backups, sync and photos',
   ),
   SettingsSection(
     id: 'dataSources',
     icon: Icons.favorite,
     title: 'Apple HealthKit',
     subtitle: 'Health data integration',
-    color: Colors.red,
-  ),
-  SettingsSection(
-    id: 'decompression',
-    icon: Icons.timeline,
-    title: 'Decompression',
-    subtitle: 'GF, data sources & narcosis',
-    color: Colors.deepPurple,
   ),
   SettingsSection(
     id: 'profile',
     icon: Icons.person,
     title: 'Diver Profile',
     subtitle: 'Active diver & profiles',
-    color: Colors.blue,
+  ),
+  SettingsSection(
+    id: 'safety',
+    icon: Icons.health_and_safety_outlined,
+    title: 'Safety',
+    subtitle: 'Review rules, decompression & equipment',
+  ),
+  SettingsSection(
+    id: 'security',
+    icon: Icons.lock_outline,
+    title: 'App Security',
+    subtitle: 'App lock & database encryption',
   ),
   SettingsSection(
     id: 'manage',
     icon: Icons.folder_shared,
     title: 'Manage',
     subtitle: 'Dive types & tank presets',
-    color: Colors.indigo,
+  ),
+  SettingsSection(
+    id: 'network',
+    icon: Icons.lan_outlined,
+    title: 'Network',
+    subtitle: 'Proxy server',
   ),
   SettingsSection(
     id: 'notifications',
     icon: Icons.notifications_outlined,
     title: 'Notifications',
     subtitle: 'Service reminders',
-    color: Colors.orange,
+  ),
+  SettingsSection(
+    id: 'sharedData',
+    icon: Icons.share,
+    title: 'Shared data',
+    subtitle: 'Share sites, trips and equipment across profiles',
   ),
   SettingsSection(
     id: 'units',
     icon: Icons.straighten,
     title: 'Units',
     subtitle: 'Measurement preferences',
-    color: Colors.teal,
   ),
 ];
+
+/// The sections this device shows: data sources need the health import of
+/// an iPhone, security needs a lock or encryption to offer, and shared data
+/// needs a second diver.
+List<SettingsSection> visibleSettingsSections({
+  required DeviceCapabilities caps,
+  required int diverCount,
+}) => settingsSections
+    .where(
+      (s) => s.id != 'dataSources' || (HostPlatform.isIOS && caps.healthImport),
+    )
+    .where(
+      (s) =>
+          s.id != 'security' || caps.biometricLock || caps.databaseEncryption,
+    )
+    .where((s) => s.id != 'sharedData' || diverCount >= 2)
+    .toList();
 
 /// Content widget for the settings section list, used in master-detail layout.
 class SettingsListContent extends ConsumerWidget {
@@ -105,9 +145,13 @@ class SettingsListContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final debugEnabled = ref.watch(debugModeNotifierProvider);
-    final sections = settingsSections
-        .where((s) => s.id != 'dataSources' || Platform.isIOS)
-        .toList();
+    final allDiversAsync = ref.watch(allDiversProvider);
+    final diverCount = allDiversAsync.valueOrNull?.length ?? 0;
+
+    final sections = visibleSettingsSections(
+      caps: ref.watch(deviceCapabilitiesProvider),
+      diverCount: diverCount,
+    );
 
     // Insert Debug section just before About when debug mode is enabled
     if (debugEnabled) {
@@ -120,29 +164,48 @@ class SettingsListContent extends ConsumerWidget {
           icon: Icons.bug_report_outlined,
           title: 'Debug',
           subtitle: 'Logs & diagnostics',
-          color: Colors.grey,
         ),
       );
     }
 
-    final listContent = ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: sections.length,
-      separatorBuilder: (context, index) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final section = sections[index];
-        final isSelected = selectedId == section.id;
+    // The setup card is row 0 of the list itself: it scrolls with the
+    // sections and cannot overflow the viewport in either variant.
+    final listContent = KeyboardListNavigator(
+      keys: [for (final s in sections) s.id],
+      currentKey: selectedId,
+      onMove: (id) => moveListCursor(
+        context,
+        canOpen: onItemSelected != null,
+        open: () => onItemSelected!(id),
+        highlight: () {},
+      ),
+      onActivate: (id) => onItemSelected?.call(id),
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        itemCount: sections.length + 1,
+        separatorBuilder: (context, index) =>
+            index == 0 ? const SizedBox.shrink() : const Divider(height: 1),
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return SettingsRootSetUpCard.desktop(selectedSectionId: selectedId);
+          }
+          final section = sections[index - 1];
+          final isSelected = selectedId == section.id;
 
-        return _SettingsSectionTile(
-          section: section,
-          isSelected: isSelected,
-          onTap: () {
-            if (onItemSelected != null) {
-              onItemSelected!(section.id);
-            }
-          },
-        );
-      },
+          return KeyboardListItem(
+            navigationKey: section.id,
+            child: _SettingsSectionTile(
+              section: section,
+              isSelected: isSelected,
+              onTap: () {
+                if (onItemSelected != null) {
+                  onItemSelected!(section.id);
+                }
+              },
+            ),
+          );
+        },
+      ),
     );
 
     if (!showAppBar) {
@@ -202,7 +265,7 @@ class _SettingsSectionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final color = section.color ?? colorScheme.primary;
+    final color = settingsSectionColor(context, section.id);
     final localizedTitle = _getLocalizedTitle(context, section.id);
     final localizedSubtitle = _getLocalizedSubtitle(context, section.id);
 
@@ -249,10 +312,10 @@ class _SettingsSectionTile extends StatelessWidget {
         return context.l10n.settings_section_diverProfile_title;
       case 'units':
         return context.l10n.settings_section_units_title;
-      case 'decompression':
-        return context.l10n.settings_section_decompression_title;
       case 'appearance':
         return context.l10n.settings_section_appearance_title;
+      case 'network':
+        return context.l10n.settings_section_network_title;
       case 'notifications':
         return context.l10n.settings_section_notifications_title;
       case 'manage':
@@ -263,8 +326,14 @@ class _SettingsSectionTile extends StatelessWidget {
         return context.l10n.settings_section_about_title;
       case 'dataSources':
         return context.l10n.settings_section_dataSources_title;
+      case 'sharedData':
+        return context.l10n.settings_sharedData_sectionTitle;
+      case 'safety':
+        return context.l10n.settings_section_safety_title;
+      case 'security':
+        return context.l10n.settings_section_security_title;
       case 'debug':
-        return 'Debug';
+        return context.l10n.settings_section_debug_title;
       default:
         return section.title;
     }
@@ -276,22 +345,28 @@ class _SettingsSectionTile extends StatelessWidget {
         return context.l10n.settings_section_diverProfile_subtitle;
       case 'units':
         return context.l10n.settings_section_units_subtitle;
-      case 'decompression':
-        return context.l10n.settings_section_decompression_subtitle;
       case 'appearance':
         return context.l10n.settings_section_appearance_subtitle;
+      case 'network':
+        return context.l10n.settings_section_network_subtitle;
       case 'notifications':
         return context.l10n.settings_section_notifications_subtitle;
       case 'manage':
         return context.l10n.settings_section_manage_subtitle;
       case 'data':
-        return context.l10n.settings_section_data_subtitle;
+        return context.l10n.settings_section_data_tagline;
       case 'about':
         return context.l10n.settings_section_about_subtitle;
       case 'dataSources':
         return context.l10n.settings_section_dataSources_subtitle;
+      case 'sharedData':
+        return context.l10n.settings_sharedData_sectionSubtitle;
+      case 'safety':
+        return context.l10n.settings_section_safety_subtitle;
+      case 'security':
+        return context.l10n.settings_section_security_subtitle;
       case 'debug':
-        return 'Logs & diagnostics';
+        return context.l10n.settings_section_debug_subtitle;
       default:
         return section.subtitle;
     }

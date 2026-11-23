@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/models/log_entry.dart';
@@ -6,6 +8,19 @@ import 'package:submersion/core/services/log_file_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 
 Future<void> flushLogs() => LoggerService.flushPendingWrites();
+
+/// Logs from wherever it runs, and says where that was.
+String? _logAndNameIsolate() {
+  const LoggerService('Worker')
+    ..debug('worker chatter')
+    ..warning('worker warning for https://x.test/cb?access_token=leak3');
+  return Isolate.current.debugName;
+}
+
+Never _failOnWorker() => throw const FormatException('bad input');
+
+void _logSessionMarker() =>
+    const LoggerService('Worker').info('worker marker', alwaysPersist: true);
 
 void main() {
   group('LoggerService', () {
@@ -29,6 +44,28 @@ void main() {
       test('creates a LoggerService instance', () {
         final logger = LoggerService.forClass(LoggerService);
         expect(logger, isA<LoggerService>());
+      });
+
+      test('can pin a default category for every call', () async {
+        final seen = <LogEntry>[];
+        final sub = LoggerService.logStream.listen(seen.add);
+        addTearDown(sub.cancel);
+
+        final logger = LoggerService.forClass(
+          Object,
+          category: LogCategory.media,
+        );
+        logger.info('pinned');
+        logger.warning('overridden', category: LogCategory.database);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          seen.map((e) => (e.message, e.category)),
+          containsAll([
+            ('pinned', LogCategory.media),
+            ('overridden', LogCategory.database),
+          ]),
+        );
       });
 
       test('created logger does not throw when logging', () {
@@ -300,6 +337,335 @@ void main() {
         expect(levels, contains(LogLevel.warning));
         expect(levels, contains(LogLevel.error));
       });
+    });
+  });
+
+  group('LoggerService file logging level (#1826)', () {
+    late Directory tempDir;
+    late LogFileService fileService;
+
+    setUp(() async {
+      tempDir = Directory.systemTemp.createTempSync('logger_level_test_');
+      fileService = LogFileService(logDirectory: tempDir.path);
+      await fileService.initialize();
+    });
+
+    tearDown(() async {
+      await flushLogs();
+      LoggerService.setFileService(null);
+      LoggerService.setMinimumFileLevel(LogLevel.debug);
+      tempDir.deleteSync(recursive: true);
+    });
+
+    test('configureFileLogging(verbose: false) persists only warnings '
+        'and errors', () async {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+
+      const logger = LoggerService('TestLogger');
+      logger.debug('debug line');
+      logger.info('info line');
+      logger.warning('warning line');
+      logger.error('error line');
+      await flushLogs();
+
+      final entries = await fileService.readEntries();
+      expect(entries.map((e) => e.message), ['warning line', 'error line']);
+    });
+
+    test('configureFileLogging(verbose: true) persists every level', () async {
+      LoggerService.configureFileLogging(fileService, verbose: true);
+
+      const logger = LoggerService('TestLogger');
+      logger.debug('debug line');
+      logger.info('info line');
+      logger.warning('warning line');
+      logger.error('error line');
+      await flushLogs();
+
+      final entries = await fileService.readEntries();
+      expect(entries.map((e) => e.level), [
+        LogLevel.debug,
+        LogLevel.info,
+        LogLevel.warning,
+        LogLevel.error,
+      ]);
+    });
+
+    test('filtered levels still reach live listeners', () async {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      final seen = <LogEntry>[];
+      final sub = LoggerService.logStream.listen(seen.add);
+      addTearDown(sub.cancel);
+
+      const LoggerService('TestLogger').debug('only on the stream');
+      await flushLogs();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen.map((e) => e.message), contains('only on the stream'));
+      expect(await fileService.readEntries(), isEmpty);
+    });
+
+    test('keeps says whether a line would reach the file now', () async {
+      LoggerService.setFileService(null);
+      LoggerService.setMinimumFileLevel(LogLevel.debug);
+      expect(LoggerService.keeps(LogLevel.error), isFalse);
+
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      expect(LoggerService.keeps(LogLevel.info), isFalse);
+      expect(LoggerService.keeps(LogLevel.warning), isTrue);
+      expect(
+        LoggerService.keeps(LogLevel.info, category: LogCategory.media),
+        isTrue,
+      );
+
+      LoggerService.configureFileLogging(fileService, verbose: true);
+      expect(LoggerService.keeps(LogLevel.debug), isTrue);
+    });
+
+    test('info(alwaysPersist: true) is written below the floor', () async {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+
+      const logger = LoggerService('TestLogger');
+      logger.info('session marker', alwaysPersist: true);
+      logger.info('ordinary info');
+      await flushLogs();
+
+      final entries = await fileService.readEntries();
+      expect(entries.map((e) => e.message), ['session marker']);
+    });
+
+    test('secrets in a message or its error are redacted before the '
+        'line is written', () async {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+
+      const LoggerService('TestLogger').error(
+        'Token refresh failed for https://x.test/cb?access_token=leak1',
+        error: 'Authorization: Bearer leak2',
+      );
+      await flushLogs();
+
+      final raw = File(fileService.logFilePath).readAsStringSync();
+      expect(raw, contains('Token refresh failed'));
+      expect(raw, isNot(contains('leak1')));
+      expect(raw, isNot(contains('leak2')));
+    });
+
+    test('lines logged before a file is attached are written once '
+        'startup buffering is on', () async {
+      LoggerService.bufferUntilFileAttached();
+      const logger = LoggerService('TestLogger');
+      logger.error('startup failure');
+      logger.debug('startup chatter');
+
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      await flushLogs();
+
+      final entries = await fileService.readEntries();
+      expect(entries.map((e) => e.message), ['startup failure']);
+    });
+
+    test('without startup buffering, earlier lines are not replayed', () async {
+      const LoggerService('TestLogger').error('logged with no file');
+
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      await flushLogs();
+
+      expect(await fileService.readEntries(), isEmpty);
+    });
+
+    test('the startup buffer keeps only the newest lines', () async {
+      LoggerService.bufferUntilFileAttached();
+      const logger = LoggerService('TestLogger');
+      for (var i = 0; i < LoggerService.startupBufferLimit + 5; i++) {
+        logger.error('line $i');
+      }
+
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      await flushLogs();
+
+      final messages = (await fileService.readEntries()).map((e) => e.message);
+      expect(messages, hasLength(LoggerService.startupBufferLimit));
+      expect(messages.first, 'line 5');
+    });
+
+    group('isolateRunKeepingLogs', () {
+      test('runs on another isolate and hands back the value', () async {
+        final name = await LoggerService.isolateRunKeepingLogs(
+          _logAndNameIsolate,
+        );
+
+        expect(name, isNot(Isolate.current.debugName));
+      });
+
+      test('writes a worker line here, filtered and redacted', () async {
+        LoggerService.configureFileLogging(fileService, verbose: false);
+
+        await LoggerService.isolateRunKeepingLogs(_logAndNameIsolate);
+        await flushLogs();
+
+        final raw = File(fileService.logFilePath).readAsStringSync();
+        expect(raw, contains('worker warning'));
+        expect(raw, isNot(contains('leak3')));
+        expect(raw, isNot(contains('worker chatter')));
+      });
+
+      test('shows every worker line to live listeners', () async {
+        LoggerService.configureFileLogging(fileService, verbose: false);
+        final seen = <String>[];
+        final sub = LoggerService.logStream.listen((e) => seen.add(e.message));
+        addTearDown(sub.cancel);
+
+        await LoggerService.isolateRunKeepingLogs(_logAndNameIsolate);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(seen, hasLength(2));
+        expect(seen.first, 'worker chatter');
+      });
+
+      test('keeps a worker line that must always persist', () async {
+        LoggerService.configureFileLogging(fileService, verbose: false);
+
+        await LoggerService.isolateRunKeepingLogs(_logSessionMarker);
+        await flushLogs();
+
+        final entries = await fileService.readEntries();
+        expect(entries.map((e) => e.message), ['worker marker']);
+      });
+
+      test('holds a worker line until startup attaches a file', () async {
+        LoggerService.setFileService(null);
+        LoggerService.bufferUntilFileAttached();
+
+        await LoggerService.isolateRunKeepingLogs(_logAndNameIsolate);
+        LoggerService.configureFileLogging(fileService, verbose: false);
+        await flushLogs();
+
+        final entries = await fileService.readEntries();
+        expect(entries, hasLength(1));
+        expect(entries.single.message, contains('worker warning'));
+      });
+
+      test('passes a worker error to the caller', () async {
+        await expectLater(
+          LoggerService.isolateRunKeepingLogs<void>(_failOnWorker),
+          throwsFormatException,
+        );
+      });
+    });
+
+    test('persistedLogStream fires after a line is written, and only for '
+        'lines that reach the file', () async {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      final persisted = <String>[];
+      final onDisk = <bool>[];
+      final sub = LoggerService.persistedLogStream.listen((entry) {
+        persisted.add(entry.message);
+        onDisk.add(
+          File(
+            fileService.logFilePath,
+          ).readAsStringSync().contains(entry.message),
+        );
+      });
+      addTearDown(sub.cancel);
+
+      const logger = LoggerService('TestLogger');
+      logger.debug('not persisted');
+      logger.error('persisted');
+      await flushLogs();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(persisted, ['persisted']);
+      expect(onDisk, [true]);
+    });
+
+    test(
+      'infoInOrder holds its place ahead of lines logged after it',
+      () async {
+        LoggerService.configureFileLogging(fileService, verbose: false);
+        final marker = Completer<String>();
+
+        const logger = LoggerService('TestLogger');
+        logger.infoInOrder(marker.future, alwaysPersist: true);
+        logger.error('logged after the marker');
+        marker.complete('session marker');
+        await flushLogs();
+
+        final entries = await fileService.readEntries();
+        expect(entries.map((e) => e.message), [
+          'session marker',
+          'logged after the marker',
+        ]);
+      },
+    );
+
+    group('per-category file floor', () {
+      test(
+        'media info lines reach the file when verbose logging is off',
+        () async {
+          LoggerService.configureFileLogging(fileService, verbose: false);
+          const logger = LoggerService('TestLogger');
+          logger.info('resolver breadcrumb', category: LogCategory.media);
+          logger.info('app breadcrumb');
+          await flushLogs();
+
+          final messages = (await fileService.readEntries())
+              .map((e) => e.message)
+              .toList();
+          expect(messages, contains('resolver breadcrumb'));
+          expect(messages, isNot(contains('app breadcrumb')));
+        },
+      );
+
+      test(
+        'media debug lines stay out of the file when verbose is off',
+        () async {
+          LoggerService.configureFileLogging(fileService, verbose: false);
+          const logger = LoggerService('TestLogger');
+          logger.debug('media chatter', category: LogCategory.media);
+          await flushLogs();
+
+          final messages = (await fileService.readEntries())
+              .map((e) => e.message)
+              .toList();
+          expect(messages, isNot(contains('media chatter')));
+        },
+      );
+
+      test('a category floor never raises the verbose floor', () async {
+        LoggerService.configureFileLogging(fileService, verbose: true);
+        const logger = LoggerService('TestLogger');
+        logger.debug('media debug', category: LogCategory.media);
+        await flushLogs();
+
+        final messages = (await fileService.readEntries())
+            .map((e) => e.message)
+            .toList();
+        expect(messages, contains('media debug'));
+      });
+
+      test('infoInOrder honours the media floor too', () async {
+        LoggerService.configureFileLogging(fileService, verbose: false);
+        const logger = LoggerService('TestLogger');
+        logger.infoInOrder(
+          Future.value('ordered media line'),
+          category: LogCategory.media,
+        );
+        logger.infoInOrder(Future.value('ordered app line'));
+        await flushLogs();
+
+        final messages = (await fileService.readEntries())
+            .map((e) => e.message)
+            .toList();
+        expect(messages, contains('ordered media line'));
+        expect(messages, isNot(contains('ordered app line')));
+      });
+    });
+
+    test('minimumFileLevel reports the configured floor', () {
+      LoggerService.configureFileLogging(fileService, verbose: false);
+      expect(LoggerService.minimumFileLevel, LogLevel.warning);
+      LoggerService.configureFileLogging(fileService, verbose: true);
+      expect(LoggerService.minimumFileLevel, LogLevel.debug);
     });
   });
 

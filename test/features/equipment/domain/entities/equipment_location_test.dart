@@ -1,0 +1,105 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_location.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_location_move.dart';
+
+void main() {
+  group('EquipmentLocationKind.fromName', () {
+    test('reads every stored name', () {
+      for (final kind in EquipmentLocationKind.values) {
+        expect(EquipmentLocationKind.fromName(kind.name), kind);
+      }
+    });
+
+    test('an unknown or missing name reads as other', () {
+      expect(
+        EquipmentLocationKind.fromName('vault'),
+        EquipmentLocationKind.other,
+      );
+      expect(EquipmentLocationKind.fromName(null), EquipmentLocationKind.other);
+    });
+
+    test('diveCenter comes right after storage', () {
+      expect(EquipmentLocationKind.values.take(2), [
+        EquipmentLocationKind.storage,
+        EquipmentLocationKind.diveCenter,
+      ]);
+    });
+  });
+
+  group('EquipmentLocation.diveCenterId', () {
+    final place = EquipmentLocation(
+      id: 'p',
+      name: 'Reef locker',
+      kind: EquipmentLocationKind.diveCenter,
+      diveCenterId: 'reef',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('copyWith keeps the link unless told otherwise', () {
+      expect(place.copyWith(name: 'x').diveCenterId, 'reef');
+      expect(place.copyWith(diveCenterId: 'bay').diveCenterId, 'bay');
+      expect(place.copyWith(clearDiveCenterId: true).diveCenterId, isNull);
+    });
+
+    test('two places differing only in link are not equal', () {
+      expect(place, isNot(place.copyWith(diveCenterId: 'bay')));
+    });
+  });
+
+  group('EquipmentLocation.buddyId', () {
+    final place = EquipmentLocation(
+      id: 'p',
+      name: 'Anna',
+      kind: EquipmentLocationKind.person,
+      buddyId: 'anna',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('copyWith keeps the link unless told otherwise', () {
+      expect(place.copyWith(name: 'x').buddyId, 'anna');
+      expect(place.copyWith(buddyId: 'sam').buddyId, 'sam');
+      expect(place.copyWith(clearBuddyId: true).buddyId, isNull);
+    });
+
+    test('two places differing only in link are not equal', () {
+      expect(place, isNot(place.copyWith(buddyId: 'sam')));
+    });
+  });
+
+  group('compareMovesNewestFirst', () {
+    EquipmentLocationMove move(String id, int movedAt, int createdAt) =>
+        EquipmentLocationMove(
+          id: id,
+          equipmentId: 'e',
+          locationId: 'l',
+          movedAt: DateTime.fromMillisecondsSinceEpoch(movedAt),
+          note: '',
+          createdAt: DateTime.fromMillisecondsSinceEpoch(createdAt),
+        );
+
+    test('orders by moved_at, then created_at, then id, newest first', () {
+      final moves = [
+        move('a', 100, 1),
+        move('c', 200, 1),
+        move('b', 200, 1),
+        move('d', 200, 5),
+      ]..sort(compareMovesNewestFirst);
+      expect([for (final m in moves) m.id], ['d', 'c', 'b', 'a']);
+    });
+  });
+
+  test('copyWith can clear the location', () {
+    final m = EquipmentLocationMove(
+      id: 'm',
+      equipmentId: 'e',
+      locationId: 'l',
+      movedAt: DateTime(2026),
+      note: '',
+      createdAt: DateTime(2026),
+    );
+    expect(m.copyWith(clearLocation: true).locationId, isNull);
+    expect(m.copyWith(note: 'x').locationId, 'l');
+  });
+}

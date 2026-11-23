@@ -6,14 +6,25 @@ class DiveDataSource extends Equatable {
   final String? computerId;
   final bool isPrimary;
   final String? computerModel;
+
+  /// The linked dive computer's user-assigned friendly name (e.g. "My
+  /// Perdix"), resolved live from the registered computer via [computerId].
+  /// Null when the source has no linked computer (manual/file imports, or a
+  /// since-deleted computer); callers fall back to [computerModel].
+  final String? computerName;
   final String? computerSerial;
   final String? sourceFormat;
   final String? sourceFileName;
   final String? sourceFileFormat;
+  final String? importedFileId;
   final double? maxDepth;
   final double? avgDepth;
   final int? duration;
   final double? waterTemp;
+  final double? entryLatitude;
+  final double? entryLongitude;
+  final double? exitLatitude;
+  final double? exitLongitude;
   final DateTime? entryTime;
   final DateTime? exitTime;
   final double? maxAscentRate;
@@ -33,14 +44,20 @@ class DiveDataSource extends Equatable {
     this.computerId,
     required this.isPrimary,
     this.computerModel,
+    this.computerName,
     this.computerSerial,
     this.sourceFormat,
     this.sourceFileName,
     this.sourceFileFormat,
+    this.importedFileId,
     this.maxDepth,
     this.avgDepth,
     this.duration,
     this.waterTemp,
+    this.entryLatitude,
+    this.entryLongitude,
+    this.exitLatitude,
+    this.exitLongitude,
     this.entryTime,
     this.exitTime,
     this.maxAscentRate,
@@ -55,23 +72,26 @@ class DiveDataSource extends Equatable {
     required this.createdAt,
   });
 
-  /// Display name for the data source (model, or "Unknown Source").
-  String get displayName => computerModel ?? 'Unknown Source';
-
   DiveDataSource copyWith({
     String? id,
     String? diveId,
     String? computerId,
     bool? isPrimary,
     String? computerModel,
+    String? computerName,
     String? computerSerial,
     String? sourceFormat,
     String? sourceFileName,
     String? sourceFileFormat,
+    String? importedFileId,
     double? maxDepth,
     double? avgDepth,
     int? duration,
     double? waterTemp,
+    double? entryLatitude,
+    double? entryLongitude,
+    double? exitLatitude,
+    double? exitLongitude,
     DateTime? entryTime,
     DateTime? exitTime,
     double? maxAscentRate,
@@ -91,14 +111,20 @@ class DiveDataSource extends Equatable {
       computerId: computerId ?? this.computerId,
       isPrimary: isPrimary ?? this.isPrimary,
       computerModel: computerModel ?? this.computerModel,
+      computerName: computerName ?? this.computerName,
       computerSerial: computerSerial ?? this.computerSerial,
       sourceFormat: sourceFormat ?? this.sourceFormat,
       sourceFileName: sourceFileName ?? this.sourceFileName,
       sourceFileFormat: sourceFileFormat ?? this.sourceFileFormat,
+      importedFileId: importedFileId ?? this.importedFileId,
       maxDepth: maxDepth ?? this.maxDepth,
       avgDepth: avgDepth ?? this.avgDepth,
       duration: duration ?? this.duration,
       waterTemp: waterTemp ?? this.waterTemp,
+      entryLatitude: entryLatitude ?? this.entryLatitude,
+      entryLongitude: entryLongitude ?? this.entryLongitude,
+      exitLatitude: exitLatitude ?? this.exitLatitude,
+      exitLongitude: exitLongitude ?? this.exitLongitude,
       entryTime: entryTime ?? this.entryTime,
       exitTime: exitTime ?? this.exitTime,
       maxAscentRate: maxAscentRate ?? this.maxAscentRate,
@@ -121,14 +147,20 @@ class DiveDataSource extends Equatable {
     computerId,
     isPrimary,
     computerModel,
+    computerName,
     computerSerial,
     sourceFormat,
     sourceFileName,
     sourceFileFormat,
+    importedFileId,
     maxDepth,
     avgDepth,
     duration,
     waterTemp,
+    entryLatitude,
+    entryLongitude,
+    exitLatitude,
+    exitLongitude,
     entryTime,
     exitTime,
     maxAscentRate,

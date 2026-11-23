@@ -25,9 +25,44 @@
 // Internal Types
 // ============================================================
 
+// The cancelled flag is written by the thread that calls
+// libdc_download_cancel and read by the download thread, so every access is
+// atomic: volatile alone gives no inter-thread guarantee in C. The Interlocked
+// API stands in for C11 atomics, which MSVC builds of this file do not enable.
+#ifdef _WIN32
+typedef LONG cancel_flag_t;
+static void cancel_flag_set(volatile cancel_flag_t *flag) {
+    InterlockedExchange(flag, 1);
+}
+static int cancel_flag_get(const volatile cancel_flag_t *flag) {
+    return InterlockedCompareExchange((volatile cancel_flag_t *)flag, 0, 0) != 0;
+}
+#else
+typedef int cancel_flag_t;
+static void cancel_flag_set(volatile cancel_flag_t *flag) {
+    __atomic_store_n(flag, 1, __ATOMIC_SEQ_CST);
+}
+static int cancel_flag_get(const volatile cancel_flag_t *flag) {
+    return __atomic_load_n(flag, __ATOMIC_SEQ_CST) != 0;
+}
+#endif
+
 struct libdc_download_session {
-    volatile int cancelled;
+    volatile cancel_flag_t cancelled;
     dc_context_t *context;
+    // Last ERROR-level message libdivecomputer logged during this session's
+    // run. The generic "Download failed" surfaced to the app hid the
+    // protocol-level cause (issue #766 took three rounds of user logs to
+    // localize); appending this message to error_buf puts the diagnosis in
+    // the app log and the UI on every platform.
+    char last_error[160];
+    // The product and model the device reported about itself when they
+    // differ from the descriptor the run was opened with (issue #422).
+    // Reset at the start of every run; read back through
+    // libdc_download_session_reported_device.
+    int has_reported_device;
+    unsigned int reported_model;
+    char reported_product[64];
 };
 
 // Data passed through the download pipeline callbacks.
@@ -39,6 +74,8 @@ typedef struct {
     int dive_count;
     unsigned int serial;
     unsigned int firmware;
+    unsigned int devinfo_model;
+    int has_devinfo_model;
     char *error_buf;
     size_t error_buf_size;
 } download_state_t;
@@ -47,7 +84,31 @@ typedef struct {
 typedef struct {
     libdc_parsed_dive_t *dive;
     int has_pending_sample;
+    unsigned int current_gasmix;  // active gas index, carried across samples
+    // Deco obligation, likewise carried: it is state the computer holds, not a
+    // reading it retakes, so it stands until the computer reports a new one.
+    unsigned int current_deco_type;
+    unsigned int current_deco_time;
+    double current_deco_depth;
+    unsigned int current_deco_tts;
+    // Water temperature, carried the same way: a computer that logs depth (or,
+    // on the Suunto Nautic, high-rate IMU) far more often than temperature is
+    // not saying the water temperature is unknown between readings. Without
+    // this the temperature trace is mostly gaps on such computers.
+    double current_temp;
     libdc_sample_t current_sample;
+    // GPS reported as profile samples (see DC_SAMPLE_LOCATION below). Fixes
+    // are only collected here and resolved once the whole profile has been
+    // walked: which end of the dive a lone fix belongs to is knowable only
+    // relative to the profile's full length.
+    int has_field_entry;  // DC_FIELD_LOCATION already supplied the entry
+    int has_field_exit;   // ...and/or the exit
+    unsigned int location_count;
+    double first_latitude;
+    double first_longitude;
+    unsigned int first_location_time_ms;
+    double last_latitude;
+    double last_longitude;
 } sample_state_t;
 
 // ============================================================
@@ -110,6 +171,65 @@ static void push_sample(sample_state_t *state) {
     state->has_pending_sample = 0;
 }
 
+// A dive computer with no satellite lock reports 0/0 rather than omitting the
+// record, and a corrupt record can yield values far outside the WGS84 range.
+// Either would place the dive somewhere it never happened, so both are dropped.
+static int is_usable_location(double latitude, double longitude) {
+    if (isnan(latitude) || isnan(longitude)) {
+        return 0;
+    }
+    if (latitude == 0.0 && longitude == 0.0) {
+        return 0;
+    }
+    return latitude >= -90.0 && latitude <= 90.0 &&
+           longitude >= -180.0 && longitude <= 180.0;
+}
+
+const char *libdc_event_type_name(unsigned int type) {
+    // Switch on the enum symbols, never on literal codes: each symbol's value
+    // is owned by libdivecomputer's parser.h, and the native test
+    // (test_event_type_names.c) walks the whole enum against this table.
+    switch (type) {
+    case SAMPLE_EVENT_NONE: return "none";
+    case SAMPLE_EVENT_DECOSTOP: return "deco";
+    case SAMPLE_EVENT_RBT: return "rbt";
+    case SAMPLE_EVENT_ASCENT: return "ascent";
+    case SAMPLE_EVENT_CEILING: return "ceiling";
+    case SAMPLE_EVENT_WORKLOAD: return "workload";
+    case SAMPLE_EVENT_TRANSMITTER: return "transmitter";
+    case SAMPLE_EVENT_VIOLATION: return "violation";
+    case SAMPLE_EVENT_BOOKMARK: return "bookmark";
+    case SAMPLE_EVENT_SURFACE: return "surface";
+    case SAMPLE_EVENT_SAFETYSTOP: return "safetystop";
+    case SAMPLE_EVENT_GASCHANGE: return "gaschange";
+    case SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY: return "safetystop_voluntary";
+    case SAMPLE_EVENT_SAFETYSTOP_MANDATORY: return "safetystop_mandatory";
+    case SAMPLE_EVENT_DEEPSTOP: return "deepstop";
+    case SAMPLE_EVENT_CEILING_SAFETYSTOP: return "ceiling_safetystop";
+    case SAMPLE_EVENT_FLOOR: return "floor";
+    case SAMPLE_EVENT_DIVETIME: return "divetime";
+    case SAMPLE_EVENT_MAXDEPTH: return "maxdepth";
+    case SAMPLE_EVENT_OLF: return "OLF";
+    case SAMPLE_EVENT_PO2: return "PO2";
+    case SAMPLE_EVENT_AIRTIME: return "airtime";
+    case SAMPLE_EVENT_RGBM: return "rgbm";
+    case SAMPLE_EVENT_HEADING: return "heading";
+    case SAMPLE_EVENT_TISSUELEVEL: return "tissuelevel";
+    case SAMPLE_EVENT_GASCHANGE2: return "gaschange2";
+    default: return "unknown";
+    }
+}
+
+const char *libdc_clock_sync_status_name(libdc_clock_sync_status_t status) {
+    switch (status) {
+    case LIBDC_CLOCK_SYNC_NOT_REQUESTED: return "not_requested";
+    case LIBDC_CLOCK_SYNC_SYNCED: return "synced";
+    case LIBDC_CLOCK_SYNC_UNSUPPORTED: return "unsupported";
+    case LIBDC_CLOCK_SYNC_FAILED: return "failed";
+    default: return "unknown";
+    }
+}
+
 static void push_event(libdc_parsed_dive_t *dive,
                         unsigned int time_ms,
                         unsigned int type,
@@ -145,7 +265,7 @@ static void push_event(libdc_parsed_dive_t *dive,
 
 static int cancel_callback(void *userdata) {
     download_state_t *state = (download_state_t *)userdata;
-    return state->session->cancelled;
+    return cancel_flag_get(&state->session->cancelled);
 }
 
 static void event_callback(dc_device_t *device, dc_event_type_t event,
@@ -161,6 +281,8 @@ static void event_callback(dc_device_t *device, dc_event_type_t event,
         const dc_event_devinfo_t *devinfo = (const dc_event_devinfo_t *)data;
         state->serial = devinfo->serial;
         state->firmware = devinfo->firmware;
+        state->devinfo_model = devinfo->model;
+        state->has_devinfo_model = 1;
     }
 }
 
@@ -174,38 +296,96 @@ static void sample_callback(dc_sample_type_t type,
         push_sample(state);
         state->has_pending_sample = 1;
         state->current_sample.time_ms = value->time;
-        state->current_sample.depth = 0.0;
-        state->current_sample.temperature = NAN;
+        // NAN, not 0.0: libdivecomputer opens a sample for every timestamp in
+        // the log, and several families stamp records that carry no depth
+        // (Divesoft logs O2-cell, battery, GPS and tissue records on their own
+        // second). Defaulting to 0.0 turned every one of those into a sample at
+        // the surface. fill_missing_depths() resolves the NANs once the whole
+        // profile is known -- no NAN depth ever leaves this file.
+        state->current_sample.depth = NAN;
+        // Carry temperature forward (NAN only until the first reading).
+        state->current_sample.temperature = state->current_temp;
         state->current_sample.pressure = NAN;
         state->current_sample.tank = UINT32_MAX;
+        for (unsigned int t = 0; t < LIBDC_MAX_TANKS; t++) {
+            state->current_sample.tank_pressure[t] = NAN;
+        }
+        // Carry the active gas forward across samples, not just the switch sample.
+        state->current_sample.gasmix = state->current_gasmix;
         state->current_sample.heartbeat = UINT32_MAX;
+        state->current_sample.heading = UINT32_MAX;
         state->current_sample.setpoint = NAN;
         state->current_sample.ppo2 = NAN;
+        for (int cell = 0; cell < 6; cell++) {
+            state->current_sample.o2_sensor[cell] = NAN;
+            state->current_sample.o2_sensor_mv[cell] = UINT32_MAX;
+        }
         state->current_sample.cns = NAN;
         state->current_sample.rbt = UINT32_MAX;
-        state->current_sample.deco_type = UINT32_MAX;
-        state->current_sample.deco_time = 0;
-        state->current_sample.deco_depth = NAN;
-        state->current_sample.deco_tts = UINT32_MAX;
+        state->current_sample.avelo_buoyancy = NAN;
+        state->current_sample.gas_remaining = UINT32_MAX;
+        state->current_sample.computer_rmv = NAN;
+        // Carry the deco state forward for the same reason as the gas: a
+        // record that carries no deco field is not the computer saying the
+        // obligation cleared. Divesoft reports deco only on its POINT_1
+        // records, so resetting here dropped the diver out of deco on every
+        // other sample and hid the deco stop entirely.
+        state->current_sample.deco_type = state->current_deco_type;
+        state->current_sample.deco_time = state->current_deco_time;
+        state->current_sample.deco_depth = state->current_deco_depth;
+        state->current_sample.deco_tts = state->current_deco_tts;
         break;
     case DC_SAMPLE_DEPTH:
         state->current_sample.depth = value->depth;
         break;
     case DC_SAMPLE_TEMPERATURE:
+        state->current_temp = value->temperature;
         state->current_sample.temperature = value->temperature;
         break;
     case DC_SAMPLE_PRESSURE:
+        // Issue #1223. libdivecomputer fires this once per transmitter, so a
+        // single sample can carry a reading for several tanks. Record each one
+        // against its own tank; keeping only the pair below dropped every tank
+        // but the last, which drew the others as a flat "(est.)" line.
+        if (value->pressure.tank < LIBDC_MAX_TANKS) {
+            state->current_sample.tank_pressure[value->pressure.tank] =
+                value->pressure.value;
+        }
         state->current_sample.pressure = value->pressure.value;
         state->current_sample.tank = value->pressure.tank;
         break;
+    case DC_SAMPLE_GASMIX:
+        // Per-sample active gas (replaces the deprecated SAMPLE_EVENT_GASCHANGE).
+        state->current_gasmix = value->gasmix;
+        state->current_sample.gasmix = value->gasmix;
+        break;
     case DC_SAMPLE_HEARTBEAT:
         state->current_sample.heartbeat = value->heartbeat;
+        break;
+    case DC_SAMPLE_BEARING:
+        state->current_sample.heading = value->bearing;
         break;
     case DC_SAMPLE_SETPOINT:
         state->current_sample.setpoint = value->setpoint;
         break;
     case DC_SAMPLE_PPO2:
-        state->current_sample.ppo2 = value->ppo2.value;
+        // libdivecomputer fires this once per O2 cell (sensor = 0,1,2,...) and
+        // optionally once with DC_SENSOR_NONE for the aggregate/computed value.
+        // Keep the aggregate in `ppo2`; store each cell separately. Don't derive
+        // ppo2 from a cell -- the Dart layer averages the cells when no
+        // aggregate is present.
+        if (value->ppo2.sensor == DC_SENSOR_NONE) {
+            state->current_sample.ppo2 = value->ppo2.value;
+        } else if (value->ppo2.sensor < 6) {
+            state->current_sample.o2_sensor[value->ppo2.sensor] =
+                value->ppo2.value;
+            // Zero means the device reports no millivolts; keep the sentinel so
+            // it does not reach the chart as a flat 0 mV line.
+            if (value->ppo2.millivolt) {
+                state->current_sample.o2_sensor_mv[value->ppo2.sensor] =
+                    value->ppo2.millivolt;
+            }
+        }
         break;
     case DC_SAMPLE_CNS:
         state->current_sample.cns = value->cns * 100.0;  // fraction to percentage
@@ -213,11 +393,44 @@ static void sample_callback(dc_sample_type_t type,
     case DC_SAMPLE_RBT:
         state->current_sample.rbt = value->rbt;
         break;
+    case DC_SAMPLE_BUOYANCY:
+        state->current_sample.avelo_buoyancy = value->buoyancy;
+        break;
+    case DC_SAMPLE_GASREMAINING:
+        state->current_sample.gas_remaining = value->gasremaining;
+        break;
+    case DC_SAMPLE_RMV:
+        state->current_sample.computer_rmv = value->rmv;
+        break;
     case DC_SAMPLE_DECO:
+        state->current_deco_type = value->deco.type;
+        state->current_deco_time = value->deco.time;
+        state->current_deco_depth = value->deco.depth;
+        state->current_deco_tts = value->deco.tts;
         state->current_sample.deco_type = value->deco.type;
         state->current_sample.deco_time = value->deco.time;
         state->current_sample.deco_depth = value->deco.depth;
         state->current_sample.deco_tts = value->deco.tts;
+        break;
+    case DC_SAMPLE_LOCATION:
+        // Issue #926. Most GPS-capable families -- Ratio / DiveSystem iX3M and
+        // iDive, Halcyon Symbios, OSTC 4, Divesoft Freedom -- do not implement
+        // DC_FIELD_LOCATION at all, emitting each fix as a profile sample
+        // instead. Record the first and last usable fix and the time of the
+        // first; resolve_sample_locations() turns them into the dive-level
+        // entry/exit positions once the profile length is known.
+        if (!is_usable_location(value->location.latitude,
+                                value->location.longitude)) {
+            break;
+        }
+        if (state->location_count == 0) {
+            state->first_latitude = value->location.latitude;
+            state->first_longitude = value->location.longitude;
+            state->first_location_time_ms = state->current_sample.time_ms;
+        }
+        state->last_latitude = value->location.latitude;
+        state->last_longitude = value->location.longitude;
+        state->location_count++;
         break;
     case DC_SAMPLE_EVENT:
         push_event(state->dive,
@@ -228,6 +441,120 @@ static void sample_callback(dc_sample_type_t type,
         break;
     default:
         break;
+    }
+}
+
+// Resolve the depths left as NAN by the profile walk (see DC_SAMPLE_TIME).
+// Must run after the final push_sample(), because a gap is filled from the
+// samples on both sides of it.
+//
+// Depth is the one sample field with no null representation downstream
+// (ProfileSample.depthMeters is non-nullable, and dive_profiles.depth is
+// written unconditionally), so a value has to be chosen here. Linear
+// interpolation in time is the honest one: it keeps the diver on the path the
+// computer actually recorded between the two depths it reported. Repeating the
+// previous depth instead would flatten the trace and then jump, and the
+// ascent-rate calculator smooths over a ~15 s window -- one such step becomes a
+// sustained false rate spread across it, which is exactly how a fabricated
+// sample turns into a rapid-ascent safety finding.
+static void fill_missing_depths(sample_state_t *state) {
+    libdc_parsed_dive_t *dive = state->dive;
+    unsigned int count = dive->sample_count;
+    unsigned int prev = UINT32_MAX;  // last sample with a reported depth
+
+    for (unsigned int i = 0; i < count; i++) {
+        if (isnan(dive->samples[i].depth)) {
+            continue;
+        }
+        if (prev == UINT32_MAX) {
+            // Leading gap: nothing earlier to interpolate from, so hold the
+            // first reported depth. The dive starts at the surface anyway.
+            for (unsigned int j = 0; j < i; j++) {
+                dive->samples[j].depth = dive->samples[i].depth;
+            }
+        } else {
+            unsigned int t0 = dive->samples[prev].time_ms;
+            unsigned int t1 = dive->samples[i].time_ms;
+            double d0 = dive->samples[prev].depth;
+            double d1 = dive->samples[i].depth;
+            for (unsigned int j = prev + 1; j < i; j++) {
+                double fraction = t1 > t0
+                    ? (double)(dive->samples[j].time_ms - t0) / (double)(t1 - t0)
+                    : 0.0;
+                dive->samples[j].depth = d0 + (d1 - d0) * fraction;
+            }
+        }
+        prev = i;
+    }
+
+    if (prev == UINT32_MAX) {
+        // The computer reported no depth anywhere in this profile. Nothing can
+        // be inferred, but a NAN must not escape: it would reach the platform
+        // layers as a null depth or a broken chart axis.
+        for (unsigned int i = 0; i < count; i++) {
+            dive->samples[i].depth = 0.0;
+        }
+        return;
+    }
+
+    // Trailing gap: hold the last reported depth.
+    for (unsigned int i = prev + 1; i < count; i++) {
+        dive->samples[i].depth = dive->samples[prev].depth;
+    }
+}
+
+// Turn the per-sample GPS fixes collected during the profile walk into the
+// dive-level entry/exit positions the rest of the app consumes. Must run after
+// the final push_sample() so the profile's length is known.
+static void resolve_sample_locations(sample_state_t *state) {
+    libdc_parsed_dive_t *dive = state->dive;
+
+    if (state->location_count == 0) {
+        return;
+    }
+
+    // Two different positions: the dive genuinely moved between the first and
+    // last lock, so they are the entry and exit points.
+    //
+    // Exact equality is deliberate here, not an oversight. Every source
+    // quantizes to an integer before we see it -- int32 / 1e7 for Ratio, / 1e6
+    // for Halcyon and Divesoft, and an exactly-widened float32 for OSTC 4 --
+    // and this file only copies the value, so identical device bytes always
+    // produce bit-identical doubles. Equality therefore means "the device
+    // replayed the same record", which is the only case worth collapsing. A
+    // distance tolerance would instead discard real data: a shore dive exits a
+    // few metres from where it entered, and those are two genuine fixes.
+    if (state->first_latitude != state->last_latitude ||
+        state->first_longitude != state->last_longitude) {
+        if (!state->has_field_entry) {
+            dive->entry_latitude = state->first_latitude;
+            dive->entry_longitude = state->first_longitude;
+        }
+        if (!state->has_field_exit) {
+            dive->exit_latitude = state->last_latitude;
+            dive->exit_longitude = state->last_longitude;
+        }
+        return;
+    }
+
+    // Every fix reported the same position, so this dive has one known point
+    // rather than an entry/exit pair. Writing it to both slots would render a
+    // bogus second marker, and always calling it the entry is wrong for a
+    // receiver that only got a lock after surfacing -- a real case now that
+    // OSTC 4 and Divesoft, which log fixes anywhere in the profile, reach this
+    // code. Let its timestamp pick the end it belongs to. Either slot resolves
+    // a dive site: the matcher falls back to the exit when entry is absent.
+    unsigned int profile_end_ms = dive->sample_count > 0
+        ? dive->samples[dive->sample_count - 1].time_ms
+        : 0;
+    if (state->first_location_time_ms <= profile_end_ms / 2) {
+        if (!state->has_field_entry) {
+            dive->entry_latitude = state->first_latitude;
+            dive->entry_longitude = state->first_longitude;
+        }
+    } else if (!state->has_field_exit) {
+        dive->exit_latitude = state->first_latitude;
+        dive->exit_longitude = state->first_longitude;
     }
 }
 
@@ -269,6 +596,11 @@ static int extract_dive_fields(dc_parser_t *parser, libdc_parsed_dive_t *dive) {
     if (dc_parser_get_field(parser, DC_FIELD_DIVEMODE, 0, &uval) == DC_STATUS_SUCCESS) {
         dive->dive_mode = uval;
     }
+    // A zero or out-of-range value is a header with no reading, not a pressure.
+    if (dc_parser_get_field(parser, DC_FIELD_ATMOSPHERIC, 0, &dval) == DC_STATUS_SUCCESS &&
+        dval >= LIBDC_MIN_SURFACE_PRESSURE_BAR && dval <= LIBDC_MAX_SURFACE_PRESSURE_BAR) {
+        dive->surface_pressure = dval;
+    }
 
     // Extract decompression model.
     dc_decomodel_t decomodel = {0};
@@ -277,6 +609,26 @@ static int extract_dive_fields(dc_parser_t *parser, libdc_parsed_dive_t *dive) {
         dive->deco_conservatism = decomodel.conservatism;
         dive->gf_low = decomodel.params.gf.low;
         dive->gf_high = decomodel.params.gf.high;
+    }
+
+    // Extract GPS entry/exit fixes (Shearwater Swift). flags: 0=entry, 1=exit.
+    // Patched libdivecomputer maps these to opening[9]/closing[9] record 9.
+    // Families that report GPS per-sample instead are handled in
+    // sample_callback's DC_SAMPLE_LOCATION branch.
+    // Tracked per side: a parser that supplies only the entry via the field
+    // while reporting the exit per-sample must not lose its exit.
+    int has_field_entry = 0;
+    int has_field_exit = 0;
+    dc_location_t loc = {0};
+    if (dc_parser_get_field(parser, DC_FIELD_LOCATION, 0, &loc) == DC_STATUS_SUCCESS) {
+        dive->entry_latitude = loc.latitude;
+        dive->entry_longitude = loc.longitude;
+        has_field_entry = 1;
+    }
+    if (dc_parser_get_field(parser, DC_FIELD_LOCATION, 1, &loc) == DC_STATUS_SUCCESS) {
+        dive->exit_latitude = loc.latitude;
+        dive->exit_longitude = loc.longitude;
+        has_field_exit = 1;
     }
 
     // Extract gas mixes.
@@ -288,6 +640,7 @@ static int extract_dive_fields(dc_parser_t *parser, libdc_parsed_dive_t *dive) {
             if (dc_parser_get_field(parser, DC_FIELD_GASMIX, i, &gm) == DC_STATUS_SUCCESS) {
                 dive->gasmixes[i].oxygen = gm.oxygen;
                 dive->gasmixes[i].helium = gm.helium;
+                dive->gasmixes[i].usage = gm.usage;
             }
         }
         dive->gasmix_count = gasmix_count;
@@ -305,6 +658,8 @@ static int extract_dive_fields(dc_parser_t *parser, libdc_parsed_dive_t *dive) {
                 dive->tanks[i].workpressure = tk.workpressure;
                 dive->tanks[i].beginpressure = tk.beginpressure;
                 dive->tanks[i].endpressure = tk.endpressure;
+                dive->tanks[i].usage = tk.usage;
+                dive->tanks[i].serial = tk.serial;
             }
         }
         dive->tank_count = tank_count;
@@ -313,8 +668,17 @@ static int extract_dive_fields(dc_parser_t *parser, libdc_parsed_dive_t *dive) {
     // Extract profile samples.
     sample_state_t sample_state = {0};
     sample_state.dive = dive;
+    sample_state.current_gasmix = UINT32_MAX;  // 0 is a valid gas index
+    sample_state.current_deco_type = UINT32_MAX;  // no obligation reported yet
+    sample_state.current_deco_depth = NAN;
+    sample_state.current_deco_tts = UINT32_MAX;
+    sample_state.current_temp = NAN;  // no reading yet
+    sample_state.has_field_entry = has_field_entry;
+    sample_state.has_field_exit = has_field_exit;
     dc_parser_samples_foreach(parser, sample_callback, &sample_state);
     push_sample(&sample_state);
+    fill_missing_depths(&sample_state);
+    resolve_sample_locations(&sample_state);
 
     return 0;
 }
@@ -326,6 +690,11 @@ static int parse_dive(download_state_t *state,
     memset(dive, 0, sizeof(*dive));
     dive->min_temp = NAN;
     dive->max_temp = NAN;
+    dive->surface_pressure = NAN;
+    dive->entry_latitude = NAN;
+    dive->entry_longitude = NAN;
+    dive->exit_latitude = NAN;
+    dive->exit_longitude = NAN;
     dive->deco_model_type = 0;  // DC_DECOMODEL_NONE
     dive->deco_conservatism = 0;
     dive->gf_low = 0;
@@ -364,7 +733,7 @@ static int dive_callback(const unsigned char *data, unsigned int size,
                           void *userdata) {
     download_state_t *state = (download_state_t *)userdata;
 
-    if (state->session->cancelled) {
+    if (cancel_flag_get(&state->session->cancelled)) {
         return 0;
     }
 
@@ -492,10 +861,56 @@ static void libdc_logfunc_wrapper(dc_context_t *context, dc_loglevel_t loglevel,
                                    const char *file, unsigned int line,
                                    const char *function, const char *message,
                                    void *userdata) {
-    (void)context; (void)file; (void)line; (void)function; (void)userdata;
+    (void)context; (void)file; (void)line; (void)function;
     if (g_log_callback != NULL && message != NULL) {
         g_log_callback((int)loglevel, message, g_log_userdata);
     }
+    // Keep the most recent ERROR so a failed run can report its actual
+    // protocol-level cause instead of a bare "Download failed".
+    libdc_download_session_t *session = (libdc_download_session_t *)userdata;
+    if (session != NULL && message != NULL && loglevel == DC_LOGLEVEL_ERROR) {
+        strncpy(session->last_error, message, sizeof(session->last_error) - 1);
+        session->last_error[sizeof(session->last_error) - 1] = '\0';
+    }
+}
+
+libdc_clock_sync_status_t libdc_sync_device_clock(struct dc_device_t *device,
+                                                   int requested,
+                                                   int download_succeeded) {
+    if (!requested || !download_succeeded) {
+        return LIBDC_CLOCK_SYNC_NOT_REQUESTED;
+    }
+
+    // Host wall-clock time with the host's UTC offset filled in. Each backend
+    // applies its own conversion (Shearwater sends UTC to a Teric and local
+    // time to everything else, Mares strips the offset, OSTC sends the raw
+    // fields), so no timezone logic lives here.
+    dc_datetime_t now;
+    memset(&now, 0, sizeof(now));
+    if (dc_datetime_localtime(&now, dc_datetime_now()) == NULL) {
+        if (g_log_callback != NULL) {
+            g_log_callback((int)DC_LOGLEVEL_WARNING,
+                           "Clock sync failed: host time unavailable",
+                           g_log_userdata);
+        }
+        return LIBDC_CLOCK_SYNC_FAILED;
+    }
+
+    dc_status_t status = dc_device_timesync(device, &now);
+    if (status == DC_STATUS_SUCCESS) {
+        return LIBDC_CLOCK_SYNC_SYNCED;
+    }
+    if (status == DC_STATUS_UNSUPPORTED) {
+        // The normal answer for most models, not an error.
+        return LIBDC_CLOCK_SYNC_UNSUPPORTED;
+    }
+    if (g_log_callback != NULL) {
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "Clock sync failed (libdivecomputer status %d)", (int)status);
+        g_log_callback((int)DC_LOGLEVEL_WARNING, msg, g_log_userdata);
+    }
+    return LIBDC_CLOCK_SYNC_FAILED;
 }
 
 libdc_download_session_t *libdc_download_session_new(void) {
@@ -511,19 +926,40 @@ libdc_download_session_t *libdc_download_session_new(void) {
     }
 
     // Route libdivecomputer's internal diagnostic messages through the
-    // registered log callback if one has been set.
-    if (g_log_callback != NULL) {
-        dc_context_set_loglevel(session->context, DC_LOGLEVEL_ALL);
-        dc_context_set_logfunc(session->context, libdc_logfunc_wrapper, NULL);
-    }
+    // registered log callback if one has been set, and capture the last
+    // error-level message for failure reporting either way.
+    dc_context_set_loglevel(session->context, DC_LOGLEVEL_ALL);
+    dc_context_set_logfunc(session->context, libdc_logfunc_wrapper, session);
 
     return session;
 }
 
+int libdc_download_session_reported_device(
+    const libdc_download_session_t *session,
+    char *product_out, size_t product_out_size, unsigned int *model_out) {
+    if (session == NULL || !session->has_reported_device ||
+        product_out == NULL || product_out_size == 0) {
+        return 0;
+    }
+    size_t len = strlen(session->reported_product);
+    if (len >= product_out_size) {
+        return 0;
+    }
+    memcpy(product_out, session->reported_product, len + 1);
+    if (model_out != NULL) {
+        *model_out = session->reported_model;
+    }
+    return 1;
+}
+
 void libdc_download_cancel(libdc_download_session_t *session) {
     if (session != NULL) {
-        session->cancelled = 1;
+        cancel_flag_set(&session->cancelled);
     }
+}
+
+int libdc_download_is_cancelled(const libdc_download_session_t *session) {
+    return session != NULL && cancel_flag_get(&session->cancelled);
 }
 
 void libdc_download_session_free(libdc_download_session_t *session) {
@@ -542,9 +978,11 @@ int libdc_download_run(
     unsigned int transport,
     const libdc_io_callbacks_t *io_callbacks,
     const unsigned char *fingerprint, unsigned int fsize,
+    int sync_clock,
     const libdc_download_callbacks_t *callbacks,
     unsigned int *serial_out,
     unsigned int *firmware_out,
+    libdc_clock_sync_status_t *clock_sync_out,
     char *error_buf, size_t error_buf_size)
 {
     if (session == NULL || vendor == NULL || product == NULL ||
@@ -557,6 +995,10 @@ int libdc_download_run(
     state.callbacks = callbacks;
     state.error_buf = error_buf;
     state.error_buf_size = error_buf_size;
+    session->last_error[0] = '\0';
+    session->has_reported_device = 0;
+    session->reported_model = 0;
+    session->reported_product[0] = '\0';
 
     // 1. Find matching descriptor.
     state.descriptor = find_descriptor(vendor, product, model);
@@ -630,11 +1072,39 @@ int libdc_download_run(
     // 7. Download dives.
     status = dc_device_foreach(device, dive_callback, &state);
 
+    // A device can name a different model than the one it advertised
+    // (issue #422). Resolved here, where the opening descriptor is known,
+    // so every binding reads one answer from the session.
+    if (state.has_devinfo_model &&
+        libdc_resolve_reported_product(
+            vendor, product, dc_descriptor_get_model(state.descriptor),
+            state.devinfo_model, session->reported_product,
+            sizeof(session->reported_product))) {
+        session->reported_model = state.devinfo_model;
+        session->has_reported_device = 1;
+    }
+
+    // 7b. Optional clock sync, only after a fully successful download so a
+    // slow or failing timesync can never cost the diver their dives, and
+    // never after a cancel (issue #1216). Its outcome is reported separately
+    // and never changes `result` or the error buffer.
+    libdc_clock_sync_status_t clock_sync = libdc_sync_device_clock(
+        device, sync_clock,
+        status == DC_STATUS_SUCCESS && !cancel_flag_get(&session->cancelled));
+
     int result = 0;
     if (status != DC_STATUS_SUCCESS) {
-        if (session->cancelled) {
+        if (cancel_flag_get(&session->cancelled)) {
             set_error(&state, "Download cancelled");
             result = LIBDC_STATUS_CANCELLED;
+        } else if (session->last_error[0] != '\0') {
+            // Surface the protocol-level cause libdivecomputer logged, not
+            // just the generic failure (issue #766).
+            char msg[224];
+            snprintf(msg, sizeof(msg), "Download failed: %s",
+                     session->last_error);
+            set_error(&state, msg);
+            result = (int)status;
         } else {
             set_error(&state, "Download failed");
             result = (int)status;
@@ -647,6 +1117,9 @@ int libdc_download_run(
     }
     if (firmware_out != NULL) {
         *firmware_out = state.firmware;
+    }
+    if (clock_sync_out != NULL) {
+        *clock_sync_out = clock_sync;
     }
 
     // 9. Cleanup.
@@ -679,6 +1152,11 @@ int libdc_parse_raw_dive(
     memset(result, 0, sizeof(*result));
     result->min_temp = NAN;
     result->max_temp = NAN;
+    result->surface_pressure = NAN;
+    result->entry_latitude = NAN;
+    result->entry_longitude = NAN;
+    result->exit_latitude = NAN;
+    result->exit_longitude = NAN;
     result->events = NULL;
     result->event_count = 0;
     result->event_capacity = 0;

@@ -1,10 +1,14 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/widgets/settings_list_content.dart';
@@ -26,7 +30,15 @@ void main() {
     if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
-  Future<Widget> buildWidget({required bool debugEnabled}) async {
+  Future<Widget> buildWidget({
+    required bool debugEnabled,
+    bool showAppBar = true,
+    void Function(String?)? onItemSelected,
+    String? selectedId,
+    List<Diver> divers = const [],
+    Locale? locale,
+    bool browser = false,
+  }) async {
     SharedPreferences.setMockInitialValues(
       debugEnabled ? {'debug_mode_enabled': true} : {},
     );
@@ -36,16 +48,67 @@ void main() {
       overrides: [
         logFileServiceProvider.overrideWithValue(logFileService),
         sharedPreferencesProvider.overrideWithValue(prefs),
+        allDiversProvider.overrideWith((ref) async => divers),
+        if (browser)
+          deviceCapabilitiesProvider.overrideWithValue(DeviceCapabilities.web),
       ],
-      child: const MaterialApp(
+      child: MaterialApp(
+        locale: locale,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: SettingsListContent(),
+        home: SettingsListContent(
+          showAppBar: showAppBar,
+          onItemSelected: onItemSelected,
+          selectedId: selectedId,
+        ),
       ),
     );
   }
 
+  Diver makeDiver(String id) => Diver(
+    id: id,
+    name: 'Diver $id',
+    createdAt: DateTime(2024),
+    updatedAt: DateTime(2024),
+  );
+
   group('SettingsListContent', () {
+    testWidgets('equipment condition is not a top-level section', (
+      tester,
+    ) async {
+      // It is reached from Settings > Safety instead. A tall surface builds
+      // every row, so the absence check is not satisfied by lazy building.
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        await buildWidget(debugEnabled: false, locale: const Locale('en')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Units'), findsOneWidget);
+      expect(find.text('Equipment condition'), findsNothing);
+      expect(
+        settingsSections.map((s) => s.id),
+        isNot(contains('equipmentCondition')),
+      );
+    });
+
+    testWidgets('shows Network between Manage and Notifications', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(await buildWidget(debugEnabled: false));
+      await tester.pumpAndSettle();
+      expect(find.text('Network'), findsOneWidget);
+      expect(find.text('Proxy server'), findsOneWidget);
+      final manage = tester.getTopLeft(find.text('Manage')).dy;
+      final network = tester.getTopLeft(find.text('Network')).dy;
+      final notifications = tester.getTopLeft(find.text('Notifications')).dy;
+      expect(manage < network && network < notifications, isTrue);
+    });
+
     testWidgets('shows Debug section when debug mode is enabled', (
       tester,
     ) async {
@@ -84,6 +147,172 @@ void main() {
 
       expect(find.text('Debug'), findsOneWidget);
       expect(find.text('About'), findsOneWidget);
+    });
+
+    testWidgets('renders compact app bar when showAppBar is false', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await buildWidget(debugEnabled: false, showAppBar: false),
+      );
+      await tester.pumpAndSettle();
+
+      // The Scaffold's AppBar should NOT be present.
+      expect(find.byType(AppBar), findsNothing);
+      // The compact header text should still show the title.
+      expect(find.text('Settings'), findsOneWidget);
+    });
+
+    testWidgets('Shared data section hidden when only one diver', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await buildWidget(debugEnabled: false, divers: [makeDiver('d1')]),
+      );
+      await tester.pumpAndSettle();
+
+      // Scroll to about to confirm 'Shared data' not present anywhere.
+      await tester.scrollUntilVisible(
+        find.text('About'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('Shared data'), findsNothing);
+    });
+
+    testWidgets('Shared data section visible with 2+ divers', (tester) async {
+      await tester.pumpWidget(
+        await buildWidget(
+          debugEnabled: false,
+          divers: [makeDiver('d1'), makeDiver('d2')],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('Shared data'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('Shared data'), findsOneWidget);
+    });
+
+    testWidgets('tapping a section fires onItemSelected with its id', (
+      tester,
+    ) async {
+      String? received;
+      await tester.pumpWidget(
+        await buildWidget(
+          debugEnabled: false,
+          onItemSelected: (id) => received = id,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('About'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(received, equals('about'));
+    });
+
+    testWidgets('selected section uses highlighted background', (tester) async {
+      await tester.pumpWidget(
+        await buildWidget(debugEnabled: false, selectedId: 'about'),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('About'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+
+      // The selected tile wraps in Material with a non-transparent color.
+      final materials = tester
+          .widgetList<Material>(find.byType(Material))
+          .toList();
+      // At least one Material has a non-transparent color (selected tile).
+      expect(
+        materials.any((m) => m.color != null && m.color != Colors.transparent),
+        isTrue,
+      );
+    });
+
+    testWidgets('Down and Up open the neighbouring sections (#3065)', (
+      tester,
+    ) async {
+      // Wide enough for the split view, where a move opens the section.
+      tester.view.physicalSize = const Size(1400, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final opened = <String?>[];
+
+      await tester.pumpWidget(
+        await buildWidget(
+          debugEnabled: false,
+          showAppBar: false,
+          onItemSelected: opened.add,
+          locale: const Locale('en'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Appearance'));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+
+      expect(opened, hasLength(3));
+      expect(opened[1], isNot(opened[0]));
+      expect(opened[2], opened[0]);
+    });
+  });
+
+  group('in a browser (#4121)', () {
+    test('visibleSettingsSections drops security and data sources', () {
+      final web = visibleSettingsSections(
+        caps: DeviceCapabilities.web,
+        diverCount: 1,
+      ).map((s) => s.id);
+      expect(web, isNot(contains('security')));
+      expect(web, isNot(contains('dataSources')));
+      expect(web, containsAll(['data', 'appearance', 'about']));
+      final native = visibleSettingsSections(
+        caps: currentDeviceCapabilities(),
+        diverCount: 1,
+      ).map((s) => s.id);
+      expect(native, contains('security'));
+    });
+
+    testWidgets('App Security is listed natively', (tester) async {
+      await tester.pumpWidget(await buildWidget(debugEnabled: false));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('App Security'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('App Security'), findsOneWidget);
+    });
+
+    testWidgets('a browser lists no App Security section', (tester) async {
+      await tester.pumpWidget(
+        await buildWidget(debugEnabled: false, browser: true),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('About'),
+        50.0,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('App Security'), findsNothing);
     });
   });
 }

@@ -1,0 +1,238 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_locations_map.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/maps/presentation/widgets/locked_map_scroll_passthrough.dart';
+import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+Future<void> _pump(WidgetTester tester, Widget child) async {
+  final overrides = await getBaseOverrides();
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: overrides,
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: Center(child: SizedBox(width: 300, height: 300, child: child)),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(seconds: 1));
+}
+
+void main() {
+  testWidgets('renders entry, exit, site markers and a track line', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const DiveLocationsMap(
+        entry: GeoPoint(12.34567, 98.76543),
+        exit: GeoPoint(12.34612, 98.76489),
+        site: GeoPoint(12.34000, 98.76000),
+      ),
+    );
+
+    expect(find.byType(FlutterMap), findsOneWidget);
+    expect(find.byKey(const ValueKey('gps-entry-marker')), findsOneWidget);
+    expect(find.byKey(const ValueKey('gps-exit-marker')), findsOneWidget);
+    expect(find.byKey(const ValueKey('gps-site-marker')), findsOneWidget);
+    // The site marker uses the diver glyph, matching the Sites map.
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('gps-site-marker')),
+        matching: find.byIcon(Icons.scuba_diving),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(PolylineLayer), findsOneWidget);
+  });
+
+  testWidgets('entry-only: no track line, no exit/site markers', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const DiveLocationsMap(entry: GeoPoint(12.34567, 98.76543)),
+    );
+
+    expect(find.byType(FlutterMap), findsOneWidget);
+    expect(find.byType(PolylineLayer), findsNothing);
+    expect(find.byKey(const ValueKey('gps-entry-marker')), findsOneWidget);
+    expect(find.byKey(const ValueKey('gps-exit-marker')), findsNothing);
+    expect(find.byKey(const ValueKey('gps-site-marker')), findsNothing);
+  });
+
+  // The dive header remounts this map on every dive selected in the
+  // master-detail pane. flutter_map's default fade animates each tile up from
+  // opacity 0 even when the image is already in memory, so the header's map
+  // background blinked on every selection.
+  testWidgets('the decorative map shows tiles instantly, without a fade', (
+    tester,
+  ) async {
+    // The header's configuration: a pinned camera nothing can move.
+    await _pump(
+      tester,
+      const DiveLocationsMap(
+        entry: GeoPoint(12.34567, 98.76543),
+        initialCenter: LatLng(12.34567, 98.76543),
+        initialZoom: 12,
+      ),
+    );
+
+    final tileLayer = tester.widget<TileLayer>(find.byType(TileLayer));
+    expect(tileLayer.tileDisplay, const TileDisplay.instantaneous());
+  });
+
+  // Instantaneous display prunes against a stale camera when a tile loads
+  // synchronously from the image cache, which blanked a map whose camera had
+  // just moved (issue #3285). Only a map whose camera never moves skips the
+  // fade.
+  group('a locked map whose camera can move fades its tiles in (#3285)', () {
+    testWidgets('when a controller can move it', (tester) async {
+      await _pump(
+        tester,
+        DiveLocationsMap(
+          entry: const GeoPoint(12.34567, 98.76543),
+          initialCenter: const LatLng(12.34567, 98.76543),
+          controller: MapController(),
+        ),
+      );
+
+      final tileLayer = tester.widget<TileLayer>(find.byType(TileLayer));
+      expect(tileLayer.tileDisplay, const TileDisplay.fadeIn());
+    });
+
+    testWidgets('when it fits its points after the first frame', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        const DiveLocationsMap(
+          entry: GeoPoint(12.34567, 98.76543),
+          exit: GeoPoint(12.34612, 98.76489),
+        ),
+      );
+
+      final tileLayer = tester.widget<TileLayer>(find.byType(TileLayer));
+      expect(tileLayer.tileDisplay, const TileDisplay.fadeIn());
+    });
+  });
+
+  testWidgets('a locked map takes no gestures, trackpad included (#3156)', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const DiveLocationsMap(entry: GeoPoint(12.34567, 98.76543)),
+    );
+
+    final map = tester.widget<FlutterMap>(find.byType(FlutterMap));
+    expect(map.options.interactionOptions.flags, InteractiveFlag.none);
+    // The trackpad recognizer wins the arena against an enclosing scrollable,
+    // so wrapping a locked map would still zoom it on a trackpad scroll.
+    expect(find.byType(TrackpadZoomMap), findsNothing);
+    // flutter_map's scale recognizer would otherwise swallow it.
+    expect(find.byType(LockedMapScrollPassthrough), findsOneWidget);
+  });
+
+  testWidgets('an interactive map keeps trackpad zoom', (tester) async {
+    await _pump(
+      tester,
+      const DiveLocationsMap(
+        entry: GeoPoint(12.34567, 98.76543),
+        interactive: true,
+      ),
+    );
+
+    expect(find.byType(TrackpadZoomMap), findsOneWidget);
+    expect(find.byType(LockedMapScrollPassthrough), findsNothing);
+  });
+
+  testWidgets('an interactive map keeps the default tile fade', (tester) async {
+    await _pump(
+      tester,
+      const DiveLocationsMap(
+        entry: GeoPoint(12.34567, 98.76543),
+        interactive: true,
+      ),
+    );
+
+    final tileLayer = tester.widget<TileLayer>(find.byType(TileLayer));
+    expect(tileLayer.tileDisplay, const TileDisplay.fadeIn());
+  });
+
+  testWidgets('renders nothing when no points are provided', (tester) async {
+    await _pump(tester, const DiveLocationsMap());
+    expect(find.byType(FlutterMap), findsNothing);
+  });
+
+  testWidgets(
+    'does not throw duplicate-key errors when the map wraps across worlds',
+    (tester) async {
+      // At low zoom in a wide viewport, flutter_map renders each marker once
+      // per visible copy of the (horizontally repeating) world. If a marker
+      // carries a key on the Marker itself, those repeated copies become
+      // duplicate-keyed siblings in the MarkerLayer's Stack and Flutter throws
+      // "Duplicate keys found". The keys must live on the marker child instead.
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SizedBox(
+                width: 2000,
+                height: 300,
+                child: DiveLocationsMap(
+                  entry: GeoPoint(0, 0),
+                  exit: GeoPoint(0.2, 0.2),
+                  site: GeoPoint(-0.2, -0.2),
+                  initialCenter: LatLng(0, 0),
+                  initialZoom: 0,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(tester.takeException(), isNull);
+      // Markers are still findable by key for the other tests' benefit.
+      expect(find.byKey(const ValueKey('gps-entry-marker')), findsWidgets);
+    },
+  );
+
+  testWidgets('clamps fit zoom so tiles render for tightly clustered points', (
+    tester,
+  ) async {
+    final controller = MapController();
+    await _pump(
+      tester,
+      DiveLocationsMap(
+        controller: controller,
+        entry: const GeoPoint(12.345670, 98.765430),
+        exit: const GeoPoint(12.345690, 98.765450),
+        site: const GeoPoint(12.345680, 98.765440),
+      ),
+    );
+
+    // Real entry/exit/site fixes sit within meters of each other. Fitting their
+    // bounds must not zoom past the tile provider's max (~19 for OSM), or the
+    // map renders blank with only markers showing.
+    expect(controller.camera.zoom, lessThanOrEqualTo(16.0));
+  });
+}

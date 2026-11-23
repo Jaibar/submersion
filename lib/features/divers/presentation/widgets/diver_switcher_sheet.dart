@@ -1,0 +1,126 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/app/app_exit_guard.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Shows the modal bottom sheet for switching the active diver profile.
+///
+/// Reusable from the diver profile hub UI and from the global Cmd+Shift+D
+/// keyboard shortcut. Tapping a non-active diver switches the active profile
+/// and pops the sheet.
+Future<void> showDiverSwitcherSheet(BuildContext context) {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final l10n = context.l10n;
+
+  return showModalBottomSheet<void>(
+    context: context,
+    useRootNavigator: true,
+    builder: (sheetContext) {
+      return ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(sheetContext).size.height * 0.4,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+              child: Text(
+                l10n.settings_profile_switchDiver_title,
+                style: Theme.of(sheetContext).textTheme.titleLarge,
+              ),
+            ),
+            const Divider(),
+            Flexible(
+              child: Consumer(
+                builder: (consumerContext, ref, _) {
+                  final diversAsync = ref.watch(diverListNotifierProvider);
+                  final currentDiverId = ref.watch(currentDiverIdProvider);
+
+                  return diversAsync.when(
+                    loading: () =>
+                        const Center(child: CircularProgressIndicator()),
+                    error: (error, _) => Center(
+                      child: Text(l10n.settings_profile_error_loadingDiver),
+                    ),
+                    data: (divers) => ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: divers.length,
+                      itemBuilder: (listContext, index) {
+                        final diver = divers[index];
+                        final isActive = diver.id == currentDiverId;
+
+                        return ListTile(
+                          leading: ProfileAvatar(
+                            photo: diver.photo,
+                            initials: diver.initials,
+                            backgroundColor: Theme.of(
+                              sheetContext,
+                            ).colorScheme.primaryContainer,
+                            foregroundColor: Theme.of(
+                              sheetContext,
+                            ).colorScheme.onPrimaryContainer,
+                          ),
+                          title: Text(diver.name),
+                          trailing: isActive
+                              ? Icon(
+                                  Icons.check,
+                                  color: Theme.of(
+                                    sheetContext,
+                                  ).colorScheme.primary,
+                                )
+                              : null,
+                          onTap: () async {
+                            if (isActive) return;
+                            final guard = ref.read(appExitGuardProvider);
+                            final current = ref.read(
+                              currentDiverIdProvider.notifier,
+                            );
+                            // This sheet opens from any page, and a switch
+                            // starts the table editor clean, so it asks as
+                            // leaving that page would.
+                            if (!await guard.mayLeave()) return;
+                            current.setCurrentDiver(diver.id);
+                            if (sheetContext.mounted) {
+                              Navigator.of(sheetContext).pop();
+                            }
+                            messenger?.showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  l10n.settings_profile_switchedTo(diver.name),
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            // Pinned below the list so the sheet is never a dead end for a
+            // single-profile user. Navigates with the CALLER's context: the
+            // sheet's own context is gone once it pops.
+            ListTile(
+              leading: Icon(
+                Icons.person_add,
+                color: Theme.of(sheetContext).colorScheme.primary,
+              ),
+              title: Text(l10n.settings_profileHub_addNewDiver),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                context.push('/settings/diver-profile/new');
+              },
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}

@@ -4,16 +4,24 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/dive_log/domain/entities/view_field_config.dart'
     as domain;
 
 /// Repository for persisting dive list view configurations and field presets.
 class ViewConfigRepository {
   final AppDatabase _db;
+  final SyncRepository _syncRepository = SyncRepository();
   static const _uuid = Uuid();
 
   ViewConfigRepository(this._db);
+
+  /// Emits whenever a saved field preset changes so the preset providers
+  /// refresh after a sync or any other write that bypasses the notifiers.
+  Stream<void> watchPresetsChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.fieldPresets));
 
   // ---------------------------------------------------------------------------
   // Table Config
@@ -21,13 +29,7 @@ class ViewConfigRepository {
 
   /// Returns the saved [domain.TableViewConfig] for [diverId], or the default.
   Future<domain.TableViewConfig> getTableConfig(String diverId) async {
-    final row =
-        await (_db.select(_db.viewConfigs)..where(
-              (r) =>
-                  r.diverId.equals(diverId) &
-                  r.viewMode.equals(ListViewMode.table.name),
-            ))
-            .getSingleOrNull();
+    final row = await _rowFor(diverId, ListViewMode.table.name);
 
     if (row == null) return domain.TableViewConfig.defaultConfig();
     return domain.TableViewConfig.fromJson(
@@ -55,11 +57,7 @@ class ViewConfigRepository {
   /// null if none is saved. Used by generic [EntityTableConfigNotifier] with
   /// keys like `"table_sites"`, `"table_trips"`, etc.
   Future<String?> getRawConfig(String diverId, String viewModeKey) async {
-    final row =
-        await (_db.select(_db.viewConfigs)..where(
-              (r) => r.diverId.equals(diverId) & r.viewMode.equals(viewModeKey),
-            ))
-            .getSingleOrNull();
+    final row = await _rowFor(diverId, viewModeKey);
     return row?.configJson;
   }
 
@@ -86,11 +84,7 @@ class ViewConfigRepository {
     String diverId,
     ListViewMode mode,
   ) async {
-    final row =
-        await (_db.select(_db.viewConfigs)..where(
-              (r) => r.diverId.equals(diverId) & r.viewMode.equals(mode.name),
-            ))
-            .getSingleOrNull();
+    final row = await _rowFor(diverId, mode.name);
 
     if (row == null) return _defaultCardConfig(mode);
     return domain.CardViewConfig.fromJson(
@@ -161,22 +155,69 @@ class ViewConfigRepository {
             ),
           ),
         );
+
+    // Mark pending so the edit is protected during merge and gets an HLC
+    // stamped onto the row. field_presets is an HLC-filtered changeset entity,
+    // so an unstamped preset (hlc == null) is silently dropped from every
+    // incremental sync once the base watermark is established.
+    await _syncRepository.markRecordPending(
+      entityType: 'fieldPresets',
+      recordId: preset.id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
   }
 
   /// Deletes the preset with [presetId] only if it is not a built-in preset.
   Future<void> deletePreset(String presetId) async {
-    await (_db.delete(
+    final deleted = await (_db.delete(
       _db.fieldPresets,
     )..where((r) => r.id.equals(presetId) & r.isBuiltIn.equals(false))).go();
+    if (deleted > 0) {
+      await _syncRepository.logDeletion(
+        entityType: 'fieldPresets',
+        recordId: presetId,
+      );
+      SyncEventBus.notifyLocalChange();
+    }
   }
 
-  /// Upserts built-in table presets for [diverId]. Idempotent: safe to call
-  /// on every load. Uses insertOnConflictUpdate so presets are refreshed if
-  /// the built-in definitions change, but createdAt is preserved by using a
-  /// fixed stable timestamp per preset ID.
+  /// Seeds the built-in table presets for [diverId], refreshing them if the
+  /// built-in definitions have changed.
+  ///
+  /// Idempotent in the strict sense: a row that already matches its built-in
+  /// definition is left alone, so a repeat call issues no write at all. That
+  /// matters because drift raises a `field_presets` update for every write
+  /// statement it executes, changed rows or not, and the presets provider
+  /// listens to that stream while seeding from inside its own build. An
+  /// unconditional upsert therefore made the provider invalidate itself on its
+  /// own write and rebuild without end (issue #1355).
+  ///
+  /// [createdAt] carries over from the stored row so a refresh preserves the
+  /// original creation time, which is also the preset list's sort key.
   Future<void> ensureBuiltInPresets(String diverId) async {
+    final builtIns = domain.FieldPreset.builtInTablePresets();
+    if (builtIns.isEmpty) return;
+
+    final ids = builtIns.map((p) => p.id).toList();
+    final rows = await (_db.select(
+      _db.fieldPresets,
+    )..where((r) => r.id.isIn(ids))).get();
+    final existing = {for (final row in rows) row.id: row};
+
     final now = DateTime.now().millisecondsSinceEpoch;
-    for (final preset in domain.FieldPreset.builtInTablePresets()) {
+    for (final preset in builtIns) {
+      final row = existing[preset.id];
+      final configJson = jsonEncode(preset.configJson);
+      final unchanged =
+          row != null &&
+          row.diverId == diverId &&
+          row.viewMode == preset.viewMode.name &&
+          row.name == preset.name &&
+          row.configJson == configJson &&
+          row.isBuiltIn;
+      if (unchanged) continue;
+
       await _db
           .into(_db.fieldPresets)
           .insertOnConflictUpdate(
@@ -185,9 +226,9 @@ class ViewConfigRepository {
               diverId: diverId,
               viewMode: preset.viewMode.name,
               name: preset.name,
-              configJson: jsonEncode(preset.configJson),
+              configJson: configJson,
               isBuiltIn: const Value(true),
-              createdAt: now,
+              createdAt: row?.createdAt ?? now,
             ),
           );
     }
@@ -197,6 +238,28 @@ class ViewConfigRepository {
   // Private helpers
   // ---------------------------------------------------------------------------
 
+  /// The saved row for [diverId] and [viewMode], or null.
+  ///
+  /// Only a database that upgraded through v62 has the unique index on
+  /// (diver_id, view_mode); a fresh install has none, and sync merges these
+  /// rows by id, so two devices can each leave a row for the same view
+  /// (issue #3343). The newest row wins, in the order the sync merge uses
+  /// (HLC first, then updatedAt, then the lower id), rather than a "Too many
+  /// elements" throw.
+  Future<ViewConfig?> _rowFor(String diverId, String viewMode) =>
+      (_db.select(_db.viewConfigs)
+            ..where(
+              (r) => r.diverId.equals(diverId) & r.viewMode.equals(viewMode),
+            )
+            ..orderBy([
+              (r) => OrderingTerm.asc(r.hlc.isNull()),
+              (r) => OrderingTerm.desc(r.hlc),
+              (r) => OrderingTerm.desc(r.updatedAt),
+              (r) => OrderingTerm.asc(r.id),
+            ])
+            ..limit(1))
+          .getSingleOrNull();
+
   Future<void> _upsertViewConfig({
     required String diverId,
     required String viewMode,
@@ -204,13 +267,11 @@ class ViewConfigRepository {
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    final existing =
-        await (_db.select(_db.viewConfigs)..where(
-              (r) => r.diverId.equals(diverId) & r.viewMode.equals(viewMode),
-            ))
-            .getSingleOrNull();
+    final existing = await _rowFor(diverId, viewMode);
 
+    final String rowId;
     if (existing != null) {
+      rowId = existing.id;
       await (_db.update(
         _db.viewConfigs,
       )..where((r) => r.id.equals(existing.id))).write(
@@ -220,11 +281,12 @@ class ViewConfigRepository {
         ),
       );
     } else {
+      rowId = _uuid.v4();
       await _db
           .into(_db.viewConfigs)
           .insert(
             ViewConfigsCompanion(
-              id: Value(_uuid.v4()),
+              id: Value(rowId),
               diverId: Value(diverId),
               viewMode: Value(viewMode),
               configJson: Value(configJson),
@@ -232,6 +294,15 @@ class ViewConfigRepository {
             ),
           );
     }
+
+    // Mark pending so the edit is protected during merge and gets an HLC
+    // stamped onto the row (cross-device config edits resolve by HLC).
+    await _syncRepository.markRecordPending(
+      entityType: 'viewConfigs',
+      recordId: rowId,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
   }
 
   domain.CardViewConfig _defaultCardConfig(ListViewMode mode) {

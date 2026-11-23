@@ -1,7 +1,10 @@
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/deco/buhlmann_algorithm.dart';
 import 'package:submersion/core/deco/entities/deco_status.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
+import 'package:submersion/core/deco/max_operating_depth.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
@@ -10,6 +13,26 @@ final calcDepthProvider = StateProvider<double>((ref) => 18.0);
 
 /// Input state: bottom time in minutes
 final calcTimeProvider = StateProvider<int>((ref) => 30);
+
+/// Input state: altitude above sea level in meters (null = sea level)
+final calcAltitudeProvider = StateProvider<double?>((ref) => null);
+
+/// Input state: water type (null = legacy standard water)
+final calcWaterTypeProvider = StateProvider<WaterType?>((ref) => null);
+
+/// The dive environment (altitude + salinity) shared with the planner's
+/// engine so the calculator agrees with the planner at altitude.
+final calcEnvironmentProvider = Provider<DiveEnvironment>((ref) {
+  final altitude = ref.watch(calcAltitudeProvider);
+  final waterType = ref.watch(calcWaterTypeProvider);
+  if (altitude == null && waterType == null) {
+    return DiveEnvironment.standard;
+  }
+  return DiveEnvironment.forConditions(
+    altitudeMeters: altitude,
+    waterType: waterType,
+  );
+});
 
 /// Input state: O2 percentage (21-100)
 final calcO2Provider = StateProvider<double>((ref) => 21.0);
@@ -36,26 +59,37 @@ final calcHeFractionProvider = Provider<double>((ref) {
   return ref.watch(calcHeProvider) / 100.0;
 });
 
-/// ppO2 at current depth
+/// ppO2 at current depth, in the same environment as [calcDecoStatusProvider]
+/// so the Gas Safety card and the decompression result agree (issue #4299).
 final calcPpO2Provider = Provider<double>((ref) {
   final depth = ref.watch(calcDepthProvider);
   final o2 = ref.watch(calcO2Provider);
-  final ambientPressure = (depth / 10) + 1; // bar absolute
-  return ambientPressure * (o2 / 100);
+  final environment = ref.watch(calcEnvironmentProvider);
+  return environment.pressureAtDepth(depth) * (o2 / 100);
 });
 
-/// Maximum Operating Depth for current gas at ppO2 1.4
+/// Maximum Operating Depth for current gas at ppO2 1.4, in the calculator's
+/// environment.
 final calcMODProvider = Provider<double>((ref) {
-  final gasMix = ref.watch(calcGasMixProvider);
-  return gasMix.mod(ppO2: 1.4);
+  final o2 = ref.watch(calcO2Provider);
+  return maxOperatingDepthMeters(
+    o2 / 100,
+    maxPpO2: 1.4,
+    environment: ref.watch(calcEnvironmentProvider),
+  );
 });
 
-/// Equivalent Narcotic Depth at current depth
+/// Equivalent Narcotic Depth at current depth, in the calculator's
+/// environment.
 final calcENDProvider = Provider<double>((ref) {
   final depth = ref.watch(calcDepthProvider);
   final gasMix = ref.watch(calcGasMixProvider);
-  final settings = ref.watch(settingsProvider);
-  return gasMix.end(depth, o2Narcotic: settings.o2Narcotic);
+  final o2Narcotic = ref.watch(settingsProvider.select((s) => s.o2Narcotic));
+  return gasMix.end(
+    depth,
+    o2Narcotic: o2Narcotic,
+    environment: ref.watch(calcEnvironmentProvider),
+  );
 });
 
 /// Computed decompression status based on current inputs.
@@ -68,12 +102,15 @@ final calcDecoStatusProvider = Provider<DecoStatus>((ref) {
   final timeMinutes = ref.watch(calcTimeProvider);
   final fN2 = ref.watch(calcN2FractionProvider);
   final fHe = ref.watch(calcHeFractionProvider);
-  final settings = ref.watch(settingsProvider);
+  final gfLow = ref.watch(gfLowDecimalProvider);
+  final gfHigh = ref.watch(gfHighDecimalProvider);
 
-  // Create algorithm with user's GF settings
+  // Create algorithm with user's GF settings and the configured
+  // altitude/salinity environment (same seam the planner engine uses).
   final algorithm = BuhlmannAlgorithm(
-    gfLow: settings.gfLowDecimal,
-    gfHigh: settings.gfHighDecimal,
+    gfLow: gfLow,
+    gfHigh: gfHigh,
+    environment: ref.watch(calcEnvironmentProvider),
   );
 
   // Simulate the dive segment at depth for the given time
@@ -124,6 +161,8 @@ void resetCalculator(WidgetRef ref) {
   ref.read(calcTimeProvider.notifier).state = 30;
   ref.read(calcO2Provider.notifier).state = 21.0;
   ref.read(calcHeProvider.notifier).state = 0.0;
+  ref.read(calcAltitudeProvider.notifier).state = null;
+  ref.read(calcWaterTypeProvider.notifier).state = null;
 }
 
 /// Apply a gas preset

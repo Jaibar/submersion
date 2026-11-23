@@ -1,0 +1,611 @@
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
+import 'package:submersion/core/utils/time_weighted_mean.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_roles/domain/services/dive_role_set.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart';
+import 'package:submersion/features/dive_log/domain/services/sequential_tank_merge.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+
+/// Why a merge was rejected outright (neither sequential nor overlapping).
+enum DiveMergeInvalidReason { tooFewDives, mixedDivers }
+
+/// One inter-dive surface gap on the merged timeline.
+class MergeGap {
+  const MergeGap({
+    required this.afterDiveId,
+    required this.beforeDiveId,
+    required this.startSeconds,
+    required this.endSeconds,
+  });
+
+  /// The gap follows this source dive.
+  final String afterDiveId;
+
+  /// The gap precedes this source dive.
+  final String beforeDiveId;
+
+  /// Seconds from the merged dive's start.
+  final int startSeconds;
+  final int endSeconds;
+
+  Duration get duration => Duration(seconds: endSeconds - startSeconds);
+}
+
+sealed class DiveMergeClassification {
+  const DiveMergeClassification();
+}
+
+class MergeInvalid extends DiveMergeClassification {
+  const MergeInvalid(this.reason);
+  final DiveMergeInvalidReason reason;
+}
+
+/// Any pair of dives overlaps in time — these look like the same dive from
+/// multiple computers (future feature), not a sequential combine.
+class MergeOverlapping extends DiveMergeClassification {
+  const MergeOverlapping();
+}
+
+class MergeSequential extends DiveMergeClassification {
+  const MergeSequential({required this.sortedDives, required this.gaps});
+  final List<Dive> sortedDives;
+  final List<MergeGap> gaps;
+}
+
+/// Everything the merge service needs to persist a sequential combine.
+class DiveMergeResult {
+  const DiveMergeResult({
+    required this.mergedDive,
+    required this.sortedSources,
+    required this.gaps,
+    required this.segmentOffsetsSeconds,
+    required this.tankIdMap,
+    required this.mergedSightings,
+    required this.previewProfile,
+  });
+
+  final Dive mergedDive;
+  final List<Dive> sortedSources;
+  final List<MergeGap> gaps;
+
+  /// Source dive id -> seconds to add to that segment's profile timestamps.
+  final Map<String, int> segmentOffsetsSeconds;
+
+  /// Old source tank id -> fresh tank id on the merged dive.
+  final Map<String, String> tankIdMap;
+
+  /// Union of source sightings (same species merged), with fresh ids.
+  final List<MarineSighting> mergedSightings;
+
+  /// Depth-vs-time series for the confirmation preview: each source's
+  /// profile re-based onto the merged timeline, bridged by 0-depth points
+  /// across each gap. Preview-only -- the persisted profile is assembled
+  /// row-by-row in [DiveMergeService] to preserve per-sample computer
+  /// attribution and native-cadence surface samples. Empty when no source
+  /// carries submerged profile data.
+  final List<DiveProfilePoint> previewProfile;
+}
+
+class DiveMergeBuilder {
+  const DiveMergeBuilder();
+
+  static const _uuid = Uuid();
+
+  T? _firstNonNull<T>(List<Dive> sorted, T? Function(Dive) pick) {
+    for (final d in sorted) {
+      final v = pick(d);
+      if (v != null) return v;
+    }
+    return null;
+  }
+
+  T? _lastNonNull<T>(List<Dive> sorted, T? Function(Dive) pick) {
+    for (final d in sorted.reversed) {
+      final v = pick(d);
+      if (v != null) return v;
+    }
+    return null;
+  }
+
+  /// The lowest or highest value any segment reports, for a summary that
+  /// describes the whole dive (issue #4136): the first segment's alone would
+  /// leave out every later one.
+  double? _extreme(
+    List<Dive> sorted,
+    double? Function(Dive) pick, {
+    required bool lowest,
+  }) {
+    double? result;
+    for (final d in _measuredSegments(sorted)) {
+      final v = pick(d);
+      if (v == null) continue;
+      if (result == null || (lowest ? v < result : v > result)) result = v;
+    }
+    return result;
+  }
+
+  /// A per-segment mean weighted by each segment's runtime, as
+  /// [_mergedAvgDepth] weighs a segment without a profile. When no segment
+  /// that reports the value has a runtime to weigh it by, the first value
+  /// stands in, which is what a Combine kept before (issue #4136).
+  double? _runtimeWeightedMean(List<Dive> sorted, double? Function(Dive) pick) {
+    final measured = _measuredSegments(sorted);
+    var area = 0.0;
+    var span = 0;
+    for (final d in measured) {
+      final v = pick(d);
+      final w = (d.effectiveRuntime ?? Duration.zero).inSeconds;
+      if (v == null || w <= 0) continue;
+      area += v * w;
+      span += w;
+    }
+    return span > 0 ? area / span : _firstNonNull(measured, pick);
+  }
+
+  /// The segments whose values were measured: the logged ones, so a plan's
+  /// assumed temperature or loop O2 never becomes the logged dive's summary
+  /// (issue #3924). Every segment when all of them are plans.
+  List<Dive> _measuredSegments(List<Dive> sorted) {
+    final logged = sorted.where((d) => !d.isPlanned).toList();
+    return logged.isEmpty ? sorted : logged;
+  }
+
+  /// A snapshot is a start/end pair, so the combined dive starts in the
+  /// earliest segment's start state and ends in the latest segment's end
+  /// state. Another segment's state would sit in the middle of the combined
+  /// dive, so it is never used for either end; a side the end segment did
+  /// not report stays null.
+  ComputerTissueSnapshot? _mergedComputerTissue(List<Dive> sorted) {
+    final first = sorted.first.computerTissue;
+    final last = sorted.last.computerTissue;
+    final start = first?.start;
+    final end = last?.end;
+    if (start == null && end == null) return null;
+    return ComputerTissueSnapshot(start: start, end: end);
+  }
+
+  String _mergedNotes(List<Dive> sorted) =>
+      sorted.map((d) => d.notes.trim()).where((n) => n.isNotEmpty).join('\n\n');
+
+  /// Trapezoidal time-weighted mean depth over one segment's samples.
+  /// Returns (weightedAreaMeterSeconds, spanSeconds) or null if < 2 samples.
+  (double, int)? _profileDepthArea(List<DiveProfilePoint> profile) {
+    final sorted = [...profile]
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final mean = TimeWeightedMean();
+    for (final point in sorted) {
+      mean.add(point.timestamp, point.depth);
+    }
+    return mean.span > 0 ? (mean.area, mean.span.toInt()) : null;
+  }
+
+  Duration? _mergedBottomTime(List<Dive> sorted) {
+    var total = Duration.zero;
+    var any = false;
+    for (final d in sorted) {
+      final bt =
+          d.bottomTime ??
+          d.calculateBottomTimeFromProfile() ??
+          d.effectiveRuntime;
+      if (bt != null && bt > Duration.zero) {
+        total += bt;
+        any = true;
+      }
+    }
+    return any ? total : null;
+  }
+
+  double? _mergedMaxDepth(List<Dive> sorted) {
+    double? max;
+    for (final d in sorted) {
+      final m = d.maxDepth ?? d.calculateMaxDepthFromProfile();
+      if (m != null && (max == null || m > max)) max = m;
+    }
+    return max;
+  }
+
+  double? _mergedAvgDepth(List<Dive> sorted) {
+    var area = 0.0;
+    var span = 0;
+    for (final d in sorted) {
+      final fromProfile = _profileDepthArea(d.profile);
+      if (fromProfile != null) {
+        area += fromProfile.$1;
+        span += fromProfile.$2;
+      } else if (d.avgDepth != null) {
+        final w = (d.effectiveRuntime ?? Duration.zero).inSeconds;
+        if (w > 0) {
+          area += d.avgDepth! * w;
+          span += w;
+        }
+      }
+    }
+    return span > 0 ? area / span : null;
+  }
+
+  DiveMergeResult build(
+    List<Dive> dives, {
+    Map<String, List<Tag>> tagsByDive = const {},
+    Map<String, List<MarineSighting>> sightingsByDive = const {},
+    String Function()? idGenerator,
+  }) {
+    final classification = classify(dives);
+    if (classification is! MergeSequential) {
+      throw ArgumentError(
+        'build() requires a sequential selection; got $classification',
+      );
+    }
+    final idGen = idGenerator ?? _uuid.v4;
+    final sorted = classification.sortedDives;
+    final first = sorted.first;
+    final last = sorted.last;
+
+    final mergedStart = first.effectiveEntryTime;
+    final mergedEnd =
+        last.exitTime ??
+        last.effectiveEntryTime.add(last.effectiveRuntime ?? Duration.zero);
+
+    final offsets = <String, int>{
+      for (final d in sorted)
+        d.id: d.effectiveEntryTime.difference(mergedStart).inSeconds,
+    };
+
+    final mergedId = idGen();
+
+    // Tanks: one per physical cylinder, chronological, fresh ids, order
+    // re-sequenced (#2036).
+    final tankMerge = mergeSequentialTanks(sorted, idGenerator: idGen);
+    final tankIdMap = tankMerge.tankIdMap;
+    final mergedTanks = tankMerge.tanks;
+
+    // Weights: first source that has any (avoids double-counting lead).
+    final weightSource = sorted.firstWhere(
+      (d) => d.weights.isNotEmpty,
+      orElse: () => sorted.first,
+    );
+    final mergedWeights = [
+      for (final w in weightSource.weights)
+        w.copyWith(id: idGen(), diveId: mergedId),
+    ];
+
+    // Custom fields: union by key, first-in-order wins.
+    final seenKeys = <String>{};
+    final mergedCustomFields = <DiveCustomField>[];
+    for (final d in sorted) {
+      for (final f in d.customFields) {
+        if (seenKeys.add(f.key)) {
+          mergedCustomFields.add(
+            DiveCustomField(
+              id: idGen(),
+              key: f.key,
+              value: f.value,
+              sortOrder: mergedCustomFields.length,
+            ),
+          );
+        }
+      }
+    }
+
+    // Tags: union by id, chronological order.
+    final seenTagIds = <String>{};
+    final mergedTags = <Tag>[
+      for (final d in sorted)
+        for (final t in tagsByDive[d.id] ?? const <Tag>[])
+          if (seenTagIds.add(t.id)) t,
+    ];
+
+    // Courses: ordered union, the earliest dive's courses first (#2515).
+    final mergedCourseIds = <String>[];
+    for (final d in sorted) {
+      for (final c in d.courseIds) {
+        if (!mergedCourseIds.contains(c)) mergedCourseIds.add(c);
+      }
+    }
+
+    // Dive types: ordered union (first dive's representative type stays first).
+    final mergedDiveTypeIds = <String>[];
+    for (final d in sorted) {
+      for (final t in d.diveTypeIds) {
+        if (!mergedDiveTypeIds.contains(t)) mergedDiveTypeIds.add(t);
+      }
+    }
+
+    // Equipment: union by item id in first-seen order, keeping the most
+    // informative link for an item both dives carry: a part link over a
+    // loose one, then a link that names its set (#1487). Keeping the first
+    // link would flatten an assembly and re-open the part double count in
+    // buoyancy.
+    int informative(GearLink g) =>
+        (g.viaEquipmentId != null ? 2 : 0) + (g.viaSetId != null ? 1 : 0);
+    final gearById = <String, GearLink>{};
+    for (final d in sorted) {
+      for (final g in d.gear) {
+        final current = gearById[g.item.id];
+        if (current == null || informative(g) > informative(current)) {
+          gearById[g.item.id] = g;
+        }
+      }
+    }
+    final mergedGear = gearById.values.toList();
+
+    // Sightings: union; same species merged (amounts combined, notes
+    // joined). Two exact counts add up; Seen gives way; otherwise the larger
+    // REEF group wins (issue #4337).
+    final bySpecies = <String, MarineSighting>{};
+    for (final d in sorted) {
+      for (final s in sightingsByDive[d.id] ?? const <MarineSighting>[]) {
+        final existing = bySpecies[s.speciesId];
+        if (existing == null) {
+          bySpecies[s.speciesId] = MarineSighting(
+            id: idGen(),
+            speciesId: s.speciesId,
+            speciesName: s.speciesName,
+            abundance: s.abundance,
+            count: s.count,
+            notes: s.notes,
+          );
+        } else {
+          final notes = [
+            existing.notes,
+            s.notes,
+          ].where((n) => n.trim().isNotEmpty).join('; ');
+          final amount = SightingAbundance.combine(existing.amount, s.amount);
+          bySpecies[s.speciesId] = MarineSighting(
+            id: existing.id,
+            speciesId: existing.speciesId,
+            speciesName: existing.speciesName,
+            abundance: amount.abundance,
+            count: amount.count,
+            notes: notes,
+          );
+        }
+      }
+    }
+
+    // Visibility comes whole from one source, by the same precedence every
+    // reader uses (issue #3226): picking each column independently could
+    // pair one source's measurement with another's range.
+    final visibilitySource =
+        sorted.where((d) => d.visibilityMeters != null).firstOrNull ??
+        sorted.where((d) => d.visibilityRange != null).firstOrNull ??
+        sorted.where((d) => d.visibility != null).firstOrNull;
+    final mergedDive = Dive(
+      id: mergedId,
+      diverId: first.diverId,
+      dateTime: first.dateTime,
+      entryTime: mergedStart,
+      exitTime: mergedEnd,
+      runtime: mergedEnd.difference(mergedStart),
+      bottomTime: _mergedBottomTime(sorted),
+      maxDepth: _mergedMaxDepth(sorted),
+      avgDepth: _mergedAvgDepth(sorted),
+      // A plan has no number, so it must not blank the logged dive's.
+      diveNumber: _firstNonNull(sorted, (d) => d.diveNumber),
+      surfaceInterval: first.surfaceInterval,
+      diveMode: first.diveMode,
+      // A dive mirrored from a segment is real only through a logged dive on
+      // its outing (issue #3924), and the segments are about to go.
+      outingId: _firstNonNull(sorted, (d) => d.outingId),
+      // One logged segment means the dive happened. Keeping the earliest
+      // segment's flag would hide it from no-fly and residual exposure
+      // (issue #3924).
+      isPlanned: sorted.every((d) => d.isPlanned),
+      notes: _mergedNotes(sorted),
+      isFavorite: sorted.any((d) => d.isFavorite),
+      // An explicit exclusion on any source survives the merge. Dropping it
+      // would silently re-admit a dive the diver deliberately took out of
+      // their statistics, which is the harder error to notice of the two.
+      excludedFromStats: sorted.any((d) => d.excludedFromStats),
+      excludedFromGasStats: sorted.any((d) => d.excludedFromGasStats),
+      entryLocation: _firstNonNull(sorted, (d) => d.entryLocation),
+      exitLocation: _lastNonNull(sorted, (d) => d.exitLocation),
+      site: _firstNonNull(sorted, (d) => d.site),
+      diveCenter: _firstNonNull(sorted, (d) => d.diveCenter),
+      trip: _firstNonNull(sorted, (d) => d.trip),
+      tripId: _firstNonNull(sorted, (d) => d.tripId),
+      tanks: mergedTanks,
+      buddy: _firstNonNull(sorted, (d) => d.buddy),
+      diveMaster: _firstNonNull(sorted, (d) => d.diveMaster),
+      // Every role the diver held on any source (issue #1221), Solo
+      // yielding to another role as DiveRoleSet.normalize has it.
+      diverRoleIds: DiveRoleSet.union([for (final d in sorted) d.diverRoleIds]),
+      rating: _firstNonNull(sorted, (d) => d.rating),
+      visibility: visibilitySource?.visibility,
+      visibilityMeters: visibilitySource?.visibilityMeters,
+      visibilityMinMeters: visibilitySource?.visibilityMinMeters,
+      visibilityMaxMeters: visibilitySource?.visibilityMaxMeters,
+      // A stored water temperature is the dive's minimum (every importer
+      // writes the computer's minimum), so the combined dive's is the
+      // coldest segment's (issue #4136).
+      waterTemp: _extreme(sorted, (d) => d.waterTemp, lowest: true),
+      airTemp: _firstNonNull(sorted, (d) => d.airTemp),
+      currentDirection: _firstNonNull(sorted, (d) => d.currentDirection),
+      currentStrength: _firstNonNull(sorted, (d) => d.currentStrength),
+      swellHeight: _firstNonNull(sorted, (d) => d.swellHeight),
+      entryMethod: _firstNonNull(sorted, (d) => d.entryMethod),
+      exitMethod: _firstNonNull(sorted, (d) => d.exitMethod),
+      waterType: _firstNonNull(sorted, (d) => d.waterType),
+      altitude: _firstNonNull(sorted, (d) => d.altitude),
+      surfacePressure: _firstNonNull(sorted, (d) => d.surfacePressure),
+      gradientFactorLow: _firstNonNull(sorted, (d) => d.gradientFactorLow),
+      gradientFactorHigh: _firstNonNull(sorted, (d) => d.gradientFactorHigh),
+      decoAlgorithm: _firstNonNull(sorted, (d) => d.decoAlgorithm),
+      decoConservatism: _firstNonNull(sorted, (d) => d.decoConservatism),
+      computerTissue: _mergedComputerTissue(sorted),
+      diveComputerModel: _firstNonNull(sorted, (d) => d.diveComputerModel),
+      diveComputerSerial: _firstNonNull(sorted, (d) => d.diveComputerSerial),
+      diveComputerFirmware: _firstNonNull(
+        sorted,
+        (d) => d.diveComputerFirmware,
+      ),
+      weightAmount: _firstNonNull(sorted, (d) => d.weightAmount),
+      weightType: _firstNonNull(sorted, (d) => d.weightType),
+      weights: mergedWeights,
+      tags: mergedTags,
+      setpointLow: _firstNonNull(sorted, (d) => d.setpointLow),
+      setpointHigh: _firstNonNull(sorted, (d) => d.setpointHigh),
+      setpointDeco: _firstNonNull(sorted, (d) => d.setpointDeco),
+      scrType: _firstNonNull(sorted, (d) => d.scrType),
+      scrInjectionRate: _firstNonNull(sorted, (d) => d.scrInjectionRate),
+      scrAdditionRatio: _firstNonNull(sorted, (d) => d.scrAdditionRatio),
+      scrOrificeSize: _firstNonNull(sorted, (d) => d.scrOrificeSize),
+      assumedVo2: _firstNonNull(sorted, (d) => d.assumedVo2),
+      diluentGas: _firstNonNull(sorted, (d) => d.diluentGas),
+      // The loop's range and mean over the whole dive (issue #4136).
+      loopO2Min: _extreme(sorted, (d) => d.loopO2Min, lowest: true),
+      loopO2Max: _extreme(sorted, (d) => d.loopO2Max, lowest: false),
+      loopO2Avg: _runtimeWeightedMean(sorted, (d) => d.loopO2Avg),
+      loopVolume: _firstNonNull(sorted, (d) => d.loopVolume),
+      scrubber: _firstNonNull(sorted, (d) => d.scrubber),
+      courseIds: mergedCourseIds,
+      importSource: _firstNonNull(sorted, (d) => d.importSource),
+      importId: _firstNonNull(sorted, (d) => d.importId),
+      diveTypeIds: mergedDiveTypeIds,
+      gear: mergedGear,
+      customFields: mergedCustomFields,
+      windSpeed: _firstNonNull(sorted, (d) => d.windSpeed),
+      windDirection: _firstNonNull(sorted, (d) => d.windDirection),
+      cloudCover: _firstNonNull(sorted, (d) => d.cloudCover),
+      precipitation: _firstNonNull(sorted, (d) => d.precipitation),
+      humidity: _firstNonNull(sorted, (d) => d.humidity),
+      weatherDescription: _firstNonNull(sorted, (d) => d.weatherDescription),
+      diveOperator: _firstNonNull(sorted, (d) => d.diveOperator),
+      boatName: _firstNonNull(sorted, (d) => d.boatName),
+      boatCaptain: _firstNonNull(sorted, (d) => d.boatCaptain),
+      surfaceConditions: _firstNonNull(sorted, (d) => d.surfaceConditions),
+      weatherSource: _firstNonNull(sorted, (d) => d.weatherSource),
+      weatherFetchedAt: _firstNonNull(sorted, (d) => d.weatherFetchedAt),
+    );
+
+    return DiveMergeResult(
+      mergedDive: mergedDive,
+      sortedSources: sorted,
+      gaps: classification.gaps,
+      segmentOffsetsSeconds: offsets,
+      tankIdMap: tankIdMap,
+      mergedSightings: bySpecies.values.toList(),
+      previewProfile: _previewProfile(sorted, offsets, classification.gaps),
+    );
+  }
+
+  /// Builds the preview depth series: each source's profile shifted by its
+  /// [offsets] onto the merged timeline, with each gap filled by 0-depth
+  /// points at the surrounding native cadence so the surface interval reads
+  /// as a genuinely flat line -- and, being proportionally dense, survives
+  /// the preview chart's downsampling instead of collapsing to a diagonal
+  /// (#449 manual test). Mirrors the gap fill [DiveMergeService] persists.
+  /// Returns an empty list when nothing submerged is present to preview.
+  List<DiveProfilePoint> _previewProfile(
+    List<Dive> sorted,
+    Map<String, int> offsets,
+    List<MergeGap> gaps,
+  ) {
+    final points = <DiveProfilePoint>[];
+    for (var i = 0; i < sorted.length; i++) {
+      final offset = offsets[sorted[i].id] ?? 0;
+      final ordered = [...sorted[i].profile]
+        ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      for (final p in ordered) {
+        points.add(
+          DiveProfilePoint(timestamp: p.timestamp + offset, depth: p.depth),
+        );
+      }
+      if (i < gaps.length && gaps[i].endSeconds > gaps[i].startSeconds) {
+        final gap = gaps[i];
+        final cadence = _previewGapCadence(sorted[i], sorted[i + 1]);
+        // Cap the fill so a very long surface interval cannot explode the
+        // series; a few hundred flat points render identically anyway.
+        final minStep = ((gap.endSeconds - gap.startSeconds) / 300).ceil();
+        final step = cadence > minStep ? cadence : minStep;
+        // Fill (start+1 .. end-1), matching the persisted gap fill in
+        // DiveMergeService, so the preview seam mirrors the result exactly
+        // and no 0-depth point duplicates a boundary sample's timestamp.
+        final gapTimestamps = <int>[
+          for (var t = gap.startSeconds + 1; t < gap.endSeconds; t += step) t,
+        ];
+        if (gapTimestamps.isEmpty || gapTimestamps.last != gap.endSeconds - 1) {
+          gapTimestamps.add(gap.endSeconds - 1);
+        }
+        for (final t in gapTimestamps) {
+          points.add(DiveProfilePoint(timestamp: t, depth: 0));
+        }
+      }
+    }
+    // A series that never leaves the surface (no submerged samples) is not
+    // worth previewing.
+    if (points.every((p) => p.depth == 0)) return const [];
+    return points;
+  }
+
+  /// The native sample cadence to fill a gap with: the median inter-sample
+  /// delta of the previous segment, falling back to the next segment's, then
+  /// to 60s when neither has samples. Parallels
+  /// `DiveMergeService._nativeSampleIntervalSeconds` on the domain profile.
+  int _previewGapCadence(Dive prev, Dive next) {
+    for (final d in [prev, next]) {
+      final timestamps = d.profile.map((p) => p.timestamp).toList()..sort();
+      final deltas = <int>[
+        for (var i = 1; i < timestamps.length; i++)
+          if (timestamps[i] - timestamps[i - 1] > 0)
+            timestamps[i] - timestamps[i - 1],
+      ];
+      if (deltas.isNotEmpty) {
+        deltas.sort();
+        return deltas[deltas.length ~/ 2];
+      }
+    }
+    return 60;
+  }
+
+  /// The segment's occupied span: the declared runtime or the last profile
+  /// sample, whichever is later. Computers routinely keep sampling past the
+  /// runtime they report (surface bobbing before the log closes), so gap
+  /// boundaries must clear the real samples or the seam is left with an
+  /// uncovered sample hole (#449 manual-test bug).
+  Duration _segmentExtent(Dive dive) {
+    var extent = dive.effectiveRuntime ?? Duration.zero;
+    for (final point in dive.profile) {
+      if (point.timestamp > extent.inSeconds) {
+        extent = Duration(seconds: point.timestamp);
+      }
+    }
+    return extent;
+  }
+
+  DiveMergeClassification classify(List<Dive> dives) {
+    if (dives.length < 2) {
+      return const MergeInvalid(DiveMergeInvalidReason.tooFewDives);
+    }
+    if (dives.map((d) => d.diverId).toSet().length > 1) {
+      return const MergeInvalid(DiveMergeInvalidReason.mixedDivers);
+    }
+    final sorted = [...dives]
+      ..sort((a, b) => a.effectiveEntryTime.compareTo(b.effectiveEntryTime));
+    final mergedStart = sorted.first.effectiveEntryTime;
+    final gaps = <MergeGap>[];
+    for (var i = 0; i < sorted.length - 1; i++) {
+      final prev = sorted[i];
+      final next = sorted[i + 1];
+      // A dive with no derivable duration is treated as zero-length: it has
+      // no profile samples, so nothing can overlap it. Deliberate (#449
+      // review).
+      final prevEnd = prev.effectiveEntryTime.add(_segmentExtent(prev));
+      if (next.effectiveEntryTime.isBefore(prevEnd)) {
+        return const MergeOverlapping();
+      }
+      gaps.add(
+        MergeGap(
+          afterDiveId: prev.id,
+          beforeDiveId: next.id,
+          startSeconds: prevEnd.difference(mergedStart).inSeconds,
+          endSeconds: next.effectiveEntryTime.difference(mergedStart).inSeconds,
+        ),
+      );
+    }
+    return MergeSequential(sortedDives: sorted, gaps: gaps);
+  }
+}

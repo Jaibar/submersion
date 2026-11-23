@@ -34,6 +34,19 @@ class ProfileEvent extends Equatable {
   /// Associated tank ID (for gas switches)
   final String? tankId;
 
+  /// Provenance of this event (imported, computed, or user-authored).
+  final EventSource source;
+
+  /// The dive computer this event was attributed to, for multi-computer
+  /// dives. Null means the event belongs to the primary source (or was
+  /// user-authored / computed without per-computer attribution).
+  final String? computerId;
+
+  /// Manufacturer of [computerId]'s computer, resolved when events are read
+  /// for display (`withComputerManufacturers`); never persisted. It is what
+  /// says whether [value] holds that vendor's own event code (#1523).
+  final String? computerManufacturer;
+
   /// When this event was created
   final DateTime createdAt;
 
@@ -47,6 +60,16 @@ class ProfileEvent extends Equatable {
     this.depth,
     this.value,
     this.tankId,
+    // Default intentionally biased toward `imported` — the most common case
+    // for direct-constructor callers is DB read-back, where the value is
+    // being reconstituted from a persisted row. Callers that construct
+    // events from in-app analysis MUST explicitly pass
+    // `source: EventSource.computed`; user-authored events MUST pass
+    // `source: EventSource.user`. Factories enforce the correct default per
+    // event type — prefer factories over direct construction.
+    this.source = EventSource.imported,
+    this.computerId,
+    this.computerManufacturer,
     required this.createdAt,
   });
 
@@ -72,26 +95,8 @@ class ProfileEvent extends Equatable {
   /// Whether this event has associated data value
   bool get hasValue => value != null;
 
-  /// Get formatted value with appropriate units based on event type
-  String? get formattedValue {
-    if (value == null) return null;
-
-    switch (eventType) {
-      case ProfileEventType.ascentRateWarning:
-      case ProfileEventType.ascentRateCritical:
-        return '${value!.toStringAsFixed(1)} m/min';
-      case ProfileEventType.ppO2High:
-      case ProfileEventType.ppO2Low:
-        return '${value!.toStringAsFixed(2)} bar';
-      case ProfileEventType.cnsWarning:
-      case ProfileEventType.cnsCritical:
-        return '${value!.toStringAsFixed(0)}%';
-      case ProfileEventType.setpointChange:
-        return '${value!.toStringAsFixed(1)} bar';
-      default:
-        return value!.toStringAsFixed(1);
-    }
-  }
+  /// Whether this is an annotation: a Notes passage pinned to a time (#4109).
+  bool get isAnnotation => eventType == ProfileEventType.annotation;
 
   /// Create an ascent start event
   factory ProfileEvent.ascentStart({
@@ -100,6 +105,7 @@ class ProfileEvent extends Equatable {
     required int timestamp,
     double? depth,
     required DateTime createdAt,
+    EventSource source = EventSource.computed,
   }) {
     return ProfileEvent(
       id: id,
@@ -108,6 +114,7 @@ class ProfileEvent extends Equatable {
       eventType: ProfileEventType.ascentStart,
       depth: depth,
       createdAt: createdAt,
+      source: source,
     );
   }
 
@@ -119,6 +126,7 @@ class ProfileEvent extends Equatable {
     required double depth,
     required DateTime createdAt,
     bool isStart = true,
+    EventSource source = EventSource.computed,
   }) {
     return ProfileEvent(
       id: id,
@@ -129,6 +137,7 @@ class ProfileEvent extends Equatable {
           : ProfileEventType.safetyStopEnd,
       depth: depth,
       createdAt: createdAt,
+      source: source,
     );
   }
 
@@ -139,6 +148,7 @@ class ProfileEvent extends Equatable {
     required int timestamp,
     required double depth,
     required DateTime createdAt,
+    EventSource source = EventSource.computed,
   }) {
     return ProfileEvent(
       id: id,
@@ -147,6 +157,7 @@ class ProfileEvent extends Equatable {
       eventType: ProfileEventType.maxDepth,
       depth: depth,
       createdAt: createdAt,
+      source: source,
     );
   }
 
@@ -159,6 +170,7 @@ class ProfileEvent extends Equatable {
     required double rate,
     required DateTime createdAt,
     bool isCritical = false,
+    EventSource source = EventSource.computed,
   }) {
     return ProfileEvent(
       id: id,
@@ -171,6 +183,7 @@ class ProfileEvent extends Equatable {
       depth: depth,
       value: rate,
       createdAt: createdAt,
+      source: source,
     );
   }
 
@@ -183,6 +196,7 @@ class ProfileEvent extends Equatable {
     required String tankId,
     String? gasName,
     required DateTime createdAt,
+    EventSource source = EventSource.imported,
   }) {
     return ProfileEvent(
       id: id,
@@ -193,6 +207,7 @@ class ProfileEvent extends Equatable {
       tankId: tankId,
       description: gasName,
       createdAt: createdAt,
+      source: source,
     );
   }
 
@@ -204,6 +219,7 @@ class ProfileEvent extends Equatable {
     double? depth,
     String? note,
     required DateTime createdAt,
+    EventSource source = EventSource.user,
   }) {
     return ProfileEvent(
       id: id,
@@ -213,6 +229,30 @@ class ProfileEvent extends Equatable {
       depth: depth,
       description: note,
       createdAt: createdAt,
+      source: source,
+    );
+  }
+
+  /// Create an annotation: a passage of the dive's Notes pinned to a time
+  /// (#4109). [words] are the link text in Notes, cached here for readers
+  /// that never load Notes.
+  factory ProfileEvent.annotation({
+    required String id,
+    required String diveId,
+    required int timestamp,
+    double? depth,
+    required String words,
+    required DateTime createdAt,
+  }) {
+    return ProfileEvent(
+      id: id,
+      diveId: diveId,
+      timestamp: timestamp,
+      eventType: ProfileEventType.annotation,
+      depth: depth,
+      description: words,
+      createdAt: createdAt,
+      source: EventSource.user,
     );
   }
 
@@ -224,6 +264,7 @@ class ProfileEvent extends Equatable {
     required double setpoint,
     double? depth,
     required DateTime createdAt,
+    EventSource source = EventSource.imported,
   }) {
     return ProfileEvent(
       id: id,
@@ -233,8 +274,112 @@ class ProfileEvent extends Equatable {
       value: setpoint,
       depth: depth,
       createdAt: createdAt,
+      source: source,
     );
   }
+
+  /// Create a deco stop event (CCR/technical dives).
+  factory ProfileEvent.decoStop({
+    required String id,
+    required String diveId,
+    required int timestamp,
+    required double depth,
+    required DateTime createdAt,
+    bool isStart = true,
+    EventSource source = EventSource.imported,
+  }) {
+    return ProfileEvent(
+      id: id,
+      diveId: diveId,
+      timestamp: timestamp,
+      eventType: isStart
+          ? ProfileEventType.decoStopStart
+          : ProfileEventType.decoStopEnd,
+      depth: depth,
+      createdAt: createdAt,
+      source: source,
+    );
+  }
+
+  /// Create a deco violation event (ceiling exceeded, generic violation).
+  factory ProfileEvent.decoViolation({
+    required String id,
+    required String diveId,
+    required int timestamp,
+    double? depth,
+    double? value,
+    String? description,
+    required DateTime createdAt,
+    EventSource source = EventSource.imported,
+  }) {
+    return ProfileEvent(
+      id: id,
+      diveId: diveId,
+      timestamp: timestamp,
+      eventType: ProfileEventType.decoViolation,
+      severity: EventSeverity.alert,
+      depth: depth,
+      value: value,
+      description: description,
+      createdAt: createdAt,
+      source: source,
+    );
+  }
+
+  /// Create a high ppO2 warning event.
+  factory ProfileEvent.ppO2High({
+    required String id,
+    required String diveId,
+    required int timestamp,
+    required double value,
+    double? depth,
+    required DateTime createdAt,
+    EventSource source = EventSource.imported,
+  }) {
+    return ProfileEvent(
+      id: id,
+      diveId: diveId,
+      timestamp: timestamp,
+      eventType: ProfileEventType.ppO2High,
+      severity: EventSeverity.warning,
+      value: value,
+      depth: depth,
+      createdAt: createdAt,
+      source: source,
+    );
+  }
+
+  /// Create a low ppO2 warning event (hypoxia risk, typically CCR).
+  factory ProfileEvent.ppO2Low({
+    required String id,
+    required String diveId,
+    required int timestamp,
+    required double value,
+    double? depth,
+    required DateTime createdAt,
+    EventSource source = EventSource.imported,
+  }) {
+    return ProfileEvent(
+      id: id,
+      diveId: diveId,
+      timestamp: timestamp,
+      eventType: ProfileEventType.ppO2Low,
+      severity: EventSeverity.warning,
+      value: value,
+      depth: depth,
+      createdAt: createdAt,
+      source: source,
+    );
+  }
+
+  /// Whether this event counts for [analyzedSource], the data source a
+  /// per-source analysis covers: that source's computer's events do, and so
+  /// do ones with no computer. A null [analyzedSource] is a dive-level
+  /// analysis, which every event counts for.
+  bool countsFor(({String? computerId})? analyzedSource) =>
+      analyzedSource == null ||
+      computerId == null ||
+      computerId == analyzedSource.computerId;
 
   ProfileEvent copyWith({
     String? id,
@@ -246,6 +391,9 @@ class ProfileEvent extends Equatable {
     double? depth,
     double? value,
     String? tankId,
+    EventSource? source,
+    String? computerId,
+    String? computerManufacturer,
     DateTime? createdAt,
   }) {
     return ProfileEvent(
@@ -258,6 +406,9 @@ class ProfileEvent extends Equatable {
       depth: depth ?? this.depth,
       value: value ?? this.value,
       tankId: tankId ?? this.tankId,
+      source: source ?? this.source,
+      computerId: computerId ?? this.computerId,
+      computerManufacturer: computerManufacturer ?? this.computerManufacturer,
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -273,6 +424,9 @@ class ProfileEvent extends Equatable {
     depth,
     value,
     tankId,
+    source,
+    computerId,
+    computerManufacturer,
     createdAt,
   ];
 }

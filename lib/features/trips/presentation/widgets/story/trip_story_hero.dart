@@ -1,0 +1,194 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/entities/trip_story.dart';
+import 'package:submersion/features/trips/presentation/widgets/story/trip_story_empty_state.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_country_flags.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Story header: trip identity plus mode-specific extras (countdown and
+/// checklist for planned trips, progress line for in-progress trips, empty
+/// state with CTAs for bare trips).
+class TripStoryHero extends ConsumerWidget {
+  final TripStory story;
+  final VoidCallback? onScanForDives;
+
+  /// The Prepare overview (#2845) has its own rows under the hero, so it
+  /// turns the empty state off.
+  final bool showEmptyState;
+
+  /// The Prepare overview's summary card has a Checklist row with the same
+  /// progress, so it turns the checklist card off (#2881).
+  final bool showChecklist;
+
+  const TripStoryHero({
+    super.key,
+    required this.story,
+    this.trip,
+    this.onScanForDives,
+    this.showEmptyState = true,
+    this.showChecklist = true,
+  });
+
+  /// The trip whose name, type and dates the hero shows, where it is not
+  /// the story's: the sitting's, on the trip page (issue #4527). Null
+  /// shows the story's trip.
+  final Trip? trip;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final trip = this.trip ?? story.trip;
+    final theme = Theme.of(context);
+    final units = ref.watch(unitFormatterProvider);
+    final name = Text(
+      trip.name,
+      style: theme.textTheme.headlineSmall?.copyWith(
+        fontWeight: FontWeight.bold,
+      ),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              trip.isLiveaboard ? Icons.sailing : Icons.flight_takeoff,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              // Every country the trip's dives were in (issue #4426) follows
+              // the name, or takes the next line when it does not fit, so a
+              // long list never squeezes the name. With no flags the name
+              // stands alone: an empty flag slot would still take the Wrap's
+              // spacing and, after a full-width name, an empty second run.
+              child: tripHasFlags(ref, trip.id)
+                  ? Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        name,
+                        TripCountryFlags(tripId: trip.id, flagHeight: 14),
+                      ],
+                    )
+                  : name,
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '${units.formatDate(trip.startDate)}'
+          ' - ${units.formatDate(trip.endDate)}'
+          ' (${context.l10n.trips_detail_durationDays(trip.durationDays)})',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        if (trip.isInProgress) ...[
+          const SizedBox(height: 8),
+          Text(
+            context.l10n.trips_story_dayOfTrip(
+              (story.todayIndex ?? 0) + 1,
+              story.days.length,
+            ),
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: theme.colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ] else if (trip.isUpcoming) ...[
+          const SizedBox(height: 8),
+          Text(
+            context.l10n.trips_story_daysUntil(trip.daysUntilStart),
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: theme.colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+        if (showChecklist && trip.isUpcoming && !story.checklist.isEmpty) ...[
+          const SizedBox(height: 12),
+          _ChecklistCard(story: story),
+        ],
+        if (showEmptyState && story.isEmpty) ...[
+          const SizedBox(height: 16),
+          TripStoryEmptyState(onScanForDives: onScanForDives),
+        ],
+      ],
+    );
+  }
+}
+
+class _ChecklistCard extends ConsumerWidget {
+  final TripStory story;
+
+  const _ChecklistCard({required this.story});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final checklist = story.checklist;
+    final progress = checklist.total == 0
+        ? 0.0
+        : checklist.done / checklist.total;
+    final units = ref.watch(unitFormatterProvider);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              context.l10n.trips_story_checklistProgress(
+                checklist.done,
+                checklist.total,
+              ),
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(value: progress, minHeight: 6),
+            ),
+            for (final item in checklist.nextDue)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.radio_button_unchecked,
+                      size: 16,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        item.title,
+                        style: theme.textTheme.bodySmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (item.dueDate != null)
+                      Text(
+                        units.formatMonthDay(item.dueDate),
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}

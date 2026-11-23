@@ -1,9 +1,15 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:developer' as developer;
+import 'dart:isolate';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:submersion/core/models/log_entry.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/log_file_service.dart';
+import 'package:submersion/core/services/log_redactor.dart';
+
+/// A line held until it can be written, with how it was logged.
+typedef _HeldLine = ({LogEntry entry, bool alwaysPersist});
 
 /// Simple logging service for the application.
 /// Uses Dart's developer.log for structured logging and writes to a
@@ -11,37 +17,221 @@ import 'package:submersion/core/services/log_file_service.dart';
 class LoggerService {
   final String _name;
 
+  /// The category a call gets when it names none. Media code pins
+  /// [LogCategory.media] so every breadcrumb lands in the exported log
+  /// without each call site repeating it.
+  final LogCategory category;
+
+  /// The SharedPreferences key of the debug mode switch, which decides
+  /// whether the log file keeps the verbose levels ([configureFileLogging]).
+  static const String debugModePrefKey = 'debug_mode_enabled';
+
   /// The shared LogFileService instance. Set during app initialization.
   static LogFileService? _fileService;
   static Future<void> _pendingWrite = Future<void>.value();
 
   /// Broadcast stream that emits every [LogEntry] as it is created.
-  /// Used by the debug log viewer to update in real time.
   static final StreamController<LogEntry> _logStreamController =
       StreamController<LogEntry>.broadcast();
 
-  /// Stream of log entries emitted in real time.
+  /// Stream of log entries emitted in real time, persisted or not.
   static Stream<LogEntry> get logStream => _logStreamController.stream;
 
+  static final StreamController<LogEntry> _persistedController =
+      StreamController<LogEntry>.broadcast();
+
+  /// Entries that have been written to the log file, emitted once the write
+  /// completes. The debug log viewer re-reads the file on each, so it never
+  /// races a write and never re-reads for a line the file will not hold.
+  static Stream<LogEntry> get persistedLogStream => _persistedController.stream;
+
+  /// Most lines [bufferUntilFileAttached] holds; the oldest are dropped.
+  static const startupBufferLimit = 500;
+
+  /// Lines logged before a file was attached, while startup buffering is on.
+  static ListQueue<_HeldLine>? _startupBuffer;
+
+  /// Lowest severity written to the log file. Live listeners on [logStream]
+  /// see every level regardless.
+  static LogLevel _minimumFileLevel = LogLevel.debug;
+
+  /// Categories whose breadcrumbs are worth having in a user's exported log
+  /// even when verbose logging is off. A category floor can only admit more
+  /// than the global floor, never less: a support report needs the media
+  /// resolver and transfer worker lines, which are logged at info.
+  static const Map<LogCategory, LogLevel> _categoryFileFloors = {
+    LogCategory.media: LogLevel.info,
+  };
+
   /// Set or clear the file logging backend.
-  /// Pass `null` to disable file logging (e.g. when debug mode is off).
+  /// Pass `null` to disable file logging entirely.
   static void setFileService(LogFileService? fileService) {
     _fileService = fileService;
     _pendingWrite = Future<void>.value();
   }
 
-  const LoggerService(this._name);
+  /// Lowest severity currently written to the log file.
+  static LogLevel get minimumFileLevel => _minimumFileLevel;
+
+  /// Set the lowest severity written to the log file.
+  static void setMinimumFileLevel(LogLevel level) {
+    _minimumFileLevel = level;
+  }
+
+  /// Whether a line at [level] in [category] would be written to the log
+  /// file now: a file is attached and the level clears its floor. For work
+  /// done only to produce such a line, which is wasted when it would not be
+  /// kept.
+  static bool keeps(LogLevel level, {LogCategory category = LogCategory.app}) =>
+      _fileService != null && _persists(level, false, category: category);
+
+  /// Attach [fileService] and choose how much of the log it keeps.
+  ///
+  /// Warnings and errors are always persisted, so a bug report can carry the
+  /// failure that prompted it even when nobody had turned on debug mode
+  /// beforehand (#1826). [verbose] (debug mode) adds the debug and info
+  /// levels, which are too chatty to keep by default.
+  static void configureFileLogging(
+    LogFileService fileService, {
+    required bool verbose,
+  }) {
+    if (!identical(_fileService, fileService)) {
+      setFileService(fileService);
+    }
+    _minimumFileLevel = verbose ? LogLevel.debug : LogLevel.warning;
+
+    // Replay what startup logged before the file existed, under the level
+    // just chosen and redacted like any other persisted line.
+    final buffered = _startupBuffer;
+    _startupBuffer = null;
+    for (final line in buffered ?? const <_HeldLine>[]) {
+      if (_persists(
+        line.entry.level,
+        line.alwaysPersist,
+        category: line.entry.category,
+      )) {
+        final entry = line.entry.copyWith(
+          message: redactSecrets(line.entry.message),
+        );
+        _enqueueWrite(fileService, Future.value(entry), 'LoggerService');
+      }
+    }
+  }
+
+  /// Hold log lines in memory until [configureFileLogging] attaches a file.
+  ///
+  /// Called first thing in `main`: the global error handlers are live from
+  /// the start, but the log file cannot be attached until preferences, the
+  /// Windows app-data migration and the app-support directory lookup are
+  /// done, and a failure in any of those would otherwise be lost (#1826).
+  /// Off by default so tests that log without a file never replay stale
+  /// lines into a file a later test attaches.
+  static void bufferUntilFileAttached() {
+    _startupBuffer ??= ListQueue();
+  }
+
+  static bool _persists(
+    LogLevel level,
+    bool alwaysPersist, {
+    required LogCategory category,
+  }) {
+    if (alwaysPersist) return true;
+    final global = _minimumFileLevel;
+    final own = _categoryFileFloors[category];
+    final floor = (own != null && own.index < global.index) ? own : global;
+    return level.index >= floor.index;
+  }
+
+  /// Queue [entry] behind every earlier write, then announce it on
+  /// [persistedLogStream].
+  static void _enqueueWrite(
+    LogFileService service,
+    Future<LogEntry> entry,
+    String loggerName,
+  ) {
+    _pendingWrite = _pendingWrite
+        .then((_) async {
+          final ready = await entry;
+          await service.writeLine(ready.toLogLine());
+          _persistedController.add(ready);
+        })
+        .catchError((Object e, StackTrace st) {
+          developer.log(
+            'Log write failed',
+            name: loggerName,
+            error: e,
+            stackTrace: st,
+          );
+        });
+  }
+
+  static void _bufferForStartup(LogEntry entry, bool alwaysPersist) {
+    final buffer = _startupBuffer;
+    if (buffer == null) return;
+    buffer.add((entry: entry, alwaysPersist: alwaysPersist));
+    while (buffer.length > startupBufferLimit) {
+      buffer.removeFirst();
+    }
+  }
+
+  /// Log an info line whose text is still being produced, holding its place
+  /// in the file: lines logged after this call are written after it.
+  ///
+  /// For the session marker, which waits on a platform lookup for the app
+  /// version while startup carries on logging. The entry is stamped with the
+  /// time of this call. Only the file keeps the order; the console and
+  /// [logStream] see the line when its text is ready.
+  void infoInOrder(
+    Future<String> message, {
+    LogCategory? category,
+    bool alwaysPersist = false,
+  }) {
+    final resolvedCategory = category ?? this.category;
+    final timestamp = DateTime.now();
+    final service = _fileService;
+    final persist =
+        service != null &&
+        _persists(LogLevel.info, alwaysPersist, category: resolvedCategory);
+    final entry = message.then((text) {
+      developer.log(text, name: _name, level: 800);
+      final ready = LogEntry(
+        timestamp: timestamp,
+        category: resolvedCategory,
+        level: LogLevel.info,
+        message: persist ? redactSecrets(text) : text,
+      );
+      _logStreamController.add(ready);
+      return ready;
+    });
+    if (persist) {
+      _enqueueWrite(service, entry, _name);
+    } else {
+      unawaited(
+        entry.then<void>(
+          (_) {},
+          onError: (Object e, StackTrace st) => developer.log(
+            'Deferred log line failed',
+            name: _name,
+            error: e,
+            stackTrace: st,
+          ),
+        ),
+      );
+    }
+  }
+
+  const LoggerService(this._name, {this.category = LogCategory.app});
 
   /// Log a debug message
   void debug(
     String message, {
-    LogCategory category = LogCategory.app,
+    LogCategory? category,
     Object? error,
     StackTrace? stackTrace,
   }) {
     _log(
       message,
-      category: category,
+      category: category ?? this.category,
       level: LogLevel.debug,
       developerLevel: 500,
       error: error,
@@ -50,32 +240,39 @@ class LoggerService {
   }
 
   /// Log an info message
+  ///
+  /// [alwaysPersist] writes the line to the file even below
+  /// [minimumFileLevel]. Reserved for rare, non-sensitive markers such as the
+  /// once-per-launch session line, which attributes the warnings after it to
+  /// the build that wrote them.
   void info(
     String message, {
-    LogCategory category = LogCategory.app,
+    LogCategory? category,
     Object? error,
     StackTrace? stackTrace,
+    bool alwaysPersist = false,
   }) {
     _log(
       message,
-      category: category,
+      category: category ?? this.category,
       level: LogLevel.info,
       developerLevel: 800,
       error: error,
       stackTrace: stackTrace,
+      alwaysPersist: alwaysPersist,
     );
   }
 
   /// Log a warning message
   void warning(
     String message, {
-    LogCategory category = LogCategory.app,
+    LogCategory? category,
     Object? error,
     StackTrace? stackTrace,
   }) {
     _log(
       message,
-      category: category,
+      category: category ?? this.category,
       level: LogLevel.warning,
       developerLevel: 900,
       error: error,
@@ -86,13 +283,13 @@ class LoggerService {
   /// Log an error message
   void error(
     String message, {
-    LogCategory category = LogCategory.app,
+    LogCategory? category,
     Object? error,
     StackTrace? stackTrace,
   }) {
     _log(
       message,
-      category: category,
+      category: category ?? this.category,
       level: LogLevel.error,
       developerLevel: 1000,
       error: error,
@@ -107,6 +304,7 @@ class LoggerService {
     required int developerLevel,
     Object? error,
     StackTrace? stackTrace,
+    bool alwaysPersist = false,
   }) {
     // Console logging via dart:developer
     developer.log(
@@ -117,42 +315,93 @@ class LoggerService {
       stackTrace: stackTrace,
     );
 
-    // File logging
-    final entry = LogEntry(
-      timestamp: DateTime.now(),
-      category: category,
-      level: level,
-      message: error != null ? '$message | error: $error' : message,
+    _record(
+      LogEntry(
+        timestamp: DateTime.now(),
+        category: category,
+        level: level,
+        message: error != null ? '$message | error: $error' : message,
+      ),
+      alwaysPersist,
+      _name,
     );
-    final logLine = entry.toLogLine();
+  }
+
+  /// Everything that happens to a line after the console: the file or the
+  /// startup buffer, then live listeners.
+  static void _record(LogEntry raw, bool alwaysPersist, String loggerName) {
     // Capture the current file service so that later changes to
     // _fileService do not affect already-emitted log entries.
     final service = _fileService;
-    if (service != null) {
-      _pendingWrite = _pendingWrite
-          .then((_) => service.writeLine(logLine))
-          .catchError((Object e, StackTrace st) {
-            developer.log(
-              'Log write failed',
-              name: _name,
-              error: e,
-              stackTrace: st,
-            );
-          });
+    final persist =
+        service != null &&
+        _persists(raw.level, alwaysPersist, category: raw.category);
+
+    // File logging. Redacted here rather than at each call site: the file is
+    // what users attach to public bug reports, and an exception's toString()
+    // can carry a request URL or response body nobody chose to log. Lines
+    // that are not persisted skip the work; the live stream stays in memory.
+    final entry = persist
+        ? raw.copyWith(message: redactSecrets(raw.message))
+        : raw;
+    if (persist) {
+      _enqueueWrite(service, Future.value(entry), loggerName);
+    } else if (service == null) {
+      _bufferForStartup(entry, alwaysPersist);
     }
 
-    // Notify live listeners (debug log viewer).
+    // Notify live listeners.
     _logStreamController.add(entry);
   }
 
+  /// [Isolate.run], keeping what [work] logs.
+  ///
+  /// Statics are per isolate, so a worker has no log file attached and its
+  /// lines would reach the console alone. They are held there and recorded
+  /// here instead, under the file level this isolate chose and redacted like
+  /// any other line, so a problem found on a worker can still reach the log a
+  /// user attaches to a bug report.
+  ///
+  /// They arrive together once [work] finishes, so they can sit after newer
+  /// lines from this isolate, carrying the times they were logged. Only the
+  /// newest [startupBufferLimit] are kept, lines from a [work] that throws are
+  /// lost with it, and [infoInOrder], which is never held, reaches the console
+  /// alone.
+  static Future<R> isolateRunKeepingLogs<R>(FutureOr<R> Function() work) async {
+    final (:value, :lines) = await _runHoldingLines(work);
+    for (final line in lines) {
+      _record(line.entry, line.alwaysPersist, 'LoggerService');
+    }
+    return value;
+  }
+
+  /// Minimal-scope hop to the worker isolate: Dart closures capture their
+  /// enclosing scope, and this one holds [work] alone.
+  static Future<({R value, List<_HeldLine> lines})> _runHoldingLines<R>(
+    FutureOr<R> Function() work,
+  ) async {
+    // A browser has no isolates: the work runs here, so its lines are
+    // already recorded and there is nothing to carry back.
+    if (HostPlatform.isWeb) {
+      return (value: await work(), lines: const <_HeldLine>[]);
+    }
+    return Isolate.run(() async {
+      bufferUntilFileAttached();
+      final value = await work();
+      return (value: value, lines: _startupBuffer!.toList(growable: false));
+    });
+  }
+
   /// Create a logger for a specific class
-  static LoggerService forClass(Type type) => LoggerService(type.toString());
+  static LoggerService forClass(
+    Type type, {
+    LogCategory category = LogCategory.app,
+  }) => LoggerService(type.toString(), category: category);
 
   /// Wait for all currently pending file writes to complete.
   ///
-  /// This method is primarily intended for tests that need deterministic
-  /// synchronization with log file writes.
-  @visibleForTesting
+  /// Tests use it to synchronize with log file writes; a headless isolate
+  /// awaits it before it exits, so its last lines are not lost (#4572).
   static Future<void> flushPendingWrites() async {
     while (true) {
       final current = _pendingWrite;

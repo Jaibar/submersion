@@ -1,21 +1,56 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/map_style.dart';
 import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/features/dive_planner/data/services/plan_calculator_service.dart';
-import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/domain/services/gear_tree.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/services/plan_engine.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 class _TestSettingsNotifier extends StateNotifier<AppSettings>
     implements SettingsNotifier {
-  _TestSettingsNotifier({PressureUnit pressureUnit = PressureUnit.bar})
-    : super(AppSettings(pressureUnit: pressureUnit));
+  // Null means "leave at the AppSettings default", so these fixtures cannot
+  // drift away from the real defaults.
+  _TestSettingsNotifier({
+    PressureUnit? pressureUnit,
+    int? gfLow,
+    int? gfHigh,
+    PlannerWaterType? plannerWater,
+    double? ccrSetpointLow,
+    double? ccrSetpointHigh,
+  }) : super(
+         const AppSettings().copyWith(
+           pressureUnit: pressureUnit,
+           gfLow: gfLow,
+           gfHigh: gfHigh,
+           defaultPlannerWaterType: plannerWater,
+           ccrSetpointLow: ccrSetpointLow,
+           ccrSetpointHigh: ccrSetpointHigh,
+         ),
+       );
 
   void updatePressureUnitForTest(PressureUnit unit) {
-    state = AppSettings(pressureUnit: unit);
+    state = state.copyWith(pressureUnit: unit);
+  }
+
+  void updateGradientFactorsForTest(int low, int high) {
+    state = state.copyWith(gfLow: low, gfHigh: high);
+  }
+
+  void updatePlannerWaterForTest(PlannerWaterType type) {
+    state = state.copyWith(defaultPlannerWaterType: type);
+  }
+
+  void updateCcrSetpointsForTest(double low, double high) {
+    state = state.copyWith(ccrSetpointLow: low, ccrSetpointHigh: high);
   }
 
   @override
@@ -28,7 +63,7 @@ class _TestSettingsNotifier extends StateNotifier<AppSettings>
 
 void main() {
   group('divePlanNotifierProvider', () {
-    test('uses ~34 bar reserve when pressure unit is psi', () {
+    test('a new plan has no reserve override regardless of pressure unit', () {
       final container = ProviderContainer(
         overrides: [
           settingsProvider.overrideWith(
@@ -39,11 +74,12 @@ void main() {
       addTearDown(container.dispose);
 
       final state = container.read(divePlanNotifierProvider);
-      // 500 psi ≈ 34.47 bar
-      expect(state.reservePressure, closeTo(34.47, 0.5));
+      // reservePressure live-resolves against the diver's Settings
+      // (issue #3552); a new plan never snapshots a value into state.
+      expect(state.reservePressure, isNull);
     });
 
-    test('uses 50 bar reserve when pressure unit is bar', () {
+    test('a new plan starts on salt water', () {
       final container = ProviderContainer(
         overrides: [
           settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
@@ -51,11 +87,82 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      final state = container.read(divePlanNotifierProvider);
-      expect(state.reservePressure, DivePlanState.kDefaultReservePressureBar);
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.salt,
+      );
     });
 
-    test('toDive sets runtime from segment durations', () {
+    test('a new plan starts on the diver default water type', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) =>
+                _TestSettingsNotifier(plannerWater: PlannerWaterType.fresh),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.fresh,
+      );
+    });
+
+    test('a new plan starts on custom salinity when that is the default', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) =>
+                _TestSettingsNotifier(plannerWater: PlannerWaterType.custom),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.waterType, isNull);
+      expect(state.salinityPpt, DiveEnvironment.typicalSeaSalinityPpt);
+    });
+
+    test('an untouched plan follows later planner water settings', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.salt,
+      );
+
+      settingsNotifier.updatePlannerWaterForTest(PlannerWaterType.fresh);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.waterType, WaterType.fresh);
+      expect(state.salinityPpt, isNull);
+      expect(state.isDirty, isFalse);
+    });
+
+    test('an untouched plan adopts a later custom water default', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container.read(divePlanNotifierProvider);
+      settingsNotifier.updatePlannerWaterForTest(PlannerWaterType.custom);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.waterType, isNull);
+      expect(state.salinityPpt, DiveEnvironment.typicalSeaSalinityPpt);
+      expect(state.isDirty, isFalse);
+    });
+
+    test('adopting the current water type is a no-op', () {
       final container = ProviderContainer(
         overrides: [
           settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
@@ -64,36 +171,689 @@ void main() {
       addTearDown(container.dispose);
 
       final notifier = container.read(divePlanNotifierProvider.notifier);
+      final before = container.read(divePlanNotifierProvider);
+      notifier.adoptPlannerWaterIfPristine(PlannerWaterType.salt);
+      expect(container.read(divePlanNotifierProvider).id, before.id);
+      expect(container.read(divePlanNotifierProvider).isDirty, isFalse);
+    });
 
-      // Load a plan with a segment so totalTime > 0
-      final defaultState = container.read(divePlanNotifierProvider);
-      final tank = defaultState.tanks.first;
-      notifier.loadPlan(
-        defaultState.copyWith(
-          segments: [
-            PlanSegment(
-              id: 'seg-1',
-              type: SegmentType.bottom,
-              startDepth: 20,
-              endDepth: 20,
-              durationSeconds: 30 * 60,
-              tankId: tank.id,
-              gasMix: tank.gasMix,
-              order: 0,
-            ),
-          ],
-        ),
+    test('a hand-tuned plan ignores later planner water settings', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .updateWaterType(WaterType.fresh);
+
+      settingsNotifier.updatePlannerWaterForTest(PlannerWaterType.custom);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.waterType, WaterType.fresh);
+      expect(state.salinityPpt, isNull);
+    });
+
+    test('a plan with segments ignores later planner water settings', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 30.0, bottomTimeMinutes: 20);
+      // addSimplePlan is a structural edit; keep water salt, then prove
+      // settings cannot rewrite it.
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.salt,
       );
 
-      final dive = notifier.toDive();
+      settingsNotifier.updatePlannerWaterForTest(PlannerWaterType.fresh);
 
-      expect(dive.runtime, isNotNull);
-      expect(dive.runtime!.inSeconds, 30 * 60);
-      expect(dive.isPlanned, isTrue);
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.salt,
+      );
+    });
+
+    test('switching to CCR seeds the diver own CCR setpoints', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _TestSettingsNotifier(
+              ccrSetpointLow: 0.6,
+              ccrSetpointHigh: 1.2,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .updateMode(domain.PlanMode.ccr);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.setpointLow, 0.6);
+      expect(state.setpointHigh, 1.2);
+    });
+
+    group('CCR loop slots (#3220)', () {
+      ProviderContainer ccrContainer() {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+        container
+            .read(divePlanNotifierProvider.notifier)
+            .updateMode(domain.PlanMode.ccr);
+        return container;
+      }
+
+      DiveTank bailout(String id, {double o2 = 50}) => DiveTank(
+        id: id,
+        volume: 11.1,
+        startPressure: 200,
+        gasMix: GasMix(o2: o2),
+        role: TankRole.backGas,
+      );
+
+      PlanSegment hold(String tankId, GasMix mix) => PlanSegment.hold(
+        id: 'seg-$tankId',
+        depth: 30,
+        durationMinutes: 20,
+        tankId: tankId,
+        gasMix: mix,
+        order: 0,
+      );
+
+      test('entering CCR makes the plan\'s cylinder the diluent and adds an '
+          'oxygen placeholder', () {
+        final state = ccrContainer().read(divePlanNotifierProvider);
+        expect(state.tanks, hasLength(2));
+        expect(state.tanks.first.role, TankRole.diluent);
+        final o2 = state.tanks.last;
+        expect(o2.role, TankRole.oxygenSupply);
+        expect(o2.gasMix.o2, 100);
+        expect(o2.volume, 3.0);
+        expect(o2.startPressure, 200);
+      });
+
+      test('a further pure-O2 cylinder stays bailout; the slot is not '
+          'duplicated', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addTank(bailout('bo-o2', o2: 100));
+        notifier.updateMode(domain.PlanMode.scr);
+        notifier.updateMode(domain.PlanMode.ccr);
+        final state = container.read(divePlanNotifierProvider);
+        expect(
+          state.tanks.where((t) => t.role == TankRole.oxygenSupply),
+          hasLength(1),
+        );
+        expect(
+          state.tanks.firstWhere((t) => t.id == 'bo-o2').role,
+          TankRole.backGas,
+        );
+      });
+
+      test('the oxygen slot and the last diluent cannot be removed', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addTank(bailout('bo'));
+        final before = container.read(divePlanNotifierProvider).tanks;
+        final o2 = before.firstWhere((t) => t.role == TankRole.oxygenSupply);
+        final dil = before.firstWhere((t) => t.role == TankRole.diluent);
+
+        notifier.removeTank(o2.id);
+        notifier.removeTank(dil.id);
+        expect(container.read(divePlanNotifierProvider).tanks, before);
+
+        // A bailout cylinder still goes.
+        notifier.removeTank('bo');
+        expect(container.read(divePlanNotifierProvider).tanks, hasLength(2));
+      });
+
+      test('a second diluent can be removed; its segments move to the '
+          'remaining one', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        const deep = GasMix(o2: 10, he: 70);
+        notifier.addTank(
+          const DiveTank(
+            id: 'deep',
+            volume: 11.1,
+            startPressure: 200,
+            gasMix: deep,
+            role: TankRole.diluent,
+          ),
+        );
+        notifier.addSegment(hold('deep', deep));
+        notifier.removeTank('deep');
+        final state = container.read(divePlanNotifierProvider);
+        final remaining = state.tanks.firstWhere(
+          (t) => t.role == TankRole.diluent,
+        );
+        expect(state.segments.single.tankId, remaining.id);
+        expect(state.segments.single.gasMix, remaining.gasMix);
+      });
+
+      test('the oxygen slot keeps its role and 100 % through an edit; the '
+          'only diluent keeps its role', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        final tanks = container.read(divePlanNotifierProvider).tanks;
+        final o2 = tanks.firstWhere((t) => t.role == TankRole.oxygenSupply);
+        final dil = tanks.firstWhere((t) => t.role == TankRole.diluent);
+
+        notifier.updateTank(
+          o2.id,
+          o2.copyWith(role: TankRole.backGas, gasMix: const GasMix(o2: 50)),
+        );
+        notifier.updateTank(dil.id, dil.copyWith(role: TankRole.backGas));
+
+        final after = container.read(divePlanNotifierProvider).tanks;
+        final o2After = after.firstWhere((t) => t.id == o2.id);
+        expect(o2After.role, TankRole.oxygenSupply);
+        expect(o2After.gasMix.o2, 100);
+        expect(after.firstWhere((t) => t.id == dil.id).role, TankRole.diluent);
+      });
+
+      test('a segment on a CCR plan always breathes a diluent', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addTank(bailout('bo'));
+        notifier.addSegment(hold('bo', const GasMix(o2: 50)));
+        final state = container.read(divePlanNotifierProvider);
+        final dil = state.tanks.firstWhere((t) => t.role == TankRole.diluent);
+        expect(state.segments.single.tankId, dil.id);
+        expect(state.segments.single.gasMix, dil.gasMix);
+      });
+
+      group('a segment overridden off the loop keeps its cylinder (#3898)', () {
+        PlanSegment bailoutLeg() => hold(
+          'bo',
+          const GasMix(o2: 50),
+        ).copyWith(diveModeOverride: domain.PlanMode.oc);
+
+        test('when it is added', () {
+          final container = ccrContainer();
+          final notifier = container.read(divePlanNotifierProvider.notifier);
+          notifier.addTank(bailout('bo'));
+          notifier.addSegment(bailoutLeg());
+
+          final segment = container.read(divePlanNotifierProvider).segments;
+          expect(segment.single.tankId, 'bo');
+          expect(segment.single.gasMix, const GasMix(o2: 50));
+        });
+
+        test('when it is edited', () {
+          final container = ccrContainer();
+          final notifier = container.read(divePlanNotifierProvider.notifier);
+          notifier.addTank(bailout('bo'));
+          final leg = bailoutLeg();
+          notifier.addSegment(leg);
+          notifier.updateSegment(leg.id, leg.copyWith(durationSeconds: 300));
+
+          final segment = container.read(divePlanNotifierProvider).segments;
+          expect(segment.single.tankId, 'bo');
+          expect(segment.single.durationSeconds, 300);
+        });
+
+        test('when a plan is loaded, as an imported plan is', () {
+          final container = ccrContainer();
+          final notifier = container.read(divePlanNotifierProvider.notifier);
+          notifier.addTank(bailout('bo'));
+          final state = container.read(divePlanNotifierProvider);
+          notifier.loadPlan(state.copyWith(segments: [bailoutLeg()]));
+
+          expect(
+            container.read(divePlanNotifierProvider).segments.single.tankId,
+            'bo',
+          );
+        });
+
+        test('when the plan enters CCR', () {
+          final container = ProviderContainer(
+            overrides: [
+              settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+            ],
+          );
+          addTearDown(container.dispose);
+          final notifier = container.read(divePlanNotifierProvider.notifier);
+          notifier.addTank(bailout('bo'));
+          notifier.addSegment(bailoutLeg());
+          notifier.updateMode(domain.PlanMode.ccr);
+
+          expect(
+            container.read(divePlanNotifierProvider).segments.single.tankId,
+            'bo',
+          );
+        });
+      });
+
+      test('entering CCR on a plan whose only pure-O2 cylinder is already '
+          'breathed by a segment (an ordinary OC/SCR O2 deco bottle) '
+          'remaps that segment onto the diluent instead of leaving it on '
+          'the cylinder CcrLoopSlots just claimed for oxygen', () {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        final primary = container.read(divePlanNotifierProvider).tanks.first;
+        const o2 = DiveTank(
+          id: 'o2-deco',
+          volume: 11.1,
+          startPressure: 207,
+          gasMix: GasMix(o2: 100),
+          role: TankRole.deco,
+        );
+        notifier.addTank(o2);
+        notifier.addSegment(hold(primary.id, primary.gasMix));
+        notifier.addSegment(hold('o2-deco', const GasMix(o2: 100)));
+
+        notifier.updateMode(domain.PlanMode.ccr);
+
+        final state = container.read(divePlanNotifierProvider);
+        final slot = state.tanks.firstWhere((t) => t.id == 'o2-deco');
+        expect(slot.role, TankRole.oxygenSupply);
+        final dil = state.tanks.firstWhere((t) => t.role == TankRole.diluent);
+        // Neither segment may still reference the oxygen slot.
+        for (final segment in state.segments) {
+          expect(segment.tankId, isNot('o2-deco'));
+          expect(segment.tankId, dil.id);
+          expect(segment.gasMix, dil.gasMix);
+        }
+      });
+
+      test('loading a CCR plan with a segment stuck on the oxygen slot '
+          '(saved before this remap existed) is repaired on load', () {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        final saved = container
+            .read(divePlanNotifierProvider)
+            .copyWith(
+              mode: domain.PlanMode.ccr,
+              tanks: const [
+                DiveTank(
+                  id: 'dil',
+                  volume: 3,
+                  startPressure: 200,
+                  gasMix: GasMix(o2: 18, he: 45),
+                  role: TankRole.diluent,
+                ),
+                DiveTank(
+                  id: 'o2',
+                  volume: 3,
+                  startPressure: 200,
+                  gasMix: GasMix(o2: 100),
+                  role: TankRole.oxygenSupply,
+                ),
+              ],
+              segments: [hold('o2', const GasMix(o2: 100))],
+              isDirty: false,
+            );
+        notifier.loadPlan(saved);
+        final state = container.read(divePlanNotifierProvider);
+        expect(state.segments.single.tankId, 'dil');
+        expect(state.segments.single.gasMix, const GasMix(o2: 18, he: 45));
+      });
+
+      test('a quick plan on a CCR plan starts on the diluent, not the first '
+          'cylinder', () {
+        final container = ccrContainer();
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        // Reorder so a bailout sits first: the quick plan must still pick
+        // the diluent.
+        final dil = container
+            .read(divePlanNotifierProvider)
+            .tanks
+            .firstWhere((t) => t.role == TankRole.diluent);
+        notifier.removeTank(dil.id); // refused: last diluent
+        notifier.addTank(bailout('bo'));
+        notifier.addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+        final state = container.read(divePlanNotifierProvider);
+        for (final segment in state.segments) {
+          expect(segment.tankId, dil.id);
+        }
+      });
+
+      test('loading a CCR plan saved without an oxygen slot fills it '
+          'without marking the plan dirty', () {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        final saved = container
+            .read(divePlanNotifierProvider)
+            .copyWith(
+              mode: domain.PlanMode.ccr,
+              tanks: [
+                const DiveTank(
+                  id: 'dil',
+                  volume: 3,
+                  startPressure: 200,
+                  gasMix: GasMix(o2: 18, he: 45),
+                  role: TankRole.diluent,
+                ),
+              ],
+              isDirty: false,
+            );
+        notifier.loadPlan(saved);
+        final state = container.read(divePlanNotifierProvider);
+        expect(state.isDirty, isFalse);
+        expect(state.tanks.map((t) => t.role), [
+          TankRole.diluent,
+          TankRole.oxygenSupply,
+        ]);
+      });
     });
 
     test(
-      'newPlan resets reserve to 500 psi (~34 bar) when pressure unit is psi',
+      'updateLoopFlow sets and clears the plan loop flow fields (#4660)',
+      () {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.updateLoopFlow(
+          scrInjectionRate: 7.5,
+          scrVo2: 2.0,
+          pscrVo2: 0.9,
+        );
+        var state = container.read(divePlanNotifierProvider);
+        expect(state.scrInjectionRate, 7.5);
+        expect(state.scrVo2, 2.0);
+        expect(state.pscrVo2, 0.9);
+        expect(state.isDirty, isTrue);
+
+        notifier.updateLoopFlow(clearScrVo2: true);
+        state = container.read(divePlanNotifierProvider);
+        expect(state.scrInjectionRate, 7.5);
+        expect(state.scrVo2, isNull);
+        expect(state.pscrVo2, 0.9);
+      },
+    );
+
+    test('switching to CCR keeps setpoints the diver already set', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _TestSettingsNotifier(
+              ccrSetpointLow: 0.6,
+              ccrSetpointHigh: 1.2,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.updateMode(domain.PlanMode.ccr);
+      notifier.updateSetpoints(low: 0.8, high: 1.4);
+      // Switching mode again (e.g. OC -> CCR -> SCR -> CCR while cycling)
+      // must not clobber a setpoint the diver already dialed in.
+      notifier.updateMode(domain.PlanMode.scr);
+      notifier.updateMode(domain.PlanMode.ccr);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.setpointLow, 0.8);
+      expect(state.setpointHigh, 1.4);
+    });
+
+    test('switching to CCR seeds only the half the diver never set', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _TestSettingsNotifier(
+              ccrSetpointLow: 0.6,
+              ccrSetpointHigh: 1.2,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      // Only the low setpoint was ever hand-set (e.g. editing just that
+      // field); the high half must still pick up the diver's Settings
+      // instead of staying null forever.
+      notifier.updateSetpoints(low: 0.9);
+      notifier.updateMode(domain.PlanMode.ccr);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.setpointLow, 0.9);
+      expect(state.setpointHigh, 1.2);
+    });
+
+    test('a CCR plan ignores later CCR setpoint settings; switching mode '
+        'already dirtied it, so unlike GF/water there is nothing pristine '
+        'left to adopt into', () {
+      final settingsNotifier = _TestSettingsNotifier(
+        ccrSetpointLow: 0.6,
+        ccrSetpointHigh: 1.2,
+      );
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .updateMode(domain.PlanMode.ccr);
+      expect(container.read(divePlanNotifierProvider).isDirty, isTrue);
+
+      settingsNotifier.updateCcrSetpointsForTest(0.9, 1.5);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.setpointLow, 0.6);
+      expect(state.setpointHigh, 1.2);
+    });
+
+    test('an OC plan ignores CCR setpoint settings', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container.read(divePlanNotifierProvider);
+      settingsNotifier.updateCcrSetpointsForTest(0.6, 1.2);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.setpointLow, isNull);
+      expect(state.setpointHigh, isNull);
+    });
+
+    test('newPlan re-reads planner water from the diver settings', () {
+      final settingsNotifier = _TestSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.updateWaterType(WaterType.fresh);
+      settingsNotifier.updatePlannerWaterForTest(PlannerWaterType.custom);
+      notifier.newPlan();
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.waterType, isNull);
+      expect(state.salinityPpt, DiveEnvironment.typicalSeaSalinityPpt);
+    });
+
+    test('selectCustomSalinity seeds EN13319 when water type is unset', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.updateWaterType(null);
+      notifier.selectCustomSalinity();
+      expect(container.read(divePlanNotifierProvider).waterType, isNull);
+      expect(
+        container.read(divePlanNotifierProvider).salinityPpt,
+        DiveEnvironment.typicalSeaSalinityPpt,
+      );
+    });
+
+    test('a new plan has no reserve override on metric settings', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.reservePressure, isNull);
+    });
+
+    test('updateWaterType stores water type and marks dirty', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.salt,
+      );
+
+      notifier.updateWaterType(WaterType.fresh);
+      expect(
+        container.read(divePlanNotifierProvider).waterType,
+        WaterType.fresh,
+      );
+      expect(container.read(divePlanNotifierProvider).isDirty, isTrue);
+
+      notifier.updateWaterType(null);
+      expect(container.read(divePlanNotifierProvider).waterType, isNull);
+    });
+
+    test('selectCustomSalinity seeds from the current type and clears it', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.updateWaterType(WaterType.fresh);
+      notifier.selectCustomSalinity();
+      expect(container.read(divePlanNotifierProvider).waterType, isNull);
+      expect(container.read(divePlanNotifierProvider).salinityPpt, 0.0);
+
+      notifier.updateSalinityPpt(20);
+      expect(container.read(divePlanNotifierProvider).salinityPpt, 20);
+      notifier.updateWaterType(WaterType.salt);
+      expect(container.read(divePlanNotifierProvider).salinityPpt, isNull);
+    });
+
+    test('plan results follow custom salinity', () {
+      int ttsForSalinity(double ppt) {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+        notifier.updateSalinityPpt(ppt);
+        return container.read(planResultsProvider).ttsAtBottom;
+      }
+
+      expect(ttsForSalinity(40), greaterThan(ttsForSalinity(0)));
+    });
+
+    test('plan gas follows the plan altitude (#4010)', () {
+      double remainingAt(double? altitude) {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addSimplePlan(maxDepth: 30.0, bottomTimeMinutes: 20);
+        notifier.updateAltitude(altitude);
+        return container
+            .read(planResultsProvider)
+            .gasConsumptions
+            .first
+            .remainingPressure!;
+      }
+
+      expect(remainingAt(3000), greaterThan(remainingAt(null)));
+    });
+
+    test('the quick plan descends at the Settings rate when unset', () {
+      // An unset plan descent rate follows the diver's Settings (#3552),
+      // not the 18 m/min spec constant.
+      final notifier = DivePlanNotifier(
+        getEngineConfig: () => const PlanEngineConfig(descentRate: 10),
+      );
+      addTearDown(notifier.dispose);
+
+      notifier.addSimplePlan(maxDepth: 30.0, bottomTimeMinutes: 20);
+      // 30 m at 10 m/min.
+      expect(notifier.state.segments.first.durationSeconds, 180);
+    });
+
+    test('plan results follow the plan water type', () {
+      int ttsForWaterType(WaterType waterType) {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+        notifier.updateWaterType(waterType);
+        return container.read(planResultsProvider).ttsAtBottom;
+      }
+
+      expect(
+        ttsForWaterType(WaterType.salt),
+        greaterThan(ttsForWaterType(WaterType.fresh)),
+      );
+    });
+
+    test(
+      'newPlan still has no reserve override after a pressure-unit change',
       () {
         final settingsNotifier = _TestSettingsNotifier();
         final container = ProviderContainer(
@@ -104,26 +864,305 @@ void main() {
         final notifier = container.read(divePlanNotifierProvider.notifier);
         expect(
           container.read(divePlanNotifierProvider).reservePressure,
-          DivePlanState.kDefaultReservePressureBar,
+          isNull,
         );
 
         settingsNotifier.updatePressureUnitForTest(PressureUnit.psi);
         notifier.newPlan();
 
         final state = container.read(divePlanNotifierProvider);
-        expect(state.reservePressure, closeTo(34.47, 0.5));
+        expect(state.reservePressure, isNull);
       },
     );
 
-    test('newPlan uses reservePressure fallback when no callback provided', () {
-      final notifier = DivePlanNotifier(
-        PlanCalculatorService(),
-        reservePressure: 40,
+    test('a new plan has no gradient-factor override; it resolves from '
+        'settings', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _TestSettingsNotifier(gfLow: 35, gfHigh: 75),
+          ),
+        ],
       );
-      addTearDown(notifier.dispose);
+      addTearDown(container.dispose);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.gfLow, isNull);
+      expect(state.gfHigh, isNull);
+      expect(container.read(gfLowProvider), 35);
+      expect(container.read(gfHighProvider), 75);
+    });
+
+    test('newPlan clears a gradient-factor override back to unset', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _TestSettingsNotifier(gfLow: 35, gfHigh: 75),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.updateGradientFactors(10, 20);
+      expect(container.read(divePlanNotifierProvider).gfLow, 10);
 
       notifier.newPlan();
-      expect(notifier.state.reservePressure, 40);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.gfLow, isNull);
+      expect(state.gfHigh, isNull);
+    });
+
+    test('changing deco settings does not discard the in-progress plan', () {
+      final settingsNotifier = _TestSettingsNotifier(gfLow: 50, gfHigh: 85);
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 30.0, bottomTimeMinutes: 20);
+      final planned = container.read(divePlanNotifierProvider);
+      expect(planned.segments, isNotEmpty);
+
+      settingsNotifier.updateGradientFactorsForTest(20, 60);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.id, planned.id);
+      expect(state.segments, planned.segments);
+      // gfLow/gfHigh live-resolve against Settings instead of being
+      // snapshotted into state, so a settings change never touches them.
+      expect(state.gfLow, isNull);
+      expect(state.gfHigh, isNull);
+    });
+
+    test('an untouched plan has no gfLow/gfHigh; the resolved value follows '
+        'later gradient factor settings', () {
+      final settingsNotifier = _TestSettingsNotifier(gfLow: 50, gfHigh: 85);
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      expect(container.read(divePlanNotifierProvider).gfLow, isNull);
+      expect(container.read(gfLowProvider), 50);
+
+      // Settings hydrate from the database after this provider is first
+      // read.
+      settingsNotifier.updateGradientFactorsForTest(20, 60);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.gfLow, isNull);
+      expect(state.gfHigh, isNull);
+      expect(container.read(gfLowProvider), 20);
+      expect(container.read(gfHighProvider), 60);
+      // Adopting a setting is not a diver edit, so it must not arm Save.
+      expect(state.isDirty, isFalse);
+    });
+
+    test('a hand-tuned plan ignores later gradient factor settings', () {
+      final settingsNotifier = _TestSettingsNotifier(gfLow: 50, gfHigh: 85);
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => settingsNotifier)],
+      );
+      addTearDown(container.dispose);
+
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .updateGradientFactors(10, 20);
+
+      settingsNotifier.updateGradientFactorsForTest(20, 60);
+
+      final state = container.read(divePlanNotifierProvider);
+      expect(state.gfLow, 10);
+      expect(state.gfHigh, 20);
+    });
+
+    test('plan results follow the plan gradient factors, not the settings', () {
+      // Settings stay liberal throughout; only the plan's own factors move.
+      int ttsForPlanFactors(int low, int high) {
+        final container = ProviderContainer(
+          overrides: [
+            settingsProvider.overrideWith(
+              (ref) => _TestSettingsNotifier(gfLow: 90, gfHigh: 95),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(divePlanNotifierProvider.notifier);
+        notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+        notifier.updateGradientFactors(low, high);
+        return container.read(planResultsProvider).ttsAtBottom;
+      }
+
+      // These results have to describe the plan the diver is actually
+      // looking at.
+      expect(ttsForPlanFactors(20, 55), greaterThan(ttsForPlanFactors(90, 95)));
+    });
+
+    test(
+      'newPlan leaves gfLow/gfHigh unset even with no callback provided',
+      () {
+        final notifier = DivePlanNotifier();
+        addTearDown(notifier.dispose);
+
+        notifier.newPlan();
+
+        // gfLow/gfHigh live-resolve against Settings (issue #3552), so a
+        // new plan never snapshots them into state.
+        expect(notifier.state.gfLow, isNull);
+        expect(notifier.state.gfHigh, isNull);
+      },
+    );
+
+    test(
+      'newPlan leaves reservePressure unset even with no callback provided',
+      () {
+        final notifier = DivePlanNotifier();
+        addTearDown(notifier.dispose);
+
+        notifier.newPlan();
+        // reservePressure live-resolves against Settings (issue #3552), so
+        // a new plan never snapshots one into state.
+        expect(notifier.state.reservePressure, isNull);
+      },
+    );
+
+    test('clearing the repetitive dive settings drops carried exposure', () {
+      final notifier = DivePlanNotifier();
+      addTearDown(notifier.dispose);
+      notifier.loadPlan(
+        notifier.state.copyWith(initialCns: 30, initialOtu: 120),
+      );
+
+      notifier.clearRepetitiveDiveSettings();
+
+      expect(notifier.state.initialCns, isNull);
+      expect(notifier.state.initialOtu, isNull);
+    });
+
+    test('setLinkedDive records and clears the converted dive', () {
+      final notifier = DivePlanNotifier();
+      addTearDown(notifier.dispose);
+
+      notifier.setLinkedDive('dive-12');
+      expect(notifier.state.linkedDiveId, 'dive-12');
+
+      notifier.setLinkedDive(null);
+      expect(notifier.state.linkedDiveId, isNull);
+    });
+
+    test('setEquipmentIds keeps provenance in step with the ids (#1487)', () {
+      final notifier = DivePlanNotifier();
+      addTearDown(notifier.dispose);
+
+      notifier.setGear(
+        const ['reg', 'hose'],
+        const [
+          GearProvenance(equipmentId: 'reg', viaSetId: 'winter'),
+          GearProvenance(
+            equipmentId: 'hose',
+            viaEquipmentId: 'reg',
+            viaSetId: 'winter',
+          ),
+        ],
+      );
+      // The id-only setter: a surviving id keeps its row, a new id starts
+      // loose, a dropped id takes its row with it.
+      notifier.setEquipmentIds(const ['reg', 'mask']);
+
+      final rows = notifier.state.gearProvenance;
+      expect(rows.map((p) => p.equipmentId), ['reg', 'mask']);
+      expect(rows[0].viaSetId, 'winter');
+      expect(rows[1].isTopLevel, isTrue);
+      expect(rows[1].viaSetId, isNull);
+    });
+
+    test('fullGearProvenance gives every id a row so an assembly whose own '
+        'row is missing still rolls up (#1487)', () {
+      final notifier = DivePlanNotifier();
+      addTearDown(notifier.dispose);
+
+      // A sparse list: the wing's row names the bcd as parent, but the bcd
+      // has no row of its own. Read raw, the wing is an orphan and nothing
+      // rolls up, so buoyancy would count the bcd and the wing.
+      final state = notifier.state.copyWith(
+        equipmentIds: const ['bcd', 'wing'],
+        gearProvenance: const [
+          GearProvenance(equipmentId: 'wing', viaEquipmentId: 'bcd'),
+        ],
+      );
+
+      final full = state.fullGearProvenance;
+      expect(full.map((p) => p.equipmentId), ['bcd', 'wing']);
+      expect(full[0].isTopLevel, isTrue);
+      expect(full[1].viaEquipmentId, 'bcd');
+      expect(GearTree.rolledUpIds(full), {'bcd'});
+    });
+  });
+
+  // A plan holds breathing gas only (issue #4243).
+  group('a suit inflation bottle', () {
+    const suit = DiveTank(
+      id: 'suit',
+      volume: 0.85,
+      gasMix: GasMix(o2: 21),
+      role: TankRole.suitInflation,
+    );
+
+    ProviderContainer container() {
+      final c = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+      );
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    test('is refused by addTank', () {
+      final c = container();
+      final notifier = c.read(divePlanNotifierProvider.notifier);
+      final before = c.read(divePlanNotifierProvider).tanks;
+
+      notifier.addTank(suit);
+      expect(c.read(divePlanNotifierProvider).tanks, before);
+      notifier.addTank(const DiveTank(id: 'stage', gasMix: GasMix(o2: 50)));
+      expect(c.read(divePlanNotifierProvider).tanks.map((t) => t.id), [
+        ...before.map((t) => t.id),
+        'stage',
+      ]);
+    });
+
+    test('is refused as the role of an edited tank', () {
+      final c = container();
+      final notifier = c.read(divePlanNotifierProvider.notifier);
+      final tank = c.read(divePlanNotifierProvider).tanks.first;
+
+      notifier.updateTank(
+        tank.id,
+        tank.copyWith(role: TankRole.suitInflation, volume: 0.85),
+      );
+
+      final updated = c.read(divePlanNotifierProvider).tanks.first;
+      expect(updated.role, tank.role);
+      expect(updated.volume, 0.85);
+    });
+
+    test('is stripped from a plan opened for editing', () {
+      final c = container();
+      final notifier = c.read(divePlanNotifierProvider.notifier);
+      final plan = c.read(divePlanNotifierProvider);
+
+      notifier.loadPlan(plan.copyWith(tanks: [suit, ...plan.tanks]));
+
+      expect(
+        c.read(divePlanNotifierProvider).tanks.map((t) => t.role),
+        isNot(contains(TankRole.suitInflation)),
+      );
     });
   });
 }

@@ -1,0 +1,306 @@
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample_point.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_series.dart';
+
+/// The series of one source that nothing else it owns supersedes, in the
+/// order of [owned].
+///
+/// The same ranking `ProfileSeriesRepository.promoteWinnerOwnedBy` applies
+/// when a source becomes primary: the most recently activated series first
+/// (issue #3189), then the null-computer series (a manual edit), then the
+/// greatest id, and a lower-ranked series is dropped only where it overlaps
+/// a winner in time. A demoted source that was edited owns its original and
+/// its edit over the same timestamps; reading both would interleave two
+/// generations of one profile (issue #3066).
+List<ProfileSeries> liveSeriesOf(List<ProfileSeries> owned) {
+  if (owned.length < 2) return owned;
+  final ranked = [...owned]
+    ..sort((a, b) {
+      // Newest activation first; a series never activated ranks last, as
+      // SQLite's DESC orders a NULL.
+      final byActivation = (b.activatedAt ?? -1).compareTo(a.activatedAt ?? -1);
+      if (byActivation != 0) return byActivation;
+      final byEdit = (a.computerId == null ? 0 : 1).compareTo(
+        b.computerId == null ? 0 : 1,
+      );
+      return byEdit != 0 ? byEdit : b.id.compareTo(a.id);
+    });
+  final winners = <ProfileSeries>[];
+  for (final candidate in ranked) {
+    final superseded = winners.any(
+      (winner) =>
+          candidate.summary.startTimestamp <= winner.summary.endTimestamp &&
+          winner.summary.startTimestamp <= candidate.summary.endTimestamp,
+    );
+    if (!superseded) winners.add(candidate);
+  }
+  // By id: ProfileSeries equality compares every sample.
+  final winnerIds = {for (final w in winners) w.id};
+  return [
+    for (final s in owned)
+      if (winnerIds.contains(s.id)) s,
+  ];
+}
+
+/// Every sample of every series in [series], interleaved by timestamp.
+///
+/// This is what `ORDER BY timestamp` over the legacy row table produced for
+/// a multi-source dive. Stable: samples that share a timestamp keep the
+/// order of [series] and then their order within the series, so callers
+/// that pass series in `(start_timestamp, id)` order get a deterministic
+/// list on every device.
+List<DiveProfilePoint> mergeSeriesPoints(List<ProfileSeries> series) {
+  if (series.isEmpty) return const [];
+  if (series.length == 1) return series.single.points;
+  final entries = <(int timestamp, int order, ProfileSample sample)>[];
+  var order = 0;
+  for (final s in series) {
+    for (final sample in s.samples) {
+      entries.add((sample.timestamp, order++, sample));
+    }
+  }
+  entries.sort((a, b) {
+    final byTime = a.$1.compareTo(b.$1);
+    return byTime != 0 ? byTime : a.$2.compareTo(b.$2);
+  });
+  return [for (final entry in entries) entry.$3.toPoint()];
+}
+
+/// [mergeSeriesPoints] with the legacy `_dropDuplicateSamples` rule applied:
+/// a legacy row carried its identity columns, so whole-row equality only ever
+/// collapsed duplicates INSIDE one identity group `(computerId, sourceId,
+/// isPrimary)`. Two devices that each download the same computer mint
+/// different series ids and sync unions them; this is the read that keeps
+/// those from rendering every sample twice. Identical samples from two
+/// different computers are both kept, as the legacy read kept them.
+List<DiveProfilePoint> mergeSeriesPointsCollapsingDuplicates(
+  List<ProfileSeries> series,
+) {
+  if (series.isEmpty) return const [];
+  final entries =
+      <(int timestamp, int order, ProfileSeries owner, ProfileSample sample)>[];
+  var order = 0;
+  for (final s in series) {
+    for (final sample in s.samples) {
+      entries.add((sample.timestamp, order++, s, sample));
+    }
+  }
+  entries.sort((a, b) {
+    final byTime = a.$1.compareTo(b.$1);
+    return byTime != 0 ? byTime : a.$2.compareTo(b.$2);
+  });
+  final seen = <(String?, String?, bool, ProfileSample)>{};
+  return [
+    for (final e in entries)
+      if (seen.add((e.$3.computerId, e.$3.sourceId, e.$3.isPrimary, e.$4)))
+        e.$4.toPoint(),
+  ];
+}
+
+/// Interleaves every sample of [series] by timestamp into one tank pressure
+/// list. Ties keep series order, then within-series order, so the result is
+/// deterministic for the `(start_timestamp, id)` order the repositories
+/// return.
+List<TankPressurePoint> mergeTankSeriesPoints(List<TankPressureSeries> series) {
+  if (series.isEmpty) return const [];
+  final entries = <(int, int, TankPressurePoint)>[];
+  var order = 0;
+  for (final s in series) {
+    for (var i = 0; i < s.samples.length; i++) {
+      final sample = s.samples[i];
+      entries.add((
+        sample.timestamp,
+        order++,
+        TankPressurePoint(
+          tankId: s.tankId,
+          timestamp: sample.timestamp,
+          pressure: sample.pressure,
+        ),
+      ));
+    }
+  }
+  entries.sort((a, b) {
+    final byTime = a.$1.compareTo(b.$1);
+    return byTime != 0 ? byTime : a.$2.compareTo(b.$2);
+  });
+  return [for (final e in entries) e.$3];
+}
+
+/// The series a single computer's view of a dive should draw, per tank.
+///
+/// Consolidating two computers that were paired to the same transmitter
+/// files both computers' pressure series under one tank (the tanks match on
+/// gas mix, so the secondary's tank merges into the primary's). Merging
+/// those two series interleaves rival readings of the same cylinder, and
+/// because the computers sample on offset seconds the line alternates
+/// between them every sample: a fuzzy band wherever the two disagree by a
+/// fraction of a bar. This is the pressure twin of the depth rule in
+/// `activeSourceProfileProvider` (#543).
+///
+/// For each tank, keeps only the series logged by [computerId] (null keeps
+/// the series with no computer) when it logged that tank at all; a tank the
+/// computer never logged keeps every series it has, so a stage read by the
+/// other computer is not hidden. Input order is preserved.
+List<TankPressureSeries> selectTankSeriesForComputer(
+  List<TankPressureSeries> series,
+  String? computerId,
+) {
+  if (series.isEmpty) return const [];
+  final tanksLoggedByComputer = <String>{
+    for (final s in series)
+      if (s.computerId == computerId) s.tankId,
+  };
+  return [
+    for (final s in series)
+      if (!tanksLoggedByComputer.contains(s.tankId) ||
+          s.computerId == computerId)
+        s,
+  ];
+}
+
+/// The series to read for each tank so that no two recordings of the same
+/// stretch of the dive are interleaved (issue #2440).
+///
+/// Two file imports of one dive, consolidated, each log the same cylinder,
+/// usually shifted against each other by the difference in their clocks.
+/// Interleaving them makes the line zigzag between the two every sample.
+/// A combined dive is the opposite case: its sources recorded one after the
+/// other, and every one of them belongs in the line.
+///
+/// Per tank, the series are grouped by source; a series with no source is a
+/// group of its own, since nothing ties it to any other. Groups are taken in
+/// order of preference and each is kept unless one of its series overlaps a
+/// series already kept. Preference: [preferredSourceId]; then an unattributed group
+/// recorded by [preferredComputerId]; then attributed groups before
+/// unattributed ones; then the group with more samples; then the one that
+/// starts first; then the first series id. Input order is preserved in the
+/// result.
+List<TankPressureSeries> selectTankSeriesPerSource(
+  List<TankPressureSeries> series, {
+  required String? preferredSourceId,
+  String? preferredComputerId,
+}) {
+  if (series.isEmpty) return const [];
+  final groupsByTank = <String, Map<String, List<TankPressureSeries>>>{};
+  for (final s in series) {
+    final key = s.sourceId ?? 'series:${s.id}';
+    ((groupsByTank[s.tankId] ??= {})[key] ??= []).add(s);
+  }
+
+  final kept = <String>{};
+  for (final groups in groupsByTank.values) {
+    final ordered = groups.values.toList()
+      ..sort((a, b) {
+        final byRank = _preferenceRank(
+          a,
+          preferredSourceId,
+          preferredComputerId,
+        ).compareTo(_preferenceRank(b, preferredSourceId, preferredComputerId));
+        if (byRank != 0) return byRank;
+        final bySize = _sampleCount(b).compareTo(_sampleCount(a));
+        if (bySize != 0) return bySize;
+        final byStart = _spanOfGroup(a).$1.compareTo(_spanOfGroup(b).$1);
+        if (byStart != 0) return byStart;
+        return a.first.id.compareTo(b.first.id);
+      });
+    // Overlap is judged series by series, not on a group's overall span: a
+    // source that recorded two stretches with another source's recording
+    // in the gap between them overlaps nothing, and that middle recording
+    // must be kept.
+    final keptSpans = <(int, int)>[];
+    for (final group in ordered) {
+      final spans = [for (final s in group) _spanOf(s)];
+      final overlaps = spans.any(
+        (span) => keptSpans.any((k) => _spansOverlap(span, k)),
+      );
+      if (overlaps) continue;
+      keptSpans.addAll(spans);
+      kept.addAll(group.map((s) => s.id));
+    }
+  }
+  return [
+    for (final s in series)
+      if (kept.contains(s.id)) s,
+  ];
+}
+
+int _preferenceRank(
+  List<TankPressureSeries> group,
+  String? preferredSourceId,
+  String? preferredComputerId,
+) {
+  final sourceId = group.first.sourceId;
+  if (sourceId != null && sourceId == preferredSourceId) return 0;
+  if (sourceId == null &&
+      preferredComputerId != null &&
+      group.every((s) => s.computerId == preferredComputerId)) {
+    return 1;
+  }
+  return sourceId != null ? 2 : 3;
+}
+
+int _sampleCount(List<TankPressureSeries> group) =>
+    group.fold(0, (n, s) => n + s.summary.sampleCount);
+
+(int, int) _spanOf(TankPressureSeries series) =>
+    (series.summary.startTimestamp, series.summary.endTimestamp);
+
+/// Whether two recordings ran side by side. Two that only meet at one
+/// second, the last reading of one and the first of the next, ran one after
+/// the other, as a combined dive's halves do. A single reading has no length,
+/// so it overlaps any span that holds its second.
+bool _spansOverlap((int, int) a, (int, int) b) {
+  final start = a.$1 > b.$1 ? a.$1 : b.$1;
+  final end = a.$2 < b.$2 ? a.$2 : b.$2;
+  if (start < end) return true;
+  return start == end && (a.$1 == a.$2 || b.$1 == b.$2);
+}
+
+(int, int) _spanOfGroup(List<TankPressureSeries> group) {
+  var start = group.first.summary.startTimestamp;
+  var end = group.first.summary.endTimestamp;
+  for (final s in group.skip(1)) {
+    if (s.summary.startTimestamp < start) start = s.summary.startTimestamp;
+    if (s.summary.endTimestamp > end) end = s.summary.endTimestamp;
+  }
+  return (start, end);
+}
+
+/// Series-level twin of `DiveRepository._dropSupersededOriginals`.
+///
+/// A saved profile edit demotes the originals and inserts a null-computer
+/// series under the same source; the demoted originals of the primary
+/// family are superseded and must not render next to the edit. Family
+/// membership follows the legacy rule: with no data sources every series is
+/// family; otherwise a null-computer series or one on the primary computer
+/// is. The caller resolves the primary computer whenever promoted and demoted
+/// rows coexist, including the null-computer demoted-edit case; this keeps
+/// family membership aligned with `_dropSupersededOriginals` and prevents
+/// the restored original from rendering beside an inactive child edit.
+/// Nothing is dropped unless the family holds both a primary and a demoted
+/// member.
+///
+/// `profileSpanSecondsSql` restates this rule in SQL so Insights measures a
+/// dive over the same series (issue #3537); change both together, and
+/// profile_span_sql_parity_test.dart checks that they agree.
+List<ProfileSeries> dropSupersededSeries(
+  List<ProfileSeries> series, {
+  required bool hasSources,
+  required String? primaryComputerId,
+}) {
+  if (!series.any((s) => !s.isPrimary) || !series.any((s) => s.isPrimary)) {
+    return series;
+  }
+  bool isFamily(ProfileSeries s) =>
+      !hasSources || s.computerId == null || s.computerId == primaryComputerId;
+  final family = series.where(isFamily);
+  final edited =
+      family.any((s) => s.isPrimary && s.computerId == null) &&
+      family.any((s) => !s.isPrimary);
+  if (!edited) return series;
+  return [
+    for (final s in series)
+      if (s.isPrimary || !isFamily(s)) s,
+  ];
+}

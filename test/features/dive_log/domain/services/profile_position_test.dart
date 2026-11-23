@@ -1,0 +1,109 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/profile_position.dart';
+
+void main() {
+  final profile = [
+    const DiveProfilePoint(timestamp: 0, depth: 0),
+    const DiveProfilePoint(timestamp: 10, depth: 5),
+    const DiveProfilePoint(timestamp: 20, depth: 10),
+    const DiveProfilePoint(timestamp: 40, depth: 12),
+  ];
+
+  group('indexForTimestamp', () {
+    test('exact match', () => expect(indexForTimestamp(profile, 20), 2));
+    test(
+      'between samples returns earlier sample',
+      () => expect(indexForTimestamp(profile, 25), 2),
+    );
+    test(
+      'before start clamps to 0',
+      () => expect(indexForTimestamp(profile, -5), 0),
+    );
+    test(
+      'after end clamps to last',
+      () => expect(indexForTimestamp(profile, 999), 3),
+    );
+    test(
+      'empty profile returns null',
+      () => expect(indexForTimestamp(const [], 10), isNull),
+    );
+  });
+
+  group('pressureAtTimestamp', () {
+    final points = [
+      const TankPressurePoint(tankId: 'tank1', timestamp: 0, pressure: 200),
+      const TankPressurePoint(tankId: 'tank1', timestamp: 60, pressure: 180),
+      const TankPressurePoint(tankId: 'tank1', timestamp: 120, pressure: 160),
+    ];
+    test('exact match', () => expect(pressureAtTimestamp(points, 60), 180));
+    test(
+      'between points returns earlier value',
+      () => expect(pressureAtTimestamp(points, 90), 180),
+    );
+    test(
+      'after last returns last',
+      () => expect(pressureAtTimestamp(points, 999), 160),
+    );
+    test(
+      'empty returns null',
+      () => expect(pressureAtTimestamp(const [], 10), isNull),
+    );
+  });
+
+  group('tankPressureRange', () {
+    test('spans the min and max across every tank\'s samples', () {
+      final range = tankPressureRange({
+        'tank1': [
+          const TankPressurePoint(tankId: 'tank1', timestamp: 0, pressure: 200),
+          const TankPressurePoint(
+            tankId: 'tank1',
+            timestamp: 60,
+            pressure: 150,
+          ),
+        ],
+        'tank2': [
+          const TankPressurePoint(tankId: 'tank2', timestamp: 0, pressure: 210),
+          const TankPressurePoint(tankId: 'tank2', timestamp: 60, pressure: 90),
+        ],
+      });
+      expect(range, (min: 90.0, max: 210.0));
+    });
+
+    test('returns null for an empty map', () {
+      expect(tankPressureRange(const {}), isNull);
+    });
+
+    test('returns null when every tank has no samples', () {
+      expect(tankPressureRange({'tank1': const [], 'tank2': const []}), isNull);
+    });
+  });
+
+  group('tankPressureScale', () {
+    test('pads the range across every tank by 5% of its span', () {
+      final scale = tankPressureScale({
+        'tank1': [
+          const TankPressurePoint(tankId: 'tank1', timestamp: 0, pressure: 200),
+        ],
+        'tank2': [
+          const TankPressurePoint(tankId: 'tank2', timestamp: 0, pressure: 100),
+        ],
+      });
+      expect(scale, (min: 95.0, max: 205.0));
+    });
+
+    test('returns null when there are no samples', () {
+      expect(tankPressureScale(const {}), isNull);
+    });
+
+    test('returns null when every sample is identical', () {
+      final scale = tankPressureScale({
+        'tank1': [
+          const TankPressurePoint(tankId: 'tank1', timestamp: 0, pressure: 0),
+          const TankPressurePoint(tankId: 'tank1', timestamp: 60, pressure: 0),
+        ],
+      });
+      expect(scale, isNull);
+    });
+  });
+}

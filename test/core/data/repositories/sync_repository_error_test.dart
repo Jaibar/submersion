@@ -64,12 +64,25 @@ void main() {
         repository.logDeletion(entityType: 'dives', recordId: 'test-id'),
         throwsA(anything),
       );
+      // The batched form rethrows too: the diver deletion runs it inside its
+      // transaction and counts on a failure rolling the rows back with it,
+      // rather than deleting them with no tombstone.
+      await expectLater(
+        repository.logDeletions(entityType: 'dives', recordIds: ['test-id']),
+        throwsA(anything),
+      );
       await expectLater(
         repository.getDeletionsSince(DateTime.now()),
         throwsA(anything),
       );
       await expectLater(repository.getAllDeletions(), throwsA(anything));
-      await expectLater(repository.clearOldDeletions(), throwsA(anything));
+      await expectLater(
+        repository.clearAcknowledgedDeletions(
+          upToHlc: null,
+          floorCutoffMillis: 0,
+        ),
+        throwsA(anything),
+      );
       await expectLater(repository.clearAllDeletions(), throwsA(anything));
       await expectLater(repository.resetSyncState(), throwsA(anything));
     });

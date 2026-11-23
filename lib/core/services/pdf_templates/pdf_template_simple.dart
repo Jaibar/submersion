@@ -1,14 +1,24 @@
+import 'dart:typed_data';
+
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'package:submersion/core/constants/pdf_templates.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_profile_series.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_fonts.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_shared_components.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_builder.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
 
 /// Simple PDF template with high-density table format.
 ///
@@ -23,19 +33,72 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
   Future<List<int>> buildPdf({
     required List<Dive> dives,
     required PdfPageSize pageSize,
-    String title = 'Dive Logbook',
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    Map<String, Map<String, String>> annotationTimesByDive = const {},
+    String? title,
     Map<String, List<Signature>>? diveSignatures,
     List<Certification>? certifications,
+    CertificationCatalog? certificationCatalog,
     Diver? diver,
+    // Accepted for the shared builder contract; this template does not chart
+    // profiles, show a portrait, or offer verification areas.
+    Map<String, PdfProfileSeries>? profiles,
+    Uint8List? diverPhoto,
+    bool includeVerificationAreas = false,
+    EquipmentArrangement gearArrangement = EquipmentArrangement.defaults,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+    Map<String, String> equipmentSetNamesById = const {},
+    DateTime? generatedAt,
+    PdfLocalization? localization,
   }) async {
-    final pdf = pw.Document(theme: PdfFonts.instance.theme);
+    final stamp = generatedAt ?? DateTime.now();
+    final loc = localization ?? PdfLocalization.english();
+    final l10n = loc.l10n;
+    final documentTitle = title ?? l10n.settings_export_pdfDocumentTitle;
+    final pdf = pw.Document(theme: await PdfFonts.instance.themeFor(loc));
     final pageFormat = getPageFormat(pageSize);
+
+    // Key metrics up front (#1017). The compact table below stays untouched:
+    // Simple remains the dense option, it just no longer opens cold.
+    if (dives.isNotEmpty) {
+      pdf.addPage(
+        pw.Page(
+          pageFormat: pageFormat,
+          textDirection: loc.textDirection,
+          build: (context) => PdfSharedComponents.buildSummaryPage(
+            dives: dives,
+            dates: dates,
+            units: units,
+            l10n: l10n,
+          ),
+        ),
+      );
+    }
+
+    if (certifications != null && certifications.isNotEmpty) {
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: pageFormat,
+          margin: const pw.EdgeInsets.all(32),
+          textDirection: loc.textDirection,
+          build: (context) => PdfSharedComponents.buildCertificationCardsBody(
+            certifications: certifications,
+            certificationCatalog: certificationCatalog,
+            dates: dates,
+            l10n: l10n,
+            diver: diver,
+          ),
+        ),
+      );
+    }
 
     // Calculate dives per page based on page size
     final divesPerPage = pageSize == PdfPageSize.a4 ? 20 : 18;
 
     // Header row for the table
-    final headerStyle = pw.TextStyle(
+    const headerStyle = pw.TextStyle(
       fontSize: 9,
       fontWeight: pw.FontWeight.bold,
       color: PdfColors.grey800,
@@ -56,6 +119,7 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
         pw.Page(
           pageFormat: pageFormat,
           margin: const pw.EdgeInsets.all(24),
+          textDirection: loc.textDirection,
           build: (context) => pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
@@ -65,8 +129,8 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
                     pw.Text(
-                      title,
-                      style: pw.TextStyle(
+                      documentTitle,
+                      style: const pw.TextStyle(
                         fontSize: 18,
                         fontWeight: pw.FontWeight.bold,
                       ),
@@ -86,7 +150,7 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
                     pw.Text(
-                      '${dives.length} dives',
+                      l10n.pdf_headerDiveCount(dives.length),
                       style: const pw.TextStyle(
                         fontSize: 10,
                         color: PdfColors.grey600,
@@ -94,7 +158,7 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                     ),
                     if (dives.isNotEmpty)
                       pw.Text(
-                        '${PdfSharedComponents.formatDate(dives.last.dateTime)} - ${PdfSharedComponents.formatDate(dives.first.dateTime)}',
+                        '${dates.date(dives.last.dateTime)} - ${dates.date(dives.first.dateTime)}',
                         style: const pw.TextStyle(
                           fontSize: 10,
                           color: PdfColors.grey600,
@@ -128,11 +192,11 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                     ),
                     children: [
                       _buildHeaderCell('#', headerStyle),
-                      _buildHeaderCell('Date', headerStyle),
-                      _buildHeaderCell('Site', headerStyle),
-                      _buildHeaderCell('Depth', headerStyle),
-                      _buildHeaderCell('Time', headerStyle),
-                      _buildHeaderCell('Temp', headerStyle),
+                      _buildHeaderCell(l10n.pdf_columnDate, headerStyle),
+                      _buildHeaderCell(l10n.pdf_columnSite, headerStyle),
+                      _buildHeaderCell(l10n.pdf_columnDepth, headerStyle),
+                      _buildHeaderCell(l10n.pdf_columnTime, headerStyle),
+                      _buildHeaderCell(l10n.pdf_columnTemp, headerStyle),
                     ],
                   ),
                   // Data rows
@@ -140,30 +204,25 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                     (dive) => pw.TableRow(
                       children: [
                         _buildCell('${dive.diveNumber ?? '-'}', cellStyle),
-                        _buildCell(
-                          PdfSharedComponents.formatDate(dive.dateTime),
-                          cellStyle,
-                        ),
+                        _buildCell(dates.date(dive.dateTime), cellStyle),
                         _buildCell(
                           dive.site?.name ?? '-',
                           cellStyle,
-                          align: pw.TextAlign.left,
+                          align: pw.TextAlign.start,
                         ),
                         _buildCell(
                           dive.maxDepth != null
-                              ? '${dive.maxDepth!.toStringAsFixed(1)}m'
+                              ? units.formatDepth(dive.maxDepth)
                               : '-',
                           cellStyle,
                         ),
                         _buildCell(
-                          dive.bottomTime != null
-                              ? '${dive.bottomTime!.inMinutes}min'
-                              : '-',
+                          pdfDiveDurationCompact(dive, l10n),
                           cellStyle,
                         ),
                         _buildCell(
                           dive.waterTemp != null
-                              ? '${dive.waterTemp!.toStringAsFixed(0)}°C'
+                              ? units.formatTemperature(dive.waterTemp)
                               : '-',
                           cellStyle,
                         ),
@@ -178,14 +237,17 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
                   pw.Text(
-                    'Generated ${PdfSharedComponents.formatDate(DateTime.now())}',
+                    l10n.pdf_generated(dates.date(stamp)),
                     style: const pw.TextStyle(
                       fontSize: 8,
                       color: PdfColors.grey500,
                     ),
                   ),
                   pw.Text(
-                    'Page ${(pageStart ~/ divesPerPage) + 1} of ${((dives.length - 1) ~/ divesPerPage) + 1}',
+                    l10n.pdf_pageOf(
+                      '${(pageStart ~/ divesPerPage) + 1}',
+                      '${((dives.length - 1) ~/ divesPerPage) + 1}',
+                    ),
                     style: const pw.TextStyle(
                       fontSize: 8,
                       color: PdfColors.grey500,
@@ -204,9 +266,10 @@ class PdfTemplateSimple extends PdfTemplateBuilder {
       pdf.addPage(
         pw.Page(
           pageFormat: pageFormat,
+          textDirection: loc.textDirection,
           build: (context) => pw.Center(
             child: pw.Text(
-              'No dives to display',
+              l10n.pdf_noDivesToDisplay,
               style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey600),
             ),
           ),

@@ -1,10 +1,20 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/core/router/global_search_location.dart';
+import 'package:submersion/core/router/pushed_route.dart';
+import 'package:submersion/core/router/section_navigation.dart';
+import 'package:submersion/core/accessibility/not_while_typing_activator.dart';
 import 'package:submersion/core/accessibility/shortcut_registry.dart';
 import 'package:submersion/core/accessibility/shortcuts_help_dialog.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_search_providers.dart';
+import 'package:submersion/features/explore/presentation/providers/explore_gate_providers.dart';
+import 'package:submersion/features/global_search/presentation/providers/global_search_providers.dart';
+import 'package:submersion/features/divers/presentation/widgets/diver_switcher_sheet.dart';
+import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 
 /// Creates a platform-appropriate shortcut activator.
 ///
@@ -30,6 +40,19 @@ class AppShortcuts {
 
   static bool _registered = false;
 
+  /// Forget that the shortcuts were registered, so the next
+  /// [ensureRegistered] fills the catalog again.
+  ///
+  /// [ShortcutCatalog.clear] empties the catalog but cannot reach this flag,
+  /// so a test that clears the catalog resets the flag with it.
+  @visibleForTesting
+  static void debugReset() {
+    _registered = false;
+    _askSubscription?.close();
+    _askSubscription = null;
+    _askContainer = null;
+  }
+
   /// Register all global shortcuts with the [ShortcutCatalog].
   ///
   /// Safe to call multiple times -- only registers once.
@@ -37,6 +60,13 @@ class AppShortcuts {
     if (_registered) return;
     _registered = true;
 
+    // The `label` and `category` strings below are deliberately English
+    // literals, NOT `context.l10n` lookups. Registration happens once from
+    // a static method with no BuildContext, and ShortcutCatalog uses the
+    // category string as a grouping key, a sort key and the argument to
+    // unregisterCategory. They are stable identifiers; the help sheet
+    // resolves them to the UI language at render time through
+    // shortcutEntryLabel / shortcutCategoryLabel in shortcut_display.dart.
     ShortcutCatalog.instance.registerAll([
       // Navigation
       ShortcutEntry(
@@ -64,7 +94,7 @@ class AppShortcuts {
         isGlobal: true,
       ),
       ShortcutEntry(
-        label: 'Go to Statistics',
+        label: 'Go to Insights',
         category: 'Navigation',
         activator: platformShortcut(LogicalKeyboardKey.digit4),
         isGlobal: true,
@@ -89,6 +119,14 @@ class AppShortcuts {
         activator: platformShortcut(LogicalKeyboardKey.keyF),
         isGlobal: true,
       ),
+      ShortcutEntry(
+        label: 'Search everything',
+        category: 'Search',
+        activator: platformShortcut(LogicalKeyboardKey.keyK),
+        isGlobal: true,
+      ),
+      // 'Ask about your dives' is listed by globalBindings, which can read
+      // the platform gate from the provider graph.
 
       // General
       const ShortcutEntry(
@@ -105,15 +143,71 @@ class AppShortcuts {
         activator: platformShortcut(LogicalKeyboardKey.comma),
         isGlobal: true,
       ),
+      ShortcutEntry(
+        label: 'Switch diver',
+        category: 'Navigation',
+        activator: platformShortcut(LogicalKeyboardKey.keyD, shift: true),
+        isGlobal: true,
+      ),
 
-      // Help
+      // Help. Bare "?" is ignored while typing in a text field; the modified
+      // key works everywhere, including inside one (#2145).
       const ShortcutEntry(
         label: 'Keyboard shortcuts',
         category: 'Help',
         activator: SingleActivator(LogicalKeyboardKey.question),
         isGlobal: true,
       ),
+      ShortcutEntry(
+        label: 'Keyboard shortcuts',
+        category: 'Help',
+        activator: platformShortcut(LogicalKeyboardKey.slash),
+        isGlobal: true,
+      ),
     ]);
+  }
+
+  static const _askLabel = 'Ask about your dives';
+
+  /// The container Ask's catalog entry follows, and its subscription.
+  static ProviderContainer? _askContainer;
+  static ProviderSubscription<bool>? _askSubscription;
+
+  /// Keeps Ask's catalog entry in step with whether Ask can answer (the
+  /// platform, the model probe and the locale), which changes while the
+  /// app runs: the catalog itself is filled once (#2773). One subscription
+  /// per container, however often the shell rebuilds.
+  static void _followAskAvailability(ProviderContainer container) {
+    if (identical(container, _askContainer)) return;
+    _askSubscription?.close();
+    _askContainer = container;
+    _askSubscription = container.listen<bool>(
+      exploreEnabledProvider,
+      (_, enabled) => _syncAskEntry(enabled),
+      fireImmediately: true,
+    );
+  }
+
+  /// Lists or unlists Ask (Cmd/Ctrl+Enter in the dive search field, #2773)
+  /// in the catalog.
+  /// The gate is a provider so every entry point, and every test override,
+  /// agrees; registration has no container, so the entry follows here.
+  static void _syncAskEntry(bool supported) {
+    final catalog = ShortcutCatalog.instance;
+    final listed = catalog.entries.any((e) => e.label == _askLabel);
+    if (listed == supported) return;
+    if (supported) {
+      catalog.register(
+        ShortcutEntry(
+          label: _askLabel,
+          category: 'Search',
+          // Not global: it works inside the dive search field.
+          activator: platformShortcut(LogicalKeyboardKey.enter),
+        ),
+      );
+    } else {
+      catalog.unregisterLabel(_askLabel);
+    }
   }
 
   /// Returns the global shortcut bindings map for [CallbackShortcuts].
@@ -121,26 +215,37 @@ class AppShortcuts {
     BuildContext context,
   ) {
     ensureRegistered();
+    _followAskAvailability(ProviderScope.containerOf(context, listen: false));
 
     return {
-      // Navigation
+      // Navigation.
+      //
+      // The numbered section shortcuts below use `go` deliberately: switching
+      // top-level sections SHOULD reset the stack. The child routes here use
+      // `push`, because these bindings are mounted around the entire shell and
+      // `go` into a `/dives` child would rebuild the stack as [dive list, X],
+      // stranding a user who pressed the key from Media or Insights.
       platformShortcut(LogicalKeyboardKey.keyN): () {
-        context.go('/dives/new');
+        // PUSH (not go): the digit shortcuts below switch tabs, but this
+        // opens a sub-page and must stay poppable (#647).
+        context.push('/dives/new');
       },
+      // Guarded: a tab's own key keeps its route, so no onExit asks about a
+      // record held in its list pane (issue #4527).
       platformShortcut(LogicalKeyboardKey.digit1): () {
-        context.go('/dives');
+        context.goGuarded('/dives');
       },
       platformShortcut(LogicalKeyboardKey.digit2): () {
-        context.go('/sites');
+        context.goGuarded('/sites');
       },
       platformShortcut(LogicalKeyboardKey.digit3): () {
-        context.go('/equipment');
+        context.goGuarded('/equipment');
       },
       platformShortcut(LogicalKeyboardKey.digit4): () {
-        context.go('/statistics');
+        context.goGuarded('/insights');
       },
       platformShortcut(LogicalKeyboardKey.digit5): () {
-        context.go('/settings');
+        context.goGuarded('/settings');
       },
       platformShortcut(LogicalKeyboardKey.keyW): () {
         if (context.canPop()) {
@@ -148,18 +253,51 @@ class AppShortcuts {
         }
       },
 
-      // Search
+      // Search: the dive list's search row (#2773), opened with the caret
+      // in it. From another section this switches to Dives, like digit1.
       platformShortcut(LogicalKeyboardKey.keyF): () {
-        context.go('/dives/search');
+        final container = ProviderScope.containerOf(context, listen: false);
+        container.read(diveSearchBarOpenProvider.notifier).state = true;
+        container.read(diveSearchFocusPendingProvider.notifier).state = true;
+        // The page on top, not the reported location: a dive list pushed
+        // over a site (#3292) leaves the router reporting the site's URI,
+        // and a go('/dives') from there would erase the list.
+        final config = GoRouter.of(context).routerDelegate.currentConfiguration;
+        final top = config.matches.isEmpty
+            ? null
+            : leafMatch(config.matches.last);
+        final uri = top is ImperativeRouteMatch ? top.matches.uri : config.uri;
+        // The phone map view (/dives?view=map) has no search row; wide
+        // layouts show the list beside the map, so they stay put.
+        final phoneMap =
+            uri.queryParameters['view'] == 'map' &&
+            !ResponsiveBreakpoints.isMasterDetail(context);
+        if (uri.path != '/dives' || phoneMap) context.go('/dives');
+      },
+
+      // Global search (#3882), over whatever page is up, so Back returns to
+      // it. Pressed on the search page it puts the caret back in the field.
+      platformShortcut(LogicalKeyboardKey.keyK): () {
+        final container = ProviderScope.containerOf(context, listen: false);
+        container.read(globalSearchFocusPendingProvider.notifier).state = true;
+        context.pushOrReturnTo(kGlobalSearchLocation);
       },
 
       // Settings
       platformShortcut(LogicalKeyboardKey.comma): () {
         context.go('/settings');
       },
+      platformShortcut(LogicalKeyboardKey.keyD, shift: true): () {
+        showDiverSwitcherSheet(context);
+      },
 
-      // Help overlay (bare "?" key, no modifier — matches convention)
-      const CharacterActivator('?'): () {
+      // Help overlay. Bare "?" follows the common convention, but it must not
+      // fire while the diver is typing, or no field could ever contain a "?"
+      // (#2145). Ctrl+/ (Cmd+/ on macOS) opens the help from anywhere.
+      const NotWhileTypingActivator(CharacterActivator('?')): () {
+        showShortcutsHelpDialog(context);
+      },
+      platformShortcut(LogicalKeyboardKey.slash): () {
         showShortcutsHelpDialog(context);
       },
     };

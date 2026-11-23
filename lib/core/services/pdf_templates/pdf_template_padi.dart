@@ -1,14 +1,29 @@
+import 'dart:typed_data';
+
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'package:submersion/core/constants/pdf_templates.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_profile_series.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_fonts.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_shared_components.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_builder.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/dive_participant_names.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/visibility_display.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/environment_enum_display.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_notes_markdown.dart';
 
 /// PADI-style PDF template mimicking PADI logbook format.
 ///
@@ -27,21 +42,44 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
   Future<List<int>> buildPdf({
     required List<Dive> dives,
     required PdfPageSize pageSize,
-    String title = 'Dive Logbook',
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    Map<String, Map<String, String>> annotationTimesByDive = const {},
+    String? title,
     Map<String, List<Signature>>? diveSignatures,
     List<Certification>? certifications,
+    CertificationCatalog? certificationCatalog,
     Diver? diver,
+    // Accepted for the shared builder contract; this template does not chart
+    // profiles, show a portrait, or offer verification areas.
+    Map<String, PdfProfileSeries>? profiles,
+    Uint8List? diverPhoto,
+    bool includeVerificationAreas = false,
+    EquipmentArrangement gearArrangement = EquipmentArrangement.defaults,
+    Map<String, DiveTypeEntity> diveTypesById = const {},
+    Map<String, DiveRole> diveRolesById = const {},
+    Map<String, String> equipmentSetNamesById = const {},
+    DateTime? generatedAt,
+    PdfLocalization? localization,
   }) async {
-    final pdf = pw.Document(theme: PdfFonts.instance.theme);
+    final stamp = generatedAt ?? DateTime.now();
+    final loc = localization ?? PdfLocalization.english();
+    final l10n = loc.l10n;
+    final documentTitle = title ?? l10n.settings_export_pdfDocumentTitle;
+    final pdf = pw.Document(theme: await PdfFonts.instance.themeFor(loc));
     final pageFormat = getPageFormat(pageSize);
 
     // Cover page
     pdf.addPage(
       pw.Page(
         pageFormat: pageFormat,
+        textDirection: loc.textDirection,
         build: (context) => _buildCoverPage(
-          title: title,
+          title: documentTitle,
           diveCount: dives.length,
+          dates: dates,
+          l10n: l10n,
+          generatedAt: stamp,
           diver: diver,
           firstDiveDate: dives.isNotEmpty ? dives.last.dateTime : null,
           lastDiveDate: dives.isNotEmpty ? dives.first.dateTime : null,
@@ -52,11 +90,15 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
     // Certification cards page - highlight PADI certs
     if (certifications != null && certifications.isNotEmpty) {
       pdf.addPage(
-        pw.Page(
+        pw.MultiPage(
           pageFormat: pageFormat,
           margin: const pw.EdgeInsets.all(32),
-          build: (context) => PdfSharedComponents.buildCertificationCardsPage(
+          textDirection: loc.textDirection,
+          build: (context) => PdfSharedComponents.buildCertificationCardsBody(
             certifications: certifications,
+            certificationCatalog: certificationCatalog,
+            dates: dates,
+            l10n: l10n,
             diver: diver,
             highlightAgency: 'padi',
             accentColor: _padiBlue,
@@ -74,17 +116,22 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
         pw.Page(
           pageFormat: pageFormat,
           margin: const pw.EdgeInsets.all(24),
+          textDirection: loc.textDirection,
           build: (context) => pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
               // Page header
-              _buildPageHeader(diver: diver),
+              _buildPageHeader(diver: diver, l10n: l10n),
               pw.SizedBox(height: 8),
               // Dive entries
               ...pageDives.expand(
                 (dive) => [
                   _buildPadiDiveEntry(
+                    annotationTimes: annotationTimesByDive[dive.id] ?? const {},
                     dive,
+                    dates: dates,
+                    units: units,
+                    l10n: l10n,
                     signatures: diveSignatures?[dive.id],
                   ),
                   pw.SizedBox(height: 8),
@@ -102,6 +149,9 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
   pw.Widget _buildCoverPage({
     required String title,
     required int diveCount,
+    required PdfDateFormatter dates,
+    required AppLocalizations l10n,
+    required DateTime generatedAt,
     Diver? diver,
     DateTime? firstDiveDate,
     DateTime? lastDiveDate,
@@ -117,12 +167,12 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
             color: _padiBlue,
             child: pw.Center(
               child: pw.Text(
-                'DIVE LOG',
+                l10n.pdf_diveLogBanner,
                 style: pw.TextStyle(
                   fontSize: 36,
                   fontWeight: pw.FontWeight.bold,
                   color: PdfColors.white,
-                  letterSpacing: 4,
+                  letterSpacing: pdfTracking(l10n.pdf_diveLogBanner, 4),
                 ),
               ),
             ),
@@ -131,7 +181,7 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
           if (diver != null) ...[
             pw.Text(
               diver.name,
-              style: pw.TextStyle(
+              style: const pw.TextStyle(
                 fontSize: 24,
                 fontWeight: pw.FontWeight.bold,
                 color: _padiBlue,
@@ -149,14 +199,14 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
               children: [
                 pw.Text(
                   '$diveCount',
-                  style: pw.TextStyle(
+                  style: const pw.TextStyle(
                     fontSize: 48,
                     fontWeight: pw.FontWeight.bold,
                     color: _padiBlue,
                   ),
                 ),
                 pw.Text(
-                  'Logged Dives',
+                  l10n.pdf_loggedDives,
                   style: const pw.TextStyle(
                     fontSize: 16,
                     color: PdfColors.grey700,
@@ -168,13 +218,13 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
           if (firstDiveDate != null && lastDiveDate != null) ...[
             pw.SizedBox(height: 20),
             pw.Text(
-              '${PdfSharedComponents.formatDate(firstDiveDate)} - ${PdfSharedComponents.formatDate(lastDiveDate)}',
+              '${dates.date(firstDiveDate)} - ${dates.date(lastDiveDate)}',
               style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey600),
             ),
           ],
           pw.Spacer(),
           pw.Text(
-            'Generated ${PdfSharedComponents.formatDateTime(DateTime.now())}',
+            l10n.pdf_generated(dates.dateTime(generatedAt)),
             style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey500),
           ),
           pw.SizedBox(height: 20),
@@ -183,7 +233,7 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
     );
   }
 
-  pw.Widget _buildPageHeader({Diver? diver}) {
+  pw.Widget _buildPageHeader({Diver? diver, required AppLocalizations l10n}) {
     return pw.Container(
       width: double.infinity,
       padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -192,8 +242,8 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
         mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
         children: [
           pw.Text(
-            'DIVE LOG',
-            style: pw.TextStyle(
+            l10n.pdf_diveLogBanner,
+            style: const pw.TextStyle(
               fontSize: 12,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.white,
@@ -209,10 +259,19 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
     );
   }
 
-  pw.Widget _buildPadiDiveEntry(Dive dive, {List<Signature>? signatures}) {
-    final tank = dive.tanks.isNotEmpty ? dive.tanks.first : null;
+  pw.Widget _buildPadiDiveEntry(
+    Dive dive, {
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    required AppLocalizations l10n,
+    List<Signature>? signatures,
+    Map<String, String> annotationTimes = const {},
+  }) {
+    // The dive's gas is its first breathing cylinder's, never a suit
+    // inflation bottle's (issue #4243).
+    final tank = dive.breathingTanks.firstOrNull;
     final isTrainingDive =
-        dive.diveTypeId.toLowerCase().contains('training') ||
+        dive.diveTypeIds.any((t) => t.toLowerCase().contains('training')) ||
         dive.courseId != null;
 
     return pw.Container(
@@ -234,8 +293,8 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
                 pw.Row(
                   children: [
                     pw.Text(
-                      'Dive #${dive.diveNumber ?? '-'}',
-                      style: pw.TextStyle(
+                      l10n.pdf_diveNumber('${dive.diveNumber ?? '-'}'),
+                      style: const pw.TextStyle(
                         fontSize: 11,
                         fontWeight: pw.FontWeight.bold,
                         color: _padiBlue,
@@ -253,8 +312,8 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
                           borderRadius: pw.BorderRadius.circular(3),
                         ),
                         child: pw.Text(
-                          'TRAINING',
-                          style: pw.TextStyle(
+                          l10n.pdf_trainingBadge,
+                          style: const pw.TextStyle(
                             fontSize: 7,
                             fontWeight: pw.FontWeight.bold,
                             color: PdfColors.white,
@@ -265,7 +324,7 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
                   ],
                 ),
                 pw.Text(
-                  PdfSharedComponents.formatDateTime(dive.dateTime),
+                  dates.dateTime(dive.dateTime),
                   style: const pw.TextStyle(fontSize: 9),
                 ),
               ],
@@ -279,8 +338,8 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
               children: [
                 // Site name
                 pw.Text(
-                  dive.site?.name ?? 'Unknown Site',
-                  style: pw.TextStyle(
+                  dive.site?.name ?? l10n.pdf_unknownSite,
+                  style: const pw.TextStyle(
                     fontSize: 10,
                     fontWeight: pw.FontWeight.bold,
                   ),
@@ -301,45 +360,67 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
                 pw.Row(
                   children: [
                     _buildPadiField(
-                      'Depth',
-                      '${dive.maxDepth?.toStringAsFixed(1) ?? '-'}m',
+                      l10n.pdf_columnDepth,
+                      units.formatDepth(dive.maxDepth),
                     ),
                     _buildPadiField(
-                      'Time',
-                      '${dive.bottomTime?.inMinutes ?? '-'}min',
+                      l10n.pdf_columnTime,
+                      pdfDiveDurationCompact(dive, l10n),
                     ),
                     _buildPadiField(
-                      'Temp',
-                      '${dive.waterTemp?.toStringAsFixed(0) ?? '-'}°C',
+                      l10n.pdf_columnTemp,
+                      units.formatTemperature(dive.waterTemp),
                     ),
-                    if (tank != null) _buildPadiField('Gas', tank.gasMix.name),
+                    if (tank != null)
+                      _buildPadiField(l10n.pdf_gas, tank.gasMix.name),
                   ],
                 ),
                 pw.SizedBox(height: 4),
                 // Conditions row
                 pw.Row(
                   children: [
-                    _buildPadiField('Vis', dive.visibility?.displayName ?? '-'),
+                    // Measured distance from v144, a band-picked range
+                    // (issue #3226), else the pre-v144 bucket label. No
+                    // adjective, matching how this template renders depth.
+                    _buildPadiField(
+                      l10n.pdf_visibilityShort,
+                      formatDiveVisibilityPlain(
+                            meters: dive.visibilityMeters,
+                            range: dive.visibilityRange,
+                            legacy: dive.visibility,
+                            l10n: l10n,
+                            units: units,
+                          ) ??
+                          '-',
+                    ),
                     if (tank != null) ...[
                       _buildPadiField(
-                        'Air',
-                        '${tank.startPressure?.round() ?? '-'}-${tank.endPressure?.round() ?? '-'}',
+                        l10n.pdf_air,
+                        pdfPressureRange(
+                          units,
+                          tank.startPressure,
+                          tank.endPressure,
+                        ),
                       ),
                     ],
-                    if (dive.waterType != null)
-                      _buildPadiField('Water', dive.waterType!.displayName),
+                    if (dive.effectiveWaterType != null)
+                      _buildPadiField(
+                        l10n.pdf_water,
+                        dive.effectiveWaterType!.localizedName(l10n),
+                      ),
                   ],
                 ),
                 // Notes (compact)
                 if (dive.notes.isNotEmpty) ...[
                   pw.SizedBox(height: 4),
-                  pw.Text(
+                  notesMarkdownPdfInline(
                     dive.notes,
                     style: const pw.TextStyle(
                       fontSize: 8,
                       color: PdfColors.grey700,
                     ),
                     maxLines: 2,
+                    annotationTimes: annotationTimes,
                   ),
                 ],
                 // Buddy/Instructor sign-off row
@@ -354,16 +435,18 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
                   child: pw.Row(
                     children: [
                       _buildSignOffField(
-                        'Buddy',
-                        dive.buddy,
+                        l10n,
+                        l10n.pdf_buddy,
+                        dive.resolvedBuddyNames,
                         signatures
                             ?.where((s) => s.isBuddySignature)
                             .firstOrNull,
                       ),
                       pw.SizedBox(width: 16),
                       _buildSignOffField(
-                        'Verified by',
-                        dive.diveMaster,
+                        l10n,
+                        l10n.pdf_verifiedBy,
+                        dive.resolvedDiveMasterNames,
                         signatures
                             ?.where((s) => !s.isBuddySignature)
                             .firstOrNull,
@@ -386,7 +469,7 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
         children: [
           pw.Text(
             label,
-            style: pw.TextStyle(
+            style: const pw.TextStyle(
               fontSize: 7,
               fontWeight: pw.FontWeight.bold,
               color: _padiBlue,
@@ -399,6 +482,7 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
   }
 
   pw.Widget _buildSignOffField(
+    AppLocalizations l10n,
     String label,
     String? name,
     Signature? signature,
@@ -408,8 +492,10 @@ class PdfTemplatePadi extends PdfTemplateBuilder {
         crossAxisAlignment: pw.CrossAxisAlignment.center,
         children: [
           pw.Text(
-            '$label: ',
-            style: pw.TextStyle(
+            // The joiner ends in a space when the value is empty, which is
+            // the gap the signature line needs.
+            l10n.pdf_labelValue(label, ''),
+            style: const pw.TextStyle(
               fontSize: 7,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.grey600,

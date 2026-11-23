@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/setup/plan_number_field.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Simple dialog for creating a basic rectangular dive plan.
 ///
@@ -28,94 +29,94 @@ class _SimplePlanDialogState extends ConsumerState<SimplePlanDialog> {
   double _depth = 18;
   int _bottomTime = 45;
 
+  final _depthField = GlobalKey<PlanNumberFieldState>();
+  final _timeField = GlobalKey<PlanNumberFieldState>();
+
+  // The band the quick plan covers, in metres and minutes. Anything outside
+  // it is a dive that wants real segments rather than a rectangle.
+  static const _minDepthMeters = 5.0;
+  static const _maxDepthMeters = 40.0;
+  static const _minBottomTime = 5.0;
+  static const _maxBottomTime = 120.0;
+
+  void _create() {
+    // Tapping Create on a touch screen leaves focus in whichever box was
+    // being edited, so settle both the way leaving them would before reading
+    // _depth and _bottomTime.
+    _depthField.currentState?.commit();
+    _timeField.currentState?.commit();
+    ref
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: _depth, bottomTimeMinutes: _bottomTime);
+    Navigator.pop(context);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
+    final l10n = context.l10n;
 
     return AlertDialog(
-      title: const Text('Quick Plan'),
+      title: Text(l10n.divePlanner_action_quickPlan),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Create a simple rectangular dive profile',
+            l10n.divePlanner_quickPlan_subtitle,
             style: theme.textTheme.bodyMedium,
           ),
           const SizedBox(height: 24),
 
-          // Depth slider
-          Row(
-            children: [
-              SizedBox(
-                width: 60,
-                child: Text('Depth:', style: theme.textTheme.bodyMedium),
-              ),
-              Expanded(
-                child: Semantics(
-                  label: 'Depth: ${units.formatDepth(_depth)}',
-                  child: Slider(
-                    value: _depth,
-                    min: 5,
-                    max: 40,
-                    divisions: 35,
-                    label: units.formatDepth(_depth),
-                    onChanged: (v) => setState(() => _depth = v),
-                  ),
-                ),
-              ),
-              SizedBox(
-                width: 60,
-                child: Text(
-                  units.formatDepth(_depth),
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
+          // Depth and bottom time as number boxes, on the same two columns
+          // as the Setup accordion's rows.
+          PlanNumberField(
+            key: _depthField,
+            label: l10n.divePlanner_quickPlan_depthLabel,
+            value: units.convertDepth(_depth),
+            hintValue: units.convertDepth(_depth),
+            suffixText: units.depthSymbol,
+            isInteger: true,
+            allowEmpty: false,
+            // Narrowed inward so every whole number the box accepts is inside
+            // 5-40 m: 16.4-131.2 ft becomes 17-131 ft, never 16 (4.88 m).
+            min: units.convertDepth(_minDepthMeters).ceilToDouble(),
+            max: units.convertDepth(_maxDepthMeters).floorToDouble(),
+            semanticsLabel: l10n.divePlanner_quickPlan_depthSemantics(
+              units.formatDepth(_depth),
+            ),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => _depth = units.depthToMeters(v));
+            },
           ),
-
-          // Time slider
-          Row(
-            children: [
-              SizedBox(
-                width: 60,
-                child: Text('Time:', style: theme.textTheme.bodyMedium),
-              ),
-              Expanded(
-                child: Semantics(
-                  label: 'Bottom time: $_bottomTime minutes',
-                  child: Slider(
-                    value: _bottomTime.toDouble(),
-                    min: 5,
-                    max: 120,
-                    divisions: 23,
-                    label: '$_bottomTime min',
-                    onChanged: (v) => setState(() => _bottomTime = v.round()),
-                  ),
-                ),
-              ),
-              SizedBox(
-                width: 60,
-                child: Text(
-                  '$_bottomTime min',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
+          PlanNumberField(
+            key: _timeField,
+            label: l10n.divePlanner_quickPlan_timeLabel,
+            value: _bottomTime.toDouble(),
+            hintValue: _bottomTime.toDouble(),
+            suffixText: l10n.divePlanner_label_minutesUnit,
+            isInteger: true,
+            allowEmpty: false,
+            min: _minBottomTime,
+            max: _maxBottomTime,
+            semanticsLabel: l10n.divePlanner_quickPlan_bottomTimeSemantics(
+              _bottomTime,
+            ),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => _bottomTime = v.round());
+            },
           ),
 
           const SizedBox(height: 16),
 
           // Preview info
           Semantics(
-            label:
-                'Plan preview: Descent to ${units.formatDepth(_depth)}, '
-                'bottom time $_bottomTime minutes, ascent with safety stop',
+            label: l10n.divePlanner_quickPlan_previewSemantics(
+              units.formatDepth(_depth),
+              _bottomTime,
+            ),
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -126,7 +127,7 @@ class _SimplePlanDialogState extends ConsumerState<SimplePlanDialog> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Plan Preview:',
+                    l10n.divePlanner_quickPlan_previewTitle,
                     style: theme.textTheme.labelMedium?.copyWith(
                       color: theme.colorScheme.primary,
                     ),
@@ -134,19 +135,21 @@ class _SimplePlanDialogState extends ConsumerState<SimplePlanDialog> {
                   const SizedBox(height: 4),
                   ExcludeSemantics(
                     child: Text(
-                      'Descent to ${units.formatDepth(_depth)}',
+                      l10n.divePlanner_quickPlan_previewDescent(
+                        units.formatDepth(_depth),
+                      ),
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
                   ExcludeSemantics(
                     child: Text(
-                      'Bottom time: $_bottomTime min',
+                      l10n.divePlanner_quickPlan_previewBottomTime(_bottomTime),
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
                   ExcludeSemantics(
                     child: Text(
-                      'Ascent with safety stop',
+                      l10n.divePlanner_quickPlan_previewAscent,
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -159,19 +162,11 @@ class _SimplePlanDialogState extends ConsumerState<SimplePlanDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
+          child: Text(l10n.common_action_cancel),
         ),
         FilledButton(
-          onPressed: () {
-            ref
-                .read(divePlanNotifierProvider.notifier)
-                .addSimplePlan(
-                  maxDepth: _depth,
-                  bottomTimeMinutes: _bottomTime,
-                );
-            Navigator.pop(context);
-          },
-          child: const Text('Create'),
+          onPressed: _create,
+          child: Text(l10n.divePlanner_quickPlan_create),
         ),
       ],
     );

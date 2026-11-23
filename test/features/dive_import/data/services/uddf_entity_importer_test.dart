@@ -1,35 +1,64 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
 import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/core/services/export/export_service.dart';
+// Only the companion: database.dart also exports Drift row classes whose
+// names collide with the domain entities this test imports (DiveSite, Dive,
+// Buddy, Tag, Trip, ...).
+import 'package:submersion/core/database/database.dart'
+    show DiveDataSourcesCompanion, DiveSitesCompanion, DivesCompanion;
+import 'package:submersion/core/services/export/export_service.dart'
+    hide ServiceRecord;
+import 'package:submersion/features/universal_import/data/models/import_enums.dart';
+import 'package:submersion/features/universal_import/data/models/source_diver.dart';
+import 'package:submersion/features/universal_import/data/parsers/subsurface_xml_parser.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_repository.dart';
 import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/courses/data/repositories/course_repository.dart';
+import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
+import 'package:submersion/features/dive_import/data/repositories/imported_file_repository.dart';
 import 'package:submersion/features/dive_import/data/services/uddf_entity_importer.dart';
+import 'package:submersion/features/dive_import/domain/import_source_file.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_cancellation_token.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_phase.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
 import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_set_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart'
+    show ServiceRecord;
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/certification_agencies/data/repositories/custom_certification_repository.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_agency.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_level.dart';
 
 @GenerateMocks([
+  DiveRoleRepository,
   TripRepository,
   EquipmentRepository,
   EquipmentSetRepository,
@@ -42,11 +71,60 @@ import 'package:submersion/features/trips/domain/entities/trip.dart';
   DiveRepository,
   TankPressureRepository,
   CourseRepository,
+  ServiceRecordRepository,
 ])
 import 'uddf_entity_importer_test.mocks.dart';
+import '../../../../helpers/fake_hosts.dart';
+
+/// Records [store] calls instead of writing rows, so tests can assert
+/// whether-and-what the importer tried to persist without a database.
+class _RecordingImportedFiles extends ImportedFileRepository {
+  int storeCalls = 0;
+  String? lastStoredId;
+
+  /// Stored row id per original file name, so a batch's per-file rows can
+  /// be told apart.
+  final storedIdByFileName = <String, String>{};
+
+  @override
+  Future<String> store({
+    required Uint8List bytes,
+    String? fileName,
+    DateTime? now,
+  }) async {
+    storeCalls++;
+    lastStoredId = 'stored-${bytes.join('-')}';
+    storedIdByFileName[fileName ?? ''] = lastStoredId!;
+    return lastStoredId!;
+  }
+}
+
+/// A store that cannot write: [store] throws, the way a real insert does
+/// when the volume is out of space or the database is unavailable.
+class _FailingImportedFiles extends ImportedFileRepository {
+  int storeCalls = 0;
+
+  @override
+  Future<String> store({
+    required Uint8List bytes,
+    String? fileName,
+    DateTime? now,
+  }) async {
+    storeCalls++;
+    throw Exception('No space left on device');
+  }
+}
 
 void main() {
-  final importer = UddfEntityImporter();
+  // The code under test calls Nominatim; it answers as offline, as it
+  // would on a device without a network.
+  setUp(() {
+    serveFakeHost('nominatim.openstreetmap.org');
+  });
+
+  final importer = UddfEntityImporter(
+    customCertifications: _NoCustomCertifications(),
+  );
   const diverId = 'diver-123';
   final now = DateTime(2024, 1, 15);
 
@@ -58,10 +136,12 @@ void main() {
   late MockCertificationRepository mockCertificationRepo;
   late MockTagRepository mockTagRepo;
   late MockDiveTypeRepository mockDiveTypeRepo;
+  late MockDiveRoleRepository mockDiveRoleRepo;
   late MockSiteRepository mockSiteRepo;
   late MockDiveRepository mockDiveRepo;
   late MockTankPressureRepository mockTankPressureRepo;
   late MockCourseRepository mockCourseRepo;
+  late MockServiceRecordRepository mockServiceRecordRepo;
   late ImportRepositories repos;
 
   setUp(() {
@@ -73,20 +153,46 @@ void main() {
     mockCertificationRepo = MockCertificationRepository();
     mockTagRepo = MockTagRepository();
     mockDiveTypeRepo = MockDiveTypeRepository();
+    mockDiveRoleRepo = MockDiveRoleRepository();
     mockSiteRepo = MockSiteRepository();
     mockDiveRepo = MockDiveRepository();
     mockTankPressureRepo = MockTankPressureRepository();
     mockCourseRepo = MockCourseRepository();
+    mockServiceRecordRepo = MockServiceRecordRepository();
+
+    // No dive type exists yet, so every imported type is created. The
+    // importer consults this to avoid duplicating a built-in slug.
+    when(mockDiveTypeRepo.getDiveTypeById(any)).thenAnswer((_) async => null);
+
+    // No tag exists yet, so every imported tag is created. The importer
+    // consults this to reuse a tag the diver already has by that name
+    // instead of minting a second uuid for it (#1032).
+    when(
+      mockTagRepo.getTagByName(any, diverId: anyNamed('diverId')),
+    ).thenAnswer((_) async => null);
 
     // Stub getNextDiveNumber for auto-numbering during import.
     when(
       mockDiveRepo.getNextDiveNumber(diverId: anyNamed('diverId')),
     ).thenAnswer((_) async => 1);
 
+    // No trip exists yet, so a dive the file puts in no trip stays out of
+    // one. The importer consults this to place such a dive in the trip whose
+    // dates cover it (#2618).
+    when(
+      mockTripRepo.getAllTrips(diverId: anyNamed('diverId')),
+    ).thenAnswer((_) async => []);
+
     // Stub getAllSites for deselected-site resolution.
     when(
       mockSiteRepo.getAllSites(diverId: anyNamed('diverId')),
     ).thenAnswer((_) async => []);
+
+    // Every imported dive attributes its pressure series to its source once
+    // the source row exists (#2440).
+    when(
+      mockTankPressureRepo.stampSourceWhereNull(any, any),
+    ).thenAnswer((_) async => 0);
 
     repos = ImportRepositories(
       tripRepository: mockTripRepo,
@@ -97,10 +203,12 @@ void main() {
       certificationRepository: mockCertificationRepo,
       tagRepository: mockTagRepo,
       diveTypeRepository: mockDiveTypeRepo,
+      diveRoleRepository: mockDiveRoleRepo,
       siteRepository: mockSiteRepo,
       diveRepository: mockDiveRepo,
       tankPressureRepository: mockTankPressureRepo,
       courseRepository: mockCourseRepo,
+      serviceRecordRepository: mockServiceRecordRepo,
     );
   });
 
@@ -200,7 +308,523 @@ void main() {
     });
   });
 
+  group('Import dive roles', () {
+    setUp(() {
+      when(
+        mockDiveRoleRepo.getAllDiveRoles(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => []);
+      when(mockDiveRoleRepo.getDiveRoleById(any)).thenAnswer((_) async => null);
+    });
+
+    test('restores custom roles preserving ids, skipping built-ins and '
+        'invalid rows', () async {
+      when(
+        mockDiveRoleRepo.importDiveRole(
+          id: anyNamed('id'),
+          name: anyNamed('name'),
+          diverId: anyNamed('diverId'),
+          sortOrder: anyNamed('sortOrder'),
+        ),
+      ).thenAnswer((_) async => true);
+
+      const data = UddfImportResult(
+        customDiveRoles: [
+          {
+            'id': 'uuid-1',
+            'name': 'Hekkensluiter',
+            'sortOrder': 9,
+            'isBuiltIn': false,
+          },
+          {'id': 'buddy', 'name': 'Buddy', 'sortOrder': 0, 'isBuiltIn': true},
+          {'id': null, 'name': 'No Id'},
+          {'id': 'uuid-2', 'name': ''},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verify(
+        mockDiveRoleRepo.importDiveRole(
+          id: 'uuid-1',
+          name: 'Hekkensluiter',
+          diverId: diverId,
+          sortOrder: 9,
+        ),
+      ).called(1);
+      verifyNever(
+        mockDiveRoleRepo.importDiveRole(
+          id: 'buddy',
+          name: anyNamed('name'),
+          diverId: anyNamed('diverId'),
+          sortOrder: anyNamed('sortOrder'),
+        ),
+      );
+    });
+
+    test('a failing role listing skips the roles, not the import', () async {
+      // Without the diver's own roles to match against, a restore could
+      // add duplicates, so the roles are left out and the rest goes on.
+      when(
+        mockDiveRoleRepo.getAllDiveRoles(diverId: anyNamed('diverId')),
+      ).thenThrow(Exception('boom'));
+
+      const data = UddfImportResult(
+        customDiveRoles: [
+          {'id': 'uuid-1', 'name': 'Hekkensluiter'},
+        ],
+      );
+
+      await expectLater(
+        importer.import(
+          data: data,
+          selections: const UddfImportSelections(),
+          repositories: repos,
+          diverId: diverId,
+        ),
+        completes,
+      );
+      verifyNever(
+        mockDiveRoleRepo.importDiveRole(
+          id: anyNamed('id'),
+          name: anyNamed('name'),
+          diverId: anyNamed('diverId'),
+          sortOrder: anyNamed('sortOrder'),
+        ),
+      );
+    });
+
+    test('a failing role import is swallowed, not fatal', () async {
+      when(
+        mockDiveRoleRepo.importDiveRole(
+          id: anyNamed('id'),
+          name: anyNamed('name'),
+          diverId: anyNamed('diverId'),
+          sortOrder: anyNamed('sortOrder'),
+        ),
+      ).thenThrow(Exception('boom'));
+
+      const data = UddfImportResult(
+        customDiveRoles: [
+          {'id': 'uuid-1', 'name': 'Hekkensluiter'},
+        ],
+      );
+
+      await expectLater(
+        importer.import(
+          data: data,
+          selections: const UddfImportSelections(),
+          repositories: repos,
+          diverId: diverId,
+        ),
+        completes,
+      );
+    });
+  });
+
+  group('Import dives (enriched FIT fields)', () {
+    setUp(() {
+      when(
+        mockDiveRepo.createDive(any),
+      ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+    });
+
+    test('maps recorded ceiling and entry GPS onto the Dive', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+            'maxDepth': 29.5,
+            'avgDepth': 16.0,
+            'duration': const Duration(seconds: 3263),
+            'runtime': const Duration(seconds: 3600),
+            'latitude': 35.815,
+            'longitude': 14.451,
+            'profile': <Map<String, dynamic>>[
+              {'timestamp': 0, 'depth': 1.6, 'ceiling': 0.0},
+              {
+                'timestamp': 60,
+                'depth': 29.5,
+                'ceiling': 6.0,
+                'tts': 480,
+                'ndl': 0,
+              },
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured.single as Dive;
+      expect(dive.entryLocation, isNotNull);
+      expect(dive.entryLocation!.latitude, closeTo(35.815, 1e-9));
+      expect(dive.entryLocation!.longitude, closeTo(14.451, 1e-9));
+      expect(dive.profile.any((p) => p.ceiling == 6.0), isTrue);
+      expect(dive.profile.any((p) => p.tts == 480), isTrue);
+    });
+
+    test('maps the dive name from the payload (FIT filename seed)', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'name': 'Dos Ojos Cenote Dive (Barbie Line)',
+            'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+            'maxDepth': 29.5,
+            'duration': const Duration(seconds: 3263),
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.name, 'Dos Ojos Cenote Dive (Barbie Line)');
+    });
+
+    test('leaves the dive unnamed when the payload has no name', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+            'maxDepth': 29.5,
+            'duration': const Duration(seconds: 3263),
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.name, isNull);
+    });
+  });
+
+  group('Import dives (weather and custom fields, #1814)', () {
+    setUp(() {
+      when(
+        mockDiveRepo.createDive(any),
+      ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+    });
+
+    Future<Dive> importDive(Map<String, dynamic> diveData) async {
+      await importer.import(
+        data: UddfImportResult(
+          dives: [
+            {'dateTime': DateTime.utc(2025, 10, 13, 11, 24), ...diveData},
+          ],
+        ),
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      return verify(mockDiveRepo.createDive(captureAny)).captured.single
+          as Dive;
+    }
+
+    test('carries the draft flag onto the Dive (#637)', () async {
+      expect((await importDive({'isDraft': true})).isDraft, isTrue);
+    });
+
+    test('a dive without the draft flag is not a draft', () async {
+      expect((await importDive(const {})).isDraft, isFalse);
+    });
+
+    test('maps the weather fields onto the Dive', () async {
+      final dive = await importDive({
+        'windSpeed': 5.0,
+        'windDirection': 'northEast',
+        'cloudCover': 'partlyCloudy',
+        'precipitation': 'lightRain',
+        'humidity': 70.0,
+        'weatherDescription': 'Sunny',
+      });
+
+      expect(dive.windSpeed, 5.0);
+      expect(dive.windDirection, CurrentDirection.northEast);
+      expect(dive.cloudCover, CloudCover.partlyCloudy);
+      expect(dive.precipitation, Precipitation.lightRain);
+      expect(dive.humidity, 70.0);
+      expect(dive.weatherDescription, 'Sunny');
+      // Imported values are not an Open-Meteo fetch.
+      expect(dive.weatherSource, isNull);
+    });
+
+    test('leaves weather empty when the payload has none', () async {
+      final dive = await importDive({});
+
+      expect(dive.windSpeed, isNull);
+      expect(dive.windDirection, isNull);
+      expect(dive.cloudCover, isNull);
+      expect(dive.precipitation, isNull);
+      expect(dive.humidity, isNull);
+      expect(dive.weatherDescription, isNull);
+    });
+
+    test('maps custom fields in payload order', () async {
+      final dive = await importDive({
+        'customFields': [
+          {'key': 'camera', 'value': 'GoPro'},
+          {'key': 'formula', 'value': '=1+1'},
+          // A field without a key cannot be stored.
+          {'key': '  ', 'value': 'orphan'},
+        ],
+      });
+
+      expect(
+        dive.customFields.map((f) => (f.key, f.value, f.sortOrder)).toList(),
+        [('camera', 'GoPro', 0), ('formula', '=1+1', 1)],
+      );
+    });
+  });
+
+  group('Import dives (auto numbering)', () {
+    setUp(() {
+      when(
+        mockDiveRepo.createDive(any),
+      ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+    });
+
+    test('numbers an undated dive by the date it is stored with', () async {
+      // A dive whose datetime could not be parsed is stored at the import
+      // clock, which makes it the most recent dive in the batch. Numbering
+      // used to sort it as if it were dated year zero and hand it the lowest
+      // number, contradicting the date written to the row (#239).
+      final data = UddfImportResult(
+        dives: [
+          {'maxDepth': 12.0},
+          {'dateTime': DateTime.utc(2020, 3, 4, 9, 0), 'maxDepth': 18.0},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0, 1}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final dives = verify(
+        mockDiveRepo.createDive(captureAny),
+      ).captured.cast<Dive>();
+      expect(dives.firstWhere((d) => d.maxDepth == 18.0).diveNumber, 1);
+      expect(dives.firstWhere((d) => d.maxDepth == 12.0).diveNumber, 2);
+    });
+
+    test('numbers dives sharing a timestamp in file order', () async {
+      // A logbook of dives entered by hand carries no times, so a whole day
+      // of them ties at midnight, and the numbering must follow the file.
+      // List.sort makes no stability guarantee: small batches happen to keep
+      // their input order today, so this one is deliberately large enough
+      // that ties are observably reordered without the tie-breaker.
+      const undatedCount = 60;
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': DateTime.utc(2020, 3, 4, 9, 0), 'maxDepth': 1000.0},
+          for (var i = 0; i < undatedCount; i++) {'maxDepth': i.toDouble()},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections(
+          dives: {for (var i = 0; i <= undatedCount; i++) i},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final dives = verify(
+        mockDiveRepo.createDive(captureAny),
+      ).captured.cast<Dive>();
+      expect(dives.firstWhere((d) => d.maxDepth == 1000.0).diveNumber, 1);
+      for (var i = 0; i < undatedCount; i++) {
+        expect(
+          dives.firstWhere((d) => d.maxDepth == i.toDouble()).diveNumber,
+          i + 2,
+          reason: 'undated dive at file position $i',
+        );
+      }
+    });
+  });
+
+  group('Import dives (dive type default)', () {
+    setUp(() {
+      when(
+        mockDiveRepo.createDive(any),
+      ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+    });
+
+    Future<Dive> importSingleDive(Map<String, dynamic> diveData) async {
+      await importer.import(
+        data: UddfImportResult(dives: [diveData]),
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      return verify(mockDiveRepo.createDive(captureAny)).captured.single
+          as Dive;
+    }
+
+    test(
+      'a profile with a deco ceiling no longer changes the type (#1513)',
+      () async {
+        final dive = await importSingleDive({
+          'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+          'maxDepth': 42.0,
+          'duration': const Duration(seconds: 3600),
+          'profile': <Map<String, dynamic>>[
+            {'timestamp': 0, 'depth': 1.5, 'ceiling': 0.0},
+            {'timestamp': 600, 'depth': 42.0, 'ceiling': 6.0},
+          ],
+        });
+        expect(dive.diveTypeIds, ['recreational']);
+      },
+    );
+
+    test(
+      'exhausted NDL with TTS at depth no longer changes the type (#1513)',
+      () async {
+        final dive = await importSingleDive({
+          'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+          'maxDepth': 35.0,
+          'duration': const Duration(seconds: 3600),
+          'profile': <Map<String, dynamic>>[
+            {'timestamp': 0, 'depth': 30.0, 'ndl': 300, 'tts': 120},
+            {'timestamp': 900, 'depth': 32.0, 'ndl': 0, 'tts': 600},
+          ],
+        });
+        expect(dive.diveTypeIds, ['recreational']);
+      },
+    );
+
+    test('a decoStopStart event no longer changes the type (#1513)', () async {
+      final dive = await importSingleDive({
+        'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+        'maxDepth': 40.0,
+        'duration': const Duration(seconds: 3600),
+        'events': <Map<String, dynamic>>[
+          {'eventType': 'decoStopStart', 'timestamp': 1800},
+        ],
+      });
+      expect(dive.diveTypeIds, ['recreational']);
+    });
+
+    test('a decoStopStart event under profileEvents (UDDF source key) no '
+        'longer changes the type (#1513)', () async {
+      final dive = await importSingleDive({
+        'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+        'maxDepth': 40.0,
+        'duration': const Duration(seconds: 3600),
+        'profileEvents': <Map<String, dynamic>>[
+          {'eventType': 'decoStopStart', 'timestamp': 1800},
+        ],
+      });
+      expect(dive.diveTypeIds, ['recreational']);
+    });
+
+    test('a no-deco profile keeps the recreational default', () async {
+      final dive = await importSingleDive({
+        'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+        'maxDepth': 18.0,
+        'duration': const Duration(seconds: 2700),
+        'profile': <Map<String, dynamic>>[
+          {'timestamp': 0, 'depth': 1.0, 'ndl': 3600},
+          {'timestamp': 600, 'depth': 18.0, 'ndl': 1500, 'tts': 120},
+        ],
+      });
+      expect(dive.diveTypeIds, ['recreational']);
+    });
+
+    test(
+      'an explicit dive type from the source wins over the default',
+      () async {
+        final dive = await importSingleDive({
+          'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+          'maxDepth': 42.0,
+          'duration': const Duration(seconds: 3600),
+          'diveType': 'training',
+          'profile': <Map<String, dynamic>>[
+            {'timestamp': 600, 'depth': 42.0, 'ceiling': 6.0},
+          ],
+        });
+        expect(dive.diveTypeIds, ['training']);
+      },
+    );
+
+    test(
+      'explicit dive type ids from the source win over the default',
+      () async {
+        final dive = await importSingleDive({
+          'dateTime': DateTime.utc(2025, 10, 13, 11, 24, 0),
+          'maxDepth': 42.0,
+          'duration': const Duration(seconds: 3600),
+          'diveTypeIds': ['cave', 'night'],
+          'profile': <Map<String, dynamic>>[
+            {'timestamp': 600, 'depth': 42.0, 'ceiling': 6.0},
+          ],
+        });
+        expect(dive.diveTypeIds, ['cave', 'night']);
+      },
+    );
+  });
+
   group('Import equipment', () {
+    test('uses selected currency only when the source omits it', () async {
+      when(mockEquipmentRepo.createEquipment(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as EquipmentItem,
+      );
+      await UddfEntityImporter(
+        defaultPurchaseCurrency: 'EUR',
+        customCertifications: _NoCustomCertifications(),
+      ).import(
+        data: const UddfImportResult(
+          equipment: [
+            {'name': 'Example regulator', 'purchasePrice': 200.0},
+            {
+              'name': 'Example fins',
+              'purchasePrice': 100.0,
+              'purchaseCurrency': 'GBP',
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(equipment: {0, 1}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      final saved = verify(
+        mockEquipmentRepo.createEquipment(captureAny),
+      ).captured.cast<EquipmentItem>();
+      expect(saved.map((item) => item.purchaseCurrency), ['EUR', 'GBP']);
+      expect(saved.map((item) => item.purchasePrice), [200.0, 100.0]);
+    });
+
     test('imports equipment with type parsing', () async {
       when(mockEquipmentRepo.createEquipment(any)).thenAnswer(
         (invocation) async =>
@@ -233,9 +857,128 @@ void main() {
       expect((captured[0] as EquipmentItem).type, EquipmentType.regulator);
       expect((captured[1] as EquipmentItem).type, EquipmentType.fins);
     });
+
+    group('imported suit thickness (#1824)', () {
+      Future<EquipmentItem> importOne(Map<String, dynamic> item) async {
+        when(mockEquipmentRepo.createEquipment(any)).thenAnswer(
+          (invocation) async =>
+              invocation.positionalArguments[0] as EquipmentItem,
+        );
+        await importer.import(
+          data: UddfImportResult(equipment: [item]),
+          selections: const UddfImportSelections(equipment: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+        return verify(
+              mockEquipmentRepo.createEquipment(captureAny),
+            ).captured.single
+            as EquipmentItem;
+      }
+
+      test('a wetsuit thickness becomes the curated thickness_mm', () async {
+        final item = await importOne({
+          'name': 'Bare 5/4',
+          'type': 'wetsuit',
+          'uddfId': 'suit-1',
+          'thickness': '5/4',
+        });
+
+        final attr = item.attributes.singleWhere(
+          (a) => a.key == EquipmentAttrKeys.thicknessMm,
+        );
+        expect(attr.isCustom, isFalse);
+        expect(attr.valueText, '5/4');
+        expect(attr.valueNum, 5.0);
+        expect(attr.equipmentId, item.id);
+      });
+
+      test('a type without a thickness in the catalog records none', () async {
+        final item = await importOne({
+          'name': '4mm neoprene drysuit',
+          'type': 'drysuit',
+          'uddfId': 'suit-1',
+          'thickness': '4mm',
+        });
+
+        expect(
+          item.attributes.where((a) => a.key == EquipmentAttrKeys.thicknessMm),
+          isEmpty,
+        );
+      });
+
+      test('the suit thickness wins over a thickness_mm in the attribute '
+          'list, as size does', () async {
+        final item = await importOne({
+          'name': 'Bare 7mm',
+          'type': 'wetsuit',
+          'uddfId': 'suit-1',
+          'thickness': '7mm',
+          'attributes': [
+            {
+              'key': EquipmentAttrKeys.thicknessMm,
+              'isCustom': false,
+              'valueText': '5',
+              'valueNum': 5.0,
+            },
+          ],
+        });
+
+        final rows = item.attributes.where(
+          (a) => a.key == EquipmentAttrKeys.thicknessMm,
+        );
+        expect(rows, hasLength(1));
+        expect(rows.single.valueNum, 7.0);
+      });
+
+      test('a designation the catalog rejects records none', () async {
+        final item = await importOne({
+          'name': 'Thin wetsuit',
+          'type': 'wetsuit',
+          'uddfId': 'suit-1',
+          'thickness': 'thin',
+        });
+
+        expect(
+          item.attributes.where((a) => a.key == EquipmentAttrKeys.thicknessMm),
+          isEmpty,
+        );
+      });
+    });
   });
 
   group('Import buddies', () {
+    test('stores an embedded photo as a bounded avatar', () async {
+      when(mockBuddyRepo.createBuddy(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Buddy,
+      );
+      await importer.import(
+        data: UddfImportResult(
+          buddies: [
+            {'name': 'Example buddy', 'photo': _png(1200, 800)},
+            {
+              'name': 'Unreadable buddy',
+              'photo': Uint8List.fromList([1, 2]),
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(buddies: {0, 1}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      final saved = verify(
+        mockBuddyRepo.createBuddy(captureAny),
+      ).captured.cast<Buddy>();
+      // Re-encoded the way a picked avatar is: a square JPEG of at most
+      // 512 px, never the source bytes.
+      final avatar = img.decodeJpg(saved.first.photo!)!;
+      expect((avatar.width, avatar.height), (512, 512));
+      // Bytes nothing can decode leave the buddy without a photo rather
+      // than storing one that never renders.
+      expect(saved.last.photo, isNull);
+      expect(saved.last.name, 'Unreadable buddy');
+    });
+
     test('imports selected buddies', () async {
       when(mockBuddyRepo.createBuddy(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Buddy,
@@ -292,6 +1035,40 @@ void main() {
   });
 
   group('Import certifications', () {
+    test('persists bounded card scans and instructor number', () async {
+      when(mockCertificationRepo.createCertification(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as Certification,
+      );
+      final front = _png(3000, 1875);
+      final back = Uint8List.fromList([4, 5, 6]);
+      await importer.import(
+        data: UddfImportResult(
+          certifications: [
+            {
+              'name': 'Example certification',
+              'instructorNumber': 'TEST-123',
+              'photoFront': front,
+              'photoBack': back,
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(certifications: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      final saved =
+          verify(
+                mockCertificationRepo.createCertification(captureAny),
+              ).captured.single
+              as Certification;
+      // Card faces keep their aspect ratio within a 2000 px edge.
+      final card = img.decodeJpg(saved.photoFront!)!;
+      expect((card.width, card.height), (2000, 1250));
+      expect(saved.photoBack, isNull);
+      expect(saved.instructorNumber, 'TEST-123');
+    });
+
     test('imports certifications with agency parsing', () async {
       when(mockCertificationRepo.createCertification(any)).thenAnswer(
         (invocation) async =>
@@ -317,14 +1094,25 @@ void main() {
       final captured = verify(
         mockCertificationRepo.createCertification(captureAny),
       ).captured;
-      expect((captured[0] as Certification).agency, CertificationAgency.padi);
-      expect((captured[1] as Certification).agency, CertificationAgency.ssi);
+      expect(
+        (captured[0] as Certification).agency,
+        CertificationAgency.padi.name,
+      );
+      expect(
+        (captured[1] as Certification).agency,
+        CertificationAgency.ssi.name,
+      );
     });
   });
 
   group('Import tags', () {
     test('imports tags', () async {
-      when(mockTagRepo.createTag(any)).thenAnswer(
+      when(
+        mockTagRepo.createTag(
+          any,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      ).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Tag,
       );
 
@@ -343,8 +1131,98 @@ void main() {
 
       expect(result.tags, 1);
 
-      final captured = verify(mockTagRepo.createTag(captureAny)).captured;
+      final captured = verify(
+        mockTagRepo.createTag(
+          captureAny,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      ).captured;
       expect((captured[0] as Tag).colorHex, '#FF0000');
+      // The map gives no scopes, so the new tag is offered everywhere.
+      expect((captured[0] as Tag).scopes, TagScope.everywhere);
+    });
+
+    test('a new tag keeps the scopes a backup states (#4407)', () async {
+      when(
+        mockTagRepo.createTag(
+          any,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      ).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Tag,
+      );
+
+      const data = UddfImportResult(
+        tags: [
+          {
+            'name': 'To try',
+            'uddfId': 'tag-1',
+            'appliesToDives': false,
+            'appliesToSites': true,
+          },
+        ],
+      );
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(tags: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(
+        mockTagRepo.createTag(
+          captureAny,
+          widenExistingTo: captureAnyNamed('widenExistingTo'),
+        ),
+      ).captured;
+      expect((captured[0] as Tag).scopes, {TagScope.sites});
+      expect(captured[1], {TagScope.sites});
+    });
+
+    test('reuses a tag the diver already has by that name (#1032)', () async {
+      final existing = Tag(
+        id: 'existing-night',
+        diverId: diverId,
+        name: 'Night Dive',
+        createdAt: now,
+        updatedAt: now,
+      );
+      when(
+        mockTagRepo.getTagByName('Night Dive', diverId: diverId),
+      ).thenAnswer((_) async => existing);
+      when(mockTagRepo.addTagToDive(any, any)).thenAnswer((_) async {});
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        tags: [
+          {'name': 'Night Dive', 'uddfId': 'tag-1'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'tagRefs': ['tag-1'],
+          },
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(tags: {0}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      expect(result.tags, 0, reason: 'nothing new was created');
+      verifyNever(
+        mockTagRepo.createTag(
+          any,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      );
+      verify(mockTagRepo.addTagToDive(any, 'existing-night')).called(1);
     });
   });
 
@@ -410,6 +1288,210 @@ void main() {
       // Error caught, count stays at 0
       expect(result.diveTypes, 0);
     });
+
+    test('creates a type with no id under the slug of its name', () async {
+      when(mockDiveTypeRepo.createDiveType(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as DiveTypeEntity,
+      );
+
+      await importer.import(
+        data: const UddfImportResult(
+          customDiveTypes: [
+            {'name': 'Search Recovery'},
+          ],
+        ),
+        selections: const UddfImportSelections(diveTypes: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final created =
+          verify(mockDiveTypeRepo.createDiveType(captureAny)).captured.single
+              as DiveTypeEntity;
+      expect(created.id, 'search_recovery');
+    });
+
+    group('dive links (#1834)', () {
+      setUp(() {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+      });
+
+      List<String> importedDiveTypeIds() =>
+          (verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive)
+              .diveTypeIds;
+
+      test('preResolvedDiveTypeIds links the dive to the existing type the '
+          'reviewer matched by name', () async {
+        final data = UddfImportResult(
+          customDiveTypes: const [
+            {
+              'id': 'search_recovery',
+              'uddfId': 'search_recovery',
+              'name': 'Search & Recovery',
+            },
+          ],
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'diveTypeIds': ['search_recovery', 'night'],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+          preResolvedDiveTypeIds: const {
+            'search_recovery': 'search_recovery_1a2b3c4d',
+          },
+        );
+
+        verifyNever(mockDiveTypeRepo.createDiveType(any));
+        expect(importedDiveTypeIds(), ['search_recovery_1a2b3c4d', 'night']);
+      });
+
+      test('two source ids resolved to one type link it once', () async {
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'diveTypeIds': ['a', 'b'],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+          preResolvedDiveTypeIds: const {'a': 'existing', 'b': 'existing'},
+        );
+
+        expect(importedDiveTypeIds(), ['existing']);
+      });
+
+      group('an incoming id the library already uses', () {
+        UddfImportResult typedDive(String name) => UddfImportResult(
+          customDiveTypes: [
+            {
+              'id': 'search_recovery',
+              'uddfId': 'search_recovery',
+              'name': name,
+            },
+          ],
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'diveTypeIds': ['search_recovery'],
+            },
+          ],
+        );
+
+        void existingNamed(String name) {
+          when(mockDiveTypeRepo.getDiveTypeById('search_recovery')).thenAnswer(
+            (_) async => DiveTypeEntity(
+              id: 'search_recovery',
+              name: name,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+        }
+
+        setUp(() {
+          when(mockDiveTypeRepo.createDiveType(any)).thenAnswer(
+            (invocation) async =>
+                (invocation.positionalArguments[0] as DiveTypeEntity).copyWith(
+                  id: 'search_recovery_1a2b3c4d',
+                ),
+          );
+        });
+
+        Future<void> importTyped(String name) => importer.import(
+          data: typedDive(name),
+          selections: const UddfImportSelections(diveTypes: {0}, dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        test('by a differently named type gets a type of its own', () async {
+          existingNamed('Search Recovery');
+
+          await importTyped('Search & Recovery');
+
+          final created =
+              verify(
+                    mockDiveTypeRepo.createDiveType(captureAny),
+                  ).captured.single
+                  as DiveTypeEntity;
+          expect(created.name, 'Search & Recovery');
+          expect(importedDiveTypeIds(), ['search_recovery_1a2b3c4d']);
+        });
+
+        test('by the same type reuses it', () async {
+          existingNamed('Search Recovery');
+
+          await importTyped('search recovery');
+
+          verifyNever(mockDiveTypeRepo.createDiveType(any));
+          expect(importedDiveTypeIds(), ['search_recovery']);
+        });
+
+        test('under a name rebuilt from the id reuses it', () async {
+          // Exports before #1834 wrote every type as its id's display form,
+          // which says nothing about the type beyond its id.
+          existingNamed('Search & Recovery');
+
+          await importTyped('Search recovery');
+
+          verifyNever(mockDiveTypeRepo.createDiveType(any));
+          expect(importedDiveTypeIds(), ['search_recovery']);
+        });
+      });
+
+      test(
+        'links the dive to the id a created type was stored under',
+        () async {
+          // createDiveType suffixes an id that is already taken.
+          when(mockDiveTypeRepo.createDiveType(any)).thenAnswer(
+            (invocation) async =>
+                (invocation.positionalArguments[0] as DiveTypeEntity).copyWith(
+                  id: 'cave_1a2b3c4d',
+                ),
+          );
+          final data = UddfImportResult(
+            customDiveTypes: const [
+              {'id': 'cave', 'uddfId': 'cave', 'name': 'Cave'},
+            ],
+            dives: [
+              {
+                'dateTime': now,
+                'maxDepth': 25.0,
+                'diveTypeIds': ['cave'],
+              },
+            ],
+          );
+
+          await importer.import(
+            data: data,
+            selections: const UddfImportSelections(diveTypes: {0}, dives: {0}),
+            repositories: repos,
+            diverId: diverId,
+          );
+
+          expect(importedDiveTypeIds(), ['cave_1a2b3c4d']);
+        },
+      );
+    });
   });
 
   group('Import sites', () {
@@ -443,6 +1525,560 @@ void main() {
       expect(site.name, 'Blue Hole');
       expect(site.location, isNotNull);
       expect(site.location!.latitude, 27.2);
+    });
+
+    test('imports city, region and country', () async {
+      when(mockSiteRepo.createSite(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as DiveSite,
+      );
+
+      await importer.import(
+        data: const UddfImportResult(
+          sites: [
+            {
+              'name': 'Blue Hole',
+              'uddfId': 'site-1',
+              'city': 'Victoria',
+              'island': 'Comino',
+              'region': 'Gozo',
+              'country': 'Malta',
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(sites: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final site =
+          verify(mockSiteRepo.createSite(captureAny)).captured.single
+              as DiveSite;
+      expect(site.city, 'Victoria');
+      expect(site.island, 'Comino');
+      expect(site.region, 'Gozo');
+      expect(site.country, 'Malta');
+    });
+  });
+
+  group('Site linking fallback for a GPS-matched duplicate', () {
+    // The duplicate checker flags an incoming site as a duplicate on name OR
+    // on 100 m proximity, and the wizard then leaves it out of the selection.
+    // A site caught by the proximity arm carries a different name, so binding
+    // its uddfId by name alone strands every dive that referenced it.
+    const existingSite = DiveSite(
+      id: 'existing-maclearie',
+      diverId: diverId,
+      name: 'Maclearie Park',
+      location: GeoPoint(40.179561, -74.037475),
+    );
+
+    setUp(() {
+      when(
+        mockSiteRepo.getAllSites(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => [existingSite]);
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+    });
+
+    test('links the dive to the existing site the duplicate sits on', () async {
+      final data = UddfImportResult(
+        sites: [
+          {
+            // Spelled differently, so the name lookup cannot rescue this.
+            'name': 'Maclearie Pk',
+            'uddfId': 'site-1',
+            'latitude': 40.179575,
+            'longitude': -74.037466,
+          },
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 20.0,
+            'site': {'uddfId': 'site-1'},
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(sites: {}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured[0] as Dive;
+      expect(dive.site, isNotNull);
+      expect(dive.site!.id, 'existing-maclearie');
+    });
+
+    test('leaves the dive unlinked when no existing site is near', () async {
+      final data = UddfImportResult(
+        sites: [
+          {
+            'name': 'Somewhere Else',
+            'uddfId': 'site-1',
+            'latitude': 18.465562,
+            'longitude': -66.084902,
+          },
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 20.0,
+            'site': {'uddfId': 'site-1'},
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(sites: {}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured[0] as Dive;
+      expect(dive.site, isNull);
+    });
+
+    test('prefers a name match over a nearer site with another name', () async {
+      const sameNameFarther = DiveSite(
+        id: 'existing-by-name',
+        diverId: diverId,
+        name: 'Maclearie Pk',
+        location: GeoPoint(40.180561, -74.037475),
+      );
+      when(
+        mockSiteRepo.getAllSites(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => [existingSite, sameNameFarther]);
+
+      final data = UddfImportResult(
+        sites: [
+          {
+            'name': 'Maclearie Pk',
+            'uddfId': 'site-1',
+            'latitude': 40.179575,
+            'longitude': -74.037466,
+          },
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 20.0,
+            'site': {'uddfId': 'site-1'},
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(sites: {}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured[0] as Dive;
+      expect(dive.site!.id, 'existing-by-name');
+    });
+  });
+
+  group('Import sites (siteOverrides / replaceSource)', () {
+    // A pre-existing site carrying values the import payload will NOT supply,
+    // so tests can assert those survive the overwrite.
+    const existingSite = DiveSite(
+      id: 'existing-site-1',
+      diverId: diverId,
+      name: 'Old Name',
+      description: 'Old description',
+      notes: 'Old notes',
+      city: 'Dahab',
+      island: 'Sinai',
+      country: 'Egypt',
+      region: 'South Sinai',
+      isShared: true,
+      rating: 3.0,
+      entryMethods: [EntryMethod.shore, EntryMethod.boat],
+      exitMethods: [EntryMethod.ladder],
+    );
+
+    setUp(() {
+      when(
+        mockSiteRepo.getAllSites(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => [existingSite]);
+      when(
+        mockSiteRepo.updateSiteWithImportedMetadata(any, any),
+      ).thenAnswer((_) async {});
+    });
+
+    test('updates the matched site in place instead of creating one', () async {
+      const data = UddfImportResult(
+        sites: [
+          {
+            'name': 'Blue Hole',
+            'uddfId': 'site-1',
+            'latitude': 28.57,
+            'longitude': 34.53,
+            'maxDepth': 100.0,
+          },
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      expect(result.sites, 1);
+      verifyNever(mockSiteRepo.createSite(any));
+
+      final captured = verify(
+        mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+      ).captured;
+      final site = captured[0] as DiveSite;
+      expect(site.id, 'existing-site-1', reason: 'must reuse the existing row');
+      expect(site.name, 'Blue Hole');
+      expect(site.maxDepth, 100.0);
+      expect(site.location!.latitude, 28.57);
+    });
+
+    test('overwrites the city when the payload supplies one', () async {
+      await importer.import(
+        data: const UddfImportResult(
+          sites: [
+            {
+              'name': 'Blue Hole',
+              'uddfId': 'site-1',
+              'city': 'Victoria',
+              'island': 'Comino',
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final site =
+          verify(
+                mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+              ).captured.single
+              as DiveSite;
+      expect(site.city, 'Victoria');
+      expect(site.island, 'Comino');
+    });
+
+    test('keeps entry and exit methods the payload omits (#2054)', () async {
+      await importer.import(
+        data: const UddfImportResult(
+          sites: [
+            {'name': 'Blue Hole', 'uddfId': 'site-1'},
+          ],
+        ),
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final site =
+          verify(
+                mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+              ).captured.single
+              as DiveSite;
+      expect(site.entryMethods, [EntryMethod.shore, EntryMethod.boat]);
+      expect(site.exitMethods, [EntryMethod.ladder]);
+    });
+
+    test('keeps methods when the payload names only unknown ones', () async {
+      await importer.import(
+        data: const UddfImportResult(
+          sites: [
+            {
+              'name': 'Blue Hole',
+              'uddfId': 'site-1',
+              'entryMethod': 'jetpack',
+              'exitMethod': 'teleport',
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final site =
+          verify(
+                mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+              ).captured.single
+              as DiveSite;
+      expect(site.entryMethods, [EntryMethod.shore, EntryMethod.boat]);
+      expect(site.exitMethods, [EntryMethod.ladder]);
+    });
+
+    test('replaces entry and exit methods the payload supplies', () async {
+      await importer.import(
+        data: const UddfImportResult(
+          sites: [
+            {
+              'name': 'Blue Hole',
+              'uddfId': 'site-1',
+              'entryMethod': 'giantStride',
+              'exitMethod': 'platform',
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final site =
+          verify(
+                mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+              ).captured.single
+              as DiveSite;
+      expect(site.entryMethods, [EntryMethod.giantStride]);
+      expect(site.exitMethods, [EntryMethod.platform]);
+    });
+
+    test('preserves existing fields the import payload omits', () async {
+      const data = UddfImportResult(
+        sites: [
+          {'name': 'Blue Hole', 'uddfId': 'site-1'},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(
+        mockSiteRepo.updateSiteWithImportedMetadata(captureAny, any),
+      ).captured;
+      final site = captured[0] as DiveSite;
+      // Supplied by the import.
+      expect(site.name, 'Blue Hole');
+      // Absent from the import -- must survive rather than reset to defaults.
+      expect(site.isShared, isTrue);
+      expect(site.description, 'Old description');
+      expect(site.notes, 'Old notes');
+      expect(site.city, 'Dahab');
+      expect(site.island, 'Sinai');
+      expect(site.rating, 3.0);
+    });
+
+    test(
+      'passes waterType and bodyOfWater through as a metadata patch',
+      () async {
+        const data = UddfImportResult(
+          sites: [
+            {
+              'name': 'Blue Hole',
+              'uddfId': 'site-1',
+              'waterType': 'salt',
+              'bodyOfWater': 'Red Sea',
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(
+            siteOverrides: {0: 'existing-site-1'},
+          ),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final captured = verify(
+          mockSiteRepo.updateSiteWithImportedMetadata(any, captureAny),
+        ).captured;
+        final patch = captured[0] as DiveSitesCompanion;
+        expect(patch.waterType.value, 'salt');
+        expect(patch.bodyOfWater.value, 'Red Sea');
+      },
+    );
+
+    test(
+      'leaves the metadata patch absent when the payload has neither',
+      () async {
+        const data = UddfImportResult(
+          sites: [
+            {'name': 'Blue Hole', 'uddfId': 'site-1'},
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(
+            siteOverrides: {0: 'existing-site-1'},
+          ),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final captured = verify(
+          mockSiteRepo.updateSiteWithImportedMetadata(any, captureAny),
+        ).captured;
+        final patch = captured[0] as DiveSitesCompanion;
+        expect(patch.waterType.present, isFalse);
+        expect(patch.bodyOfWater.present, isFalse);
+      },
+    );
+
+    test(
+      'links dives to the overwritten site via the uddfId mapping',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final data = UddfImportResult(
+          sites: const [
+            {'name': 'Blue Hole', 'uddfId': 'site-1'},
+          ],
+          dives: [
+            {'dateTime': now, 'maxDepth': 30.0, 'siteId': 'site-1'},
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(
+            siteOverrides: {0: 'existing-site-1'},
+            dives: {0},
+          ),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        verifyNever(mockSiteRepo.createSite(any));
+        final dive =
+            verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+        expect(dive.site, isNotNull);
+        // The dive points at the row that was overwritten, not a fresh one.
+        expect(dive.site!.id, 'existing-site-1');
+        expect(dive.site!.name, 'Blue Hole');
+      },
+    );
+
+    test('counts overrides and creations in one progress total', () async {
+      when(mockSiteRepo.createSite(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as DiveSite,
+      );
+
+      const data = UddfImportResult(
+        sites: [
+          {'name': 'Blue Hole', 'uddfId': 'site-1'},
+          {'name': 'Brand New', 'uddfId': 'site-2'},
+        ],
+      );
+
+      final progressCalls = <(ImportPhase, int, int)>[];
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+          sites: {1},
+        ),
+        repositories: repos,
+        diverId: diverId,
+        onProgress: (phase, current, total) {
+          progressCalls.add((phase, current, total));
+        },
+      );
+
+      expect(result.sites, 2);
+      verify(mockSiteRepo.updateSiteWithImportedMetadata(any, any)).called(1);
+      verify(mockSiteRepo.createSite(any)).called(1);
+
+      final siteCalls = progressCalls
+          .where((c) => c.$1 == ImportPhase.sites)
+          .toList();
+      expect(siteCalls.first, (ImportPhase.sites, 0, 2));
+      expect(siteCalls.last, (ImportPhase.sites, 2, 2));
+    });
+
+    test('skips an override whose target site no longer exists', () async {
+      const data = UddfImportResult(
+        sites: [
+          {'name': 'Blue Hole', 'uddfId': 'site-1'},
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'site-that-was-deleted'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      expect(result.sites, 0);
+      verifyNever(mockSiteRepo.updateSiteWithImportedMetadata(any, any));
+      verifyNever(mockSiteRepo.createSite(any));
+    });
+
+    test('skips an override index outside the import list', () async {
+      const data = UddfImportResult(
+        sites: [
+          {'name': 'Blue Hole', 'uddfId': 'site-1'},
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {5: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      expect(result.sites, 0);
+      verifyNever(mockSiteRepo.updateSiteWithImportedMetadata(any, any));
+    });
+
+    test('skips an override whose payload has no name', () async {
+      const data = UddfImportResult(
+        sites: [
+          {'uddfId': 'site-1', 'latitude': 28.57},
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(
+          siteOverrides: {0: 'existing-site-1'},
+        ),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      expect(result.sites, 0);
+      verifyNever(mockSiteRepo.updateSiteWithImportedMetadata(any, any));
     });
   });
 
@@ -524,6 +2160,128 @@ void main() {
       expect(dive.diverId, diverId);
     });
 
+    // Subsurface (and similar) parsers set 'duration' and 'runtime' to the same
+    // total-time value; that duration is the runtime, not a distinct bottom
+    // time. When a profile exists, bottom time must be derived from it, not left
+    // equal to runtime. Regression guard for the "bottom time == runtime" bug.
+    test(
+      'derives bottom time from profile when duration equals runtime',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 30.0,
+              // Total dive time in both keys, as Subsurface reports it.
+              'duration': const Duration(seconds: 1320),
+              'runtime': const Duration(seconds: 1320),
+              'profile': [
+                {'timestamp': 0, 'depth': 0.0},
+                {'timestamp': 60, 'depth': 30.0},
+                {'timestamp': 120, 'depth': 30.0},
+                {'timestamp': 1200, 'depth': 30.0},
+                {'timestamp': 1260, 'depth': 5.0},
+                {'timestamp': 1320, 'depth': 0.0},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final dive =
+            verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+        // Ascent threshold is min(max(6 m, 33% of 30 m), 85% of 30 m) =
+        // 9.9 m; the last sample at/deeper is t=1200 and bottom time runs
+        // from surface departure (t=0), so 1200 s, not the 1320 s runtime.
+        expect(dive.runtime, const Duration(seconds: 1320));
+        expect(dive.bottomTime, const Duration(seconds: 1200));
+        expect(dive.bottomTime!, lessThan(dive.runtime!));
+      },
+    );
+
+    // FIT parsers put a genuine, device-reported bottom time in 'duration'
+    // (distinct from 'runtime'). That real value must be preserved, not
+    // overwritten by the profile heuristic.
+    test(
+      'keeps a genuine bottom time when duration differs from runtime',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 30.0,
+              'duration': const Duration(seconds: 3263), // real bottom time
+              'runtime': const Duration(seconds: 3600), // total elapsed
+              'profile': [
+                {'timestamp': 0, 'depth': 0.0},
+                {'timestamp': 60, 'depth': 30.0},
+                {'timestamp': 1200, 'depth': 30.0},
+                {'timestamp': 1320, 'depth': 0.0},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final dive =
+            verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+        expect(dive.bottomTime, const Duration(seconds: 3263));
+        expect(dive.runtime, const Duration(seconds: 3600));
+      },
+    );
+
+    // Minimal CSV imports carry only a single 'duration' with no profile; that
+    // value must still populate bottom time so the field is not left empty.
+    test(
+      'falls back to duration for bottom time when there is no profile',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 18.0,
+              'duration': const Duration(minutes: 42),
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final dive =
+            verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+        expect(dive.bottomTime, const Duration(minutes: 42));
+      },
+    );
+
     test('links dive to imported site via ID mapping', () async {
       when(mockSiteRepo.createSite(any)).thenAnswer((invocation) async {
         final site = invocation.positionalArguments[0] as DiveSite;
@@ -599,7 +2357,7 @@ void main() {
         (invocation) async => invocation.positionalArguments[0] as Buddy,
       );
       when(
-        mockBuddyRepo.addBuddyToDive(any, any, any),
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
       ).thenAnswer((_) async {});
       when(mockDiveRepo.createDive(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Dive,
@@ -625,7 +2383,377 @@ void main() {
         diverId: diverId,
       );
 
-      verify(mockBuddyRepo.addBuddyToDive(any, any, BuddyRole.buddy)).called(1);
+      verify(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, const [
+          DiveRole.buddyId,
+        ]),
+      ).called(1);
+    });
+
+    test('roles inferred from separate fields add up; Buddy drops out '
+        '(#1221)', () async {
+      when(mockBuddyRepo.createBuddy(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Buddy,
+      );
+      when(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
+      ).thenAnswer((_) async {});
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      await importer.import(
+        data: UddfImportResult(
+          buddies: [
+            {'name': 'Alice', 'uddfId': 'buddy-1'},
+          ],
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'buddyRefs': ['buddy-1'],
+              'diveGuideRefs': ['buddy-1'],
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(buddies: {0}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verify(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, const [
+          DiveRole.diveGuideId,
+        ]),
+      ).called(1);
+    });
+
+    test('exact roles replace the inferred ones (#1221)', () async {
+      when(mockBuddyRepo.createBuddy(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Buddy,
+      );
+      when(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
+      ).thenAnswer((_) async {});
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      await importer.import(
+        data: UddfImportResult(
+          buddies: [
+            {'name': 'Alice', 'uddfId': 'buddy-1'},
+          ],
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'buddyRefs': ['buddy-1'],
+              'diveGuideRefs': ['buddy-1'],
+              'buddyRoleRefs': [
+                {'buddyRef': 'buddy-1', 'roleId': DiveRole.buddyId},
+                {'buddyRef': 'buddy-1', 'roleId': DiveRole.instructorId},
+              ],
+            },
+          ],
+        ),
+        selections: const UddfImportSelections(buddies: {0}, dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verify(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, const [
+          DiveRole.instructorId,
+          DiveRole.buddyId,
+        ]),
+      ).called(1);
+    });
+
+    test(
+      'an unknown exact role is dropped when another resolves (#1221)',
+      () async {
+        // The custom role's definition never arrived: no row here.
+        when(
+          mockDiveRoleRepo.getDiveRoleById('role-never-arrived'),
+        ).thenAnswer((_) async => null);
+        when(mockBuddyRepo.createBuddy(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Buddy,
+        );
+        when(
+          mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
+        ).thenAnswer((_) async {});
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        await importer.import(
+          data: UddfImportResult(
+            buddies: [
+              {'name': 'Alice', 'uddfId': 'buddy-1'},
+            ],
+            dives: [
+              {
+                'dateTime': now,
+                'maxDepth': 25.0,
+                'buddyRoleRefs': [
+                  {'buddyRef': 'buddy-1', 'roleId': DiveRole.diveMasterId},
+                  {'buddyRef': 'buddy-1', 'roleId': 'role-never-arrived'},
+                ],
+              },
+            ],
+          ),
+          selections: const UddfImportSelections(buddies: {0}, dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        verify(
+          mockBuddyRepo.addBuddyToDiveWithRoles(any, any, const [
+            DiveRole.diveMasterId,
+          ]),
+        ).called(1);
+      },
+    );
+
+    test('preResolvedBuddyIds links a skipped duplicate buddy to the existing '
+        'record without creating a twin (#756)', () async {
+      when(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
+      ).thenAnswer((_) async {});
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        buddies: [
+          {'name': 'Nathalie', 'uddfId': 'Nathalie'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'buddyRefs': ['Nathalie'],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        // The buddy index is NOT selected: the reviewer chose Skip (or
+        // Link to existing) for the flagged duplicate.
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedBuddyIds: const {'Nathalie': 'existing-1'},
+      );
+
+      verifyNever(mockBuddyRepo.createBuddy(any));
+      verify(
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, 'existing-1', const [
+          DiveRole.buddyId,
+        ]),
+      ).called(1);
+    });
+
+    test('preResolvedTagIds links a skipped duplicate tag to the existing '
+        'record without creating a twin (#756)', () async {
+      when(mockTagRepo.addTagToDive(any, any)).thenAnswer((_) async {});
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        tags: [
+          {'name': 'Night', 'uddfId': 'Night'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'tagRefs': ['Night'],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedTagIds: const {'Night': 'existing-tag-1'},
+      );
+
+      verifyNever(
+        mockTagRepo.createTag(
+          any,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      );
+      verify(mockTagRepo.addTagToDive(any, 'existing-tag-1')).called(1);
+    });
+
+    test('preResolvedEquipmentIds links a skipped duplicate gear item to the '
+        'existing record without creating a twin (#756)', () async {
+      const existing = EquipmentItem(
+        id: 'existing-eq-1',
+        name: 'Hog Wing',
+        type: EquipmentType.bcd,
+      );
+      when(
+        mockEquipmentRepo.getEquipmentById('existing-eq-1'),
+      ).thenAnswer((_) async => existing);
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        equipment: [
+          {'name': 'Hog Wing', 'type': 'bcd', 'uddfId': '|Hog Wing|'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'equipmentRefs': ['|Hog Wing|'],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        // The equipment index is NOT selected: the reviewer chose Skip (or
+        // Link to existing) for the flagged duplicate.
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedEquipmentIds: const {'|Hog Wing|': 'existing-eq-1'},
+      );
+
+      verifyNever(mockEquipmentRepo.createEquipment(any));
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.gear.map((g) => g.item.id), ['existing-eq-1']);
+    });
+
+    test('preResolvedDiveCenterIds links a skipped duplicate center to the '
+        'existing record without creating a twin (#3852)', () async {
+      final existing = DiveCenter(
+        id: 'existing-center-1',
+        name: 'Reef Divers',
+        createdAt: now,
+        updatedAt: now,
+      );
+      when(
+        mockDiveCenterRepo.getDiveCenterById('existing-center-1'),
+      ).thenAnswer((_) async => existing);
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        diveCenters: [
+          {'name': 'Reef Divers', 'uddfId': 'diveoperator:reef divers'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'diveCenterRef': 'diveoperator:reef divers',
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        // The center index is NOT selected: the reviewer chose Skip (or Link
+        // to existing) for the flagged duplicate.
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedDiveCenterIds: const {
+          'diveoperator:reef divers': 'existing-center-1',
+        },
+      );
+
+      verifyNever(mockDiveCenterRepo.createDiveCenter(any));
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.diveCenter?.id, 'existing-center-1');
+    });
+
+    test('preResolvedTripIds links a skipped duplicate trip to the existing '
+        'record without creating a twin (#3852)', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        trips: [
+          {'name': 'Bonaire', 'uddfId': 'trip-1'},
+        ],
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, 'tripRef': 'trip-1'},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedTripIds: const {'trip-1': 'existing-trip-1'},
+      );
+
+      verifyNever(mockTripRepo.createTrip(any));
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.tripId, 'existing-trip-1');
+    });
+
+    test('preResolvedCertificationIds links a course to the existing '
+        'certification of a skipped duplicate (#3852)', () async {
+      when(mockCertificationRepo.getCertificationById(any)).thenAnswer(
+        (_) async => Certification(
+          id: 'existing-cert-1',
+          name: 'Open Water',
+          agency: CertificationAgency.padi.name,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      when(mockCourseRepo.createCourse(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Course,
+      );
+      when(
+        mockCourseRepo.setCourseCertifications(any, any),
+      ).thenAnswer((_) async {});
+
+      const data = UddfImportResult(
+        certifications: [
+          {'name': 'Open Water', 'uddfId': 'cert-1'},
+        ],
+        courses: [
+          {
+            'name': 'Open Water Course',
+            'uddfId': 'course-1',
+            'certificationRefs': ['cert-1'],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(courses: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedCertificationIds: const {'cert-1': 'existing-cert-1'},
+      );
+
+      verifyNever(mockCertificationRepo.createCertification(any));
+      verify(
+        mockCourseRepo.setCourseCertifications(any, ['existing-cert-1']),
+      ).called(1);
     });
 
     test('creates inline buddies for unmatched names', () async {
@@ -636,10 +2764,10 @@ void main() {
         updatedAt: now,
       );
       when(
-        mockBuddyRepo.findOrCreateByName('Charlie'),
-      ).thenAnswer((_) async => inlineBuddy);
+        mockBuddyRepo.resolveByName('Charlie', diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => (buddy: inlineBuddy, created: true));
       when(
-        mockBuddyRepo.addBuddyToDive(any, any, any),
+        mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
       ).thenAnswer((_) async {});
       when(mockDiveRepo.createDive(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Dive,
@@ -664,11 +2792,18 @@ void main() {
 
       // Inline buddy counted in buddies total
       expect(result.buddies, 1);
-      verify(mockBuddyRepo.findOrCreateByName('Charlie')).called(1);
+      verify(
+        mockBuddyRepo.resolveByName('Charlie', diverId: diverId),
+      ).called(1);
     });
 
     test('links tags to dive', () async {
-      when(mockTagRepo.createTag(any)).thenAnswer(
+      when(
+        mockTagRepo.createTag(
+          any,
+          widenExistingTo: anyNamed('widenExistingTo'),
+        ),
+      ).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Tag,
       );
       when(mockTagRepo.addTagToDive(any, any)).thenAnswer((_) async {});
@@ -699,7 +2834,7 @@ void main() {
       verify(mockTagRepo.addTagToDive(any, any)).called(1);
     });
 
-    test('appends weight to notes', () async {
+    test('imports a weight total as a DiveWeight, not as notes text', () async {
       when(mockDiveRepo.createDive(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Dive,
       );
@@ -724,8 +2859,67 @@ void main() {
 
       final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
       final dive = captured[0] as Dive;
-      expect(dive.notes, contains('Great dive'));
-      expect(dive.notes, contains('Weight used: 4.5 kg'));
+      expect(dive.weights, hasLength(1));
+      expect(dive.weights.single.amountKg, 4.5);
+      expect(dive.weights.single.diveId, dive.id);
+      // #912: the value belongs in the Weights section, and the user's own
+      // notes must come through untouched.
+      expect(dive.notes, 'Great dive');
+    });
+
+    test('weightAmount is imported as a DiveWeight too', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, 'weightAmount': 6.0},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured[0] as Dive;
+      expect(dive.weights, hasLength(1));
+      expect(dive.weights.single.amountKg, 6.0);
+    });
+
+    test('an explicit weights breakdown wins over the total', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'weightUsed': 9.0,
+            'weights': <Map<String, dynamic>>[
+              {'type': WeightType.belt, 'amount': 4.0},
+              {'type': WeightType.trimWeights, 'amount': 2.0},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = captured[0] as Dive;
+      expect(dive.weights, hasLength(2));
+      expect(dive.weights.map((w) => w.amountKg), [4.0, 2.0]);
     });
 
     test('persists profile heart rate from imported UDDF samples', () async {
@@ -763,7 +2957,7 @@ void main() {
     });
 
     test(
-      'persists UDDF sample cns, ndl, rbt and stores dive-level cns and otu in the source snapshot',
+      'persists UDDF sample cns, ndl, tts, rbt and stores dive-level cns and otu in the source snapshot',
       () async {
         when(mockDiveRepo.createDive(any)).thenAnswer(
           (invocation) async => invocation.positionalArguments[0] as Dive,
@@ -783,9 +2977,16 @@ void main() {
                   'depth': 0.0,
                   'cns': 3.0,
                   'ndl': 1200,
+                  'tts': 300,
                   'rbt': 1500,
                 },
-                {'timestamp': 60, 'depth': 12.0, 'cns': 8.5, 'rbt': 900},
+                {
+                  'timestamp': 60,
+                  'depth': 12.0,
+                  'cns': 8.5,
+                  'tts': 480,
+                  'rbt': 900,
+                },
               ],
             },
           ],
@@ -805,9 +3006,11 @@ void main() {
         expect(dive.profile, hasLength(2));
         expect(dive.profile[0].cns, 3.0);
         expect(dive.profile[0].ndl, 1200);
+        expect(dive.profile[0].tts, 300);
         expect(dive.profile[0].rbt, 1500);
         expect(dive.profile[1].cns, 8.5);
         expect(dive.profile[1].ndl, isNull);
+        expect(dive.profile[1].tts, 480);
         expect(dive.profile[1].rbt, 900);
 
         final capturedReadings = verify(
@@ -816,6 +3019,51 @@ void main() {
         final reading = capturedReadings.single;
         expect(reading.cns.value, 18.5);
         expect(reading.otu.value, 7.0);
+      },
+    );
+
+    test(
+      'writes the dive-level CNS and OTU to the dive row too (#2555)',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+        when(
+          mockDiveRepo.applyImportedMetadata(any, any),
+        ).thenAnswer((_) async {});
+
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 25.0,
+              'cnsStart': 4.0,
+              'cnsEnd': 18.5,
+              'otu': 7.0,
+            },
+            {'dateTime': now.add(const Duration(days: 1)), 'maxDepth': 20.0},
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0, 1}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final patches = verify(
+          mockDiveRepo.applyImportedMetadata(any, captureAny),
+        ).captured.cast<DivesCompanion>();
+        // Only the dive that reported a value is written; the other keeps the
+        // column defaults.
+        expect(patches, hasLength(1));
+        final patch = patches.single;
+        expect(patch.cnsStart.value, 4.0);
+        expect(patch.cnsEnd.value, 18.5);
+        expect(patch.otu.value, 7.0);
+        expect(patch.boatName.present, isFalse);
       },
     );
 
@@ -913,6 +3161,60 @@ void main() {
       expect(reading.otu.value, 64.0);
     });
 
+    group('source diver key on the primary source (#1921)', () {
+      Future<DiveDataSourcesCompanion> importOne(
+        Map<String, dynamic> diveData,
+      ) async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+        await importer.import(
+          data: UddfImportResult(
+            dives: [
+              {'dateTime': now, 'maxDepth': 18.0, ...diveData},
+            ],
+          ),
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        return verify(
+              mockDiveRepo.saveComputerReading(captureAny),
+            ).captured.single
+            as DiveDataSourcesCompanion;
+      }
+
+      test('stores the diver the logbook attributed the dive to', () async {
+        final reading = await importOne({SourceDiver.mapKey: 'name:Ann Lee'});
+
+        expect(reading.sourceDiverKey.value, 'name:Ann Lee');
+      });
+
+      test('stores the key as the file itself emits it, not as the batch '
+          'merger qualified it', () async {
+        // A resync re-parses the one stored file with no merger in between,
+        // so only the file-true key can ever match its candidates again.
+        final reading = await importOne({
+          '_sourceFileId': 'f1',
+          SourceDiver.mapKey: SourceDiver.qualifyForFile(
+            'local:macdive-pk3',
+            'f1',
+          ),
+        });
+
+        expect(reading.sourceDiverKey.value, 'local:macdive-pk3');
+      });
+
+      test('leaves it null for a format with no diver attribution', () async {
+        final reading = await importOne(const {});
+
+        expect(reading.sourceDiverKey.value, isNull);
+      });
+    });
+
     test(
       'imports dive with two tanks and stores pressure data for both',
       () async {
@@ -973,6 +3275,10 @@ void main() {
         expect(pressuresByTank.keys, hasLength(2));
         expect(pressuresByTank.values.first, isNotEmpty);
         expect(pressuresByTank.values.last, isNotEmpty);
+
+        // Written before the source row exists, the series are attributed
+        // to the dive's single source once it does (#2440).
+        verify(mockTankPressureRepo.stampSourceWhereNull(any, any)).called(1);
       },
     );
 
@@ -1019,6 +3325,86 @@ void main() {
       expect(switches, hasLength(2));
       expect(switches[0].tankId, dive.tanks[0].id);
       expect(switches[1].tankId, dive.tanks[1].id);
+    });
+
+    test('carries each tank\'s recorded usage duration (#1496)', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'tanks': [
+              {'name': 'Left', 'usageDuration': const Duration(minutes: 30)},
+              {'name': 'Right', 'usageDuration': const Duration(minutes: 22)},
+              {'name': 'Spare'},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.first as Dive;
+      expect(dive.tanks.map((t) => t.usageDuration), [
+        const Duration(minutes: 30),
+        const Duration(minutes: 22),
+        null,
+      ]);
+    });
+
+    test('maps gas switches by tank index to created tank ids', () async {
+      // FIT imports have no UDDF refs; switches address tanks positionally.
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.insertGasSwitches(any)).thenAnswer((_) async {});
+
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 40.0,
+            'tanks': [
+              {'gasMix': const GasMix(o2: 19, he: 34)},
+              {'gasMix': const GasMix(o2: 32, he: 0)},
+            ],
+            'gasSwitches': [
+              {'timestamp': 0, 'tankIndex': 0},
+              {'timestamp': 2474, 'tankIndex': 1, 'depth': 21.0},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final capturedDive = verify(mockDiveRepo.createDive(captureAny)).captured;
+      final dive = capturedDive.first as Dive;
+      expect(dive.tanks, hasLength(2));
+
+      final capturedSwitches = verify(
+        mockDiveRepo.insertGasSwitches(captureAny),
+      ).captured;
+      final switches = capturedSwitches.first as List<GasSwitch>;
+      expect(switches, hasLength(2));
+      expect(switches[0].tankId, dive.tanks[0].id);
+      expect(switches[1].tankId, dive.tanks[1].id);
+      expect(switches[1].depth, 21.0);
     });
   });
 
@@ -1753,9 +4139,16 @@ void main() {
     // _parseEnum is also used for buddy certificationLevel and
     // certificationAgency, providing another indirect test path.
 
+    // issue #553: a buddy's parsed cert now lands on a buddy-owned row in the
+    // certifications table (the inline Buddy cert fields were dropped), so
+    // these assert on the created Certification. _parseEnum is still exercised.
     test('parses certificationLevel string on buddy', () async {
       when(mockBuddyRepo.createBuddy(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Buddy,
+      );
+      when(mockCertificationRepo.createCertification(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as Certification,
       );
 
       const data = UddfImportResult(
@@ -1775,14 +4168,21 @@ void main() {
         diverId: diverId,
       );
 
-      final captured = verify(mockBuddyRepo.createBuddy(captureAny)).captured;
-      final buddy = captured[0] as Buddy;
-      expect(buddy.certificationLevel, CertificationLevel.advancedOpenWater);
+      final captured = verify(
+        mockCertificationRepo.createCertification(captureAny),
+      ).captured;
+      final cert = captured[0] as Certification;
+      expect(cert.level, CertificationLevel.advancedOpenWater.name);
+      expect(cert.buddyId, isNotNull);
     });
 
     test('parses certificationAgency enum on buddy', () async {
       when(mockBuddyRepo.createBuddy(any)).thenAnswer(
         (invocation) async => invocation.positionalArguments[0] as Buddy,
+      );
+      when(mockCertificationRepo.createCertification(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as Certification,
       );
 
       const data = UddfImportResult(
@@ -1802,9 +4202,11 @@ void main() {
         diverId: diverId,
       );
 
-      final captured = verify(mockBuddyRepo.createBuddy(captureAny)).captured;
-      final buddy = captured[0] as Buddy;
-      expect(buddy.certificationAgency, CertificationAgency.ssi);
+      final captured = verify(
+        mockCertificationRepo.createCertification(captureAny),
+      ).captured;
+      final cert = captured[0] as Certification;
+      expect(cert.agency, CertificationAgency.ssi.name);
     });
 
     test('returns null for unrecognized certificationLevel', () async {
@@ -1858,4 +4260,1056 @@ void main() {
       expect(buddy.certificationAgency, isNull);
     });
   });
+
+  group('Profile events persistence', () {
+    setUp(() {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.insertProfileEvents(any)).thenAnswer((_) async {});
+    });
+
+    test('persists setpointChange event with correct fields', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'events': [
+              {'eventType': 'setpointChange', 'timestamp': 300, 'value': 1.2},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(
+        mockDiveRepo.insertProfileEvents(captureAny),
+      ).captured;
+      final events = captured.first as List<ProfileEvent>;
+      expect(events, hasLength(1));
+      expect(events[0].eventType, ProfileEventType.setpointChange);
+      expect(events[0].timestamp, 300);
+      expect(events[0].value, 1.2);
+      expect(events[0].source, EventSource.imported);
+    });
+
+    test('an event id the log already holds takes a fresh one, and the Notes '
+        'links follow it', () async {
+      when(
+        mockDiveRepo.existingProfileEventIds(any),
+      ).thenAnswer((_) async => {'taken'});
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'notes': '[felt sick](annotation:taken), [ok](annotation:free)',
+            'profileEvents': [
+              {
+                'id': 'taken',
+                'eventType': 'annotation',
+                'timestamp': 300,
+                'description': 'felt sick',
+              },
+              {
+                'id': 'free',
+                'eventType': 'annotation',
+                'timestamp': 400,
+                'description': 'ok',
+              },
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final events =
+          verify(mockDiveRepo.insertProfileEvents(captureAny)).captured.first
+              as List<ProfileEvent>;
+      final fresh = events[0].id;
+      expect(fresh, isNot('taken'));
+      expect(events[1].id, 'free');
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.first as Dive;
+      expect(
+        dive.notes,
+        '[felt sick](annotation:$fresh), [ok](annotation:free)',
+      );
+    });
+
+    test('events without an id ask nothing of the log', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'events': [
+              {'eventType': 'setpointChange', 'timestamp': 300, 'value': 1.2},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verifyNever(mockDiveRepo.existingProfileEventIds(any));
+    });
+
+    test('does not call insertProfileEvents for unknown event type', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 20.0,
+            'events': [
+              {'eventType': 'unknownType', 'timestamp': 100},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verifyNever(mockDiveRepo.insertProfileEvents(any));
+    });
+
+    test(
+      'persists all 8 event types from profile-events-variety-style diveData',
+      () async {
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 40.0,
+              'events': [
+                {'eventType': 'setpointChange', 'timestamp': 60, 'value': 0.7},
+                {
+                  'eventType': 'bookmark',
+                  'timestamp': 120,
+                  'description': 'nice spot',
+                },
+                {
+                  'eventType': 'ascentRateWarning',
+                  'timestamp': 180,
+                  'value': 12.5,
+                },
+                {'eventType': 'ppO2High', 'timestamp': 240, 'value': 1.7},
+                {'eventType': 'decoViolation', 'timestamp': 300},
+                {'eventType': 'decoViolation', 'timestamp': 360, 'value': 0.5},
+                {'eventType': 'decoStopStart', 'timestamp': 420},
+                {'eventType': 'safetyStopStart', 'timestamp': 480},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: UddfImportSelections.selectAll(data),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        final captured = verify(
+          mockDiveRepo.insertProfileEvents(captureAny),
+        ).captured;
+        final events = captured.first as List<ProfileEvent>;
+        expect(events, hasLength(8));
+
+        expect(events[0].eventType, ProfileEventType.setpointChange);
+        expect(events[0].source, EventSource.imported);
+
+        expect(events[1].eventType, ProfileEventType.bookmark);
+        expect(events[1].source, EventSource.imported);
+        expect(events[1].description, 'nice spot');
+
+        expect(events[2].eventType, ProfileEventType.ascentRateWarning);
+        expect(events[2].source, EventSource.imported);
+
+        expect(events[3].eventType, ProfileEventType.ppO2High);
+        expect(events[3].source, EventSource.imported);
+        expect(events[3].value, 1.7);
+
+        expect(events[4].eventType, ProfileEventType.decoViolation);
+        expect(events[4].source, EventSource.imported);
+
+        expect(events[5].eventType, ProfileEventType.decoViolation);
+        expect(events[5].value, 0.5);
+
+        expect(events[6].eventType, ProfileEventType.decoStopStart);
+        expect(events[6].source, EventSource.imported);
+
+        expect(events[7].eventType, ProfileEventType.safetyStopStart);
+        expect(events[7].source, EventSource.imported);
+      },
+    );
+
+    test('bookmark event from import uses source=imported, not user', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 18.0,
+            'events': [
+              {
+                'eventType': 'bookmark',
+                'timestamp': 90,
+                'description': 'cool fish',
+              },
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(
+        mockDiveRepo.insertProfileEvents(captureAny),
+      ).captured;
+      final events = captured.first as List<ProfileEvent>;
+      expect(events, hasLength(1));
+      expect(events[0].eventType, ProfileEventType.bookmark);
+      expect(events[0].source, EventSource.imported);
+      expect(events[0].description, 'cool fish');
+    });
+
+    test(
+      'ppO2High event with missing value is skipped at importer level',
+      () async {
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 20.0,
+              'events': [
+                // No 'value' key — simulates parser malfunction or malformed event
+                {'eventType': 'ppO2High', 'timestamp': 300},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: UddfImportSelections.selectAll(data),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        verifyNever(mockDiveRepo.insertProfileEvents(any));
+      },
+    );
+
+    test(
+      'ppO2Low event with missing value is skipped at importer level',
+      () async {
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 20.0,
+              'events': [
+                // No 'value' key — simulates parser malfunction or malformed event
+                {'eventType': 'ppO2Low', 'timestamp': 300},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: UddfImportSelections.selectAll(data),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        verifyNever(mockDiveRepo.insertProfileEvents(any));
+      },
+    );
+
+    test(
+      'ascentRateWarning event with missing value is skipped at importer level',
+      () async {
+        final data = UddfImportResult(
+          dives: [
+            {
+              'dateTime': now,
+              'maxDepth': 20.0,
+              'events': [
+                // No 'value' key — avoid persisting a misleading 0 m/min rate
+                {'eventType': 'ascentRateWarning', 'timestamp': 300},
+              ],
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: UddfImportSelections.selectAll(data),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        verifyNever(mockDiveRepo.insertProfileEvents(any));
+      },
+    );
+  });
+
+  group('dive-level metadata persistence (Slice D)', () {
+    test(
+      'dual-cylinder.ssrf populates Dives + DiveDataSources metadata fields',
+      () async {
+        // This test asserts specific values from dual-cylinder.ssrf:
+        // - divecomputer model: 'Shearwater Peregrine'
+        // - Serial: '98d09a47'
+        // - FW Version: '86'
+        // - Deco model: 'GF 40/85'
+        // - Surface pressure: '1.012 bar'
+        // If dual-cylinder.ssrf is ever edited (e.g., sanitized for privacy),
+        // update the expectations below to match.
+
+        // 1. Load fixture bytes and wrap in required <divelog> envelope.
+        const fixturePath =
+            'test/features/universal_import/data/parsers/fixtures/dual-cylinder.ssrf';
+        final diveXml = await File(fixturePath).readAsString();
+        final wrapped =
+            "<divelog program='subsurface' version='3'><dives>$diveXml</dives></divelog>";
+        // Encode as UTF-8 to match SubsurfaceXmlParser.parse() decoding;
+        // codeUnits would produce UTF-16 and break on non-ASCII fixtures.
+        final bytes = Uint8List.fromList(utf8.encode(wrapped));
+
+        // 2. Parse via SubsurfaceXmlParser.
+        final parsePayload = await SubsurfaceXmlParser().parse(bytes);
+        final diveDataList = parsePayload.entitiesOf(ImportEntityType.dives);
+        expect(diveDataList.length, 1);
+        final diveData = diveDataList.first;
+
+        // 3. Parser-level assertions — metadata keys populated.
+        expect(diveData['diveComputerModel'], 'Shearwater Peregrine');
+        expect(diveData['diveComputerSerial'], '98d09a47');
+        expect(diveData['diveComputerFirmware'], '86');
+        expect(diveData['decoAlgorithm'], 'buhlmann');
+        expect(diveData['gradientFactorLow'], 40);
+        expect(diveData['gradientFactorHigh'], 85);
+        expect(diveData['surfacePressure'], closeTo(1.012, 0.0001));
+
+        // 4. Build UddfImportResult from parsed dives and run the importer.
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+        final data = UddfImportResult(dives: diveDataList);
+
+        await importer.import(
+          data: data,
+          selections: UddfImportSelections.selectAll(data),
+          repositories: repos,
+          diverId: diverId,
+        );
+
+        // 5. Verify captured Dive entity — assert dive-level metadata fields.
+        final capturedDives = verify(
+          mockDiveRepo.createDive(captureAny),
+        ).captured;
+        final dive = capturedDives.single as Dive;
+        expect(dive.diveComputerModel, 'Shearwater Peregrine');
+        expect(dive.diveComputerSerial, '98d09a47');
+        expect(dive.diveComputerFirmware, '86');
+        expect(dive.decoAlgorithm, 'buhlmann');
+        expect(dive.gradientFactorLow, 40);
+        expect(dive.gradientFactorHigh, 85);
+        expect(dive.surfacePressure, closeTo(1.012, 0.0001));
+
+        // 6. Verify captured DiveDataSourcesCompanion — assert data-source fields.
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final reading = capturedReadings.single;
+        expect(reading.computerModel.value, 'Shearwater Peregrine');
+        expect(reading.computerSerial.value, '98d09a47');
+        expect(reading.decoAlgorithm.value, 'buhlmann');
+        expect(reading.gradientFactorLow.value, 40);
+        expect(reading.gradientFactorHigh.value, 85);
+      },
+    );
+  });
+
+  group('Store the imported file and its real format (issue #478)', () {
+    test(
+      'stores the source file and records its format when supported',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+        final store = _RecordingImportedFiles();
+        final importer = UddfEntityImporter(importedFiles: store);
+
+        final data = UddfImportResult(
+          dives: [
+            {'dateTime': now, 'maxDepth': 25.0},
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+          sourceFormat: ImportFormat.uddf,
+          sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+          sourceFileName: 'dive.uddf',
+        );
+
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final reading = capturedReadings.single;
+        expect(reading.sourceFileFormat.value, 'uddf');
+        expect(reading.importedFileId.value, store.lastStoredId);
+        expect(store.storeCalls, 1);
+      },
+    );
+
+    test(
+      'does not store a file for a format parserForFormat cannot re-parse',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+        final store = _RecordingImportedFiles();
+        final importer = UddfEntityImporter(importedFiles: store);
+
+        final data = UddfImportResult(
+          dives: [
+            {'dateTime': now, 'maxDepth': 25.0},
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0}),
+          repositories: repos,
+          diverId: diverId,
+          sourceFormat: ImportFormat.csv,
+          sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+          sourceFileName: 'dive.csv',
+        );
+
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final reading = capturedReadings.single;
+        expect(reading.sourceFileFormat.value, 'csv');
+        expect(reading.importedFileId.value, isNull);
+        expect(store.storeCalls, 0);
+      },
+    );
+
+    test('a store failure leaves the import intact', () async {
+      // Storing the file is an enhancement to the import, never a
+      // precondition: a full disk must cost the diver a resync path, not the
+      // whole import.
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+      final store = _FailingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0},
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFormat: ImportFormat.uddf,
+        sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+        sourceFileName: 'dive.uddf',
+      );
+
+      expect(store.storeCalls, 1);
+      expect(result.dives, 1);
+      final reading = verify(
+        mockDiveRepo.saveComputerReading(captureAny),
+      ).captured.single;
+      expect(reading.importedFileId.value, isNull);
+    });
+
+    test('stores nothing when the dives bring their own source rows', () async {
+      // A Submersion export carries <source> entries, so the restored rows
+      // define this dive's provenance and no synthesised row names the stored
+      // copy. `imported/` has no orphan sweep and the deletion cascade is
+      // refcounted off those pointers, so an unreferenced copy would be
+      // unreachable garbage forever.
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReadings(any)).thenAnswer((_) async {});
+
+      final store = _RecordingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, 'sourceUuid': 'src-uuid-1'},
+        ],
+        dataSourcesByDiveRef: {
+          'src-uuid-1': [
+            {'isPrimary': true, 'sourceFileFormat': 'libdivecomputer'},
+          ],
+        },
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFormat: ImportFormat.uddf,
+        sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+        sourceFileName: 'export.uddf',
+      );
+
+      expect(store.storeCalls, 0);
+      verifyNever(mockDiveRepo.saveComputerReading(any));
+    });
+
+    test('stores nothing when the import is cancelled before the first '
+        'dive', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+      final store = _RecordingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+      final cancelToken = ImportCancellationToken()..cancel();
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFormat: ImportFormat.uddf,
+        sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+        sourceFileName: 'dive.uddf',
+        cancelToken: cancelToken,
+      );
+
+      expect(store.storeCalls, 0);
+    });
+
+    test('stores one copy per import run, shared by every dive', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+      final store = _RecordingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0},
+          {'dateTime': now.add(const Duration(hours: 2)), 'maxDepth': 18.0},
+          {'dateTime': now.add(const Duration(hours: 4)), 'maxDepth': 12.0},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0, 1, 2}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFormat: ImportFormat.uddf,
+        sourceFileBytes: Uint8List.fromList([1, 2, 3]),
+        sourceFileName: 'logbook.uddf',
+      );
+
+      // One file on disk, three rows pointing at it -- not one copy per dive.
+      expect(store.storeCalls, 1);
+      final captured = verify(
+        mockDiveRepo.saveComputerReading(captureAny),
+      ).captured;
+      expect(captured, hasLength(3));
+      expect(captured.map((r) => r.importedFileId.value).toSet(), {
+        store.lastStoredId,
+      });
+    });
+
+    test('a batch import gives each dive the copy of the file it came '
+        'from', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+      final store = _RecordingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+
+      var januaryReads = 0;
+      var februaryReads = 0;
+
+      // Two dives from one file, one from another, in payload order rather
+      // than chronological order so the per-dive lookup cannot ride on the
+      // import's own sort.
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, '_sourceFileId': 'f0'},
+          {
+            'dateTime': now.add(const Duration(hours: 2)),
+            'maxDepth': 18.0,
+            '_sourceFileId': 'f1',
+          },
+          {
+            'dateTime': now.add(const Duration(hours: 4)),
+            'maxDepth': 12.0,
+            '_sourceFileId': 'f0',
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0, 1, 2}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFilesById: {
+          'f0': ImportSourceFile(
+            fileName: 'january.uddf',
+            format: ImportFormat.uddf,
+            readBytes: () async {
+              januaryReads++;
+              return Uint8List.fromList([1, 2, 3]);
+            },
+          ),
+          'f1': ImportSourceFile(
+            fileName: 'february.ssrf',
+            format: ImportFormat.subsurfaceXml,
+            readBytes: () async {
+              februaryReads++;
+              return Uint8List.fromList([4, 5, 6]);
+            },
+          ),
+        },
+      );
+
+      // One copy per file, not per dive, and each file's bytes are read once.
+      expect(store.storeCalls, 2);
+      expect(januaryReads, 1);
+      expect(februaryReads, 1);
+
+      final captured = verify(
+        mockDiveRepo.saveComputerReading(captureAny),
+      ).captured;
+      expect(captured, hasLength(3));
+
+      final januaryPath = store.storedIdByFileName['january.uddf'];
+      final februaryPath = store.storedIdByFileName['february.ssrf'];
+      expect(januaryPath, isNotNull);
+      expect(februaryPath, isNotNull);
+      expect(januaryPath, isNot(februaryPath));
+
+      final pathsByName = <String?, Set<String?>>{};
+      final formatsByName = <String?, Set<String?>>{};
+      for (final reading in captured) {
+        (pathsByName[reading.sourceFileName.value] ??= {}).add(
+          reading.importedFileId.value,
+        );
+        (formatsByName[reading.sourceFileName.value] ??= {}).add(
+          reading.sourceFileFormat.value,
+        );
+      }
+      expect(pathsByName['january.uddf'], {januaryPath});
+      expect(pathsByName['february.ssrf'], {februaryPath});
+      expect(formatsByName['january.uddf'], {'uddf'});
+      expect(formatsByName['february.ssrf'], {'subsurfaceXml'});
+    });
+
+    test('one unreadable file in a batch does not cost the others their '
+        'paths', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+      when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+      final store = _RecordingImportedFiles();
+      final importer = UddfEntityImporter(importedFiles: store);
+
+      final data = UddfImportResult(
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, '_sourceFileId': 'f0'},
+          {
+            'dateTime': now.add(const Duration(hours: 2)),
+            'maxDepth': 18.0,
+            '_sourceFileId': 'f1',
+          },
+        ],
+      );
+
+      final result = await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0, 1}),
+        repositories: repos,
+        diverId: diverId,
+        sourceFilesById: {
+          'f0': ImportSourceFile(
+            fileName: 'gone.uddf',
+            format: ImportFormat.uddf,
+            readBytes: () async =>
+                throw const FileSystemException('No such file'),
+          ),
+          'f1': ImportSourceFile(
+            fileName: 'here.uddf',
+            format: ImportFormat.uddf,
+            readBytes: () async => Uint8List.fromList([4, 5, 6]),
+          ),
+        },
+      );
+
+      expect(result.dives, 2);
+      final captured = verify(
+        mockDiveRepo.saveComputerReading(captureAny),
+      ).captured;
+      final byName = {
+        for (final reading in captured)
+          reading.sourceFileName.value: reading.importedFileId.value,
+      };
+      expect(byName['gone.uddf'], isNull);
+      expect(byName['here.uddf'], store.storedIdByFileName['here.uddf']);
+    });
+
+    test(
+      'a batch stores only the files whose format can be re-parsed',
+      () async {
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+        when(mockDiveRepo.saveComputerReading(any)).thenAnswer((_) async {});
+
+        final store = _RecordingImportedFiles();
+        final importer = UddfEntityImporter(importedFiles: store);
+
+        var csvReads = 0;
+
+        final data = UddfImportResult(
+          dives: [
+            {'dateTime': now, 'maxDepth': 25.0, '_sourceFileId': 'f0'},
+            {
+              'dateTime': now.add(const Duration(hours: 2)),
+              'maxDepth': 18.0,
+              '_sourceFileId': 'f1',
+            },
+          ],
+        );
+
+        await importer.import(
+          data: data,
+          selections: const UddfImportSelections(dives: {0, 1}),
+          repositories: repos,
+          diverId: diverId,
+          sourceFilesById: {
+            'f0': ImportSourceFile(
+              fileName: 'log.csv',
+              format: ImportFormat.csv,
+              readBytes: () async {
+                csvReads++;
+                return Uint8List.fromList([1, 2, 3]);
+              },
+            ),
+            'f1': ImportSourceFile(
+              fileName: 'log.uddf',
+              format: ImportFormat.uddf,
+              readBytes: () async => Uint8List.fromList([4, 5, 6]),
+            ),
+          },
+        );
+
+        // The unstorable file is never even read.
+        expect(csvReads, 0);
+        expect(store.storeCalls, 1);
+        final captured = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final byName = {
+          for (final reading in captured)
+            reading.sourceFileName.value: reading.importedFileId.value,
+        };
+        expect(byName['log.csv'], isNull);
+        expect(byName['log.uddf'], isNotNull);
+      },
+    );
+  });
+
+  group('Import service records', () {
+    setUp(() {
+      when(mockEquipmentRepo.createEquipment(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as EquipmentItem,
+      );
+      when(mockServiceRecordRepo.createRecord(any)).thenAnswer(
+        (invocation) async =>
+            invocation.positionalArguments[0] as ServiceRecord,
+      );
+    });
+
+    UddfImportResult dataWith(List<Map<String, dynamic>> records) {
+      return UddfImportResult(
+        equipment: const [
+          {'name': 'Travel Set', 'uddfId': 'gear-1', 'type': 'regulator'},
+        ],
+        serviceRecords: records,
+      );
+    }
+
+    test('attaches a record to the equipment it references', () async {
+      await importer.import(
+        data: dataWith([
+          {
+            'equipmentRef': 'gear-1',
+            'serviceDate': DateTime(2025, 5, 12),
+            'provider': 'Seals Watersports',
+            'notes': 'Swapped yoke to DIN',
+            'serviceCategory': 'annual',
+          },
+        ]),
+        selections: const UddfImportSelections(equipment: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final captured = verify(
+        mockServiceRecordRepo.createRecord(captureAny),
+      ).captured;
+      expect(captured, hasLength(1));
+      final record = captured.single as ServiceRecord;
+      expect(record.provider, 'Seals Watersports');
+      expect(record.serviceDate, DateTime(2025, 5, 12));
+      expect(record.serviceCategory, ServiceCategory.annual);
+      expect(record.notes, 'Swapped yoke to DIN');
+
+      // The record must point at the newly created equipment row, not at the
+      // source's own id.
+      final equipment =
+          verify(mockEquipmentRepo.createEquipment(captureAny)).captured.single
+              as EquipmentItem;
+      expect(record.equipmentId, equipment.id);
+    });
+
+    test('skips a record whose equipment was not imported', () async {
+      await importer.import(
+        data: dataWith([
+          {
+            'equipmentRef': 'gear-missing',
+            'serviceDate': DateTime(2025, 5, 12),
+          },
+        ]),
+        selections: const UddfImportSelections(equipment: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verifyNever(mockServiceRecordRepo.createRecord(any));
+    });
+
+    // A skipped duplicate is linked to the existing row so dives keep their
+    // gear, but its history is not re-imported: there is no service-record
+    // dedup, so every re-import of the file would copy it again.
+    test('skips a record whose equipment was linked to an existing '
+        'item', () async {
+      await importer.import(
+        data: dataWith([
+          {'equipmentRef': 'gear-1', 'serviceDate': DateTime(2025, 5, 12)},
+        ]),
+        selections: const UddfImportSelections(),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedEquipmentIds: const {'gear-1': 'existing-eq-1'},
+      );
+
+      verifyNever(mockServiceRecordRepo.createRecord(any));
+    });
+
+    test('an item imported despite a seed still gets its service history '
+        '(#1824)', () async {
+      await importer.import(
+        data: dataWith([
+          {'equipmentRef': 'gear-1', 'serviceDate': DateTime(2025, 5, 12)},
+        ]),
+        selections: const UddfImportSelections(equipment: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedEquipmentIds: const {'gear-1': 'existing-gear-1'},
+      );
+
+      final record =
+          verify(mockServiceRecordRepo.createRecord(captureAny)).captured.single
+              as ServiceRecord;
+      final equipment =
+          verify(mockEquipmentRepo.createEquipment(captureAny)).captured.single
+              as EquipmentItem;
+      expect(record.equipmentId, equipment.id);
+    });
+
+    test('skips a record with no service date', () async {
+      await importer.import(
+        data: dataWith([
+          {'equipmentRef': 'gear-1', 'provider': 'Someone'},
+        ]),
+        selections: const UddfImportSelections(equipment: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verifyNever(mockServiceRecordRepo.createRecord(any));
+    });
+
+    test('one failing record does not abort the import', () async {
+      when(mockServiceRecordRepo.createRecord(any)).thenAnswer((
+        invocation,
+      ) async {
+        final record = invocation.positionalArguments[0] as ServiceRecord;
+        if (record.provider == 'boom') throw Exception('write failed');
+        return record;
+      });
+
+      await importer.import(
+        data: dataWith([
+          {
+            'equipmentRef': 'gear-1',
+            'serviceDate': DateTime(2025, 1, 1),
+            'provider': 'boom',
+          },
+          {
+            'equipmentRef': 'gear-1',
+            'serviceDate': DateTime(2025, 2, 1),
+            'provider': 'fine',
+          },
+        ]),
+        selections: const UddfImportSelections(equipment: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verify(mockServiceRecordRepo.createRecord(any)).called(2);
+    });
+  });
+
+  group('Import dives (cylinder order, #4347)', () {
+    setUp(() {
+      when(
+        mockDiveRepo.createDive(any),
+      ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+    });
+
+    Future<Dive> importDive(List<Map<String, dynamic>> tanks) async {
+      await importer.import(
+        data: UddfImportResult(
+          dives: [
+            {'dateTime': DateTime.utc(2025, 10, 13, 11, 24), 'tanks': tanks},
+          ],
+        ),
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+      );
+      return verify(mockDiveRepo.createDive(captureAny)).captured.single
+          as Dive;
+    }
+
+    test('cylinders without a tankorder keep their file position', () async {
+      final dive = await importDive([
+        {'startPressure': 200.0},
+        {'startPressure': 210.0},
+      ]);
+
+      expect(dive.tanks.map((t) => t.order), [0, 1]);
+    });
+
+    test('a tankorder from the file is kept', () async {
+      final dive = await importDive([
+        {'startPressure': 200.0, 'order': 3},
+        {'startPressure': 210.0, 'order': 1},
+      ]);
+
+      expect(dive.tanks.map((t) => t.order), [3, 1]);
+    });
+  });
 }
+
+/// These tests run on mocked repositories with no database: no custom
+/// agencies or levels exist, and one an import creates lives in memory
+/// (issue #690).
+class _NoCustomCertifications extends CustomCertificationRepository {
+  @override
+  Future<List<CustomCertificationAgency>> getAllAgencies() async => const [];
+
+  @override
+  Future<List<CustomCertificationLevel>> getAllLevels() async => const [];
+
+  @override
+  Future<CustomCertificationAgency> createAgency({
+    required String diverId,
+    required String name,
+    int? colorArgb,
+    required bool isShared,
+  }) async => CustomCertificationAgency(
+    id: 'custom-${name.toLowerCase()}',
+    diverId: diverId,
+    name: name,
+    colorArgb: colorArgb ?? 0xFF3B82F6,
+    isShared: isShared,
+    createdAt: DateTime(2026),
+    updatedAt: DateTime(2026),
+  );
+}
+
+/// A solid PNG of the given size, standing in for an image embedded in a
+/// source logbook.
+Uint8List _png(int width, int height) =>
+    img.encodePng(img.Image(width: width, height: height));

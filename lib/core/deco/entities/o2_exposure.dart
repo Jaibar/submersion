@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/deco/entities/cns_calculation_method.dart';
+
 /// Represents oxygen toxicity exposure during a dive.
 ///
 /// Tracks both CNS (Central Nervous System) toxicity percentage and
@@ -12,6 +14,12 @@ class O2Exposure extends Equatable {
 
   /// CNS% at end of dive
   final double cnsEnd;
+
+  /// Surface time since the nearest earlier dive with no known oxygen exposure
+  /// (no profile, or a gauge dive), up to this dive's start, or null when no
+  /// such dive is inside [CnsTable.cnsRecoveryWindow]. The carried history
+  /// leaves that dive's dose out; see [cnsIsMinimum].
+  final Duration? cnsUnknownDiveAge;
 
   /// OTU accumulated during this dive
   final double otu;
@@ -25,37 +33,59 @@ class O2Exposure extends Equatable {
   /// Depth at which max ppO2 occurred (meters)
   final double maxPpO2Depth;
 
-  /// Time spent above warning threshold (1.4 bar) in seconds
+  /// Time spent above [warningThreshold] in seconds
   final int timeAboveWarning;
 
-  /// Time spent above critical threshold (1.6 bar) in seconds
+  /// Time spent above [criticalThreshold] in seconds
   final int timeAboveCritical;
+
+  /// ppO2 working limit this exposure was evaluated against, in bar. Defaults
+  /// to the 1.4 bar recreational working limit; the diver can raise or lower
+  /// it in decompression settings.
+  final double warningThreshold;
+
+  /// ppO2 maximum (deco/contingency) limit this exposure was evaluated
+  /// against, in bar. Defaults to the 1.6 bar limit.
+  final double criticalThreshold;
 
   const O2Exposure({
     this.cnsStart = 0.0,
     this.cnsEnd = 0.0,
+    this.cnsUnknownDiveAge,
     this.otu = 0.0,
     this.otuStart = 0.0,
     this.maxPpO2 = 0.0,
     this.maxPpO2Depth = 0.0,
     this.timeAboveWarning = 0,
     this.timeAboveCritical = 0,
+    this.warningThreshold = 1.4,
+    this.criticalThreshold = 1.6,
   });
 
   /// CNS% accumulated during this dive
   double get cnsDelta => cnsEnd - cnsStart;
 
+  /// Whether [cnsStart], and so [cnsEnd], is a minimum rather than the whole
+  /// load, because of the unknown dive [cnsUnknownDiveAge] measures from.
+  bool get cnsIsMinimum => cnsUnknownDiveAge != null;
+
+  /// CNS% at or above which the oxygen clock is in its warning zone.
+  static const double cnsWarningPercent = 80.0;
+
+  /// CNS% at or above which the oxygen clock is critical.
+  static const double cnsCriticalPercent = 100.0;
+
   /// Whether CNS is in warning zone (>80%)
-  bool get cnsWarning => cnsEnd >= 80.0;
+  bool get cnsWarning => cnsEnd >= cnsWarningPercent;
 
   /// Whether CNS is critical (>100%)
-  bool get cnsCritical => cnsEnd >= 100.0;
+  bool get cnsCritical => cnsEnd >= cnsCriticalPercent;
 
-  /// Whether ppO2 exceeded safe working limit (1.4 bar)
-  bool get ppO2Warning => maxPpO2 > 1.4;
+  /// Whether ppO2 exceeded the diver's working limit ([warningThreshold])
+  bool get ppO2Warning => maxPpO2 > warningThreshold;
 
-  /// Whether ppO2 exceeded maximum deco limit (1.6 bar)
-  bool get ppO2Critical => maxPpO2 > 1.6;
+  /// Whether ppO2 exceeded the diver's maximum deco limit ([criticalThreshold])
+  bool get ppO2Critical => maxPpO2 > criticalThreshold;
 
   /// Daily OTU limit (typically 300 for single day, 850 cumulative)
   static const double dailyOtuLimit = 300.0;
@@ -89,22 +119,28 @@ class O2Exposure extends Equatable {
   O2Exposure copyWith({
     double? cnsStart,
     double? cnsEnd,
+    Duration? cnsUnknownDiveAge,
     double? otu,
     double? otuStart,
     double? maxPpO2,
     double? maxPpO2Depth,
     int? timeAboveWarning,
     int? timeAboveCritical,
+    double? warningThreshold,
+    double? criticalThreshold,
   }) {
     return O2Exposure(
       cnsStart: cnsStart ?? this.cnsStart,
       cnsEnd: cnsEnd ?? this.cnsEnd,
+      cnsUnknownDiveAge: cnsUnknownDiveAge ?? this.cnsUnknownDiveAge,
       otu: otu ?? this.otu,
       otuStart: otuStart ?? this.otuStart,
       maxPpO2: maxPpO2 ?? this.maxPpO2,
       maxPpO2Depth: maxPpO2Depth ?? this.maxPpO2Depth,
       timeAboveWarning: timeAboveWarning ?? this.timeAboveWarning,
       timeAboveCritical: timeAboveCritical ?? this.timeAboveCritical,
+      warningThreshold: warningThreshold ?? this.warningThreshold,
+      criticalThreshold: criticalThreshold ?? this.criticalThreshold,
     );
   }
 
@@ -112,12 +148,15 @@ class O2Exposure extends Equatable {
   List<Object?> get props => [
     cnsStart,
     cnsEnd,
+    cnsUnknownDiveAge,
     otu,
     otuStart,
     maxPpO2,
     maxPpO2Depth,
     timeAboveWarning,
     timeAboveCritical,
+    warningThreshold,
+    criticalThreshold,
   ];
 }
 
@@ -125,35 +164,30 @@ class O2Exposure extends Equatable {
 ///
 /// Based on NOAA Diving Manual oxygen exposure limits.
 class CnsTable {
-  /// Get CNS% accumulation per minute at given ppO2
+  /// CNS %/min at [ppO2] using [method] (default: Shearwater-style).
   ///
-  /// Returns 0 if ppO2 is below 0.5 bar (no CNS accumulation).
-  /// Returns high value for ppO2 > 1.6 (immediate danger zone).
-  static double cnsPerMinute(double ppO2) {
-    if (ppO2 <= 0.5) return 0.0;
-    if (ppO2 <= 0.6) return 100.0 / 720.0; // 720 min limit
-    if (ppO2 <= 0.7) return 100.0 / 570.0; // 570 min limit
-    if (ppO2 <= 0.8) return 100.0 / 450.0; // 450 min limit
-    if (ppO2 <= 0.9) return 100.0 / 360.0; // 360 min limit
-    if (ppO2 <= 1.0) return 100.0 / 300.0; // 300 min limit
-    if (ppO2 <= 1.1) return 100.0 / 240.0; // 240 min limit
-    if (ppO2 <= 1.2) return 100.0 / 210.0; // 210 min limit
-    if (ppO2 <= 1.3) return 100.0 / 180.0; // 180 min limit
-    if (ppO2 <= 1.4) return 100.0 / 150.0; // 150 min limit
-    if (ppO2 <= 1.5) return 100.0 / 120.0; // 120 min limit
-    if (ppO2 <= 1.6) return 100.0 / 45.0; // 45 min limit
-    // Above 1.6 bar is extremely dangerous
-    return 100.0 / 10.0; // Rapid accumulation
+  /// Returns 0 if ppO2 is at or below 0.5 bar (no CNS accumulation).
+  static double cnsPerMinute(
+    double ppO2, {
+    CnsCalculationMethod method = CnsCalculationMethod.shearwater,
+  }) {
+    return method.cnsPerMinute(ppO2);
   }
 
-  /// Calculate CNS% for a time segment at constant ppO2
-  static double cnsForSegment(double ppO2, int durationSeconds) {
-    final minutes = durationSeconds / 60.0;
-    return cnsPerMinute(ppO2) * minutes;
+  /// CNS% for a segment of [durationSeconds] at constant [ppO2].
+  static double cnsForSegment(
+    double ppO2,
+    int durationSeconds, {
+    CnsCalculationMethod method = CnsCalculationMethod.shearwater,
+  }) {
+    return cnsPerMinute(ppO2, method: method) * (durationSeconds / 60.0);
   }
 
   /// Half-time for CNS recovery at surface (approximately 90 minutes)
   static const double cnsHalfTimeMinutes = 90.0;
+
+  /// Surface time after which a dive's CNS no longer carries into the next.
+  static const Duration cnsRecoveryWindow = Duration(hours: 24);
 
   /// Calculate remaining CNS% after surface interval
   static double cnsAfterSurfaceInterval(

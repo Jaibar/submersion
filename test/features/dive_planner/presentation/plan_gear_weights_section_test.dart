@@ -1,0 +1,530 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/core/buoyancy/weight_observation.dart';
+import 'package:submersion/core/buoyancy/weight_prediction_engine.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/equipment_picker_sheet.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/plan_gear_weights_section.dart';
+import 'package:submersion/features/divers/domain/entities/diver_weight_entry.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_weight_entry_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/weight_planner/presentation/providers/weight_planner_providers.dart';
+
+import '../../../helpers/mock_providers.dart';
+import '../../../helpers/test_app.dart';
+
+void main() {
+  const suitItem = EquipmentItem(
+    id: 'suit',
+    name: '5mm Suit',
+    type: EquipmentType.wetsuit,
+  );
+
+  final entry = DiverWeightEntry(
+    id: 'w1',
+    diverId: 'diver-1',
+    measuredAt: DateTime(2026, 6, 1),
+    weightKg: 80,
+    createdAt: DateTime(2026, 6, 1),
+    updatedAt: DateTime(2026, 6, 1),
+  );
+
+  final observations = [
+    for (var i = 0; i < 12; i++)
+      WeightObservation(
+        diveId: 'd$i',
+        diveDateTime: DateTime(2026, 6, 1).subtract(Duration(days: i)),
+        waterType: WaterType.salt,
+        carriedKg: 8.0,
+        equipmentIds: const ['suit'],
+        tanks: const [
+          ObservedTank(
+            presetName: 'al80',
+            volumeL: 11.1,
+            workingPressureBar: 207,
+            material: TankMaterial.aluminum,
+          ),
+        ],
+        feedback: 'correct',
+      ),
+  ];
+
+  testWidgets('shows a live prediction and persists it on accept', (
+    tester,
+  ) async {
+    final base = await getBaseOverrides();
+    final overrides = [
+      ...base,
+      weightObservationsProvider.overrideWith((ref) async => observations),
+      allEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+      activeEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+      latestDiverWeightProvider.overrideWith((ref) async => entry),
+      latestDiverHeightProvider.overrideWith((ref) async => null),
+      latestDiverBodyFatProvider.overrideWith((ref) async => null),
+      diverBodyProfileProvider.overrideWith(
+        (ref) async => (sex: null, ageYears: null),
+      ),
+    ];
+
+    await tester.pumpWidget(
+      testApp(overrides: overrides, child: const PlanGearWeightsSection()),
+    );
+    await tester.pumpAndSettle();
+
+    // Seed the plan state through the real notifier.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanGearWeightsSection)),
+    );
+    container.read(divePlanNotifierProvider.notifier)
+      ..addTank(
+        const DiveTank(
+          id: 't1',
+          volume: 11.1,
+          workingPressure: 207,
+          material: TankMaterial.aluminum,
+          presetName: 'al80',
+        ),
+      )
+      ..setEquipmentIds(['suit']);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Predicted:'), findsOneWidget);
+    expect(find.text('5mm Suit'), findsOneWidget);
+
+    await tester.tap(find.text('Use as planned weight'));
+    await tester.pumpAndSettle();
+
+    final state = container.read(divePlanNotifierProvider);
+    expect(state.plannedWeightKg, isNotNull);
+    expect(state.plannedWeightKg, greaterThan(4.0));
+    expect(find.textContaining('Planned:'), findsOneWidget);
+  });
+
+  testWidgets('gear picker and set picker add items; chip delete removes '
+      'them', (tester) async {
+    final base = await getBaseOverrides();
+    final set = EquipmentSet(
+      id: 'set-1',
+      name: 'Tropical rig',
+      description: '',
+      equipmentIds: const ['suit'],
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          weightObservationsProvider.overrideWith((ref) async => const []),
+          allEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+          activeEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+          latestDiverWeightProvider.overrideWith((ref) async => null),
+          latestDiverHeightProvider.overrideWith((ref) async => null),
+          latestDiverBodyFatProvider.overrideWith((ref) async => null),
+          diverBodyProfileProvider.overrideWith(
+            (ref) async => (sex: null, ageYears: null),
+          ),
+          equipmentSetsProvider.overrideWith((ref) async => [set]),
+          equipmentSetWithItemsProvider(
+            'set-1',
+          ).overrideWith((ref) async => set.copyWith(items: const [suitItem])),
+        ],
+        child: const PlanGearWeightsSection(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Add via the gear picker, which leaves out the components of an
+    // assembly it offers (#2514).
+    await tester.tap(find.byTooltip('Add gear'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<EquipmentPickerSheet>(find.byType(EquipmentPickerSheet))
+          .hideAssemblyParts,
+      isTrue,
+    );
+    await tester.tap(find.text('5mm Suit').last);
+    await tester.pumpAndSettle();
+    expect(find.byType(InputChip), findsOneWidget);
+
+    // Remove via the chip's delete icon (its only Icon descendant).
+    await tester.tap(
+      find.descendant(of: find.byType(InputChip), matching: find.byType(Icon)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(InputChip), findsNothing);
+
+    // Add via the set picker.
+    await tester.tap(find.byTooltip('Use set'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Tropical rig'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InputChip), findsOneWidget);
+  });
+
+  testWidgets('a set member no longer shared is not added (issue #2046)', (
+    tester,
+  ) async {
+    const theirs = EquipmentItem(
+      id: 'theirs',
+      diverId: 'wife',
+      name: 'Their fins',
+      type: EquipmentType.fins,
+    );
+    final base = await getBaseOverrides();
+    final set = EquipmentSet(
+      id: 'set-1',
+      name: 'Tropical rig',
+      description: '',
+      equipmentIds: const ['suit', 'theirs'],
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          weightObservationsProvider.overrideWith((ref) async => const []),
+          allEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+          activeEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+          validatedCurrentDiverIdProvider.overrideWith(
+            (ref) async => 'diver-1',
+          ),
+          latestDiverWeightProvider.overrideWith((ref) async => null),
+          latestDiverHeightProvider.overrideWith((ref) async => null),
+          latestDiverBodyFatProvider.overrideWith((ref) async => null),
+          diverBodyProfileProvider.overrideWith(
+            (ref) async => (sex: null, ageYears: null),
+          ),
+          equipmentSetsProvider.overrideWith((ref) async => [set]),
+          equipmentSetWithItemsProvider('set-1').overrideWith(
+            (ref) async => set.copyWith(items: const [suitItem, theirs]),
+          ),
+        ],
+        child: const PlanGearWeightsSection(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Use set'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Tropical rig'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InputChip), findsOneWidget);
+    expect(find.text('Their fins'), findsNothing);
+  });
+
+  testWidgets('an assembly shows one chip carrying its part count', (
+    tester,
+  ) async {
+    const reg = EquipmentItem(
+      id: 'reg',
+      name: 'Reg',
+      type: EquipmentType.regulator,
+    );
+    const hose = EquipmentItem(
+      id: 'hose',
+      name: 'Hose',
+      type: EquipmentType.hose,
+    );
+    final base = await getBaseOverrides();
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          weightObservationsProvider.overrideWith((ref) async => const []),
+          allEquipmentProvider.overrideWith((ref) async => const [reg, hose]),
+          activeEquipmentProvider.overrideWith(
+            (ref) async => const [reg, hose],
+          ),
+          latestDiverWeightProvider.overrideWith((ref) async => null),
+          latestDiverHeightProvider.overrideWith((ref) async => null),
+          latestDiverBodyFatProvider.overrideWith((ref) async => null),
+          diverBodyProfileProvider.overrideWith(
+            (ref) async => (sex: null, ageYears: null),
+          ),
+        ],
+        child: const PlanGearWeightsSection(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanGearWeightsSection)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .setGear(
+          const ['reg', 'hose'],
+          const [
+            GearProvenance(equipmentId: 'reg'),
+            GearProvenance(equipmentId: 'hose', viaEquipmentId: 'reg'),
+          ],
+        );
+    await tester.pumpAndSettle();
+
+    // The part sits inside the assembly's chip as a localized count
+    // (#1487), not as a chip of its own.
+    expect(find.text('Reg (+1)'), findsOneWidget);
+    expect(find.text('Hose'), findsNothing);
+    expect(find.byType(InputChip), findsOneWidget);
+
+    // Deleting the assembly takes its part with it.
+    await tester.tap(
+      find.descendant(of: find.byType(InputChip), matching: find.byType(Icon)),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(divePlanNotifierProvider).equipmentIds, isEmpty);
+  });
+
+  testWidgets('an orphaned part still shows as its own chip', (tester) async {
+    const hose = EquipmentItem(
+      id: 'hose',
+      name: 'Hose',
+      type: EquipmentType.hose,
+    );
+    final base = await getBaseOverrides();
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          weightObservationsProvider.overrideWith((ref) async => const []),
+          allEquipmentProvider.overrideWith((ref) async => const [hose]),
+          activeEquipmentProvider.overrideWith((ref) async => const [hose]),
+          latestDiverWeightProvider.overrideWith((ref) async => null),
+          latestDiverHeightProvider.overrideWith((ref) async => null),
+          latestDiverBodyFatProvider.overrideWith((ref) async => null),
+          diverBodyProfileProvider.overrideWith(
+            (ref) async => (sex: null, ageYears: null),
+          ),
+        ],
+        child: const PlanGearWeightsSection(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The parent is not on the plan, so the part is a top-level row and
+    // must be visible and removable rather than hidden behind nothing.
+    ProviderScope.containerOf(
+          tester.element(find.byType(PlanGearWeightsSection)),
+        )
+        .read(divePlanNotifierProvider.notifier)
+        .setGear(
+          const ['hose'],
+          const [
+            GearProvenance(equipmentId: 'hose', viaEquipmentId: 'missing'),
+          ],
+        );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hose'), findsOneWidget);
+    expect(find.byType(InputChip), findsOneWidget);
+  });
+
+  testWidgets('shows the empty invitation without gear', (tester) async {
+    final base = await getBaseOverrides();
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...base,
+          weightObservationsProvider.overrideWith((ref) async => const []),
+          allEquipmentProvider.overrideWith((ref) async => const []),
+          activeEquipmentProvider.overrideWith((ref) async => const []),
+          latestDiverWeightProvider.overrideWith((ref) async => null),
+          latestDiverHeightProvider.overrideWith((ref) async => null),
+          latestDiverBodyFatProvider.overrideWith((ref) async => null),
+          diverBodyProfileProvider.overrideWith(
+            (ref) async => (sex: null, ageYears: null),
+          ),
+        ],
+        child: const PlanGearWeightsSection(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add gear to predict your weighting'), findsOneWidget);
+  });
+
+  group('issue #2060', () {
+    List<Object> overridesFor(
+      List<Object> base, {
+      List<WeightObservation>? history,
+    }) => [
+      ...base,
+      weightObservationsProvider.overrideWith(
+        (ref) async => history ?? observations,
+      ),
+      allEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+      activeEquipmentProvider.overrideWith((ref) async => const [suitItem]),
+      latestDiverWeightProvider.overrideWith((ref) async => entry),
+      latestDiverHeightProvider.overrideWith((ref) async => null),
+      latestDiverBodyFatProvider.overrideWith((ref) async => null),
+      diverBodyProfileProvider.overrideWith(
+        (ref) async => (sex: null, ageYears: null),
+      ),
+    ];
+
+    Future<ProviderContainer> pumpSeeded(
+      WidgetTester tester,
+      List<Object> overrides, {
+      // Pinned, so the English finders never depend on the host's locale.
+      Locale locale = const Locale('en'),
+    }) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          locale: locale,
+          child: const SingleChildScrollView(child: PlanGearWeightsSection()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PlanGearWeightsSection)),
+      );
+      container.read(divePlanNotifierProvider.notifier)
+        ..addTank(
+          const DiveTank(
+            id: 't1',
+            volume: 11.1,
+            workingPressure: 207,
+            material: TankMaterial.aluminum,
+            presetName: 'al80',
+          ),
+        )
+        ..addSimplePlan(maxDepth: 18, bottomTimeMinutes: 40)
+        ..setEquipmentIds(['suit']);
+      await tester.pumpAndSettle();
+      return container;
+    }
+
+    testWidgets('the prediction row fits a phone in French', (tester) async {
+      // The reporter's 384 dp wide phone with Android's Large font size,
+      // where the French accept label no longer fits beside the prediction.
+      tester.view.physicalSize = const Size(1080, 2340);
+      tester.view.devicePixelRatio = 2.8125;
+      addTearDown(tester.view.reset);
+      tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+      await pumpSeeded(
+        tester,
+        overridesFor(await getBaseOverrides()),
+        locale: const Locale('fr'),
+      );
+
+      // The accept label is wider than the card on its own line: it must
+      // wrap below the prediction, not crush it to a zero-width column.
+      expect(tester.takeException(), isNull);
+      final predicted = find.textContaining('Prédit');
+      expect(predicted, findsOneWidget);
+      expect(tester.getSize(predicted).width, greaterThan(50));
+      expect(find.text('Utiliser comme lestage prévu'), findsOneWidget);
+    });
+
+    testWidgets('on a wide screen the accept button keeps the right edge', (
+      tester,
+    ) async {
+      await pumpSeeded(tester, overridesFor(await getBaseOverrides()));
+
+      final button = tester.getRect(find.byType(TextButton));
+      final card = tester.getRect(find.byType(Card));
+      expect(
+        tester.getRect(find.textContaining('Predicted:')).top,
+        closeTo(button.top, button.height),
+        reason: 'prediction and button share one line when they fit',
+      );
+      // Card margin (4) plus content padding (16).
+      expect(button.right, closeTo(card.right - 20, 0.5));
+    });
+
+    testWidgets('accepting in pounds plans whole-pound placements', (
+      tester,
+    ) async {
+      const lb = 0.45359237;
+      final container = await pumpSeeded(
+        tester,
+        overridesFor(
+          await getBaseOverrides(
+            settingsNotifier: MockSettingsNotifier(
+              const AppSettings(weightUnit: WeightUnit.pounds),
+            ),
+          ),
+          // The split needs a placement history to follow.
+          history: [
+            for (final o in observations)
+              WeightObservation(
+                diveId: o.diveId,
+                diveDateTime: o.diveDateTime,
+                waterType: o.waterType,
+                carriedKg: o.carriedKg,
+                equipmentIds: o.equipmentIds,
+                tanks: o.tanks,
+                feedback: o.feedback,
+                placement: const {'belt': 6.0, 'integrated': 2.0},
+              ),
+          ],
+        ),
+      );
+
+      await tester.tap(find.byType(TextButton));
+      await tester.pumpAndSettle();
+
+      final placement = container
+          .read(divePlanNotifierProvider)
+          .plannedWeightPlacement!;
+      final total = placement.values.fold(0.0, (a, b) => a + b);
+      expect(total, greaterThan(0));
+      // Pound increments, not the half-kilo steps a metric diver gets.
+      expect((total / lb - (total / lb).round()).abs(), lessThan(1e-6));
+      expect((total / 0.5 - (total / 0.5).round()).abs(), greaterThan(1e-6));
+    });
+
+    testWidgets('a failing buoyancy computation keeps the card usable', (
+      tester,
+    ) async {
+      await pumpSeeded(tester, [
+        ...overridesFor(await getBaseOverrides()),
+        planOutcomeProvider.overrideWith(
+          (ref) => throw StateError('deco engine failed'),
+        ),
+      ]);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ErrorWidget), findsNothing);
+      expect(find.text('5mm Suit'), findsOneWidget);
+      expect(find.textContaining('Predicted:'), findsOneWidget);
+    });
+
+    testWidgets('a failing weight prediction keeps the card usable', (
+      tester,
+    ) async {
+      await pumpSeeded(tester, [
+        ...overridesFor(await getBaseOverrides()),
+        weightCalibrationProvider.overrideWith((ref) async => _ThrowingModel()),
+      ]);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ErrorWidget), findsNothing);
+      expect(find.text('5mm Suit'), findsOneWidget);
+      expect(find.textContaining('Predicted:'), findsNothing);
+    });
+  });
+}
+
+class _ThrowingModel extends Fake implements FittedWeightModel {
+  @override
+  WeightPrediction predict(RigSpec rig) =>
+      throw StateError('prediction failed');
+}

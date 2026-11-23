@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/gas_calculators/presentation/info/calculator_info.dart';
 import 'package:submersion/features/gas_calculators/presentation/providers/mnd_calculator_providers.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
 
 /// MND/END (Maximum Narcotic Depth / Equivalent Narcotic Depth) calculator.
 ///
@@ -23,12 +25,11 @@ class MndCalculator extends ConsumerWidget {
     final mnd = ref.watch(mndResultProvider);
     final depth = ref.watch(mndDepthProvider);
     final endAtDepth = ref.watch(mndEndAtDepthProvider);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    final isMetric = settings.depthUnit == DepthUnit.meters;
+    final isMetric = units.settings.depthUnit == DepthUnit.meters;
     final primaryUnit = units.depthSymbol;
     final secondaryUnit = isMetric ? 'ft' : 'm';
 
@@ -106,14 +107,6 @@ class MndCalculator extends ConsumerWidget {
                 secondaryUnit: secondaryUnit,
                 convertDepth: units.convertDepth,
               ),
-              const SizedBox(height: 16),
-
-              // Info card
-              _buildInfoCard(
-                context,
-                textTheme: textTheme,
-                colorScheme: colorScheme,
-              ),
             ],
           ),
         ),
@@ -145,11 +138,16 @@ class MndCalculator extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.gasCalculators_mnd_inputParameters,
-              style: textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w600,
+            InfoTitleRow(
+              title: Text(
+                context.l10n.gasCalculators_mnd_inputParameters,
+                style: textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
               ),
+              label: context.l10n.gasCalculators_tab_mnd,
+              info: (context) =>
+                  calculatorInfo(context.l10n, infoUnits(context), 'mnd'),
             ),
             const SizedBox(height: 16),
 
@@ -383,46 +381,6 @@ class MndCalculator extends ConsumerWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  // ===========================================================================
-  // Info Card
-  // ===========================================================================
-
-  Widget _buildInfoCard(
-    BuildContext context, {
-    required TextTheme textTheme,
-    required ColorScheme colorScheme,
-  }) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.info_outline, size: 20, color: colorScheme.primary),
-                const SizedBox(width: 8),
-                Text(
-                  context.l10n.gasCalculators_mnd_infoTitle,
-                  style: textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              context.l10n.gasCalculators_mnd_infoContent,
-              style: textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
         ),
       ),
     );

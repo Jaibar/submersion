@@ -1,0 +1,143 @@
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_set_repository_impl.dart';
+import 'package:submersion/features/equipment/data/services/dive_computer_gear_linker.dart';
+
+/// Applies every equipment set that lists a dive's computer as a member and
+/// has opted in to `autoApplyOnComputerImport` (issue #1020).
+///
+/// A diver who keeps a computer permanently paired with the rest of a rig
+/// (e.g. a CCR controller with drysuit, tec fins, bailout) models that by
+/// adding the computer's gear twin to an `EquipmentSet` alongside the other
+/// items, then turning the set's "apply when this computer is imported"
+/// switch on -- off by default, so existing sets are unaffected until a
+/// diver opts in. Once the computer that logged this dive is known, this
+/// service looks up every opted-in set containing that computer's gear-twin
+/// equipment id and adds that set's full roster.
+///
+/// Runs at every seam `DiveComputerGearLinker` runs at, after it. Unlike
+/// `DiveEquipmentDefaulter` this is NOT gated on the dive being empty and NOT
+/// mutually exclusive with a geofenced/default set: a diver can have both a
+/// location-based set and a computer-based set match the same dive, in which
+/// case both are applied (the issue itself accepts this as a case the diver
+/// may need to correct manually). Several sets can list the same computer;
+/// all of them are applied. `bulkAddEquipment` is idempotent per equipment
+/// id and only fills a still-null `viaSetId`, so an overlapping or repeated
+/// application never duplicates a row or steals another set's provenance.
+///
+/// Best-effort: any failure is swallowed so this can never abort a download
+/// or import that has already persisted the dive.
+class EquipmentSetForComputerLinker {
+  EquipmentSetForComputerLinker({
+    DiveComputerGearLinker? gearLinker,
+    EquipmentSetRepository? equipmentSetRepository,
+    DiveRepository? diveRepository,
+    EquipmentRepository? equipmentRepository,
+  }) : _gearLinker = gearLinker ?? DiveComputerGearLinker(),
+       _sets = equipmentSetRepository ?? EquipmentSetRepository(),
+       _dives = diveRepository ?? DiveRepository(),
+       _equipment = equipmentRepository ?? EquipmentRepository();
+
+  final DiveComputerGearLinker _gearLinker;
+  final EquipmentSetRepository _sets;
+  final DiveRepository _dives;
+  final EquipmentRepository _equipment;
+
+  AppDatabase get _db => DatabaseService.instance.database;
+
+  /// Returns true when at least one set was applied.
+  ///
+  /// Scoped to the dive's own diver, same as `DiveEquipmentDefaulter`: a
+  /// dive computer can be shared across diver profiles in one local
+  /// database (e.g. buddies syncing one install), and without this a set
+  /// another diver built around that same computer would silently attach
+  /// its unrelated gear to this diver's dive. A dive with no diver (owner-
+  /// less) is skipped entirely rather than crossing diver scopes.
+  Future<bool> linkComputerSetsForDive({required String diveId}) async =>
+      (await linkComputerSets(diveId: diveId)).isNotEmpty;
+
+  /// [linkComputerSetsForDive], returning the ids of the sets it applied,
+  /// by name. A set whose gear was already on the dive under another set's
+  /// tag leaves no tag of its own, so the caller that goes on to apply what
+  /// the sets carry besides gear (issue #4525) needs them named.
+  Future<List<String>> linkComputerSets({required String diveId}) async {
+    if (DatabaseService.instance.databaseOrNull == null) return const [];
+    // Declared outside the try so a failure partway through the loop below
+    // still reports (and notifies sync about) whichever sets already wrote
+    // successfully, instead of masking a real DB change as "nothing happened".
+    final applied = <String>[];
+    try {
+      final computerEquipmentIds = await _gearLinker
+          .gearTwinEquipmentIdsForDive(diveId);
+      if (computerEquipmentIds.isEmpty) return applied;
+
+      final dive = await (_db.select(
+        _db.dives,
+      )..where((t) => t.id.equals(diveId))).getSingleOrNull();
+      final diverId = dive?.diverId;
+      if (diverId == null) return applied;
+
+      // One query for "opted-in sets, owned by this diver, that contain
+      // one of these computers" rather than a set-membership lookup
+      // followed by a separate opt-in filter. A set also contains what the
+      // sets it includes hold (issue #4525).
+      final placeholders = computerEquipmentIds.map((_) => '?').join(',');
+      final computers = [
+        for (final id in computerEquipmentIds) Variable<String>(id),
+      ];
+      final rows = await _db
+          .customSelect(
+            'SELECT DISTINCT s.id, s.name FROM equipment_sets s '
+            'WHERE s.auto_apply_on_computer_import = 1 '
+            'AND s.diver_id = ? AND ('
+            'EXISTS (SELECT 1 FROM equipment_set_items i '
+            'WHERE i.set_id = s.id AND i.equipment_id IN ($placeholders)) '
+            'OR EXISTS (SELECT 1 FROM equipment_set_includes inc '
+            'JOIN equipment_set_items i ON i.set_id = inc.included_set_id '
+            'WHERE inc.set_id = s.id AND i.equipment_id IN ($placeholders))) '
+            'ORDER BY s.name COLLATE NOCASE, s.id',
+            variables: [Variable<String>(diverId), ...computers, ...computers],
+            readsFrom: {
+              _db.equipmentSets,
+              _db.equipmentSetItems,
+              _db.equipmentSetIncludes,
+            },
+          )
+          .get();
+      final setIds = [for (final row in rows) row.read<String>('id')];
+      if (setIds.isEmpty) return applied;
+
+      for (final setId in setIds) {
+        // A member no longer shared with this diver stays in the set but is
+        // not applied (issue #2046).
+        final setEquipmentIds = await _equipment.usableSetMemberIds(
+          await _sets.getEffectiveEquipmentIds(setId),
+          diverId,
+        );
+        if (setEquipmentIds.isEmpty) continue;
+        await _dives.bulkAddEquipment(
+          [diveId],
+          setEquipmentIds,
+          viaSetId: setId,
+        );
+        applied.add(setId);
+      }
+      return applied;
+    } catch (_) {
+      // Best-effort: never let this fail the dive operation. A set earlier
+      // in the loop may have written before a later one threw; report that
+      // partial success rather than masking it as nothing.
+      return applied;
+    } finally {
+      // Runs once regardless of which path returned, so a partial success
+      // followed by a thrown exception still notifies sync about the sets
+      // that did get written.
+      if (applied.isNotEmpty) SyncEventBus.notifyLocalChange();
+    }
+  }
+}

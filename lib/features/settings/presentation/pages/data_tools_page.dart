@@ -1,0 +1,98 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/agent_access/presentation/providers/agent_access_providers.dart';
+import 'package:submersion/features/demo_mode/presentation/providers/demo_mode_providers.dart';
+import 'package:submersion/features/settings/presentation/widgets/data_row_tile.dart';
+import 'package:submersion/features/settings/presentation/widgets/relink_data_sources_tile.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Settings > Data > Advanced > Data tools (issue #3482): the one-off repair
+/// tools that used to sit at the bottom of the Data page, each opening its
+/// own page. Re-parse dives (issue #224) is offered where the dive parser
+/// runs; Raw dive computer data (issue #4590) everywhere. Relink data
+/// sources (issue #4465) runs in place after a confirmation.
+///
+/// Agent access (the in-app MCP server) is listed here too, on desktop only
+/// and, until its write surface is complete, only while debug mode is on.
+class DataToolsPage extends ConsumerWidget {
+  const DataToolsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final showAgentAccess = ref.watch(agentAccessAvailableProvider);
+    final demoActive = ref.watch(demoModeActiveProvider);
+    // Re-parsing runs the native dive parser, which a browser lacks.
+    final canReparse = ref
+        .watch(deviceCapabilitiesProvider)
+        .diveComputerDownload;
+
+    Widget tool(IconData icon, String title, String subtitle, String route) =>
+        DataRowTile(icon: icon, title: title, subtitle: subtitle, route: route);
+
+    return Scaffold(
+      appBar: AppBar(title: Text(l10n.settings_data_dataTools)),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          tool(
+            Icons.access_time,
+            l10n.settings_fixDiveTimes_title,
+            l10n.settings_fixDiveTimes_subtitle,
+            '/settings/fix-dive-times',
+          ),
+          tool(
+            Icons.group_add,
+            l10n.buddies_linkText_page_title,
+            l10n.buddies_linkText_page_subtitle,
+            '/settings/link-buddy-names',
+          ),
+          tool(
+            Icons.category,
+            l10n.equipment_retypeOther_title,
+            l10n.equipment_retypeOther_subtitle,
+            '/settings/retype-other-gear',
+          ),
+          tool(
+            Icons.rule,
+            l10n.dataQuality_settings_title,
+            l10n.dataQuality_settings_subtitle,
+            '/settings/data-quality',
+          ),
+          tool(
+            Icons.grid_on,
+            l10n.settings_tableEditor_title,
+            l10n.settings_tableEditor_subtitle,
+            '/settings/table-editor',
+          ),
+          if (canReparse)
+            tool(
+              Icons.refresh,
+              l10n.settings_reparseDives_title,
+              l10n.settings_reparseDives_subtitle,
+              '/settings/reparse-dives',
+            ),
+          // Synced raw data can be discarded where it cannot be re-parsed, so
+          // this one is offered on every platform (issue #4590).
+          tool(
+            Icons.memory,
+            l10n.diveComputer_rawData_tileTitle,
+            l10n.settings_rawDiveData_subtitle,
+            '/settings/raw-dive-data',
+          ),
+          const RelinkDataSourcesTile(),
+          if (showAgentAccess)
+            DataRowTile(
+              icon: Icons.smart_toy_outlined,
+              title: l10n.settings_agentAccess_title,
+              subtitle: l10n.settings_agentAccess_subtitle,
+              route: '/settings/agent-access',
+              enabled: !demoActive,
+            ),
+        ],
+      ),
+    );
+  }
+}

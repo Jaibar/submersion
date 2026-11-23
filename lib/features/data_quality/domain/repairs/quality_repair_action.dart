@@ -1,0 +1,629 @@
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show GasMix;
+
+/// A repair option offered for a finding. Pure data; the UI/executor turn a
+/// selected action into the actual write.
+sealed class QualityRepairAction {
+  const QualityRepairAction();
+}
+
+class TimeShiftRepair extends QualityRepairAction {
+  const TimeShiftRepair({
+    required this.suggestedOffset,
+    this.offerImportWide = false,
+  });
+  final Duration suggestedOffset;
+  final bool offerImportWide;
+}
+
+/// Correct one secondary source's clock (issue #3655): a computer downloaded
+/// with its clock off by whole hours disagrees with a primary that is right,
+/// so only that source's own window moves and the logbook stays put.
+/// [suggestedOffset] brings the source onto the primary's clock.
+class SourceClockShiftRepair extends QualityRepairAction {
+  const SourceClockShiftRepair({
+    required this.diveId,
+    required this.sourceId,
+    required this.suggestedOffset,
+  });
+  final String diveId;
+  final String sourceId;
+  final Duration suggestedOffset;
+}
+
+/// Line one source of a consolidated dive up with the primary by its depth
+/// trace (issue #4296): a consolidation that trusted a clock wrong by less
+/// than the dive lasted left the source's samples [seconds] away from where
+/// they fit. Its samples, events and own clock move; the logbook stays.
+class SourceProfileShiftRepair extends QualityRepairAction {
+  const SourceProfileShiftRepair({
+    required this.diveId,
+    required this.sourceId,
+    required this.seconds,
+  });
+  final String diveId;
+  final String sourceId;
+  final int seconds;
+}
+
+/// Merge a likely duplicate pair as one dive recorded by two computers.
+///
+/// Carries the pair only. Which recording survives (and so supplies the notes,
+/// site, rating and manual edits) is a judgment call, so the executor opens
+/// the combine dialog's primary selector rather than choosing here (#1690).
+class ConsolidateDuplicateRepair extends QualityRepairAction {
+  const ConsolidateDuplicateRepair(this.diveIds);
+  final List<String> diveIds;
+}
+
+/// Delete the redundant copy of a dive downloaded twice from one computer.
+/// The pair cannot be consolidated (that folds a SECOND computer's recording
+/// in), so the fix is to keep the richer recording and drop the other; which
+/// is which was decided by the detector and is carried here.
+class DeleteDuplicateRepair extends QualityRepairAction {
+  const DeleteDuplicateRepair({
+    required this.keepDiveId,
+    required this.deleteDiveId,
+  });
+  final String keepDiveId;
+  final String deleteDiveId;
+}
+
+/// Remove a shared setup from one profile's dive (issue #2853): the top item
+/// and the parts folded into it. Offered only where the detector marked
+/// that side removable, every matched item being on the dive by its gear
+/// list alone: a tank link left behind would keep the overlap, and the
+/// rescan would reopen the finding.
+class RemoveGearFromDiveRepair extends QualityRepairAction {
+  const RemoveGearFromDiveRepair({
+    required this.diveId,
+    required this.otherDiveId,
+    required this.equipmentIds,
+    required this.diverName,
+  });
+  final String diveId;
+
+  /// The other dive of the pair, rescanned with this one.
+  final String otherDiveId;
+
+  /// The top item first, then its folded and installed parts.
+  final List<String> equipmentIds;
+
+  /// The profile whose dive loses the item, for the button label; empty
+  /// when unknown.
+  final String diverName;
+}
+
+class CombineSplitRepair extends QualityRepairAction {
+  const CombineSplitRepair(this.diveIds);
+  final List<String> diveIds;
+}
+
+class SetPrimarySourceRepair extends QualityRepairAction {
+  const SetPrimarySourceRepair({required this.diveId, required this.sourceId});
+  final String diveId;
+  final String sourceId;
+}
+
+class SplitSourceRepair extends QualityRepairAction {
+  const SplitSourceRepair({required this.diveId, required this.sourceId});
+  final String diveId;
+  final String sourceId;
+}
+
+/// Merges a twin finding's duplicate cylinder rows into one (issue #4393).
+/// [sameTransmitter] widens it to every row on the dive with that serial.
+class RemoveDuplicateCylinderRepair extends QualityRepairAction {
+  const RemoveDuplicateCylinderRepair({
+    required this.diveId,
+    required this.tankIdA,
+    required this.tankIdB,
+    required this.sameTransmitter,
+  });
+  final String diveId;
+  final String tankIdA;
+  final String tankIdB;
+  final bool sameTransmitter;
+}
+
+/// Removes the source from the dive with what it owns (issue #4393).
+class RemoveSourceRepair extends QualityRepairAction {
+  const RemoveSourceRepair({required this.diveId, required this.sourceId});
+  final String diveId;
+  final String sourceId;
+}
+
+class DespikeRepair extends QualityRepairAction {
+  const DespikeRepair(this.diveId);
+  final String diveId;
+}
+
+class SmoothRatesRepair extends QualityRepairAction {
+  const SmoothRatesRepair(this.diveId);
+  final String diveId;
+}
+
+class ClampNegativeDepthsRepair extends QualityRepairAction {
+  const ClampNegativeDepthsRepair(this.diveId);
+  final String diveId;
+}
+
+class FillGapsRepair extends QualityRepairAction {
+  const FillGapsRepair(this.diveId);
+  final String diveId;
+}
+
+class SmoothTemperatureRepair extends QualityRepairAction {
+  const SmoothTemperatureRepair(this.diveId);
+  final String diveId;
+}
+
+class ConvertTemperatureRepair extends QualityRepairAction {
+  const ConvertTemperatureRepair({
+    required this.diveId,
+    required this.kelvinScale,
+  });
+  final String diveId;
+  final bool kelvinScale;
+}
+
+/// Reinterpret the dive's recorded water temperature on another scale. The
+/// sibling of [ConvertTemperatureRepair], which converts the sample channel;
+/// this one rewrites the single `dives.water_temp` value.
+class ConvertWaterTempRepair extends QualityRepairAction {
+  const ConvertWaterTempRepair({
+    required this.diveId,
+    required this.kelvinScale,
+  });
+  final String diveId;
+  final bool kelvinScale;
+}
+
+class RecomputeMetricsRepair extends QualityRepairAction {
+  const RecomputeMetricsRepair(this.diveId);
+  final String diveId;
+}
+
+/// Divide a cylinder's mix stored 100 times too high by an older import
+/// back to [mix] (issue #4714). [mix] is what the finding offered, for the
+/// button; the executor writes it only while the stored mix still divides
+/// to it, so a mix corrected by hand since the scan is left alone.
+class RescaleGasMixRepair extends QualityRepairAction {
+  const RescaleGasMixRepair({
+    required this.diveId,
+    required this.tankId,
+    required this.mix,
+  });
+  final String diveId;
+  final String tankId;
+  final GasMix mix;
+}
+
+class SwapTankRecordPressuresRepair extends QualityRepairAction {
+  const SwapTankRecordPressuresRepair({
+    required this.diveId,
+    required this.tankId,
+    required this.startBar,
+    required this.endBar,
+  });
+  final String diveId;
+  final String tankId;
+  final double startBar;
+  final double endBar;
+}
+
+class SetTankRecordFromSeriesRepair extends QualityRepairAction {
+  const SetTankRecordFromSeriesRepair({
+    required this.diveId,
+    required this.tankId,
+    required this.seriesBar,
+    required this.endpoint,
+  });
+  final String diveId;
+  final String tankId;
+  final double seriesBar;
+  final String endpoint; // 'start' | 'end'
+}
+
+class SwapPressureSeriesRepair extends QualityRepairAction {
+  const SwapPressureSeriesRepair({
+    required this.diveId,
+    required this.tankIdA,
+    required this.tankIdB,
+  });
+  final String diveId;
+  final String tankIdA;
+  final String tankIdB;
+}
+
+class ReassignPressureSeriesRepair extends QualityRepairAction {
+  const ReassignPressureSeriesRepair({
+    required this.diveId,
+    required this.fromTankId,
+  });
+  final String diveId;
+  final String fromTankId;
+}
+
+class CompareSourcesRepair extends QualityRepairAction {
+  const CompareSourcesRepair(this.diveId);
+  final String diveId;
+}
+
+class GoToDiveRepair extends QualityRepairAction {
+  const GoToDiveRepair(this.diveId);
+  final String diveId;
+}
+
+/// Open the Equipment page of the transmitter [serial] names, to set up the
+/// cylinder it feeds (issue #3676).
+class SetUpTransmitterRepair extends QualityRepairAction {
+  const SetUpTransmitterRepair(this.serial);
+  final String serial;
+}
+
+/// Make a name-derived transmitter tank the bailout (issue #3307), merging
+/// the computer's duplicate bailout cylinder [ocTankId] when it is as
+/// imported. The confirmation can also register the transmitter.
+class UseAsBailoutRepair extends QualityRepairAction {
+  const UseAsBailoutRepair({
+    required this.diveId,
+    required this.tankId,
+    required this.ocTankId,
+  });
+  final String diveId;
+  final String tankId;
+  final String ocTankId;
+}
+
+/// A gas switch a repair writes: the cylinder switched to, the second from
+/// the start of the dive, and the depth there in meters.
+typedef SwitchToAdd = ({String tankId, int t, double depth});
+
+/// Write the gas switches a dive's cylinder pressures show although no
+/// computer logged one (issue #165). Each one was checked against its gas's
+/// MOD by the detector; undo deletes exactly these switches.
+class AddGasSwitchesRepair extends QualityRepairAction {
+  const AddGasSwitchesRepair({required this.diveId, required this.switches});
+  final String diveId;
+  final List<SwitchToAdd> switches;
+}
+
+/// The switches a missing-switch finding offers to add, from its stored
+/// params. An entry missing a field is skipped rather than guessed.
+List<SwitchToAdd> _switchesToAdd(Object? raw) => [
+  if (raw is List)
+    for (final entry in raw)
+      if (entry is Map &&
+          entry['tankId'] is String &&
+          entry['t'] is num &&
+          entry['depth'] is num)
+        (
+          tankId: entry['tankId'] as String,
+          t: (entry['t'] as num).toInt(),
+          depth: (entry['depth'] as num).toDouble(),
+        ),
+];
+
+double? _num(Map<String, Object?> p, String k) => (p[k] as num?)?.toDouble();
+
+/// Pure mapping from a finding to its offered repairs (spec's repair table).
+/// Repairs automate mechanics, never judgment: information-preserving,
+/// unambiguous fixes get a one-tap action; everything else explains and
+/// navigates.
+List<QualityRepairAction> repairOptionsFor(QualityFinding f) {
+  final p = f.params;
+  final diveId = f.diveId;
+  final related = f.relatedDiveId;
+
+  switch (f.detectorId) {
+    case 'transmitter_role':
+      final tankId = p['tankId'] as String?;
+      final ocTankId = p['ocTankId'] as String?;
+      return [
+        if (tankId != null && ocTankId != null)
+          UseAsBailoutRepair(
+            diveId: diveId,
+            tankId: tankId,
+            ocTankId: ocTankId,
+          ),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'clock_offset':
+      if (p.containsKey('profileOffsetSeconds')) {
+        final sourceId = p['sourceId'] as String?;
+        return [
+          if (sourceId != null)
+            SourceProfileShiftRepair(
+              diveId: diveId,
+              sourceId: sourceId,
+              seconds: (p['profileOffsetSeconds'] as num).toInt(),
+            ),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      if (p.containsKey('offsetHours')) {
+        // The secondary source reads `offsetHours` later than the primary.
+        // Either side can be the wrong one (#3655): the secondary's clock,
+        // corrected by pulling it back, or the logbook's, moved forward to
+        // the secondary along with the primary source it mirrors. A wrong
+        // download clock is the common case, so it leads.
+        final hours = (p['offsetHours'] as num).toInt();
+        final sourceId = p['sourceId'] as String?;
+        return [
+          if (sourceId != null)
+            SourceClockShiftRepair(
+              diveId: diveId,
+              sourceId: sourceId,
+              suggestedOffset: Duration(hours: -hours),
+            ),
+          TimeShiftRepair(
+            suggestedOffset: Duration(hours: hours),
+            offerImportWide: true,
+          ),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      if (p.containsKey('overlapMinutes')) {
+        return [
+          GoToDiveRepair(diveId),
+          if (related != null) GoToDiveRepair(related),
+        ];
+      }
+      if (p.containsKey('entryTimeMs')) {
+        return [
+          const TimeShiftRepair(
+            suggestedOffset: Duration.zero,
+            offerImportWide: true,
+          ),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'duplicate':
+      // Consolidation folds a SECOND computer's recording into the dive.
+      // DiveConsolidationBuilder rejects a pair that shares one physical
+      // computer, so offering the repair there is a button that can only
+      // ever fail; the card falls back to its no-automatic-fix row instead.
+      // Findings written before the detector reported this (no key at all)
+      // stay repairable until a rescan fills the fact in.
+      final consolidatable = p['sameComputer'] != true;
+      // A same-computer pair's fix is to delete the redundant copy, and the
+      // detector names it (see DuplicateDetector's redundantDuplicate). Only
+      // trusted when it names one side of THIS pair: a stale or foreign id
+      // must never volunteer a dive.
+      final redundant = p['redundantDiveId'] as String?;
+      // Detector 3 named the redundant copy on recording richness alone, so
+      // it could name the copy holding the diver's gear and notes (#1720).
+      // Detector 4 withholds the name in that case, but findings already on
+      // disk carry the old verdict: an unread key would be a guess, so the
+      // repair waits for the rescan the version bump offers. Unlike
+      // `sameComputer`, an absent fact CANNOT default to repairable here --
+      // this repair deletes a dive.
+      final checkedForDiverData = f.detectorVersion >= 4;
+      final deletable =
+          !consolidatable &&
+          checkedForDiverData &&
+          related != null &&
+          (redundant == diveId || redundant == related);
+      return [
+        if (deletable)
+          DeleteDuplicateRepair(
+            keepDiveId: redundant == diveId ? related : diveId,
+            deleteDiveId: redundant!,
+          ),
+        if (related != null && consolidatable)
+          ConsolidateDuplicateRepair([diveId, related]),
+        if (related != null) GoToDiveRepair(related),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'split_pair':
+      return [
+        if (related != null) CombineSplitRepair([diveId, related]),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'sample_gap':
+      // Every hole may be longer than fillGaps will interpolate across; then
+      // the button could only ever no-op. Findings written before the detector
+      // reported this stay repairable until the rescan fills the fact in.
+      final fillable = (p['fillableGapCount'] as num?)?.toInt();
+      if (fillable == null || fillable > 0) {
+        return [FillGapsRepair(diveId), GoToDiveRepair(diveId)];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'depth_spike':
+      if (p.containsKey('storedMaxDepth')) {
+        return [RecomputeMetricsRepair(diveId)];
+      }
+      if (p.containsKey('minDepth')) {
+        return [ClampNegativeDepthsRepair(diveId), GoToDiveRepair(diveId)];
+      }
+      return [DespikeRepair(diveId), GoToDiveRepair(diveId)];
+
+    case 'impossible_rate':
+      // A run only has a mechanical fix when its interior can be redrawn; a
+      // sustained fast descent is a judgment call for the diver.
+      if (p['interpolatable'] == true) {
+        return [SmoothRatesRepair(diveId), GoToDiveRepair(diveId)];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'temp_anomaly':
+      // The scalar and range findings carry the same conversion flags, so
+      // dispatch on the shape first: `waterTempC` is the dive's recorded
+      // temperature, `minTempC`/`maxTempC` the sample channel.
+      if (p.containsKey('waterTempC')) {
+        if (p['fahrenheitAsKelvinSuspected'] == true) {
+          return [
+            ConvertWaterTempRepair(diveId: diveId, kelvinScale: true),
+            GoToDiveRepair(diveId),
+          ];
+        }
+        if (p['fahrenheitSuspected'] == true) {
+          return [
+            ConvertWaterTempRepair(diveId: diveId, kelvinScale: false),
+            GoToDiveRepair(diveId),
+          ];
+        }
+        return [GoToDiveRepair(diveId)];
+      }
+      if (p.containsKey('deltaC')) {
+        // A one-sided step survives smoothing, so it navigates instead.
+        if (p['spikeShaped'] == true) {
+          return [SmoothTemperatureRepair(diveId), GoToDiveRepair(diveId)];
+        }
+        return [GoToDiveRepair(diveId)];
+      }
+      if (p['fahrenheitAsKelvinSuspected'] == true) {
+        return [
+          ConvertTemperatureRepair(diveId: diveId, kelvinScale: true),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      if (p['fahrenheitSuspected'] == true) {
+        return [
+          ConvertTemperatureRepair(diveId: diveId, kelvinScale: false),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'pressure_anomaly':
+      final tankId = p['tankId'] as String?;
+      if (tankId != null &&
+          p.containsKey('startBar') &&
+          p.containsKey('endBar')) {
+        // A swap: the corrected record has start/end exchanged.
+        return [
+          SwapTankRecordPressuresRepair(
+            diveId: diveId,
+            tankId: tankId,
+            startBar: _num(p, 'endBar')!,
+            endBar: _num(p, 'startBar')!,
+          ),
+        ];
+      }
+      if (tankId != null && p.containsKey('recordBar')) {
+        return [
+          SetTankRecordFromSeriesRepair(
+            diveId: diveId,
+            tankId: tankId,
+            seriesBar: _num(p, 'seriesBar')!,
+            endpoint: (p['endpoint'] as String?) ?? 'start',
+          ),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'gas_mod':
+      return [GoToDiveRepair(diveId)];
+
+    case 'impossible_gas_mix':
+      final tankId = p['tankId'] as String?;
+      final o2 = _num(p, 'correctedO2Percent');
+      final he = _num(p, 'correctedHePercent');
+      return [
+        if (tankId != null && o2 != null && he != null)
+          RescaleGasMixRepair(
+            diveId: diveId,
+            tankId: tankId,
+            mix: GasMix(o2: o2, he: he),
+          ),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'unknown_transmitter':
+      final serial = p['serial'] as String?;
+      return [
+        if (serial != null) SetUpTransmitterRepair(serial),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'missing_gas_switch':
+      final switches = _switchesToAdd(p['missingSwitches']);
+      return [
+        if (switches.isNotEmpty)
+          AddGasSwitchesRepair(diveId: diveId, switches: switches),
+        GoToDiveRepair(diveId),
+      ];
+
+    case 'tank_assignment':
+      final a = p['tankIdA'] as String?;
+      final b = p['tankIdB'] as String?;
+      if (a != null && b != null) {
+        final sameTransmitter = p['sameTransmitter'] == true;
+        final remove = RemoveDuplicateCylinderRepair(
+          diveId: diveId,
+          tankIdA: a,
+          tankIdB: b,
+          sameTransmitter: sameTransmitter,
+        );
+        // A shared serial proves one cylinder, so removing the copy leads.
+        // Twins matched only by curve could be a real manifolded twinset, so
+        // there the harmless swap stays first and removal comes last.
+        return [
+          if (sameTransmitter) remove,
+          SwapPressureSeriesRepair(diveId: diveId, tankIdA: a, tankIdB: b),
+          ReassignPressureSeriesRepair(diveId: diveId, fromTankId: a),
+          if (!sameTransmitter) remove,
+        ];
+      }
+      final tankId = p['tankId'] as String?;
+      if (tankId != null) {
+        return [
+          ReassignPressureSeriesRepair(diveId: diveId, fromTankId: tankId),
+          GoToDiveRepair(diveId),
+        ];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'source_conflict':
+      final sourceId = p['sourceId'] as String?;
+      if (sourceId != null) {
+        return [
+          SetPrimarySourceRepair(diveId: diveId, sourceId: sourceId),
+          SplitSourceRepair(diveId: diveId, sourceId: sourceId),
+          RemoveSourceRepair(diveId: diveId, sourceId: sourceId),
+          CompareSourcesRepair(diveId),
+        ];
+      }
+      return [GoToDiveRepair(diveId)];
+
+    case 'shared_gear_overlap':
+      final equipmentId = p['equipmentId'] as String?;
+      final dives = p['dives'];
+      if (equipmentId == null || dives is! Map || related == null) {
+        return [GoToDiveRepair(diveId)];
+      }
+      bool removable(Object? side) => side is Map && side['removable'] == true;
+      final ids = [
+        equipmentId,
+        for (final id in (p['partIds'] as List?) ?? const []) id as String,
+      ];
+
+      String diverName(Object? side) =>
+          side is Map ? (side['diverName'] as String? ?? '') : '';
+      return [
+        for (final (id, other) in [(diveId, related), (related, diveId)])
+          if (removable(dives[id]))
+            RemoveGearFromDiveRepair(
+              diveId: id,
+              otherDiveId: other,
+              equipmentIds: ids,
+              diverName: diverName(dives[id]),
+            ),
+        GoToDiveRepair(diveId),
+        GoToDiveRepair(related),
+      ];
+
+    default:
+      return [GoToDiveRepair(diveId)];
+  }
+}

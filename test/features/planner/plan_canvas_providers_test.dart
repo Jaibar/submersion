@@ -1,0 +1,775 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
+import 'package:submersion/features/planner/domain/services/plan_engine.dart';
+import 'package:submersion/features/planner/domain/services/plan_state_outcome.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_chart_backdrop_painter.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_results_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../helpers/planner_results.dart';
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  // Null means "leave at the AppSettings default", so these fixtures cannot
+  // drift away from the real defaults.
+  _TestSettingsNotifier({
+    int? gfLow,
+    int? gfHigh,
+    double? endLimit,
+    double? ccrSetpointLow,
+    double? ccrSetpointHigh,
+  }) : super(
+         const AppSettings().copyWith(
+           gfLow: gfLow,
+           gfHigh: gfHigh,
+           endLimit: endLimit,
+           ccrSetpointLow: ccrSetpointLow,
+           ccrSetpointHigh: ccrSetpointHigh,
+         ),
+       );
+
+  @override
+  Future<void> setMapStyle(MapStyle style) async =>
+      state = state.copyWith(mapStyle: style);
+
+  @override
+  Future<void> setThemeMode(ThemeMode mode) async =>
+      state = state.copyWith(themeMode: mode);
+
+  @override
+  Future<void> setEndLimit(double value) async =>
+      state = state.copyWith(endLimit: value);
+
+  @override
+  Future<void> setO2Narcotic(bool value) async =>
+      state = state.copyWith(o2Narcotic: value);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+ProviderContainer _container({
+  int? gfLow,
+  int? gfHigh,
+  double? endLimit,
+  double? ccrSetpointLow,
+  double? ccrSetpointHigh,
+}) {
+  final container = ProviderContainer(
+    overrides: [
+      ...plannerResultsInline(),
+      settingsProvider.overrideWith(
+        (ref) => _TestSettingsNotifier(
+          gfLow: gfLow,
+          gfHigh: gfHigh,
+          endLimit: endLimit,
+          ccrSetpointLow: ccrSetpointLow,
+          ccrSetpointHigh: ccrSetpointHigh,
+        ),
+      ),
+    ],
+  );
+  addTearDown(container.dispose);
+  return container;
+}
+
+/// A stand-in for the planner's real dependents (the plan outcome, the
+/// bailout and contingency checks, the range table), counting how often
+/// [planEngineConfigProvider] makes it rebuild.
+({Provider<PlanEngineConfig> provider, int Function() builds})
+_countingDependent() {
+  var builds = 0;
+  final provider = Provider<PlanEngineConfig>((ref) {
+    builds++;
+    return ref.watch(planEngineConfigProvider);
+  });
+  return (provider: provider, builds: () => builds);
+}
+
+int _totalStopSeconds(ProviderContainer container) => container
+    .read(planOutcomeProvider)
+    .stops
+    .fold(0, (sum, stop) => sum + stop.durationSeconds);
+
+/// [outcome] with its issues replaced.
+PlanOutcome _withIssues(PlanOutcome outcome, List<PlanIssue> issues) {
+  return PlanOutcome(
+    runtimeSeconds: outcome.runtimeSeconds,
+    maxDepth: outcome.maxDepth,
+    ndlAtBottom: outcome.ndlAtBottom,
+    ttsAtBottom: outcome.ttsAtBottom,
+    stops: outcome.stops,
+    schedule: outcome.schedule,
+    segmentOutcomes: outcome.segmentOutcomes,
+    tankUsages: outcome.tankUsages,
+    cnsEnd: outcome.cnsEnd,
+    otuTotal: outcome.otuTotal,
+    issues: issues,
+    endTissue: outcome.endTissue,
+    surfacedTissue: outcome.surfacedTissue,
+    tissueTimeline: outcome.tissueTimeline,
+    ceilingTrace: outcome.ceilingTrace,
+    authoredDecoSeconds: outcome.authoredDecoSeconds,
+  );
+}
+
+/// A container whose engine outcome is computed for real but reports exactly
+/// [issues], so a test can pin what the engine says independently of the
+/// plan the legacy calculator sees.
+ProviderContainer _containerWithEngineIssues(List<PlanIssue> issues) {
+  final container = ProviderContainer(
+    overrides: [
+      ...plannerResultsInline(),
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+      planOutcomeProvider.overrideWith((ref) {
+        final real = computeOutcomeForState(
+          ref.watch(divePlanNotifierProvider),
+          config: ref.watch(planEngineConfigProvider),
+        );
+        return _withIssues(real, issues);
+      }),
+    ],
+  );
+  addTearDown(container.dispose);
+  return container;
+}
+
+void main() {
+  test('scrub provider defaults to null', () {
+    final container = _container();
+    expect(container.read(scrubTimeProvider), isNull);
+  });
+
+  test('simple plan produces a surface-to-surface profile', () {
+    final container = _container();
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30.0, bottomTimeMinutes: 10);
+    final series = container.read(planCanvasSeriesProvider);
+
+    expect(series.isEmpty, isFalse);
+    expect(series.profile.first.timeSeconds, 0);
+    expect(series.profile.first.depth, 0);
+    expect(series.profile.last.depth, 0);
+    // Time is monotonically non-decreasing.
+    for (var i = 1; i < series.profile.length; i++) {
+      expect(
+        series.profile[i].timeSeconds,
+        greaterThanOrEqualTo(series.profile[i - 1].timeSeconds),
+      );
+    }
+    expect(series.maxDepth, 30.0);
+    expect(series.depthAt(0), 0);
+  });
+
+  test(
+    'a new plan has no gradient-factor override; it resolves from settings',
+    () {
+      final container = _container(gfLow: 35, gfHigh: 75);
+      final state = container.read(divePlanNotifierProvider);
+
+      expect(state.gfLow, isNull);
+      expect(state.gfHigh, isNull);
+      expect(container.read(gfLowProvider), 35);
+      expect(container.read(gfHighProvider), 75);
+    },
+  );
+
+  test('conservative gradient factors lengthen the computed deco', () {
+    final conservative = _container(gfLow: 20, gfHigh: 55);
+    conservative
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+
+    final liberal = _container(gfLow: 90, gfHigh: 95);
+    liberal
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+
+    expect(
+      _totalStopSeconds(conservative),
+      greaterThan(_totalStopSeconds(liberal)),
+    );
+  });
+
+  test('salt water lengthens the computed deco versus fresh water', () {
+    final salt = _container();
+    salt.read(divePlanNotifierProvider.notifier)
+      ..addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25)
+      ..updateWaterType(WaterType.salt);
+
+    final fresh = _container();
+    fresh.read(divePlanNotifierProvider.notifier)
+      ..addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25)
+      ..updateWaterType(WaterType.fresh);
+
+    expect(_totalStopSeconds(salt), greaterThan(_totalStopSeconds(fresh)));
+  });
+
+  test('custom salinity lengthens the computed deco versus fresh ppt', () {
+    final dense = _container();
+    dense.read(divePlanNotifierProvider.notifier)
+      ..addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25)
+      ..updateSalinityPpt(40);
+
+    final fresh = _container();
+    fresh.read(divePlanNotifierProvider.notifier)
+      ..addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25)
+      ..updateSalinityPpt(0);
+
+    expect(_totalStopSeconds(dense), greaterThan(_totalStopSeconds(fresh)));
+  });
+
+  test('deco plan appends stop flats and stop markers', () {
+    final container = _container();
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+    final outcome = container.read(planOutcomeProvider);
+    final series = container.read(planCanvasSeriesProvider);
+
+    expect(outcome.stops, isNotEmpty);
+    expect(series.stopLabels, hasLength(outcome.stops.length));
+    // Each stop contributes a flat: two consecutive points at equal depth.
+    for (final stop in outcome.stops) {
+      final flat = series.profile.where(
+        (p) =>
+            p.depth == stop.depthMeters &&
+            p.timeSeconds >= stop.arrivalRuntimeSeconds,
+      );
+      expect(
+        flat.length,
+        greaterThanOrEqualTo(2),
+        reason: 'stop ${stop.depthMeters}',
+      );
+    }
+    expect(series.ceiling, isNotEmpty);
+  });
+
+  test(
+    'ceiling curve rises from 0, is finely sampled, and clears back to 0',
+    () {
+      final container = _container();
+      final notifier = container.read(divePlanNotifierProvider.notifier);
+      notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+      final outcome = container.read(planOutcomeProvider);
+      final series = container.read(planCanvasSeriesProvider);
+
+      // A staircase pinned to each stop's own depth would only produce two
+      // points per stop; a real ceiling curve samples far more densely across
+      // the whole ascent (and the loading portion of the dive too).
+      expect(series.ceiling.length, greaterThan(outcome.stops.length * 2));
+      expect(series.ceiling.first.depth, 0);
+      expect(series.ceiling.map((p) => p.depth), contains(greaterThan(0)));
+
+      // Clears the surface once the last stop finishes. Residual
+      // GF-interpolation noise keeps this off exactly 0, so the bound is the
+      // painter's own epsilon rather than a round number: anything at or
+      // above it leaves the no-go band open and trailing along the surface
+      // for the rest of the dive.
+      expect(
+        series.ceiling.last.depth,
+        lessThan(PlanChartBackdropPainter.clearCeilingEpsilon),
+      );
+
+      // Time is monotonically non-decreasing, and no gap exceeds the
+      // engine's sampling interval - a coarser stretch would show up as a
+      // straight chord cutting across the real curve.
+      for (var i = 1; i < series.ceiling.length; i++) {
+        final gap =
+            series.ceiling[i].timeSeconds - series.ceiling[i - 1].timeSeconds;
+        expect(gap, greaterThanOrEqualTo(0));
+        expect(gap, lessThanOrEqualTo(PlanEngine.ceilingSampleSeconds));
+      }
+    },
+  );
+
+  test('multi-gas plan yields gas-switch markers at deco depths', () {
+    final container = _container();
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+    notifier.addTank(
+      const DiveTank(
+        id: 'ean50',
+        name: 'EAN50',
+        volume: 11.1,
+        startPressure: 207,
+        gasMix: GasMix(o2: 50),
+        role: TankRole.deco,
+      ),
+    );
+    final series = container.read(planCanvasSeriesProvider);
+
+    expect(series.gasSwitches, isNotEmpty);
+    for (final marker in series.gasSwitches) {
+      expect(marker.depth, lessThanOrEqualTo(22.0));
+      expect(marker.label, isNotEmpty);
+    }
+  });
+
+  test('a switch set inside a folded leg is marked where it happens', () {
+    const air = GasMix();
+    final plan = domain.DivePlan(
+      id: 'folded-switch',
+      name: 'Folded switch',
+      gfLow: 50,
+      gfHigh: 80,
+      tanks: const [
+        DiveTank(id: 'back', volume: 22, startPressure: 200, gasMix: air),
+        DiveTank(
+          id: 'deco',
+          volume: 11,
+          startPressure: 200,
+          gasMix: GasMix(o2: 50),
+          role: TankRole.deco,
+          decoSwitchDepth: 10,
+        ),
+      ],
+      segments: [
+        PlanSegment.travel(
+          id: 'down',
+          fromDepth: 0,
+          targetDepth: 45,
+          ratePerMinute: 18,
+          tankId: 'back',
+          gasMix: air,
+          order: 0,
+        ),
+        PlanSegment.hold(
+          id: 'bottom',
+          depth: 45,
+          durationMinutes: 25,
+          tankId: 'back',
+          gasMix: air,
+          order: 1,
+        ),
+      ],
+      createdAt: DateTime(2026, 10, 31),
+      updatedAt: DateTime(2026, 10, 31),
+    );
+    const engine = PlanEngine();
+    final outcome = engine.compute(plan);
+    final row = outcome.schedule.firstWhere((r) => r.foldedTravel.length > 1);
+    final onDeco = row.foldedTravel.last;
+    expect(onDeco.tankId, 'deco');
+
+    final series = buildCanvasSeries(
+      plan: plan,
+      outcome: outcome,
+      config: engine.config,
+    );
+
+    final marker = series.gasSwitches.single;
+    expect(marker.timeSeconds, row.startRuntimeSeconds - onDeco.seconds);
+    expect(marker.depth, onDeco.fromDepthMeters);
+    expect(series.depthAt(marker.timeSeconds), closeTo(marker.depth, 0.1));
+  });
+
+  test('a switch at a stop is still marked at the stop', () {
+    final container = _container();
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 45.0, bottomTimeMinutes: 25);
+    notifier.addTank(
+      const DiveTank(
+        id: 'oxygen',
+        volume: 7,
+        startPressure: 200,
+        gasMix: GasMix(o2: 100),
+        role: TankRole.deco,
+      ),
+    );
+    final outcome = container.read(planOutcomeProvider);
+    final stop = outcome.stops.firstWhere((s) => s.tankId == 'oxygen');
+
+    final marker = container.read(planCanvasSeriesProvider).gasSwitches.last;
+
+    expect(marker.timeSeconds, stop.arrivalRuntimeSeconds);
+    expect(marker.depth, stop.depthMeters);
+  });
+
+  group('every gas switch the table lists is on the chart (issue #4078)', () {
+    domain.DivePlan plan({
+      required List<DiveTank> tanks,
+      required List<PlanSegment> segments,
+    }) => domain.DivePlan(
+      id: 'switches',
+      name: 'Switches',
+      gfLow: 50,
+      gfHigh: 80,
+      tanks: tanks,
+      segments: segments,
+      createdAt: DateTime(2026, 11, 9),
+      updatedAt: DateTime(2026, 11, 9),
+    );
+
+    PlanCanvasSeries seriesFor(domain.DivePlan plan, PlanOutcome outcome) =>
+        buildCanvasSeries(
+          plan: plan,
+          outcome: outcome,
+          config: const PlanEngine().config,
+        );
+
+    // The gases the table highlights as switches, in order: every line
+    // whose gas differs from the line before, past the first.
+    List<String> tableSwitches(PlanOutcome outcome) => [
+      for (final row in outcome.schedule.skip(1))
+        if (row.gasSwitch)
+          GasMix(o2: row.gasFO2 * 100, he: row.gasFHe * 100).name,
+    ];
+
+    test('a switch on the way up to the first stop is flagged where it '
+        'happens, as well as the one at the stop', () {
+      // The plan in the report: air at 39 m, EAN40 on the fly from 30 m
+      // on the way up to a shallow first stop, and EAN80 at 6 m.
+      const air = GasMix();
+      final p = plan(
+        tanks: const [
+          DiveTank(id: 'back', volume: 24, startPressure: 232, gasMix: air),
+          DiveTank(
+            id: 'ean40',
+            volume: 11,
+            startPressure: 200,
+            gasMix: GasMix(o2: 40),
+            role: TankRole.deco,
+          ),
+          DiveTank(
+            id: 'ean80',
+            volume: 11,
+            startPressure: 200,
+            gasMix: GasMix(o2: 80),
+            role: TankRole.deco,
+          ),
+        ],
+        segments: [
+          PlanSegment.travel(
+            id: 'down',
+            fromDepth: 0,
+            targetDepth: 39,
+            ratePerMinute: 18,
+            tankId: 'back',
+            gasMix: air,
+            order: 0,
+          ),
+          PlanSegment.hold(
+            id: 'bottom',
+            depth: 39,
+            durationMinutes: 14,
+            tankId: 'back',
+            gasMix: air,
+            order: 1,
+          ),
+        ],
+      );
+      final outcome = const PlanEngine().compute(p);
+      // The EAN40 stretch holds no stop of its own: it is breathed only on
+      // the leg up to the first stop, which is what used to go unmarked.
+      expect(
+        outcome.stops.where((s) => s.tankId == 'ean40'),
+        isEmpty,
+        reason: 'the fixture must switch to EAN40 on the fly',
+      );
+
+      final series = seriesFor(p, outcome);
+
+      expect(series.gasSwitches.map((m) => m.label), tableSwitches(outcome));
+      expect(series.gasSwitches.map((m) => m.label), ['EAN40', 'EAN80']);
+      final ean40 = series.gasSwitches.first;
+      expect(ean40.depth, closeTo(30, 0.5));
+      expect(series.depthAt(ean40.timeSeconds), closeTo(ean40.depth, 0.1));
+    });
+
+    test('a switch inside the authored segments is flagged too', () {
+      const air = GasMix();
+      const travel = GasMix(o2: 32);
+      final p = plan(
+        tanks: const [
+          DiveTank(
+            id: 'travel',
+            volume: 11,
+            startPressure: 200,
+            gasMix: travel,
+            role: TankRole.stage,
+          ),
+          DiveTank(id: 'back', volume: 24, startPressure: 232, gasMix: air),
+        ],
+        segments: [
+          PlanSegment.travel(
+            id: 'down',
+            fromDepth: 0,
+            targetDepth: 20,
+            ratePerMinute: 18,
+            tankId: 'travel',
+            gasMix: travel,
+            order: 0,
+          ),
+          PlanSegment.hold(
+            id: 'bottom',
+            depth: 20,
+            durationMinutes: 20,
+            tankId: 'back',
+            gasMix: air,
+            order: 1,
+          ),
+        ],
+      );
+      final outcome = const PlanEngine().compute(p);
+
+      final series = seriesFor(p, outcome);
+
+      // Air at the bottom, then back onto the travel gas on the ascent.
+      expect(series.gasSwitches.map((m) => m.label), tableSwitches(outcome));
+      final marker = series.gasSwitches.first;
+      expect(marker.label, air.name);
+      expect(marker.depth, 20);
+      expect(marker.timeSeconds, outcome.schedule.first.runtimeSeconds);
+    });
+
+    test('a CCR plan flags the diluent switch it authored, and nothing on '
+        'its computed ascent (#3131)', () {
+      const shallow = GasMix(o2: 21);
+      const deep = GasMix(o2: 18, he: 45);
+      final p = plan(
+        tanks: const [
+          DiveTank(
+            id: 'dil-air',
+            volume: 3,
+            startPressure: 200,
+            gasMix: shallow,
+            role: TankRole.diluent,
+          ),
+          DiveTank(
+            id: 'dil-tx',
+            volume: 3,
+            startPressure: 200,
+            gasMix: deep,
+            role: TankRole.diluent,
+          ),
+          DiveTank(
+            id: 'o2',
+            volume: 3,
+            startPressure: 200,
+            gasMix: GasMix(o2: 100),
+            role: TankRole.oxygenSupply,
+          ),
+        ],
+        segments: [
+          PlanSegment.travel(
+            id: 'down',
+            fromDepth: 0,
+            targetDepth: 30,
+            ratePerMinute: 18,
+            tankId: 'dil-air',
+            gasMix: shallow,
+            order: 0,
+          ),
+          PlanSegment.travel(
+            id: 'deeper',
+            fromDepth: 30,
+            targetDepth: 60,
+            ratePerMinute: 18,
+            tankId: 'dil-tx',
+            gasMix: deep,
+            order: 1,
+          ),
+          PlanSegment.hold(
+            id: 'bottom',
+            depth: 60,
+            durationMinutes: 25,
+            tankId: 'dil-tx',
+            gasMix: deep,
+            order: 2,
+          ),
+        ],
+      ).copyWith(mode: domain.PlanMode.ccr);
+      final outcome = const PlanEngine().compute(p);
+      expect(outcome.stops, isNotEmpty);
+
+      final series = seriesFor(p, outcome);
+
+      final authoredSeconds = outcome.runtimeSeconds - outcome.ttsAtBottom;
+      expect(series.gasSwitches.map((m) => m.label), [deep.name]);
+      expect(series.gasSwitches.single.timeSeconds, lessThan(authoredSeconds));
+    });
+  });
+
+  test('planEngineConfig reflects settings defaults', () {
+    final container = _container();
+    final config = container.read(planEngineConfigProvider);
+    expect(config.ppO2Working, 1.4);
+    expect(config.ppO2Deco, 1.6);
+  });
+
+  test('planEngineConfig carries the Settings END limit (issue #1499)', () {
+    final container = _container(endLimit: 40.0);
+    expect(container.read(planEngineConfigProvider).endLimitMeters, 40.0);
+  });
+
+  test('planEngineConfig carries the Settings CCR setpoints (issue #2801)', () {
+    final container = _container(ccrSetpointLow: 0.6, ccrSetpointHigh: 1.2);
+    final config = container.read(planEngineConfigProvider);
+    expect(config.ccrSetpointLow, 0.6);
+    expect(config.ccrSetpointHigh, 1.2);
+  });
+
+  test('a CCR plan loaded without setpoints computes with the Settings '
+      'setpoints, not the spec 0.7 / 1.3 (issue #2801)', () {
+    final container = _container(ccrSetpointLow: 0.6, ccrSetpointHigh: 1.2);
+    final notifier = container.read(divePlanNotifierProvider.notifier);
+    notifier.addSimplePlan(maxDepth: 60, bottomTimeMinutes: 25);
+    // The shape of a plan saved before the CCR seed existed, or imported
+    // from a file without setpoints: CCR, but no updateMode seed.
+    notifier.loadPlan(
+      container
+          .read(divePlanNotifierProvider)
+          .copyWith(mode: domain.PlanMode.ccr),
+    );
+    final state = container.read(divePlanNotifierProvider);
+    expect(state.mode, domain.PlanMode.ccr);
+    expect(state.setpointHigh, isNull);
+
+    final bottom = container
+        .read(planOutcomeProvider)
+        .schedule
+        .firstWhere((r) => r.kind == PlanScheduleRowKind.level);
+    expect(bottom.ppO2, closeTo(1.2, 0.005));
+  });
+
+  test('an air leg at 32 m raises no END warning under a 40 m END limit '
+      '(issue #1499)', () {
+    final container = _container(endLimit: 40.0);
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 32, bottomTimeMinutes: 10);
+    final issues = container.read(planOutcomeProvider).issues;
+    expect(
+      issues.map((i) => i.type),
+      isNot(contains(PlanIssueType.endExceeded)),
+    );
+  });
+
+  group('planEngineConfig rebuilds only for its own inputs (issue #2632)', () {
+    test(
+      'a theme or map style change does not rebuild its dependents',
+      () async {
+        final container = _container();
+        final dependent = _countingDependent();
+        container.listen(dependent.provider, (_, _) {});
+        final before = container.read(planEngineConfigProvider);
+        expect(dependent.builds(), 1);
+
+        await container
+            .read(settingsProvider.notifier)
+            .setThemeMode(ThemeMode.dark);
+        await container
+            .read(settingsProvider.notifier)
+            .setMapStyle(MapStyle.esriSatellite);
+        container.read(dependent.provider);
+
+        expect(container.read(settingsProvider).themeMode, ThemeMode.dark);
+        expect(dependent.builds(), 1);
+        expect(
+          identical(container.read(planEngineConfigProvider), before),
+          isTrue,
+          reason: 'an unrelated setting must not rebuild the config itself',
+        );
+      },
+    );
+
+    test('an END limit change still rebuilds its dependents', () async {
+      final container = _container();
+      final dependent = _countingDependent();
+      container.listen(dependent.provider, (_, _) {});
+      expect(dependent.builds(), 1);
+
+      await container.read(settingsProvider.notifier).setEndLimit(40);
+      container.read(dependent.provider);
+
+      expect(container.read(planEngineConfigProvider).endLimitMeters, 40);
+      expect(dependent.builds(), 2);
+    });
+
+    test('an O2-narcotic change still rebuilds its dependents', () async {
+      final container = _container();
+      final dependent = _countingDependent();
+      container.listen(dependent.provider, (_, _) {});
+      expect(container.read(planEngineConfigProvider).o2Narcotic, isTrue);
+      expect(dependent.builds(), 1);
+
+      await container.read(settingsProvider.notifier).setO2Narcotic(false);
+      container.read(dependent.provider);
+
+      expect(container.read(planEngineConfigProvider).o2Narcotic, isFalse);
+      expect(dependent.builds(), 2);
+    });
+  });
+
+  group('isDiveable, the gate for planned dives (issue #3094)', () {
+    test('a plan with no critical engine issue is valid', () {
+      final container = _container();
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 18.0, bottomTimeMinutes: 20);
+
+      expect(container.read(planOutcomeProvider).isDiveable, isTrue);
+    });
+
+    test('a critical issue only the engine reports blocks conversion', () {
+      // Air at 50 m: ppO2 is within limits, but the gas density is past the
+      // engine's critical limit, a check the legacy calculator never made.
+      final container = _container();
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 50.0, bottomTimeMinutes: 5);
+
+      expect(
+        container
+            .read(planOutcomeProvider)
+            .issues
+            .map((i) => (i.type, i.severity)),
+        contains((
+          PlanIssueType.gasDensityCritical,
+          PlanIssueSeverity.critical,
+        )),
+      );
+      expect(container.read(planOutcomeProvider).isDiveable, isFalse);
+    });
+
+    test(
+      'a plan the engine passes converts whatever the legacy model says',
+      () {
+        // Air at 70 m breaks the legacy calculator's ppO2 limit; with the
+        // engine reporting nothing critical, the gate follows the engine.
+        final container = _containerWithEngineIssues(const []);
+        container
+            .read(divePlanNotifierProvider.notifier)
+            .addSimplePlan(maxDepth: 70.0, bottomTimeMinutes: 10);
+
+        expect(container.read(planOutcomeProvider).isDiveable, isTrue);
+      },
+    );
+
+    test('a critical engine issue blocks conversion of any plan', () {
+      final container = _containerWithEngineIssues(const [
+        PlanIssue(
+          type: PlanIssueType.hypoxicGas,
+          severity: PlanIssueSeverity.critical,
+          message: 'hypoxic',
+        ),
+      ]);
+      container
+          .read(divePlanNotifierProvider.notifier)
+          .addSimplePlan(maxDepth: 18.0, bottomTimeMinutes: 20);
+
+      expect(container.read(planOutcomeProvider).isDiveable, isFalse);
+    });
+  });
+}

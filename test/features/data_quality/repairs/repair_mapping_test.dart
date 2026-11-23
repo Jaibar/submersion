@@ -1,0 +1,850 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/data_quality/domain/repairs/quality_repair_action.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show GasMix;
+
+QualityFinding f({
+  required String detectorId,
+  Map<String, Object?> params = const {},
+  String? relatedDiveId,
+  int detectorVersion = 1,
+}) => QualityFinding(
+  id: 'f1',
+  diveId: 'd1',
+  relatedDiveId: relatedDiveId,
+  detectorId: detectorId,
+  detectorVersion: detectorVersion,
+  category: QualityCategory.profile,
+  severity: QualitySeverity.warning,
+  status: QualityStatus.open,
+  params: params,
+  createdAt: DateTime.utc(2026, 7, 17),
+  updatedAt: DateTime.utc(2026, 7, 17),
+);
+
+void main() {
+  group('source clock offset (#3655)', () {
+    // The secondary reads 3 h later than the primary.
+    final finding = f(
+      detectorId: 'clock_offset',
+      params: {'offsetHours': 3, 'sourceId': 's2'},
+    );
+
+    test('first offers to fix the secondary source, pulled back', () {
+      final actions = repairOptionsFor(finding);
+      final fix = actions.first as SourceClockShiftRepair;
+      expect(fix.diveId, 'd1');
+      expect(fix.sourceId, 's2');
+      expect(fix.suggestedOffset, const Duration(hours: -3));
+    });
+
+    test('then offers to move the logbook forward to the secondary', () {
+      final actions = repairOptionsFor(finding);
+      final shift = actions.whereType<TimeShiftRepair>().single;
+      expect(actions.indexOf(shift), 1);
+      expect(shift.suggestedOffset, const Duration(hours: 3));
+      expect(shift.offerImportWide, isTrue);
+    });
+
+    test('a finding without its source id offers the logbook only', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'clock_offset', params: {'offsetHours': -2}),
+      );
+      expect(actions.whereType<SourceClockShiftRepair>(), isEmpty);
+      expect(
+        actions.whereType<TimeShiftRepair>().single.suggestedOffset,
+        const Duration(hours: -2),
+      );
+    });
+  });
+
+  group('source placed away from where its profile fits (#4296)', () {
+    test('first offers to line the source up by the stored shift', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'clock_offset',
+          params: {'sourceId': 's2', 'profileOffsetSeconds': 1160},
+        ),
+      );
+      final fix = actions.first as SourceProfileShiftRepair;
+      expect(fix.diveId, 'd1');
+      expect(fix.sourceId, 's2');
+      expect(fix.seconds, 1160);
+      expect(actions.last, isA<GoToDiveRepair>());
+      expect(actions.whereType<TimeShiftRepair>(), isEmpty);
+    });
+
+    test('a finding without its source id only navigates', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'clock_offset', params: {'profileOffsetSeconds': -600}),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  test('duplicate maps to consolidate with the pair', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'duplicate', relatedDiveId: 'd2'),
+    );
+    // The pair is handed to the combine dialog, which asks the diver which
+    // recording survives; the mapping itself names no survivor (#1690).
+    final c = actions.whereType<ConsolidateDuplicateRepair>().single;
+    expect(c.diveIds, ['d1', 'd2']);
+  });
+
+  test('duplicate from the SAME computer offers no consolidate', () {
+    // DiveConsolidationBuilder refuses two records from one physical
+    // computer, so a Consolidate button on that pair can only ever fail.
+    final actions = repairOptionsFor(
+      f(
+        detectorId: 'duplicate',
+        relatedDiveId: 'd2',
+        params: {'sameComputer': true},
+      ),
+    );
+    expect(actions.whereType<ConsolidateDuplicateRepair>(), isEmpty);
+    // The pair is still navigable from the card's expanded row.
+    expect(actions.whereType<GoToDiveRepair>(), isNotEmpty);
+  });
+
+  test('duplicate from two different computers still offers consolidate', () {
+    final actions = repairOptionsFor(
+      f(
+        detectorId: 'duplicate',
+        relatedDiveId: 'd2',
+        params: {'sameComputer': false},
+      ),
+    );
+    expect(actions.whereType<ConsolidateDuplicateRepair>(), hasLength(1));
+  });
+
+  group('delete-duplicate', () {
+    // A same-computer re-download cannot be consolidated, so the repair
+    // that finishes the job is deleting the redundant copy. The detector
+    // names that copy; the mapping only trusts it when it names one side
+    // of the pair, and never volunteers a second computer's recording.
+    test('offered when the detector names the related dive', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': true, 'redundantDiveId': 'd2'},
+          detectorVersion: 4,
+        ),
+      );
+      final d = actions.whereType<DeleteDuplicateRepair>().single;
+      expect(d.keepDiveId, 'd1');
+      expect(d.deleteDiveId, 'd2');
+      expect(actions.whereType<ConsolidateDuplicateRepair>(), isEmpty);
+      expect(actions.first, isA<DeleteDuplicateRepair>());
+    });
+
+    test('offered when the detector names the finding\'s own dive', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': true, 'redundantDiveId': 'd1'},
+          detectorVersion: 4,
+        ),
+      );
+      final d = actions.whereType<DeleteDuplicateRepair>().single;
+      expect(d.keepDiveId, 'd2');
+      expect(d.deleteDiveId, 'd1');
+    });
+
+    test('withheld when no side is clearly redundant', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': true},
+          detectorVersion: 4,
+        ),
+      );
+      expect(actions.whereType<DeleteDuplicateRepair>(), isEmpty);
+      expect(actions.whereType<ConsolidateDuplicateRepair>(), isEmpty);
+    });
+
+    test('withheld for a pair from two different computers', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': false, 'redundantDiveId': 'd2'},
+          detectorVersion: 4,
+        ),
+      );
+      expect(actions.whereType<DeleteDuplicateRepair>(), isEmpty);
+      expect(actions.whereType<ConsolidateDuplicateRepair>(), hasLength(1));
+    });
+
+    test('withheld when the named dive is neither side of the pair', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': true, 'redundantDiveId': 'd9'},
+          detectorVersion: 4,
+        ),
+      );
+      expect(actions.whereType<DeleteDuplicateRepair>(), isEmpty);
+    });
+
+    // Detector 3 chose the redundant copy on recording richness alone, so it
+    // could name the copy holding the diver's gear (#1720). A finding it
+    // wrote is still on disk after the update; the repair must wait for the
+    // rescan rather than act on the old verdict.
+    test('withheld for a finding written before the diver-data check', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'duplicate',
+          relatedDiveId: 'd2',
+          params: {'sameComputer': true, 'redundantDiveId': 'd2'},
+          detectorVersion: 3,
+        ),
+      );
+      expect(actions.whereType<DeleteDuplicateRepair>(), isEmpty);
+      // Still no Consolidate either: a same-computer pair cannot be merged,
+      // so the card keeps its no-automatic-fix row.
+      expect(actions.whereType<ConsolidateDuplicateRepair>(), isEmpty);
+    });
+  });
+
+  test('split pair maps to combine', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'split_pair', relatedDiveId: 'd2'),
+    );
+    expect(actions.whereType<CombineSplitRepair>().single.diveIds, [
+      'd1',
+      'd2',
+    ]);
+  });
+
+  test('maxdepth mismatch maps to recompute, not despike', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'depth_spike', params: {'storedMaxDepth': 40.0}),
+    );
+    expect(actions.whereType<RecomputeMetricsRepair>(), hasLength(1));
+    expect(actions.whereType<DespikeRepair>(), isEmpty);
+  });
+
+  test('gas_mod gets navigation only (judgment repair)', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'gas_mod', params: {'peakPpO2': 2.25}),
+    );
+    expect(actions, hasLength(1));
+    expect(actions.single, isA<GoToDiveRepair>());
+  });
+
+  test('every detector id yields at least one action', () {
+    for (final id in [
+      'clock_offset',
+      'duplicate',
+      'split_pair',
+      'sample_gap',
+      'depth_spike',
+      'impossible_rate',
+      'temp_anomaly',
+      'pressure_anomaly',
+      'gas_mod',
+      'tank_assignment',
+      'source_conflict',
+      'missing_gas_switch',
+    ]) {
+      expect(
+        repairOptionsFor(f(detectorId: id, relatedDiveId: 'd2')),
+        isNotEmpty,
+        reason: id,
+      );
+    }
+  });
+
+  group('clock_offset sub-branches', () {
+    test('overlap offers navigation to both dives', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'clock_offset',
+          params: {'overlapMinutes': 10},
+          relatedDiveId: 'd2',
+        ),
+      );
+      expect(actions.whereType<GoToDiveRepair>().map((a) => a.diveId), [
+        'd1',
+        'd2',
+      ]);
+    });
+
+    test('overlap without related dive navigates to only the dive', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'clock_offset', params: {'overlapMinutes': 10}),
+      );
+      expect(actions.whereType<GoToDiveRepair>(), hasLength(1));
+    });
+
+    test('ancient/future entry offers a zero-offset import-wide shift', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'clock_offset', params: {'entryTimeMs': 0}),
+      );
+      final shift = actions.whereType<TimeShiftRepair>().single;
+      expect(shift.suggestedOffset, Duration.zero);
+      expect(shift.offerImportWide, isTrue);
+    });
+
+    test('bare clock_offset falls back to navigation', () {
+      final actions = repairOptionsFor(f(detectorId: 'clock_offset'));
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('pair repairs without a related dive', () {
+    test('duplicate offers no consolidate when related is null', () {
+      final actions = repairOptionsFor(f(detectorId: 'duplicate'));
+      expect(actions.whereType<ConsolidateDuplicateRepair>(), isEmpty);
+      expect(actions.whereType<GoToDiveRepair>(), hasLength(1));
+    });
+
+    test('split offers no combine when related is null', () {
+      final actions = repairOptionsFor(f(detectorId: 'split_pair'));
+      expect(actions.whereType<CombineSplitRepair>(), isEmpty);
+    });
+  });
+
+  test('sample_gap offers fill-gaps then navigation', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'sample_gap', params: {'fillableGapCount': 2}),
+    );
+    expect(actions.first, isA<FillGapsRepair>());
+    expect(actions.whereType<GoToDiveRepair>(), hasLength(1));
+  });
+
+  test('sample_gap without the fillable count stays repairable', () {
+    // Findings written before the detector reported it, pending a rescan.
+    final actions = repairOptionsFor(f(detectorId: 'sample_gap'));
+    expect(actions.first, isA<FillGapsRepair>());
+  });
+
+  test('sample_gap with only unfillable holes navigates', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'sample_gap', params: {'fillableGapCount': 0}),
+    );
+    expect(actions.single, isA<GoToDiveRepair>());
+  });
+
+  test('depth spike (non-mismatch) offers despike', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'depth_spike', params: {'depth': 60.0}),
+    );
+    expect(actions.first, isA<DespikeRepair>());
+  });
+
+  test('negative depths offer a clamp, not a despike', () {
+    final actions = repairOptionsFor(
+      f(
+        detectorId: 'depth_spike',
+        params: {'sampleCount': 3, 'minDepth': -4.0},
+      ),
+    );
+    expect(actions.first, isA<ClampNegativeDepthsRepair>());
+    expect(actions.whereType<DespikeRepair>(), isEmpty);
+  });
+
+  test('an interpolatable impossible-rate run offers rate smoothing', () {
+    final actions = repairOptionsFor(
+      f(detectorId: 'impossible_rate', params: {'interpolatable': true}),
+    );
+    expect(actions.first, isA<SmoothRatesRepair>());
+  });
+
+  test('a non-interpolatable impossible-rate run navigates', () {
+    // Redrawing the run would leave it just as impossible, so the button
+    // would only ever no-op.
+    final actions = repairOptionsFor(
+      f(detectorId: 'impossible_rate', params: {'interpolatable': false}),
+    );
+    expect(actions.single, isA<GoToDiveRepair>());
+  });
+
+  group('temp_anomaly branches', () {
+    test('fahrenheit-as-kelvin offers a kelvin-scale conversion', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {'fahrenheitAsKelvinSuspected': true},
+        ),
+      );
+      final c = actions.whereType<ConvertTemperatureRepair>().single;
+      expect(c.kelvinScale, isTrue);
+    });
+
+    test('a spike-shaped delta jump offers temperature smoothing', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {'deltaC': 9.0, 'spikeShaped': true},
+        ),
+      );
+      expect(actions.first, isA<SmoothTemperatureRepair>());
+    });
+
+    test('a one-sided delta jump navigates', () {
+      // Smoothing cannot remove a step that never comes back.
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {'deltaC': 9.0, 'spikeShaped': false},
+        ),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+
+    test('a scalar water temp stored before the rescan navigates', () {
+      // Written by detector v2, which reported no conversion facts; the
+      // finding stays navigation-only until a rescan fills them in.
+      final actions = repairOptionsFor(
+        f(detectorId: 'temp_anomaly', params: {'waterTempC': 60.0}),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+
+    test('a Fahrenheit scalar water temp offers a scalar conversion', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {'waterTempC': 78.0, 'fahrenheitSuspected': true},
+        ),
+      );
+      final c = actions.whereType<ConvertWaterTempRepair>().single;
+      expect(c.kelvinScale, isFalse);
+      expect(c.diveId, 'd1');
+      // The dive's recorded temperature is not a sample channel.
+      expect(actions.whereType<ConvertTemperatureRepair>(), isEmpty);
+    });
+
+    test(
+      'a Fahrenheit-as-Kelvin scalar water temp offers a kelvin conversion',
+      () {
+        final actions = repairOptionsFor(
+          f(
+            detectorId: 'temp_anomaly',
+            params: {
+              'waterTempC': 297.0,
+              'fahrenheitAsKelvinSuspected': true,
+              'fahrenheitSuspected': false,
+            },
+          ),
+        );
+        final c = actions.whereType<ConvertWaterTempRepair>().single;
+        expect(c.kelvinScale, isTrue);
+      },
+    );
+
+    test('an unexplainable scalar water temp navigates', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {
+            'waterTempC': -50.0,
+            'fahrenheitSuspected': false,
+            'fahrenheitAsKelvinSuspected': false,
+          },
+        ),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+
+    test('a range finding still routes to the sample-channel conversion', () {
+      // The scalar and range findings now carry the same conversion flags,
+      // so the mapping must dispatch on the shape, not on the flags.
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {
+            'minTempC': 60.0,
+            'maxTempC': 80.0,
+            'fahrenheitSuspected': true,
+          },
+        ),
+      );
+      expect(actions.whereType<ConvertTemperatureRepair>(), hasLength(1));
+      expect(actions.whereType<ConvertWaterTempRepair>(), isEmpty);
+    });
+
+    test('a Fahrenheit channel offers a non-kelvin conversion', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'temp_anomaly',
+          params: {'minTempC': 60.0, 'fahrenheitSuspected': true},
+        ),
+      );
+      final c = actions.whereType<ConvertTemperatureRepair>().single;
+      expect(c.kelvinScale, isFalse);
+    });
+
+    test('a range anomaly with no unit explanation navigates', () {
+      // One bad sample in an otherwise plausible channel: converting the
+      // whole series would corrupt every good reading.
+      final actions = repairOptionsFor(
+        f(detectorId: 'temp_anomaly', params: {'minTempC': 1.0}),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('impossible gas mix (#4714)', () {
+    test('offers the mix divided by 100 first', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'impossible_gas_mix',
+          params: {
+            'tankId': 't1',
+            'tankPosition': 0,
+            'o2Percent': 2100.0,
+            'hePercent': 3500.0,
+            'correctedO2Percent': 21.0,
+            'correctedHePercent': 35.0,
+          },
+        ),
+      );
+      final r = actions.first as RescaleGasMixRepair;
+      expect(r.diveId, 'd1');
+      expect(r.tankId, 't1');
+      expect(r.mix, const GasMix(o2: 21, he: 35));
+      expect(actions.last, isA<GoToDiveRepair>());
+    });
+
+    test('a mix dividing does not explain only goes to the dive', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'impossible_gas_mix',
+          params: {
+            'tankId': 't1',
+            'tankPosition': 0,
+            'o2Percent': 60.0,
+            'hePercent': 50.0,
+          },
+        ),
+      );
+      expect(actions, hasLength(1));
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+
+    test('a finding missing its cylinder only goes to the dive', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'impossible_gas_mix',
+          params: {'correctedO2Percent': 32.0, 'correctedHePercent': 0.0},
+        ),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('pressure_anomaly branches', () {
+    test('swap offers a start/end-exchanged record repair', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'pressure_anomaly',
+          params: {'tankId': 't1', 'startBar': 50.0, 'endBar': 200.0},
+        ),
+      );
+      final r = actions.whereType<SwapTankRecordPressuresRepair>().single;
+      expect(r.startBar, 200.0); // exchanged
+      expect(r.endBar, 50.0);
+    });
+
+    test('endpoint mismatch offers set-from-series with the endpoint', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'pressure_anomaly',
+          params: {
+            'tankId': 't1',
+            'recordBar': 210.0,
+            'seriesBar': 190.0,
+            'endpoint': 'end',
+          },
+        ),
+      );
+      final r = actions.whereType<SetTankRecordFromSeriesRepair>().single;
+      expect(r.seriesBar, 190.0);
+      expect(r.endpoint, 'end');
+    });
+
+    test('endpoint mismatch defaults endpoint to start', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'pressure_anomaly',
+          params: {'tankId': 't1', 'recordBar': 210.0, 'seriesBar': 190.0},
+        ),
+      );
+      expect(
+        actions.whereType<SetTankRecordFromSeriesRepair>().single.endpoint,
+        'start',
+      );
+    });
+
+    test('rise (no tankId) gets navigation only', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'pressure_anomaly', params: {'riseBar': 15.0}),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('tank_assignment branches', () {
+    test('twin tanks offer swap and reassign', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'tank_assignment',
+          params: {'tankIdA': 'a', 'tankIdB': 'b'},
+        ),
+      );
+      expect(actions.whereType<SwapPressureSeriesRepair>(), hasLength(1));
+      expect(actions.whereType<ReassignPressureSeriesRepair>(), hasLength(1));
+    });
+
+    test('twin findings offer remove duplicate first (#4393)', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'tank_assignment',
+          params: {'tankIdA': 'a', 'tankIdB': 'b', 'sameTransmitter': true},
+        ),
+      );
+      final remove = actions.first as RemoveDuplicateCylinderRepair;
+      expect(remove.diveId, 'd1');
+      expect(remove.tankIdA, 'a');
+      expect(remove.tankIdB, 'b');
+      expect(remove.sameTransmitter, isTrue);
+    });
+
+    test('curve-only twins keep swap first, with remove offered after', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'tank_assignment',
+          params: {'tankIdA': 'a', 'tankIdB': 'b', 'sameTransmitter': false},
+        ),
+      );
+      expect(actions.first, isA<SwapPressureSeriesRepair>());
+      expect(actions.whereType<RemoveDuplicateCylinderRepair>(), hasLength(1));
+    });
+
+    test('single-tank drop offers reassign then navigation', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'tank_assignment', params: {'tankId': 't1'}),
+      );
+      expect(actions.first, isA<ReassignPressureSeriesRepair>());
+      expect(actions.whereType<GoToDiveRepair>(), hasLength(1));
+    });
+
+    test('tank_assignment without ids gets navigation only', () {
+      final actions = repairOptionsFor(f(detectorId: 'tank_assignment'));
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('missing_gas_switch branches', () {
+    test('missed switches offer adding them, then navigation (#165)', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'missing_gas_switch',
+          params: {
+            'missingSwitches': [
+              {'tankId': 'deco', 'tankPosition': 1, 't': 1800, 'depth': 21},
+              {'tankId': 'o2', 'tankPosition': 2, 't': 2400, 'depth': 6.0},
+            ],
+            'deepStarts': const [],
+          },
+        ),
+      );
+      final add = actions.first as AddGasSwitchesRepair;
+      expect(add.diveId, 'd1');
+      expect(add.switches, [
+        (tankId: 'deco', t: 1800, depth: 21.0),
+        (tankId: 'o2', t: 2400, depth: 6.0),
+      ]);
+      expect(actions.whereType<GoToDiveRepair>(), hasLength(1));
+    });
+
+    test('an entry missing a field is skipped, not guessed (#165)', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'missing_gas_switch',
+          params: {
+            'missingSwitches': [
+              {'tankId': 'deco', 't': 1800},
+              {'t': 2400, 'depth': 6.0},
+              {'tankId': 'o2', 't': '2400', 'depth': 6.0},
+              'not a map',
+              {'tankId': 'o2', 't': 2400, 'depth': 6},
+            ],
+            'deepStarts': const [],
+          },
+        ),
+      );
+      final add = actions.first as AddGasSwitchesRepair;
+      expect(add.switches, [(tankId: 'o2', t: 2400, depth: 6.0)]);
+    });
+
+    test('only malformed entries leave navigation only (#165)', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'missing_gas_switch',
+          params: {
+            'missingSwitches': [
+              {'tankId': 'deco', 't': 1800},
+            ],
+            'deepStarts': const [],
+          },
+        ),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+
+    test('only too-deep starts get navigation only (#165)', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'missing_gas_switch',
+          params: {
+            'missingSwitches': const [],
+            'deepStarts': [
+              {'tankId': 'deco', 'tankPosition': 1, 't': 1800, 'depth': 40},
+            ],
+          },
+        ),
+      );
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  group('source_conflict branches', () {
+    test('with a source id offers set-primary, split, and compare', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'source_conflict', params: {'sourceId': 's1'}),
+      );
+      expect(actions.whereType<SetPrimarySourceRepair>(), hasLength(1));
+      expect(actions.whereType<SplitSourceRepair>(), hasLength(1));
+      expect(actions.whereType<CompareSourcesRepair>(), hasLength(1));
+    });
+
+    test('offers to remove the disagreeing source (issue #4393)', () {
+      final actions = repairOptionsFor(
+        f(detectorId: 'source_conflict', params: {'sourceId': 's1'}),
+      );
+      final remove = actions.whereType<RemoveSourceRepair>().single;
+      expect(remove.sourceId, 's1');
+      expect(remove.diveId, 'd1');
+      expect(
+        actions.indexOf(remove),
+        actions.indexOf(actions.whereType<SplitSourceRepair>().single) + 1,
+      );
+    });
+
+    test('without a source id gets navigation only', () {
+      final actions = repairOptionsFor(f(detectorId: 'source_conflict'));
+      expect(actions.single, isA<GoToDiveRepair>());
+    });
+  });
+
+  test('unknown detector id falls back to navigation', () {
+    final actions = repairOptionsFor(f(detectorId: 'mystery'));
+    expect(actions.single, isA<GoToDiveRepair>());
+  });
+
+  group('shared gear overlap (issue #2853)', () {
+    bool gearListOnly(List<String> kinds) =>
+        kinds.length == 1 && kinds.single == 'gearList';
+
+    Map<String, Object?> sharedParams(
+      List<String> d1Kinds,
+      List<String> d2Kinds, {
+      bool? d2Removable,
+    }) => {
+      'equipmentId': 'light',
+      'itemName': 'Primary light',
+      'partIds': const <String>['battery'],
+      'dives': {
+        'd1': {
+          'diverId': 'anna',
+          'diverName': 'Anna',
+          'entryMs': 0,
+          'linkKinds': d1Kinds,
+          'removable': gearListOnly(d1Kinds),
+        },
+        'd2': {
+          'diverId': 'bill',
+          'diverName': 'Bill',
+          'entryMs': 0,
+          'linkKinds': d2Kinds,
+          'removable': d2Removable ?? gearListOnly(d2Kinds),
+        },
+      },
+    };
+
+    test(
+      'offers to remove from each dive whose only link is the gear list',
+      () {
+        final actions = repairOptionsFor(
+          f(
+            detectorId: 'shared_gear_overlap',
+            relatedDiveId: 'd2',
+            params: sharedParams(['gearList'], ['gearList']),
+          ),
+        );
+        final removes = actions.whereType<RemoveGearFromDiveRepair>().toList();
+        expect(removes.map((r) => (r.diveId, r.otherDiveId, r.diverName)), [
+          ('d1', 'd2', 'Anna'),
+          ('d2', 'd1', 'Bill'),
+        ]);
+        expect(
+          removes.every((r) => r.equipmentIds.join(',') == 'light,battery'),
+          isTrue,
+        );
+        expect(actions.whereType<GoToDiveRepair>().map((g) => g.diveId), {
+          'd1',
+          'd2',
+        });
+      },
+    );
+
+    test('no remove where a tank slot also links the item', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'shared_gear_overlap',
+          relatedDiveId: 'd2',
+          params: sharedParams(['gearList', 'tankCylinder'], ['tankRegulator']),
+        ),
+      );
+      expect(actions.whereType<RemoveGearFromDiveRepair>(), isEmpty);
+    });
+    test('removal follows the side removable flag and takes the folded '
+        'parts', () {
+      final actions = repairOptionsFor(
+        f(
+          detectorId: 'shared_gear_overlap',
+          relatedDiveId: 'd2',
+          params: sharedParams(['gearList'], ['gearList'], d2Removable: false),
+        ),
+      );
+      final remove = actions.whereType<RemoveGearFromDiveRepair>().single;
+      expect(remove.diveId, 'd1');
+      expect(remove.equipmentIds, ['light', 'battery']);
+    });
+  });
+
+  // #3307: the bailout repair comes first, with the tank and the OC cylinder
+  // the detector named.
+  test('transmitter_role maps to use-as-bailout, then go to dive', () {
+    final actions = repairOptionsFor(
+      f(
+        detectorId: 'transmitter_role',
+        params: {'tankId': 'tx', 'ocTankId': 'oc'},
+      ),
+    );
+    final use = actions.first as UseAsBailoutRepair;
+    expect(use.diveId, 'd1');
+    expect(use.tankId, 'tx');
+    expect(use.ocTankId, 'oc');
+    expect(actions.last, isA<GoToDiveRepair>());
+  });
+}

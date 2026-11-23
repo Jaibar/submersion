@@ -1,12 +1,15 @@
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:intl/intl.dart';
 
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
+import 'package:submersion/features/certifications/presentation/certification_title_l10n.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/presentation/certification_entry_display.dart';
 
 /// Service for rendering certification cards to PNG images for sharing.
 ///
@@ -17,6 +20,14 @@ class CertificationCardRenderer {
 
   /// Standard credit card aspect ratio (CR80: 85.6mm × 53.98mm).
   static const double _cardAspectRatio = 1.586;
+
+  /// Renders [date] in the diver's date order.
+  ///
+  /// Exposed for tests: both share images burn the date into pixels, so the
+  /// ordering can only be asserted on the string, not on the PNG.
+  @visibleForTesting
+  static String formatDate(DateTime date, DateFormatPreference dateFormat) =>
+      DateFormat(dateFormat.pattern).format(date);
 
   /// Generates a certification card image programmatically using Canvas.
   ///
@@ -32,7 +43,9 @@ class CertificationCardRenderer {
     required Certification certification,
     required String diverName,
     required AppLocalizations l10n,
+    CertificationCatalog? catalog,
   }) async {
+    final cat = catalog ?? CertificationCatalog.builtInOnly;
     try {
       const width = 800.0;
       const height = width / _cardAspectRatio;
@@ -41,10 +54,10 @@ class CertificationCardRenderer {
       final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, width, height));
 
       final primaryColor = ui.Color(
-        certification.agency.primaryColor.toARGB32(),
+        cat.agency(certification.agency).primaryColor.toARGB32(),
       );
       final secondaryColor = ui.Color(
-        certification.agency.secondaryColor.toARGB32(),
+        cat.agency(certification.agency).secondaryColor.toARGB32(),
       );
 
       // Draw gradient background
@@ -66,7 +79,7 @@ class CertificationCardRenderer {
       // Draw agency name at top
       _drawText(
         canvas: canvas,
-        text: certification.agency.displayName,
+        text: cat.agency(certification.agency).localizedName(l10n),
         x: 32,
         y: 32,
         fontSize: 24,
@@ -78,7 +91,7 @@ class CertificationCardRenderer {
       // Draw certification name (large, centered vertically)
       _drawText(
         canvas: canvas,
-        text: certification.name,
+        text: certificationTitleL10n(certification, l10n, catalog: cat),
         x: 32,
         y: height * 0.35,
         fontSize: 32,
@@ -87,11 +100,17 @@ class CertificationCardRenderer {
         maxWidth: width - 64,
       );
 
-      // Draw level if available
-      if (certification.level != null) {
+      // Only when the title above is a custom name -- otherwise it already
+      // contains the certification.
+      final subtitle = certificationSubtitleL10n(
+        certification,
+        l10n,
+        catalog: cat,
+      );
+      if (subtitle != null) {
         _drawText(
           canvas: canvas,
-          text: certification.level!.displayName,
+          text: subtitle,
           x: 32,
           y: height * 0.35 + 44,
           fontSize: 20,
@@ -127,10 +146,11 @@ class CertificationCardRenderer {
         );
       }
 
-      // Draw issue date at bottom right
+      // Draw issue date at bottom right. Month/year only, mirroring the
+      // physical card this image imitates: there is no day to order, so the
+      // diver's date preference has nothing to change here.
       if (certification.issueDate != null) {
-        final dateFormat = DateFormat('MM/yy');
-        final dateStr = dateFormat.format(certification.issueDate!);
+        final dateStr = DateFormat('MM/yy').format(certification.issueDate!);
         _drawTextRightAligned(
           canvas: canvas,
           text: dateStr,
@@ -267,11 +287,17 @@ class CertificationCardRenderer {
   /// - Issue date and card number at bottom
   ///
   /// Returns the PNG bytes, or null if generation fails.
+  ///
+  /// [dateFormat] is the diver's date order preference; the shared image is a
+  /// static PNG, so the ordering is burned in and cannot be re-read later.
   static Future<Uint8List?> generateCertificateImage({
     required Certification certification,
     required String diverName,
     required AppLocalizations l10n,
+    required DateFormatPreference dateFormat,
+    CertificationCatalog? catalog,
   }) async {
+    final cat = catalog ?? CertificationCatalog.builtInOnly;
     try {
       const width = 1200.0;
       const height = 800.0;
@@ -281,7 +307,7 @@ class CertificationCardRenderer {
       final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, width, height));
 
       final agencyColor = ui.Color(
-        certification.agency.primaryColor.toARGB32(),
+        cat.agency(certification.agency).primaryColor.toARGB32(),
       );
 
       // Draw white background
@@ -319,7 +345,7 @@ class CertificationCardRenderer {
       // Draw agency name at top
       _drawCenteredText(
         canvas: canvas,
-        text: certification.agency.displayName,
+        text: cat.agency(certification.agency).localizedName(l10n),
         y: 60,
         width: width,
         fontSize: 48,
@@ -373,7 +399,7 @@ class CertificationCardRenderer {
       // Draw certification name
       _drawCenteredText(
         canvas: canvas,
-        text: certification.name,
+        text: certificationTitleL10n(certification, l10n, catalog: cat),
         y: 390,
         width: width,
         fontSize: 40,
@@ -381,11 +407,17 @@ class CertificationCardRenderer {
         color: agencyColor,
       );
 
-      // Draw level if available
-      if (certification.level != null) {
+      // Only when the title above is a custom name -- otherwise it already
+      // contains the certification.
+      final subtitle = certificationSubtitleL10n(
+        certification,
+        l10n,
+        catalog: cat,
+      );
+      if (subtitle != null) {
         _drawCenteredText(
           canvas: canvas,
-          text: certification.level!.displayName,
+          text: subtitle,
           y: 450,
           width: width,
           fontSize: 28,
@@ -396,9 +428,8 @@ class CertificationCardRenderer {
 
       // Draw issue date and card number at bottom
       if (certification.issueDate != null) {
-        final dateFormat = DateFormat('MMMM d, yyyy');
         final issueDateStr = l10n.certifications_certificate_issued(
-          dateFormat.format(certification.issueDate!),
+          formatDate(certification.issueDate!, dateFormat),
         );
         _drawCenteredText(
           canvas: canvas,

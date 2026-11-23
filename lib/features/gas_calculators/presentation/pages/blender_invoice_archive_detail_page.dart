@@ -1,0 +1,174 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/currency.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/gas_calculators/domain/blending/billed_fill.dart';
+import 'package:submersion/features/gas_calculators/presentation/providers/gas_blender_providers.dart';
+import 'package:submersion/features/gas_calculators/presentation/widgets/blender/blender_archived_invoice_tile.dart';
+import 'package:submersion/features/gas_calculators/presentation/widgets/blender/blender_billed_line_row.dart';
+import 'package:submersion/features/gas_calculators/presentation/widgets/blender/blender_formatting.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// One archived bill, read only: every fill it was paid for, itemised the
+/// same way the running bill is.
+///
+/// Looks the invoice up in the full, unfiltered
+/// [blenderArchivedInvoicesProvider] rather than the filtered list the diver
+/// tapped from, so a deep link (or a filter changed after navigating) still
+/// resolves it.
+class BlenderInvoiceArchiveDetailPage extends ConsumerWidget {
+  const BlenderInvoiceArchiveDetailPage({super.key, required this.invoiceId});
+
+  final String invoiceId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Without this the deep link promised above resolves against an archive
+    // that is still empty, and every id reads as "not found" (PR #1359
+    // review). See BlenderInvoiceArchivePage for the same reasoning.
+    ref.watch(blenderPreferencesLoaderProvider);
+    final l10n = context.l10n;
+    final invoices = ref.watch(blenderArchivedInvoicesProvider);
+    ArchivedInvoice? invoice;
+    for (final candidate in invoices) {
+      if (candidate.id == invoiceId) {
+        invoice = candidate;
+        break;
+      }
+    }
+
+    if (invoice == null) {
+      return Scaffold(
+        appBar: AppBar(title: Text(l10n.gasCalculators_blender_invoiceArchive)),
+        body: Center(
+          child: Text(l10n.gasCalculators_blender_invoiceArchiveNotFound),
+        ),
+      );
+    }
+
+    final units = ref.watch(unitFormatterProvider);
+    final decimals = pressureDecimalsFor(units.settings.pressureUnit);
+    final fallbackCurrency = ref.watch(blenderCurrencyProvider);
+    final currency = invoice.currencyCode ?? fallbackCurrency;
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          l10n.gasCalculators_blender_billedDate(
+            units.formatDate(invoice.date),
+          ),
+        ),
+        actions: [
+          IconButton(
+            key: const Key('blender-archived-invoice-detail-delete'),
+            icon: const Icon(Icons.delete_outline),
+            tooltip: l10n.gasCalculators_blender_invoiceArchiveDelete,
+            onPressed: () async {
+              final navigator = Navigator.of(context);
+              await deleteArchivedInvoice(context, ref, invoiceId);
+              if (!ref
+                  .read(blenderArchivedInvoicesProvider)
+                  .any((i) => i.id == invoiceId)) {
+                navigator.pop();
+              }
+            },
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (invoice.billedTo.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                '${l10n.gasCalculators_blender_billedTo}: ${invoice.billedTo}',
+                style: theme.textTheme.bodyMedium,
+              ),
+            ),
+          if (invoice.fills.any((f) => f.lines.isNotEmpty))
+            BlenderBilledLineHeader(units: units, currency: currency),
+          for (final fill in invoice.fills)
+            _fillSection(context, theme, fill, currency, units, decimals),
+          const Divider(height: 24),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                l10n.gasCalculators_blender_billedTotal,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Text(
+                invoice.total == null
+                    ? l10n.gasCalculators_blender_invoiceArchiveIncomplete
+                    : formatMoney(invoice.total!, currency),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _fillSection(
+    BuildContext context,
+    ThemeData theme,
+    BilledFill fill,
+    String currency,
+    UnitFormatter units,
+    int decimals,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              // Aligned to the gas-line grid below it, matching the running
+              // invoice's title row: label spans columns 1+2, total spans
+              // the rest (Copilot review, issue #1876 follow-up).
+              Expanded(
+                flex: kBilledLineFlex[0] + kBilledLineFlex[1],
+                child: Text(
+                  fill.label,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Expanded(
+                flex:
+                    kBilledLineFlex[2] +
+                    kBilledLineFlex[3] +
+                    kBilledLineFlex[4],
+                child: Text(
+                  fill.total == null ? '' : formatMoney(fill.total!, currency),
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                  textAlign: TextAlign.end,
+                ),
+              ),
+            ],
+          ),
+          for (final line in fill.lines)
+            BlenderBilledLineRow(
+              line: line,
+              currency: currency,
+              units: units,
+              decimals: decimals,
+            ),
+        ],
+      ),
+    );
+  }
+}

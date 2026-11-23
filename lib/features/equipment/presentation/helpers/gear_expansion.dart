@@ -1,0 +1,133 @@
+import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/domain/services/gear_expander.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+
+/// True for gear the expander may attach as a part. Retired, sold, lost and
+/// wishlist (#2025) gear never is, even on an older row whose isActive was
+/// left true. Matches the repository's own expansion (`_activeIdsAmong`).
+bool isGearActive(EquipmentItem item) =>
+    item.isActive &&
+    item.status != EquipmentStatus.retired &&
+    item.status != EquipmentStatus.sold &&
+    item.status != EquipmentStatus.lost &&
+    item.status != EquipmentStatus.wanted;
+
+/// The ids among [items] a gear list can leave out because an assembly it
+/// also lists brings them along (#2514); see [ComponentsIndex.partsWithin]
+/// for [attached]. Only gear the expander attaches ([isGearActive]) counts,
+/// as a part or as the assembly: a retired, sold or lost part is not
+/// brought along, and an assembly that has left the kit leaves its parts as
+/// the way to add them. Every surface goes through here, so none can hand
+/// the index gear it would wrongly hide.
+Set<String> assemblyPartsAmong(
+  ComponentsIndex index,
+  Iterable<EquipmentItem> items, {
+  Set<String> attached = const {},
+}) => index.partsWithin({
+  for (final e in items)
+    if (isGearActive(e)) e.id,
+}, attached: attached);
+
+/// What a page gets back from [expandGearOnPage]: the new provenance list
+/// and the items (parts) that were not in the page's list before, so the
+/// page can append them to its flat item list.
+typedef GearExpansion = ({
+  List<GearProvenance> provenance,
+  List<EquipmentItem> newItems,
+});
+
+/// Expands [additions] on a page's in-memory gear list, fetching the parts'
+/// items so the page can show them (issue #1487). [existingItems] must
+/// already contain the items being added. Best-effort on the template: if
+/// the index or the parts cannot be read, the additions are attached flat,
+/// which is what the app did before assemblies existed, rather than
+/// failing the add.
+///
+/// With [diverId], a part another profile owns and has not shared with that
+/// diver is not attached (issue #2046): a shared assembly does not bring
+/// along parts the diver cannot see. Null attaches every part, as before
+/// sharing existed.
+Future<GearExpansion> expandGearOnPage(
+  WidgetRef ref, {
+  required List<GearAddition> additions,
+  required List<GearProvenance> existing,
+  required List<EquipmentItem> existingItems,
+  required String? diverId,
+}) => expandGear(
+  ref.read,
+  additions: additions,
+  existing: existing,
+  existingItems: existingItems,
+  diverId: diverId,
+);
+
+/// Reads a provider: `WidgetRef.read`, or `ProviderContainer.read` for work
+/// that can outlive the widget that started it.
+typedef ProviderRead = T Function<T>(ProviderListenable<T> provider);
+
+/// [expandGearOnPage] through [read], for an editing sitting whose gear can
+/// be added after the widget that asked has gone (issue #4527).
+Future<GearExpansion> expandGear(
+  ProviderRead read, {
+  required List<GearAddition> additions,
+  required List<GearProvenance> existing,
+  required List<EquipmentItem> existingItems,
+  required String? diverId,
+}) async {
+  ComponentsIndex index;
+  try {
+    index = await read(equipmentComponentsIndexProvider.future);
+  } catch (_) {
+    index = ComponentsIndex.empty;
+  }
+  final candidateIds = {
+    for (final a in additions) ...index.descendantsOf(a.equipmentId),
+  }..removeAll(existingItems.map((e) => e.id));
+  var fetched = const <EquipmentItem>[];
+  if (candidateIds.isNotEmpty) {
+    try {
+      final repository = read(equipmentRepositoryProvider);
+      final parts = await repository.getEquipmentByIds(candidateIds.toList());
+      if (diverId == null) {
+        fetched = parts;
+      } else {
+        final usable = (await repository.usableSetMemberIds([
+          for (final e in parts) e.id,
+        ], diverId)).toSet();
+        fetched = [
+          for (final e in parts)
+            if (usable.contains(e.id)) e,
+        ];
+      }
+    } catch (_) {
+      // The repository has logged it; an unknown part is simply not
+      // attached, and the expander skips ids it cannot see.
+    }
+  }
+  final itemsById = {
+    for (final e in existingItems) e.id: e,
+    for (final e in fetched) e.id: e,
+  };
+  final provenance = GearExpander.expand(
+    additions: additions,
+    index: index,
+    existing: existing,
+    isActive: (id) {
+      final item = itemsById[id];
+      return item != null && isGearActive(item);
+    },
+  );
+  final known = {for (final e in existingItems) e.id};
+  final newItems = [
+    for (final p in provenance)
+      if (!known.contains(p.equipmentId) && itemsById[p.equipmentId] != null)
+        itemsById[p.equipmentId]!,
+  ];
+  return (provenance: provenance, newItems: newItems);
+}

@@ -167,22 +167,40 @@ void main() {
       });
     });
 
-    group('buildDescription', () {
-      test('builds description from weather data', () {
-        final desc = WeatherMapper.buildDescription(
-          cloudCover: CloudCover.partlyCloudy,
-          airTempCelsius: 28.0,
-          windSpeedMs: 3.0,
-          windDirection: CurrentDirection.northEast,
-          precipitation: Precipitation.none,
+    group('weather code and description', () {
+      Map<String, dynamic> hourly({int? code}) => {
+        'time': ['2026-07-26T12:00'],
+        'temperature_2m': [24.0],
+        'cloud_cover': [10.0],
+        'wind_speed_10m': [10.0],
+        'wind_direction_10m': [0.0],
+        if (code != null) 'weathercode': [code],
+      };
+
+      test('retains the raw WMO code', () {
+        final data = WeatherMapper.mapApiResponse(
+          hourly(code: 61),
+          targetHour: DateTime.parse('2026-07-26T12:00'),
         );
-        expect(desc, isNotEmpty);
-        expect(desc, contains('Partly Cloudy'));
+        expect(data.weatherCode, 61);
       });
 
-      test('handles all nulls gracefully', () {
-        final desc = WeatherMapper.buildDescription();
-        expect(desc, isNull);
+      test('leaves the code null when the API omits it', () {
+        final data = WeatherMapper.mapApiResponse(
+          hourly(),
+          targetHour: DateTime.parse('2026-07-26T12:00'),
+        );
+        expect(data.weatherCode, isNull);
+      });
+
+      test('does not generate an English description', () {
+        final data = WeatherMapper.mapApiResponse(
+          hourly(code: 0),
+          targetHour: DateTime.parse('2026-07-26T12:00'),
+        );
+        // Prose is rendered at display time so it follows the diver's locale
+        // and units. Persisting it here froze it as English and metric.
+        expect(data.description, isNull);
       });
     });
 
@@ -213,6 +231,66 @@ void main() {
         expect(result.windDirection, CurrentDirection.northEast);
         expect(result.surfacePressure, closeTo(1.0135, 0.001));
         expect(result.windSpeed, closeTo(12.0 / 3.6, 0.01));
+      });
+
+      // Issue #3349: dive times are stored as a wall clock flagged UTC, while
+      // the archive's zone-less timestamps parse as device-local. The hour
+      // must be matched on wall-clock fields, not on absolute instants, or the
+      // pick shifts by the device's UTC offset.
+      test('matches a UTC-flagged wall clock on its wall-clock hour', () {
+        final hours = List.generate(24, (h) => h);
+        final hourlyData = {
+          'time': [
+            for (final h in hours)
+              '2022-01-26T${h.toString().padLeft(2, '0')}:00',
+          ],
+          'temperature_2m': [for (final h in hours) h.toDouble()],
+        };
+
+        final result = WeatherMapper.mapApiResponse(
+          hourlyData,
+          targetHour: DateTime.utc(2022, 1, 26, 13),
+        );
+
+        expect(result.airTemp, 13.0);
+      });
+
+      test('keeps seconds when the target is past the half hour', () {
+        final hours = List.generate(24, (h) => h);
+        final hourlyData = {
+          'time': [
+            for (final h in hours)
+              '2022-01-26T${h.toString().padLeft(2, '0')}:00',
+          ],
+          'temperature_2m': [for (final h in hours) h.toDouble()],
+        };
+
+        // 09:30:30 is closer to 10:00 than to 09:00. Dropping the seconds
+        // would make it a tie, which resolves to the earlier hour.
+        final result = WeatherMapper.mapApiResponse(
+          hourlyData,
+          targetHour: DateTime.utc(2022, 1, 26, 9, 30, 30),
+        );
+
+        expect(result.airTemp, 10.0);
+      });
+
+      test('matches a local wall clock on its wall-clock hour', () {
+        final hours = List.generate(24, (h) => h);
+        final hourlyData = {
+          'time': [
+            for (final h in hours)
+              '2022-01-26T${h.toString().padLeft(2, '0')}:00',
+          ],
+          'temperature_2m': [for (final h in hours) h.toDouble()],
+        };
+
+        final result = WeatherMapper.mapApiResponse(
+          hourlyData,
+          targetHour: DateTime(2022, 1, 26, 13, 20),
+        );
+
+        expect(result.airTemp, 13.0);
       });
     });
   });

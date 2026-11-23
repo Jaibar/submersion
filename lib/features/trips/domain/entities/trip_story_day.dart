@@ -1,0 +1,305 @@
+import 'package:equatable/equatable.dart';
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/trips/domain/entities/itinerary_day.dart';
+
+/// Temporal position of a story day relative to "today" (date-only).
+enum TripStoryDayKind { past, today, future }
+
+/// Total time in the water across [dives].
+///
+/// Runtime (surface to surface) is what divers add up when they talk about
+/// how long they were in the water, and it is what the rest of the app sums
+/// (`measuredRuntimeSecondsSql` in the statistics and dive-log queries). A
+/// dive with only a bottom time measured no runtime, so it adds nothing
+/// (issue #3304).
+Duration diveDayRuntime(Iterable<Dive> dives) => dives.fold(
+  Duration.zero,
+  (sum, dive) => sum + (dive.measuredRuntime ?? Duration.zero),
+);
+
+/// The deepest of [dives], or null when none logged a depth.
+double? diveDayMaxDepth(Iterable<Dive> dives) {
+  double? max;
+  for (final dive in dives) {
+    final depth = dive.maxDepth;
+    if (depth != null && (max == null || depth > max)) max = depth;
+  }
+  return max;
+}
+
+/// Day-level weather from [dives], or null when no dive logged any.
+///
+/// Each field is the first non-null value across the dives in dive order, so
+/// a morning dive that logged only air temperature and an afternoon dive that
+/// logged only sky conditions still combine into one complete summary.
+TripStoryDayWeather? diveDayWeather(Iterable<Dive> dives) {
+  double? airTemp;
+  CloudCover? cloudCover;
+  Precipitation? precipitation;
+  for (final dive in dives) {
+    airTemp ??= dive.airTemp;
+    cloudCover ??= dive.cloudCover;
+    precipitation ??= dive.precipitation;
+  }
+  if (airTemp == null && cloudCover == null && precipitation == null) {
+    return null;
+  }
+  return TripStoryDayWeather(
+    airTemp: airTemp,
+    cloudCover: cloudCover,
+    precipitation: precipitation,
+  );
+}
+
+/// One calendar day of a trip story: real dives when they exist, itinerary
+/// metadata when it exists, or neither (a surface day).
+class TripStoryDay extends Equatable {
+  final DateTime date;
+  final int dayNumber;
+  final ItineraryDay? itineraryDay;
+  final List<Dive> dives;
+
+  /// The day's earliest media, for the photo strip: a preview, not all of it.
+  /// [mediaCount] and [photoCount] cover the whole day.
+  final List<MediaItem> media;
+  final int mediaCount;
+  final int photoCount;
+  final List<Sighting> sightings;
+  final TripStoryDayKind kind;
+
+  const TripStoryDay({
+    required this.date,
+    required this.dayNumber,
+    required this.kind,
+    this.itineraryDay,
+    this.dives = const [],
+    this.media = const [],
+    this.mediaCount = 0,
+    this.photoCount = 0,
+    this.sightings = const [],
+  });
+
+  int get diveCount => dives.length;
+
+  /// Total time in the water for the day; see [diveDayRuntime].
+  Duration get totalRuntime => diveDayRuntime(dives);
+
+  double? get maxDepth => diveDayMaxDepth(dives);
+
+  /// Unique site names in dive order (deduped by display name, for subtitles).
+  List<String> get siteNames {
+    final seen = <String>{};
+    final names = <String>[];
+    for (final dive in dives) {
+      final name = dive.site?.name;
+      if (name != null && seen.add(name)) names.add(name);
+    }
+    return names;
+  }
+
+  /// Where the day's sites are, each distinct location once in dive order, as
+  /// [DiveSite.locationString] gives it ("Marsa Alam · Red Sea, Egypt").
+  /// Several sites in one area read as that area once, and a location whose
+  /// every part (town or island, region, country) a fuller one repeats is
+  /// left out: "Red Sea, Egypt", "Marsa Alam" or "Red Sea" beside
+  /// "Marsa Alam · Red Sea, Egypt" would say the same place twice. The town is
+  /// [DiveSite.locality], so a site with only an island set reads as that
+  /// island; one with no town, island, region or country adds nothing. The
+  /// parts compare without case, since one area is often typed two ways; the
+  /// first spelling wins.
+  List<String> get siteLocations {
+    final seen = <String>{};
+    final areas = <({String location, List<String> parts})>[];
+    for (final dive in dives) {
+      final site = dive.site;
+      if (site == null || site.locationString.isEmpty) continue;
+      final parts = [
+        site.locality,
+        site.region?.trim() ?? '',
+        site.country?.trim() ?? '',
+      ].map((part) => part.toLowerCase()).toList();
+      if (seen.add(parts.join('\n'))) {
+        areas.add((location: site.locationString, parts: parts));
+      }
+    }
+    // [coarse] says nothing [fine] does not: each part it sets, [fine] sets
+    // the same. Two areas that differ in any set part are both kept.
+    bool repeats(List<String> coarse, List<String> fine) =>
+        !identical(coarse, fine) &&
+        [
+          for (var i = 0; i < coarse.length; i++)
+            coarse[i].isEmpty || coarse[i] == fine[i],
+        ].every((same) => same);
+
+    return [
+      for (final area in areas)
+        if (!areas.any((other) => repeats(area.parts, other.parts)))
+          area.location,
+    ];
+  }
+
+  /// Distinct dive sites deduped by stable id (not display name), so two
+  /// different sites that share a name still count as two -- matching the map
+  /// geometry and the trip-level stat strip, which key on site id.
+  int get siteCount {
+    final ids = <String>{};
+    for (final dive in dives) {
+      final id = dive.site?.id;
+      if (id != null) ids.add(id);
+    }
+    return ids.length;
+  }
+
+  /// Day-level weather summary, or null when no dive logged any weather;
+  /// see [diveDayWeather].
+  TripStoryDayWeather? get weather => diveDayWeather(dives);
+
+  bool get hasContent =>
+      dives.isNotEmpty || media.isNotEmpty || itineraryDay != null;
+
+  /// A day with nothing to show: no dives, media, or itinerary entry, and not
+  /// a planned (future) day. Still gets the standard sticky day header, labeled
+  /// "Surface day" in place of a day type; only its card body is empty.
+  bool get isSurface => !hasContent && kind != TripStoryDayKind.future;
+
+  /// A dive-day itinerary row planned at 0 dives, with none logged: a rest
+  /// day the diver planned, most often on the board's day strip, which writes
+  /// a dive-day row for a day the itinerary lacks (#2658). Its stored type
+  /// says "Dive Day" but the plan says otherwise, so the story labels it a
+  /// surface day. Other day types keep their own label, and a dive logged
+  /// anyway makes it a dive day after all.
+  bool get isPlannedRest {
+    final row = itineraryDay;
+    return row != null &&
+        row.dayType == DayType.diveDay &&
+        row.plannedDives == 0 &&
+        dives.isEmpty;
+  }
+
+  @override
+  List<Object?> get props => [
+    date,
+    dayNumber,
+    itineraryDay,
+    dives,
+    media,
+    mediaCount,
+    photoCount,
+    sightings,
+    kind,
+  ];
+}
+
+/// Compact weather summary for one story day, shown in the day header.
+class TripStoryDayWeather extends Equatable {
+  final double? airTemp; // celsius
+  final CloudCover? cloudCover;
+  final Precipitation? precipitation;
+
+  const TripStoryDayWeather({
+    this.airTemp,
+    this.cloudCover,
+    this.precipitation,
+  });
+
+  /// True when the day header's badge would actually draw something.
+  ///
+  /// [Precipitation.none] does not count, and that is the whole point of this
+  /// getter. `WeatherMapper.mapPrecipitation` never returns null: a missing
+  /// reading becomes `none`, so a dive whose weather lookup resolved nothing
+  /// still stores `none`. `weatherIconFor` gives `none` no glyph of its own,
+  /// so such a day renders as blank. Treating it as "this day has weather"
+  /// would leave the day badge-free forever.
+  bool get isRenderable =>
+      airTemp != null ||
+      cloudCover != null ||
+      (precipitation != null && precipitation != Precipitation.none);
+
+  /// The weather a day shows: what the diver logged wins when it can draw
+  /// something, since a stored day summary only ever stands in for days that
+  /// logged none. A dive whose lookup resolved nothing still carries
+  /// [Precipitation.none], and letting that mask a stored row would leave the
+  /// day blank.
+  static TripStoryDayWeather? resolve({
+    TripStoryDayWeather? logged,
+    TripStoryDayWeather? stored,
+  }) => (logged != null && logged.isRenderable) ? logged : (stored ?? logged);
+
+  @override
+  List<Object?> get props => [airTemp, cloudCover, precipitation];
+}
+
+/// A mappable point contributed by a story day: an itinerary location, or
+/// one dive at a site (one point per dive, so a pin can name a dive).
+class TripStoryMapPoint extends Equatable {
+  final double latitude;
+  final double longitude;
+  final int dayIndex;
+  final String? siteId;
+  final String label;
+
+  /// The dive this point stands for; null for an itinerary location.
+  final String? diveId;
+
+  /// The number the day card shows for that dive (its logged number, else
+  /// its position in the day), so the pin and the row read the same.
+  final int? diveNumber;
+
+  const TripStoryMapPoint({
+    required this.latitude,
+    required this.longitude,
+    required this.dayIndex,
+    required this.label,
+    this.siteId,
+    this.diveId,
+    this.diveNumber,
+  });
+
+  bool get isDive => diveId != null;
+
+  @override
+  List<Object?> get props => [
+    latitude,
+    longitude,
+    dayIndex,
+    siteId,
+    label,
+    diveId,
+    diveNumber,
+  ];
+}
+
+/// Precomputed map geometry for the whole story, in day order. The point
+/// sequence doubles as the route polyline.
+class TripStoryMapGeometry extends Equatable {
+  final List<TripStoryMapPoint> points;
+
+  const TripStoryMapGeometry({required this.points});
+
+  bool get hasPoints => points.isNotEmpty;
+
+  List<TripStoryMapPoint> pointsForDay(int dayIndex) =>
+      points.where((p) => p.dayIndex == dayIndex).toList();
+
+  /// The map point closest to [dayIndex], preserving route order when two
+  /// points are equally distant.
+  TripStoryMapPoint? nearestPointForDay(int dayIndex) {
+    TripStoryMapPoint? nearest;
+    int? nearestDistance;
+    for (final point in points) {
+      final distance = (point.dayIndex - dayIndex).abs();
+      if (nearestDistance == null || distance < nearestDistance) {
+        nearest = point;
+        nearestDistance = distance;
+      }
+    }
+    return nearest;
+  }
+
+  @override
+  List<Object?> get props => [points];
+}

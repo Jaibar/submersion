@@ -1,0 +1,144 @@
+# Trips
+
+Trips group a set of related dives: a holiday, a resort week, a liveaboard expedition, or a single morning at your local site. Before you go, a trip helps you plan and pack; while you are away and afterwards, it tells the story of the trip day by day.
+
+> [!NOTE]
+> **Where to find it:** **Trips** in the navigation rail (desktop) or the bottom bar (phone, one of the default slots).
+
+<!-- screenshot: images/trips/trip-detail.png: trip detail -->
+
+## Creating a trip
+
+Tap the **+** button at the bottom right of the Trips list (**Add Trip**). Every trip needs:
+
+- **Trip Name**: a short label for the trip (for example, "Red Sea 2026").
+- **Start Date** and **End Date**: the calendar dates bounding the trip. The page shows the duration in days as you pick dates.
+- **Trip type**, chosen in the trip's header:
+
+| Type | Use when |
+|------|----------|
+| **Shore** | Shore dives over one or more days |
+| **Liveaboard** | Living aboard a dive boat, with vessel and itinerary details |
+| **Resort** | A stay at a dive resort |
+| **Day Trip** | A single day out, such as one local dive |
+
+> [!TIP]
+> A trip does not have to mean travel. If you dive one weekend morning at a local site, a **Day Trip** is the place to put it. Choosing **Day Trip** locks the end date to the start date: moving the start date moves the end date with it, and choosing another type makes the end date editable again.
+
+Optional fields:
+
+- **Location**: the destination (for example, "Dahab, Egypt"), with **Resort Name** and **Liveaboard Name**.
+- **Return Flight**: when you fly home. Submersion uses it to count down to the flight and to tell you how long you can still dive before flying (see [Safety](safety.md)).
+- **Planning**: **Dives per day**, **Expected dives**, **Expected runtime per dive**, and **Divers sharing cylinders** (including you; blank means one). These feed the trip's gas and cylinder planning.
+- **Notes**: anything else about the trip.
+
+When more than one diver profile exists, **Shared with** picks who else sees the trip: **Everyone**, or only the profiles you tick. See [Sharing a trip with other profiles](#sharing-a-trip-with-other-profiles).
+
+> [!TIP]
+> To change any of these later, open the trip and tap the lock (in the top bar on a phone, in the pane's header on desktop). Each card shows its pencil, on every tab: open the ones you want, change them and tap **Done**, then **Save**. One Save writes everything you changed, packing, checklists and scans included, and adds one entry to the trip's **History**.
+
+## Liveaboard details
+
+When you choose **Liveaboard**, the trip gains a **Vessel** card:
+
+| Field | Notes |
+|-------|-------|
+| **Vessel Name** | Required for liveaboard trips |
+| **Operator / Charter** | The dive operator or charter company |
+| **Vessel Type** | Catamaran, Motor Yacht, Sailing Yacht, or Other |
+| **Cabin Type** | Free text, for example "Twin en-suite" |
+| **Passenger Capacity** | Number of guest berths |
+| **Embark Port** / **Disembark Port** | Where you boarded and left the boat |
+
+## The trip's tabs
+
+Every trip, whatever its type, has six tabs: **Overview**, **Itinerary**, **Gear**, **Checklist**, **Dives**, and **Photos**.
+
+### Overview
+
+Before the first day, the Overview is a preparation page: a countdown to the trip, one summary card whose rows (itinerary, plan, gear, checklist) open the other tabs, and your notes.
+
+From the first day on, it becomes the trip's story, one day at a time. A strip across the top draws the whole trip: one tile per day, with that day's dives hanging down from a line for the surface. Each shape is one dive, as deep as it went and as wide as it was long, so the deep day and the easy days show at a glance. A dashed outline is a dive whose shape is not recorded: one you have planned but not dived yet, a draft, or a dive logged without a dive computer profile, drawn from its depth and time. On a long trip the strip scrolls sideways.
+
+Tap a tile to see that day and nothing else: its map, a strip showing when you dived, your dive cards, then that day's photos and the species you saw. On a wide window the map sits beside the dives. Days with no dives show as surface days, and planned dives appear on the days they are planned for.
+
+The first tile, **Trip**, shows the whole trip instead: its dates and totals, a line for every day (tap one to open it), and for a liveaboard its vessel. A finished trip opens here; a trip that is under way opens on today.
+
+With a keyboard, Tab reaches the strip and the left and right arrow keys move from one tile to the next.
+
+While the trip is under way, today's page and the **Trip** page both show how full your cylinders are and, if you have entered a return flight, a card counting down to it.
+
+The preparation page and the **Trip** page both end with your notes, then the trip's **Documents** card, where you add and open the trip's paperwork.
+
+### Itinerary
+
+The itinerary has one entry per day. If a trip has none yet, **Generate itinerary** builds it from the trip dates, and **Fill in missing days** adds any days that are missing after you change the dates. Tap a day to edit it (**Edit Day**):
+
+- **Day Type**: **Dive Day**, **Travel**, **Rest**, **Sea Day**, **Port Day**, **Embark**, or **Disembark**.
+- **Planned dives**: how many dives you plan that day.
+- **Location** or **Port / Anchorage**, and **Notes**.
+
+### Gear
+
+The **Gear** tab is what you will dive with. **Add** offers **From my equipment**, **An equipment set**, **Scan a tag**, or **Rental cylinders**. In **From my equipment**, tick as many items as you like and press **Add N** to add them all at once; the parts of an assembly are hidden, since packing the assembly takes them along. Packed items are listed under **Packed**, and cylinders get slots on the trip's board under **Cylinders**; a cylinder you pack can be put on the board or left off it. Equipment due for service shows a service alert here.
+
+### Checklist
+
+The trip's checklists, with how many items are done, due this week, or overdue.
+
+### Dives
+
+Every dive in the trip, in chronological order. Tap any dive to open it.
+
+### Photos
+
+All photos from the trip's dives, grouped by dive in chronological order (**Trip Photos**). Tap any thumbnail to open the full-screen viewer.
+
+<!-- screenshot: images/trips/trip-gallery.png: trip photo gallery -->
+
+To link more photos, tap the camera icon in the gallery's app bar. Submersion scans your device's photo library for images taken during the trip's dates, matches them to the dives they most likely belong to, shows you the results to review, and links the ones you confirm. Photos that are already linked are left out of the scan.
+
+> [!TIP]
+> Photos attach to individual dives, not to the trip directly. If the trip has no dives yet, the scan asks you to add dives first.
+
+## Adding dives to a trip
+
+### Scanning by date
+
+When you save a new trip, or change its dates, Submersion looks for dives within those dates and offers them in **Add Dives to Trip**, in two groups:
+
+- **Unassigned**: dives not on any trip yet (selected by default).
+- **On other trips**: dives already on another trip (not selected, but you can move them).
+
+Check or uncheck dives, then tap **Add**. **Find matching dives** runs the same scan again any time from the trip's dives.
+
+### From the dive
+
+You can also put a dive on a trip from the dive's own page: unlock it (**Unlock to edit**) and set **Trip** on its **Details** card. When a trip's dates cover the dive, Submersion suggests it; tap **Use** to accept. To move many dives at once, select them in the dive list and use **Edit Selected**. See [Dive Logging](dive-logging.md).
+
+Imported dives that have no trip of their own join the trip whose dates cover them (see [Import & Export](import-export.md)).
+
+## Trip statistics and map
+
+To see the trip's dive sites on a map, tap the map icon in the trip's app bar. Submersion switches to the dive map filtered to this trip's dives.
+
+> [!NOTE]
+> Exporting a whole trip (to CSV or PDF) is not available yet; the trip's **Export** menu says so. To export a trip's dives today, select them in the dive list and use **Export Selected** (see [Dive Logging](dive-logging.md)).
+
+## Sharing a trip with other profiles
+
+With two or more diver profiles on the device (a family sharing one tablet, say), a trip can be shared so the others can add their own dives to it without typing the trip in again.
+
+- **Who sees it:** unlock the trip, open its header with the pencil and tap **Shared with**, then save. Choose **Everyone** (every profile, including ones you add later), or tick only the profiles that were on the trip. A profile you leave unticked never sees it, so its trip list stays clear of trips it was not on.
+- **Several trips at once:** select them in the trip list and choose **Share with...**. This only adds the profiles you tick; it never takes a trip away from anyone. **Settings > Shared data > Share all my trips...** does the same for every trip you own.
+- **Who owns it:** the profile that created the trip. Only the owner can delete it or change who it is shared with. A profile it is shared with sees **Shared by {name}**, can edit its details and add its own dives, but cannot delete it.
+- **Not wanted in your profile?** On a trip someone else shared, choose **Remove from my profile**. It is hidden for you only, stays in the owner's log and every other profile, and your own dives stay linked to it. Bring it back from **Settings > Shared data > Hidden from this profile**.
+- **To stop sharing:** the owner unlocks the trip, taps **Shared with** in its header, unticks a profile (or every profile) and saves. That profile's dives stay linked to the trip; it just no longer appears in that profile's trip list. Nothing is deleted.
+
+## See also
+
+- [Dive Logging](dive-logging.md)
+- [Dive Sites](dive-sites.md)
+- [Marine Life and Photos](marine-life-and-photos.md)
+- [Equipment](equipment.md)
+- [Safety](safety.md)

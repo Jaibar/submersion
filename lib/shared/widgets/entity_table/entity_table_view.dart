@@ -1,14 +1,67 @@
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:linked_scroll_controller/linked_scroll_controller.dart';
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/core/utils/table_value_compare.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/shared/constants/entity_field.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_header_cell.dart';
+import 'package:submersion/shared/widgets/entity_table/entity_table_menu.dart';
+import 'package:submersion/core/platform/desktop_target_platform.dart';
+
+/// The rows in the order the table shows them for [config]: the sort field
+/// ascending or descending, nulls last, text through the collator. Public so
+/// an editor can walk cells in that order (#3422).
+List<T> sortTableEntities<T, F extends EntityField>(
+  List<T> entities,
+  EntityFieldAdapter<T, F> adapter,
+  EntityTableViewConfig<F> config,
+  UnitFormatter units,
+) {
+  final field = config.sortField;
+  if (field == null) return entities;
+  final ascending = config.sortAscending;
+  // Each row's value is read and formatted once, not once per comparison.
+  final rows = <(T, Object?)>[
+    for (final entity in entities)
+      (entity, adapter.extractValue(field, entity)),
+  ];
+  final collator = TextCollator();
+  final formattedValues = <Object, String>{};
+  rows.sort((a, b) {
+    final va = a.$2;
+    final vb = b.$2;
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    final cmp = compareTableValues(
+      va,
+      vb,
+      collator: collator,
+      formatted: (value) => formattedValues.putIfAbsent(
+        value,
+        () => adapter.formatValue(field, value, units),
+      ),
+    );
+    return ascending ? cmp : -cmp;
+  });
+  return [for (final row in rows) row.$1];
+}
 
 /// Row height for each row in the table.
 const double kEntityTableRowHeight = 38.0;
 const double _kCheckboxWidth = 48.0;
+
+/// Width reserved for [EntityTableView.leadingBuilder], when one is given.
+const double _kLeadingWidth = 40.0;
+
+/// Opacity of a row [EntityTableView.isEntityMuted] answers true for.
+const double kEntityTableMutedOpacity = 0.6;
 
 /// Generic full-width data table for displaying entity lists with pinned
 /// columns and synchronized horizontal scrolling.
@@ -17,7 +70,8 @@ const double _kCheckboxWidth = 48.0;
 /// Trips, Equipment, etc.). Entity-specific behavior is provided via the
 /// [adapter] and callbacks.
 class EntityTableView<T, F extends EntityField> extends StatefulWidget {
-  /// The entities to display as rows.
+  /// The entities to display as rows. Changed rows arrive as a new list: the
+  /// table keeps its sort while this one stays, so it is never edited in place.
   final List<T> entities;
 
   /// Extract a unique string ID from an entity (for selection/highlight).
@@ -47,9 +101,6 @@ class EntityTableView<T, F extends EntityField> extends StatefulWidget {
   /// Called when user double-taps a row.
   final void Function(String entityId)? onEntityDoubleTap;
 
-  /// Called when user long-presses a row.
-  final void Function(String entityId)? onEntityLongPress;
-
   /// IDs of selected entities (for bulk selection mode).
   final Set<String> selectedIds;
 
@@ -58,6 +109,72 @@ class EntityTableView<T, F extends EntityField> extends StatefulWidget {
 
   /// ID of the currently highlighted entity (for single-select highlight).
   final String? highlightedId;
+
+  /// Optional widget rendered at the start of each row, before the first
+  /// column. Null for every table that does not opt in, so existing tables are
+  /// unchanged.
+  ///
+  /// Used for profile photos, which are not a sortable text value and
+  /// therefore do not belong in the field enum. Renders in the PINNED section
+  /// so it stays put when the table is scrolled horizontally, which means the
+  /// header reserves the same width to keep columns aligned.
+  final Widget Function(T entity)? leadingBuilder;
+
+  /// Hides [field]'s column. When set, every header menu offers "Hide
+  /// column", disabled on the last column (#2984).
+  final void Function(F field)? onHideColumn;
+
+  /// Extra header menu items, shown above "Hide column".
+  final EntityTableHeaderMenuBuilder<F>? headerMenuBuilder;
+
+  /// Cell menu items. Null leaves cells with no menu and no long-press
+  /// recognizer, as before #2984.
+  final EntityTableCellMenuBuilder<T, F>? cellMenuBuilder;
+
+  /// Whether [field]'s column is filtered (shown as a header icon).
+  final bool Function(F field)? isColumnFiltered;
+
+  /// Whether [entity]'s cell in [field]'s column has any menu items. A cell
+  /// answering false gets no cell gestures, so a hold there stays the row's.
+  /// Every cell has one when null.
+  final bool Function(T entity, F field)? hasCellMenu;
+
+  /// Whether [entity]'s row is greyed out, such as a permanently closed dive
+  /// center (#3379). No row is when null.
+  final bool Function(T entity)? isEntityMuted;
+
+  /// A widget shown after the text in [entity]'s cell in [field]'s column,
+  /// such as a status tag beside a name, or null for none. Cells hold only
+  /// their text when this is null.
+  final Widget? Function(T entity, F field)? cellTrailingBuilder;
+
+  /// A tap on a cell, with its entity and column. When set (and selection
+  /// mode is off) a cell tap goes here instead of [onEntityTap], so an
+  /// editor can open the cell (#3422). Double taps stay the row's, unless
+  /// [cellDoubleTap] is set.
+  final void Function(T entity, F field)? onCellTap;
+
+  /// What a double tap on a cell does, or null for a cell that has none, so
+  /// its single tap lands at once rather than waiting to see if a second
+  /// follows (#3422). Used with [onCellTap], in place of [onEntityDoubleTap].
+  final VoidCallback? Function(T entity, F field)? cellDoubleTap;
+
+  /// Shown in brackets after a column's label, such as its unit (#3422).
+  final String? Function(F field)? headerSuffix;
+
+  /// Replaces a cell's text with the widget it returns, filling the cell's
+  /// box with no padding; null keeps the formatted text (#3422).
+  final Widget? Function(
+    BuildContext context,
+    T entity,
+    F field,
+    String formatted,
+  )?
+  cellBuilder;
+
+  /// A colour painted behind one cell, above the row background, such as a
+  /// pending edit; null paints nothing (#3422).
+  final Color? Function(T entity, F field)? cellBackground;
 
   const EntityTableView({
     super.key,
@@ -71,10 +188,22 @@ class EntityTableView<T, F extends EntityField> extends StatefulWidget {
     required this.onEntityTap,
     this.onEntityTapDown,
     this.onEntityDoubleTap,
-    this.onEntityLongPress,
     this.selectedIds = const {},
     this.isSelectionMode = false,
     this.highlightedId,
+    this.leadingBuilder,
+    this.onHideColumn,
+    this.headerMenuBuilder,
+    this.cellMenuBuilder,
+    this.isColumnFiltered,
+    this.hasCellMenu,
+    this.isEntityMuted,
+    this.cellTrailingBuilder,
+    this.onCellTap,
+    this.cellDoubleTap,
+    this.headerSuffix,
+    this.cellBuilder,
+    this.cellBackground,
   });
 
   @override
@@ -84,6 +213,14 @@ class EntityTableView<T, F extends EntityField> extends StatefulWidget {
 class _EntityTableViewState<T, F extends EntityField>
     extends State<EntityTableView<T, F>> {
   String? _hoveredEntityId;
+
+  /// Always-visible scrollbars on desktop, the platform default on touch.
+  bool? get _thumbVisibility =>
+      isDesktopTargetPlatform(defaultTargetPlatform) ? true : null;
+
+  /// Widths of columns being dragged right now (#2984): the column redraws
+  /// on every move, and the config is written once, on drag end.
+  Map<F, double> _liveWidths = const {};
 
   late final LinkedScrollControllerGroup _horizontalGroup;
   late final ScrollController _headerHorizontalController;
@@ -103,25 +240,64 @@ class _EntityTableViewState<T, F extends EntityField>
     _verticalGroup = LinkedScrollControllerGroup();
     _pinnedVerticalController = _verticalGroup.addAndGet();
     _scrollableVerticalController = _verticalGroup.addAndGet();
+    // A table built with a highlighted row (the list was returned to, #3301)
+    // shows that row rather than the top of the table.
+    if (widget.highlightedId != null) {
+      // Built with rows, the reveal is decided now, found or not: a row a
+      // later filter brings into view is not jumped to.
+      _revealedOnBuild = widget.entities.isNotEmpty;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToHighlightedRow(jump: true);
+      });
+    }
   }
+
+  /// Whether the highlighted row has been brought into view since this
+  /// table was built, so rows arriving after that do not move it again.
+  bool _revealedOnBuild = false;
+
+  /// A row highlighted while the rows did not hold it, as when a jump to a
+  /// typed dive number clears the search and highlights its dive before the
+  /// whole list has loaded (#3744). Shown once rows that hold it arrive.
+  String? _awaitedHighlightId;
 
   @override
   void didUpdateWidget(EntityTableView<T, F> oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.highlightedId != null &&
         widget.highlightedId != oldWidget.highlightedId) {
-      _scrollToHighlightedRow();
+      _scrollToHighlightedRow(awaitRows: true);
+    } else if (_awaitedHighlightId != null &&
+        _awaitedHighlightId == widget.highlightedId &&
+        !identical(widget.entities, oldWidget.entities)) {
+      // A jump, as a restore makes: the rows have only just arrived.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToHighlightedRow(jump: true, awaitRows: true);
+      });
+    } else if (!_revealedOnBuild &&
+        widget.highlightedId != null &&
+        oldWidget.entities.isEmpty &&
+        widget.entities.isNotEmpty) {
+      // Built before its rows arrived: reveal the row once they do.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToHighlightedRow(jump: true);
+      });
     }
   }
 
-  void _scrollToHighlightedRow() {
+  /// Scrolls the highlighted row into view, by [jump] when the table is
+  /// being restored so it does not visibly travel from the top. With
+  /// [awaitRows], a row the rows do not hold yet is shown when they do.
+  void _scrollToHighlightedRow({bool jump = false, bool awaitRows = false}) {
     if (widget.highlightedId == null) return;
 
     final sorted = _sortedEntities();
     final index = sorted.indexWhere(
       (e) => widget.idExtractor(e) == widget.highlightedId,
     );
+    _awaitedHighlightId = index < 0 && awaitRows ? widget.highlightedId : null;
     if (index < 0) return;
+    if (jump) _revealedOnBuild = true;
 
     if (!_pinnedVerticalController.hasClients) return;
     final viewportHeight = _pinnedVerticalController.position.viewportDimension;
@@ -134,12 +310,22 @@ class _EntityTableViewState<T, F extends EntityField>
       return;
     }
 
+    // Rows are one fixed height, so the full extent is known even while the
+    // scroll position still reports the extent of the rows before these.
+    final maxScroll = math.max(
+      _pinnedVerticalController.position.maxScrollExtent,
+      sorted.length * kEntityTableRowHeight - viewportHeight,
+    );
     final targetOffset =
         (rowTop - (viewportHeight / 2) + (kEntityTableRowHeight / 2)).clamp(
           0.0,
-          _pinnedVerticalController.position.maxScrollExtent,
+          maxScroll,
         );
 
+    if (jump) {
+      _pinnedVerticalController.jumpTo(targetOffset);
+      return;
+    }
     _pinnedVerticalController.animateTo(
       targetOffset,
       duration: const Duration(milliseconds: 300),
@@ -160,35 +346,33 @@ class _EntityTableViewState<T, F extends EntityField>
   // Sorting
   // ---------------------------------------------------------------------------
 
+  /// What [_sorted] was sorted from, so a rebuild that changes none of it
+  /// (hover, a live column width) keeps the order (#3850). The rows, adapter
+  /// and units compare by identity: an edit arrives as a new list, and
+  /// anything an adapter reads, such as labels or a catalog, as a new adapter.
+  (List<T>, EntityFieldAdapter<T, F>, UnitFormatter, F, bool)? _sortInputs;
+  List<T> _sorted = const [];
+
   List<T> _sortedEntities() {
     final config = widget.config;
-    if (config.sortField == null) return widget.entities;
-
-    final field = config.sortField!;
-    final ascending = config.sortAscending;
-
-    final sorted = List<T>.from(widget.entities);
-    sorted.sort((a, b) {
-      final va = widget.adapter.extractValue(field, a);
-      final vb = widget.adapter.extractValue(field, b);
-
-      if (va == null && vb == null) return 0;
-      if (va == null) return 1;
-      if (vb == null) return -1;
-
-      int cmp;
-      if (va is Comparable && vb is Comparable) {
-        cmp = va.compareTo(vb);
-      } else {
-        cmp = widget.adapter
-            .formatValue(field, va, widget.units)
-            .compareTo(widget.adapter.formatValue(field, vb, widget.units));
-      }
-
-      return ascending ? cmp : -cmp;
-    });
-
-    return sorted;
+    final field = config.sortField;
+    if (field == null) return widget.entities;
+    final inputs = (
+      widget.entities,
+      widget.adapter,
+      widget.units,
+      field,
+      config.sortAscending,
+    );
+    if (inputs == _sortInputs) return _sorted;
+    _sortInputs = inputs;
+    _sorted = sortTableEntities(
+      widget.entities,
+      widget.adapter,
+      config,
+      widget.units,
+    );
+    return _sorted;
   }
 
   // ---------------------------------------------------------------------------
@@ -203,17 +387,77 @@ class _EntityTableViewState<T, F extends EntityField>
     return widget.config.columns.where((c) => !c.isPinned).toList();
   }
 
+  double _widthOf(EntityTableColumnConfig<F> c) =>
+      _liveWidths[c.field] ?? c.width;
+
   double _pinnedWidth() {
-    return _pinnedColumns().fold(0.0, (sum, c) => sum + c.width);
+    return _pinnedColumns().fold(0.0, (sum, c) => sum + _widthOf(c));
   }
 
   double _scrollableWidth() {
-    return _scrollableColumns().fold(0.0, (sum, c) => sum + c.width);
+    return _scrollableColumns().fold(0.0, (sum, c) => sum + _widthOf(c));
+  }
+
+  void _resizeLive(F field, double width) =>
+      setState(() => _liveWidths = {..._liveWidths, field: width});
+
+  void _resizeCommit(F field) {
+    final width = _liveWidths[field];
+    if (width == null) return;
+    widget.onResizeColumn(field, width);
+    setState(
+      () => _liveWidths = {
+        for (final e in _liveWidths.entries)
+          if (e.key != field) e.key: e.value,
+      },
+    );
   }
 
   // ---------------------------------------------------------------------------
   // Cell rendering
   // ---------------------------------------------------------------------------
+
+  bool get _hasHeaderMenu =>
+      widget.onHideColumn != null || widget.headerMenuBuilder != null;
+
+  void _openHeaderMenu(BuildContext context, F field, Offset position) {
+    // Labels resolve here, never in build, so tables pumped without
+    // localizations still build.
+    final l10n = context.l10n;
+    showEntityTableMenu(
+      context,
+      position: position,
+      sections: [
+        widget.headerMenuBuilder?.call(context, field) ?? const [],
+        if (widget.onHideColumn != null)
+          [
+            EntityTableMenuAction(
+              label: l10n.tableMode_menu_hideColumn,
+              enabled: widget.config.columns.length > 1,
+              onSelected: () => widget.onHideColumn!(field),
+            ),
+          ],
+      ],
+    );
+  }
+
+  /// One header cell, with its menu and filter indicator wired.
+  Widget _headerCell(EntityTableColumnConfig<F> col) => Builder(
+    builder: (context) => EntityTableHeaderCell(
+      field: col.field,
+      width: _widthOf(col),
+      isSorted: widget.config.sortField == col.field,
+      sortAscending: widget.config.sortAscending,
+      onTap: () => widget.onSortFieldChanged(col.field),
+      onResize: (w) => _resizeLive(col.field, w),
+      onResizeEnd: () => _resizeCommit(col.field),
+      isFiltered: widget.isColumnFiltered?.call(col.field) ?? false,
+      labelSuffix: widget.headerSuffix?.call(col.field),
+      onOpenMenu: _hasHeaderMenu
+          ? (position) => _openHeaderMenu(context, col.field, position)
+          : null,
+    ),
+  );
 
   Widget _buildCell({
     required T entity,
@@ -225,11 +469,28 @@ class _EntityTableViewState<T, F extends EntityField>
   }) {
     final value = widget.adapter.extractValue(column.field, entity);
     final text = widget.adapter.formatValue(column.field, value, widget.units);
+    final label = Text(
+      text,
+      overflow: TextOverflow.ellipsis,
+      maxLines: 1,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: isSelected ? theme.colorScheme.onPrimaryContainer : null,
+      ),
+    );
+    final trailing = widget.cellTrailingBuilder?.call(entity, column.field);
+    final custom = widget.cellBuilder?.call(
+      context,
+      entity,
+      column.field,
+      text,
+    );
 
-    return Container(
-      width: column.width,
+    final box = Container(
+      width: _widthOf(column),
       height: kEntityTableRowHeight,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: custom == null
+          ? const EdgeInsets.symmetric(horizontal: 8)
+          : EdgeInsets.zero,
       alignment: column.field.isRightAligned
           ? Alignment.centerRight
           : Alignment.centerLeft,
@@ -244,14 +505,61 @@ class _EntityTableViewState<T, F extends EntityField>
               : BorderSide.none,
         ),
       ),
-      child: Text(
-        text,
-        overflow: TextOverflow.ellipsis,
-        maxLines: 1,
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: isSelected ? theme.colorScheme.onPrimaryContainer : null,
-        ),
-      ),
+      // The trailing widget keeps its natural width up to half the cell, so
+      // a long tag ellipsizes rather than overflowing a narrow column, and a
+      // right-aligned column stays right-aligned.
+      child:
+          custom ??
+          (trailing == null
+              ? label
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(child: label),
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: math.max(0, (_widthOf(column) - 16 - 6) / 2),
+                      ),
+                      child: trailing,
+                    ),
+                  ],
+                )),
+    );
+    final background = widget.cellBackground?.call(entity, column.field);
+    final painted = background == null
+        ? box
+        : ColoredBox(color: background, child: box);
+    final muted = (widget.isEntityMuted?.call(entity) ?? false)
+        ? Opacity(opacity: kEntityTableMutedOpacity, child: painted)
+        : painted;
+    final onCellTap = widget.onCellTap;
+    final cell = onCellTap == null || widget.isSelectionMode
+        ? muted
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => onCellTap(entity, column.field),
+            onDoubleTap: widget.cellDoubleTap?.call(entity, column.field),
+            child: muted,
+          );
+    final menu = widget.cellMenuBuilder;
+    if (menu == null ||
+        !(widget.hasCellMenu?.call(entity, column.field) ?? true)) {
+      return cell;
+    }
+    return Builder(
+      builder: (cellContext) {
+        void open(Offset position) => showEntityTableMenu(
+          cellContext,
+          position: position,
+          sections: [menu(cellContext, entity, column.field)],
+        );
+        return GestureDetector(
+          onSecondaryTapUp: (d) => open(d.globalPosition),
+          onLongPressStart: (d) => open(d.globalPosition),
+          child: cell,
+        );
+      },
     );
   }
 
@@ -290,216 +598,240 @@ class _EntityTableViewState<T, F extends EntityField>
     final pinnedWidth = _pinnedWidth();
     final scrollableWidth = _scrollableWidth();
 
-    return Column(
-      children: [
-        // Header row
-        SizedBox(
-          height: kEntityTableRowHeight,
-          child: Row(
-            children: [
-              if (widget.isSelectionMode)
-                const SizedBox(
-                  width: _kCheckboxWidth,
-                  height: kEntityTableRowHeight,
-                ),
-              ...pinned.map((col) {
-                return EntityTableHeaderCell(
-                  field: col.field,
-                  width: col.width,
-                  isSorted: widget.config.sortField == col.field,
-                  sortAscending: widget.config.sortAscending,
-                  onTap: () => widget.onSortFieldChanged(col.field),
-                  onResize: (w) => widget.onResizeColumn(col.field, w),
-                );
-              }),
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  controller: _headerHorizontalController,
-                  physics: const ClampingScrollPhysics(),
-                  child: Row(
-                    children: scrollable.map((col) {
-                      return EntityTableHeaderCell(
-                        field: col.field,
-                        width: col.width,
-                        isSorted: widget.config.sortField == col.field,
-                        sortAscending: widget.config.sortAscending,
-                        onTap: () => widget.onSortFieldChanged(col.field),
-                        onResize: (w) => widget.onResizeColumn(col.field, w),
-                      );
-                    }).toList(),
+    // One explicit scrollbar per axis on the body (#2984), never one per
+    // inner scrollable (pinned list, header, body) as the desktop default
+    // would draw.
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: Column(
+        children: [
+          // Header row
+          SizedBox(
+            height: kEntityTableRowHeight,
+            child: Row(
+              children: [
+                if (widget.isSelectionMode)
+                  const SizedBox(
+                    width: _kCheckboxWidth,
+                    height: kEntityTableRowHeight,
+                  ),
+                if (widget.leadingBuilder != null)
+                  const SizedBox(
+                    width: _kLeadingWidth,
+                    height: kEntityTableRowHeight,
+                  ),
+                ...pinned.map(_headerCell),
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    controller: _headerHorizontalController,
+                    physics: const ClampingScrollPhysics(),
+                    child: Row(children: scrollable.map(_headerCell).toList()),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
 
-        // Table body
-        Expanded(
-          child: Row(
-            children: [
-              // Pinned body columns
-              SizedBox(
-                width:
-                    pinnedWidth +
-                    (widget.isSelectionMode ? _kCheckboxWidth : 0),
-                child: ListView.builder(
-                  controller: _pinnedVerticalController,
-                  itemExtent: kEntityTableRowHeight,
-                  itemCount: sorted.length,
-                  itemBuilder: (context, index) {
-                    final entity = sorted[index];
-                    final entityId = widget.idExtractor(entity);
-                    final isSelected =
-                        widget.isSelectionMode &&
-                        widget.selectedIds.contains(entityId);
-                    final isHighlighted =
-                        !widget.isSelectionMode &&
-                        widget.highlightedId == entityId;
-                    final isHovered = _hoveredEntityId == entityId;
+          // Table body
+          Expanded(
+            child: Row(
+              children: [
+                // Pinned body columns
+                SizedBox(
+                  width:
+                      pinnedWidth +
+                      (widget.isSelectionMode ? _kCheckboxWidth : 0) +
+                      (widget.leadingBuilder != null ? _kLeadingWidth : 0),
+                  child: ListView.builder(
+                    controller: _pinnedVerticalController,
+                    itemExtent: kEntityTableRowHeight,
+                    itemCount: sorted.length,
+                    itemBuilder: (context, index) {
+                      final entity = sorted[index];
+                      final entityId = widget.idExtractor(entity);
+                      final isSelected =
+                          widget.isSelectionMode &&
+                          widget.selectedIds.contains(entityId);
+                      final isHighlighted =
+                          !widget.isSelectionMode &&
+                          widget.highlightedId == entityId;
+                      final isHovered = _hoveredEntityId == entityId;
 
-                    return MouseRegion(
-                      onEnter: (_) =>
-                          setState(() => _hoveredEntityId = entityId),
-                      onExit: (_) {
-                        if (_hoveredEntityId == entityId) {
-                          setState(() => _hoveredEntityId = null);
-                        }
-                      },
-                      child: Listener(
-                        onPointerDown: widget.onEntityTapDown != null
-                            ? (_) => widget.onEntityTapDown!(entityId)
-                            : null,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () => widget.onEntityTap(entityId),
-                          onDoubleTap: widget.onEntityDoubleTap != null
-                              ? () => widget.onEntityDoubleTap!(entityId)
+                      return MouseRegion(
+                        onEnter: (_) =>
+                            setState(() => _hoveredEntityId = entityId),
+                        onExit: (_) {
+                          if (_hoveredEntityId == entityId) {
+                            setState(() => _hoveredEntityId = null);
+                          }
+                        },
+                        child: Listener(
+                          onPointerDown: widget.onEntityTapDown != null
+                              ? (_) => widget.onEntityTapDown!(entityId)
                               : null,
-                          onLongPress: widget.onEntityLongPress != null
-                              ? () => widget.onEntityLongPress!(entityId)
-                              : null,
-                          child: ColoredBox(
-                            color: _rowBackground(
-                              index: index,
-                              isSelected: isSelected,
-                              isHighlighted: isHighlighted,
-                              isHovered: isHovered,
-                              colorScheme: colorScheme,
-                            ),
-                            child: Row(
-                              children: [
-                                if (widget.isSelectionMode)
-                                  SizedBox(
-                                    width: _kCheckboxWidth,
-                                    height: kEntityTableRowHeight,
-                                    child: Checkbox(
-                                      value: isSelected,
-                                      onChanged: (_) =>
-                                          widget.onEntityTap(entityId),
-                                      materialTapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                      visualDensity: VisualDensity.compact,
-                                    ),
-                                  ),
-                                ...pinned.asMap().entries.map((entry) {
-                                  return _buildCell(
-                                    entity: entity,
-                                    column: entry.value,
-                                    theme: theme,
-                                    rowIndex: index,
-                                    isSelected: isSelected,
-                                    isLastPinned:
-                                        entry.key == pinned.length - 1,
-                                  );
-                                }),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-
-              // Scrollable body columns
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  controller: _bodyHorizontalController,
-                  physics: const ClampingScrollPhysics(),
-                  child: SizedBox(
-                    width: scrollableWidth,
-                    child: ListView.builder(
-                      controller: _scrollableVerticalController,
-                      itemExtent: kEntityTableRowHeight,
-                      itemCount: sorted.length,
-                      itemBuilder: (context, index) {
-                        final entity = sorted[index];
-                        final entityId = widget.idExtractor(entity);
-                        final isSelected =
-                            widget.isSelectionMode &&
-                            widget.selectedIds.contains(entityId);
-                        final isHighlighted =
-                            !widget.isSelectionMode &&
-                            widget.highlightedId == entityId;
-                        final isHovered = _hoveredEntityId == entityId;
-
-                        return MouseRegion(
-                          onEnter: (_) =>
-                              setState(() => _hoveredEntityId = entityId),
-                          onExit: (_) {
-                            if (_hoveredEntityId == entityId) {
-                              setState(() => _hoveredEntityId = null);
-                            }
-                          },
-                          child: Listener(
-                            onPointerDown: widget.onEntityTapDown != null
-                                ? (_) => widget.onEntityTapDown!(entityId)
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => widget.onEntityTap(entityId),
+                            onDoubleTap: widget.onEntityDoubleTap != null
+                                ? () => widget.onEntityDoubleTap!(entityId)
                                 : null,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => widget.onEntityTap(entityId),
-                              onDoubleTap: widget.onEntityDoubleTap != null
-                                  ? () => widget.onEntityDoubleTap!(entityId)
-                                  : null,
-                              onLongPress: widget.onEntityLongPress != null
-                                  ? () => widget.onEntityLongPress!(entityId)
-                                  : null,
-                              child: ColoredBox(
-                                color: _rowBackground(
-                                  index: index,
-                                  isSelected: isSelected,
-                                  isHighlighted: isHighlighted,
-                                  isHovered: isHovered,
-                                  colorScheme: colorScheme,
-                                ),
-                                child: Row(
-                                  children: scrollable.map((col) {
+                            child: ColoredBox(
+                              color: _rowBackground(
+                                index: index,
+                                isSelected: isSelected,
+                                isHighlighted: isHighlighted,
+                                isHovered: isHovered,
+                                colorScheme: colorScheme,
+                              ),
+                              child: Row(
+                                children: [
+                                  if (widget.isSelectionMode)
+                                    SizedBox(
+                                      width: _kCheckboxWidth,
+                                      height: kEntityTableRowHeight,
+                                      child: Checkbox(
+                                        value: isSelected,
+                                        onChanged: (_) =>
+                                            widget.onEntityTap(entityId),
+                                        materialTapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                    ),
+                                  if (widget.leadingBuilder != null)
+                                    SizedBox(
+                                      width: _kLeadingWidth,
+                                      height: kEntityTableRowHeight,
+                                      child: Center(
+                                        child:
+                                            (widget.isEntityMuted?.call(
+                                                  entity,
+                                                ) ??
+                                                false)
+                                            ? Opacity(
+                                                opacity:
+                                                    kEntityTableMutedOpacity,
+                                                child: widget.leadingBuilder!(
+                                                  entity,
+                                                ),
+                                              )
+                                            : widget.leadingBuilder!(entity),
+                                      ),
+                                    ),
+                                  ...pinned.asMap().entries.map((entry) {
                                     return _buildCell(
                                       entity: entity,
-                                      column: col,
+                                      column: entry.value,
                                       theme: theme,
                                       rowIndex: index,
                                       isSelected: isSelected,
+                                      isLastPinned:
+                                          entry.key == pinned.length - 1,
                                     );
-                                  }).toList(),
-                                ),
+                                  }),
+                                ],
                               ),
                             ),
                           ),
-                        );
-                      },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+
+                // Scrollable body columns. Both bars sit outside the
+                // horizontal scroller, so the vertical one stays at the
+                // viewport's edge; the body list is one scrollable below the
+                // horizontal one (depth 1).
+                Expanded(
+                  child: Scrollbar(
+                    controller: _bodyHorizontalController,
+                    thumbVisibility: _thumbVisibility,
+                    notificationPredicate: (n) =>
+                        n.depth == 0 && n.metrics.axis == Axis.horizontal,
+                    child: Scrollbar(
+                      controller: _scrollableVerticalController,
+                      thumbVisibility: _thumbVisibility,
+                      notificationPredicate: (n) =>
+                          n.depth == 1 && n.metrics.axis == Axis.vertical,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        controller: _bodyHorizontalController,
+                        physics: const ClampingScrollPhysics(),
+                        child: SizedBox(
+                          width: scrollableWidth,
+                          child: ListView.builder(
+                            controller: _scrollableVerticalController,
+                            itemExtent: kEntityTableRowHeight,
+                            itemCount: sorted.length,
+                            itemBuilder: (context, index) {
+                              final entity = sorted[index];
+                              final entityId = widget.idExtractor(entity);
+                              final isSelected =
+                                  widget.isSelectionMode &&
+                                  widget.selectedIds.contains(entityId);
+                              final isHighlighted =
+                                  !widget.isSelectionMode &&
+                                  widget.highlightedId == entityId;
+                              final isHovered = _hoveredEntityId == entityId;
+
+                              return MouseRegion(
+                                onEnter: (_) =>
+                                    setState(() => _hoveredEntityId = entityId),
+                                onExit: (_) {
+                                  if (_hoveredEntityId == entityId) {
+                                    setState(() => _hoveredEntityId = null);
+                                  }
+                                },
+                                child: Listener(
+                                  onPointerDown: widget.onEntityTapDown != null
+                                      ? (_) => widget.onEntityTapDown!(entityId)
+                                      : null,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => widget.onEntityTap(entityId),
+                                    onDoubleTap:
+                                        widget.onEntityDoubleTap != null
+                                        ? () => widget.onEntityDoubleTap!(
+                                            entityId,
+                                          )
+                                        : null,
+                                    child: ColoredBox(
+                                      color: _rowBackground(
+                                        index: index,
+                                        isSelected: isSelected,
+                                        isHighlighted: isHighlighted,
+                                        isHovered: isHovered,
+                                        colorScheme: colorScheme,
+                                      ),
+                                      child: Row(
+                                        children: scrollable.map((col) {
+                                          return _buildCell(
+                                            entity: entity,
+                                            column: col,
+                                            theme: theme,
+                                            rowIndex: index,
+                                            isSelected: isSelected,
+                                          );
+                                        }).toList(),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

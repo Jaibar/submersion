@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:equatable/equatable.dart';
 
 /// Represents a dive center/operator
@@ -18,6 +20,20 @@ class DiveCenter extends Equatable {
   final List<String> affiliations; // PADI, SSI, etc.
   final double? rating;
   final String notes;
+
+  /// Fill hours (v249), minutes after local midnight: when the station fills
+  /// cylinders, for the trip fill forecast's deadline. Both or neither.
+  final int? fillOpensAt;
+  final int? fillClosesAt;
+
+  /// Out of business (v313, #3379). Kept for past dives and statistics, but
+  /// never offered as a nearby center in the picker.
+  final bool isPermanentlyClosed;
+
+  /// Logo (v373, #4460): a 512x512 square JPEG from the profile photo codec,
+  /// or null to draw the store icon. Pass the repository's instance through
+  /// unchanged: avatar image caching is keyed by its identity.
+  final Uint8List? logo;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -38,6 +54,10 @@ class DiveCenter extends Equatable {
     this.affiliations = const [],
     this.rating,
     this.notes = '',
+    this.fillOpensAt,
+    this.fillClosesAt,
+    this.isPermanentlyClosed = false,
+    this.logo,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -76,21 +96,13 @@ class DiveCenter extends Equatable {
     return parts.isEmpty ? null : parts.join('\n');
   }
 
-  /// Get single-line address summary
-  String? get addressSummary {
+  /// Get full location string (city, state/province, country)
+  String? get fullLocationString {
     final parts = <String>[];
     if (city != null && city!.isNotEmpty) parts.add(city!);
     if (stateProvince != null && stateProvince!.isNotEmpty) {
       parts.add(stateProvince!);
     }
-    if (country != null && country!.isNotEmpty) parts.add(country!);
-    return parts.isEmpty ? null : parts.join(', ');
-  }
-
-  /// Get full location string (city, country)
-  String? get fullLocationString {
-    final parts = <String>[];
-    if (city != null && city!.isNotEmpty) parts.add(city!);
     if (country != null && country!.isNotEmpty) parts.add(country!);
     return parts.isEmpty ? null : parts.join(', ');
   }
@@ -117,6 +129,10 @@ class DiveCenter extends Equatable {
     List<String>? affiliations,
     double? rating,
     String? notes,
+    Object? fillOpensAt = _undefined,
+    Object? fillClosesAt = _undefined,
+    bool? isPermanentlyClosed,
+    Object? logo = _undefined,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -137,6 +153,14 @@ class DiveCenter extends Equatable {
       affiliations: affiliations ?? this.affiliations,
       rating: rating ?? this.rating,
       notes: notes ?? this.notes,
+      fillOpensAt: fillOpensAt == _undefined
+          ? this.fillOpensAt
+          : fillOpensAt as int?,
+      fillClosesAt: fillClosesAt == _undefined
+          ? this.fillClosesAt
+          : fillClosesAt as int?,
+      isPermanentlyClosed: isPermanentlyClosed ?? this.isPermanentlyClosed,
+      logo: logo == _undefined ? this.logo : logo as Uint8List?,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -166,7 +190,14 @@ class DiveCenter extends Equatable {
     affiliations,
     rating,
     notes,
+    fillOpensAt,
+    fillClosesAt,
+    isPermanentlyClosed,
+    logo,
     createdAt,
     updatedAt,
   ];
 }
+
+// Sentinel value for distinguishing null from undefined in copyWith
+const _undefined = Object();

@@ -1,0 +1,24 @@
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/data_quality/presentation/widgets/quality_finding_message.dart';
+
+/// Binds the finding renderer to a diver's units.
+///
+/// Takes an already-built [UnitFormatter] rather than a `WidgetRef` so any
+/// caller that has one can reuse it, instead of watching the settings provider
+/// a second time just to reach these closures.
+QualityUnitFormatters qualityUnitFormattersFor(UnitFormatter units) =>
+    QualityUnitFormatters(
+      depth: (m) => units.formatDepth(m),
+      depthRate: (mpm) => units.formatDepthRate(mpm),
+      limitDepth: (m) => units.formatDepthFloor(m),
+      pressure: (bar) => units.formatPressure(bar),
+      temperature: (c) => units.formatTemperature(c),
+      temperatureDelta: (c) => units.formatTemperatureDelta(c),
+      // Surface air consumption is a volume rate; honor the volume unit
+      // preference (L/min vs cuft/min); this is an RMV, never a pressure rate.
+      // formatRmv keeps 2 decimals for cuft/min, where values sit below 1.
+      sac: (lpm) => units.formatRmv(lpm),
+      date: (d) => units.formatDate(d),
+      dateTime: (d) => '${units.formatDate(d)} ${units.formatTime(d)}',
+      time: (d) => units.formatTime(d),
+    );

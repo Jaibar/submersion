@@ -1,0 +1,174 @@
+import 'package:meta/meta.dart';
+
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+
+enum FieldType { number, text, bool, enumName, date, id }
+
+/// How a date column stores its instant, which decides what "the calendar
+/// day D" binds to.
+enum DateFrame {
+  /// A wall clock flagged as UTC (`dives.dive_date_time`): day D is
+  /// `DateTime.utc(D)`.
+  wallClockUtc,
+
+  /// A local instant stored as `millisecondsSinceEpoch` (trips,
+  /// certifications, courses): day D is the device's local midnight.
+  localInstant,
+}
+
+/// The order the builder offers an enum field's values in.
+enum EnumOrder {
+  /// As [QueryField.enumValues] lists them: for values whose order means
+  /// something (current none, light, strong; Monday to Sunday).
+  declared,
+
+  /// By localized label, so the list matches the pickers that sort the same
+  /// values by label (equipment types, #4244) and follows the locale.
+  byLabel,
+}
+
+enum FieldDimension {
+  depth,
+  temperature,
+  pressure,
+
+  /// Pressure per minute (SAC). Stored in bar per minute at the surface.
+  pressureRate,
+  weight,
+  volume,
+  minutes,
+  percent,
+  count,
+  none,
+}
+
+const Set<QueryOp> kOrderingOps = {
+  QueryOp.eq,
+  QueryOp.neq,
+  QueryOp.lt,
+  QueryOp.lte,
+  QueryOp.gt,
+  QueryOp.gte,
+  QueryOp.between,
+  QueryOp.inList,
+  QueryOp.isEmpty,
+  QueryOp.isSet,
+};
+const Set<QueryOp> kTextOps = {
+  QueryOp.eq,
+  QueryOp.neq,
+  QueryOp.contains,
+  QueryOp.inList,
+  QueryOp.isEmpty,
+  QueryOp.isSet,
+};
+const Set<QueryOp> kMembershipOps = {
+  QueryOp.eq,
+  QueryOp.neq,
+  QueryOp.inList,
+  QueryOp.isEmpty,
+  QueryOp.isSet,
+};
+const Set<QueryOp> kBoolOps = {QueryOp.eq, QueryOp.neq};
+
+/// One queryable field of an entity.
+///
+/// [sql] and [emptySql] are written against the placeholder `{r}`, the alias
+/// of the entity's row at whatever nesting depth the compiler reaches it.
+/// A field that reads dives through its own subquery marks where the active
+/// diver narrows them with `{diver:<alias>}` (`kDiverToken`): the
+/// compiler binds ` AND <alias>.diver_id = ?` there when the caller names a
+/// diver, and nothing otherwise.
+@immutable
+class QueryField {
+  final String key;
+  final List<String> aliases;
+  final FieldType type;
+  final FieldDimension dimension;
+  final String sql;
+  final String emptySql;
+  final Set<QueryOp>? _ops;
+  final String labelKey;
+
+  /// The operators this field accepts; the type's default unless declared.
+  Set<QueryOp> get ops => _ops ?? _defaultOps(type);
+
+  /// Stored names, for [FieldType.enumName]. The builder localizes them.
+  final List<String>? enumValues;
+
+  /// The order the builder lists [enumValues] in.
+  final EnumOrder enumOrder;
+
+  /// For an enumName field whose values may also be custom ids (issue #690):
+  /// typed text that names no built-in resolves through this name-only
+  /// subject, and the validator accepts any value, since a stored custom id
+  /// is legitimate even when this build cannot name it.
+  final QuerySubject? customValueSubject;
+
+  /// What each enum name binds as, when the column does not store the name
+  /// itself (weekday stores 0..6). Defaults to the name.
+  final Map<String, Object>? enumSqlValues;
+
+  /// For [FieldType.bool] fields that are predicates rather than columns:
+  /// the SQL for `= true` and for `= false`. When set, [sql] is unused.
+  final ({String whenTrue, String whenFalse})? boolSql;
+
+  /// For a number field whose rows may hold a range instead of a value: the
+  /// SQL of the range's inclusive low end and exclusive high end (issue
+  /// #3226). An ordering comparison then also matches a row whose value is
+  /// NULL and whose whole range satisfies it. Equality never matches a
+  /// range. Null for ordinary fields.
+  final ({String low, String high})? rangeSql;
+
+  /// Validation range in storage units, inclusive.
+  final ({double min, double max})? sanity;
+
+  /// Decimal places the app shows this field with, where its dimension's
+  /// own precision does not apply: visibility is a depth shown in whole
+  /// metres or feet. A typed number compares as shown at this precision
+  /// (issue #4398). Null takes the dimension's.
+  final int? displayDecimals;
+
+  /// For [FieldType.date]: the frame the column stores.
+  final DateFrame dateFrame;
+
+  /// Tables this field's SQL reads besides the entity's own (dive_weights
+  /// inside weight's emptySql, the profile tables inside deco), for ticks.
+  final List<String> tables;
+
+  const QueryField({
+    required this.key,
+    this.aliases = const [],
+    required this.type,
+    this.dimension = FieldDimension.none,
+    required this.sql,
+    required this.emptySql,
+    required this.labelKey,
+    Set<QueryOp>? ops,
+    this.enumValues,
+    this.enumOrder = EnumOrder.declared,
+    this.customValueSubject,
+    this.enumSqlValues,
+    this.boolSql,
+    this.rangeSql,
+    this.sanity,
+    this.displayDecimals,
+    this.dateFrame = DateFrame.wallClockUtc,
+    this.tables = const [],
+  }) : _ops = ops;
+
+  static Set<QueryOp> _defaultOps(FieldType type) => switch (type) {
+    FieldType.number || FieldType.date => kOrderingOps,
+    FieldType.text => kTextOps,
+    FieldType.enumName || FieldType.id => kMembershipOps,
+    FieldType.bool => kBoolOps,
+  };
+
+  /// Typed names fold case, so `Trip:none` reads as `trip:none` (#3810).
+  bool matches(String keyOrAlias) {
+    final name = keyOrAlias.toLowerCase();
+    return key.toLowerCase() == name ||
+        aliases.any((a) => a.toLowerCase() == name);
+  }
+}

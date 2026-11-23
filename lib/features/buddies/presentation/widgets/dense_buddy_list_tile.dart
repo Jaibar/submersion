@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_favorite_button.dart';
+import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/buddies/presentation/buddy_certification_l10n.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Single-row flat tile for the buddy list (maximum density).
 ///
-/// Row: Buddy name (expanded) | Cert level (~100px) | Dive count (~40px) | Chevron
+/// Row: Buddy name (expanded) | Cert level (~100px) | Dive count (~40px) | Favorite star | Chevron
 /// No avatar, no agency. Uses a bottom border divider instead of a card wrapper.
 class DenseBuddyListTile extends StatelessWidget {
   final Buddy buddy;
@@ -52,25 +58,17 @@ class DenseBuddyListTile extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.only(
-              left: 8,
-              right: 16,
-              top: 10,
-              bottom: 10,
+            padding: const EdgeInsets.symmetric(
+              horizontal: kRecordRowDenseHorizontalPadding,
+              vertical: 10,
             ),
             child: Row(
               children: [
-                Visibility(
-                  visible: isSelectionMode,
-                  maintainSize: true,
-                  maintainAnimation: true,
-                  maintainState: true,
-                  child: Checkbox(
-                    value: isChecked,
-                    onChanged: (_) => onTap?.call(),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
-                  ),
+                SelectionCheckboxSlot(
+                  isSelectionMode: isSelectionMode,
+                  isChecked: isChecked,
+                  onChanged: (_) => onTap?.call(),
+                  gap: 8,
                 ),
                 // Buddy name (expanded)
                 Expanded(
@@ -83,12 +81,23 @@ class DenseBuddyListTile extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                // Cert level (~100px)
-                if (buddy.certificationLevel != null)
+                // Cert line (~100px) -- issue #1303: the "Name on the card",
+                // plus the agency unless it is "Other" or already in the
+                // name, so the pair alone never just reads "Other".
+                if (buddyCertificationLineL10n(
+                      buddy,
+                      context.l10n,
+                      catalog: context.certificationCatalog,
+                    ) !=
+                    null)
                   SizedBox(
                     width: 100,
                     child: Text(
-                      buddy.certificationLevel!.displayName,
+                      buddyCertificationLineL10n(
+                        buddy,
+                        context.l10n,
+                        catalog: context.certificationCatalog,
+                      )!,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: secondaryTextColor,
                       ),
@@ -112,12 +121,16 @@ class DenseBuddyListTile extends StatelessWidget {
                         )
                       : null,
                 ),
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: secondaryTextColor,
-                    size: 18,
-                  ),
+                // The favorite (issue #1336), shown whatever the bulk
+                // selection; it is set on the buddy's page.
+                BuddyFavoriteButton(
+                  isFavorite: buddy.isFavorite,
+                  iconSize: 16,
+                  unselectedColor: secondaryTextColor,
+                ),
+                RecordListChevron(
+                  size: RecordListChevron.denseSize,
+                  color: secondaryTextColor,
                 ),
               ],
             ),

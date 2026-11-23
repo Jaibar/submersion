@@ -26,11 +26,18 @@ class DeviceDescriptor {
     required this.product,
     required this.model,
     required this.transports,
+    this.deliversOldestFirst = false,
   });
   final String vendor;
   final String product;
   final int model;
   final List<TransportType> transports;
+
+  /// Whether this backend hands dives over oldest-first. libdivecomputer is
+  /// newest-first except where the fork reversed a driver (Shearwater
+  /// Petrel, issue #480). Only for such a backend is an interrupted
+  /// download's newest dive a safe resume point (issue #2902).
+  final bool deliversOldestFirst;
 }
 
 class DiscoveredDevice {
@@ -57,7 +64,9 @@ class ProfileSample {
     this.temperatureCelsius,
     this.pressureBar,
     this.tankIndex,
+    this.tankPressuresBar,
     this.heartRate,
+    this.heading,
     this.setpoint,
     this.ppo2,
     this.cns,
@@ -66,13 +75,42 @@ class ProfileSample {
     this.decoTime,
     this.decoDepth,
     this.tts,
+    this.o2Sensor1,
+    this.o2Sensor2,
+    this.o2Sensor3,
+    this.o2Sensor4,
+    this.o2Sensor5,
+    this.o2Sensor6,
+    this.o2SensorMv1,
+    this.o2SensorMv2,
+    this.o2SensorMv3,
+    this.o2SensorMv4,
+    this.o2SensorMv5,
+    this.o2SensorMv6,
+    this.aveloBuoyancy,
+    this.aveloGasRemaining,
+    this.computerRmv,
+    this.gasMixIndex,
   });
   final int timeSeconds;
   final double depthMeters;
   final double? temperatureCelsius;
   final double? pressureBar;
   final int? tankIndex;
+
+  /// Every tank's pressure in bar at this sample, indexed by tank index, with
+  /// null where that tank reported nothing. libdivecomputer fires one pressure
+  /// reading per air-integrated transmitter, so a single sample can carry
+  /// several; [pressureBar]/[tankIndex] hold only the last of them and lose the
+  /// rest (issue #1223). Null when the sample carries no pressure at all, and
+  /// trimmed of trailing nulls, so an ordinary single-transmitter dive costs one
+  /// short list per sample.
+  final List<double?>? tankPressuresBar;
   final int? heartRate;
+
+  /// Compass heading in degrees (0-359) from DC_SAMPLE_BEARING; null when the
+  /// computer does not report bearing samples.
+  final double? heading;
   final double? setpoint;
   final double? ppo2;
   final double? cns;
@@ -81,6 +119,39 @@ class ProfileSample {
   final int? decoTime;
   final double? decoDepth;
   final int? tts;
+
+  /// Individual CCR O2 cell ppO2 readings in bar (sensor 1..6), null when that
+  /// cell has no reading. libdivecomputer reports these per-sensor via
+  /// DC_SAMPLE_PPO2; [ppo2] holds the aggregate/computed value.
+  final double? o2Sensor1;
+  final double? o2Sensor2;
+  final double? o2Sensor3;
+  final double? o2Sensor4;
+  final double? o2Sensor5;
+  final double? o2Sensor6;
+
+  /// Raw O2 cell output in millivolts (sensor 1..6), null when that cell
+  /// reports none. Present even when the cell's ppO2 is unavailable because the
+  /// logged calibration could not be trusted (issue #810).
+  final int? o2SensorMv1;
+  final int? o2SensorMv2;
+  final int? o2SensorMv3;
+  final int? o2SensorMv4;
+  final int? o2SensorMv5;
+  final int? o2SensorMv6;
+
+  /// Shearwater Avelo mode (issue #4664): the computer's buoyancy figure in
+  /// kilograms (negative is heavy), the Hydrotank's gas remaining in percent,
+  /// and the computer's own respiratory minute volume in litres per minute.
+  /// Null on every sample outside Avelo mode and where the computer logged a
+  /// code instead of a value.
+  final double? aveloBuoyancy;
+  final int? aveloGasRemaining;
+  final double? computerRmv;
+
+  /// Active gas mix index at this sample (from DC_SAMPLE_GASMIX), carried forward
+  /// from the most recent gas switch; null if the computer reported no gas.
+  final int? gasMixIndex;
 }
 
 class GasMix {
@@ -88,10 +159,17 @@ class GasMix {
     required this.index,
     required this.o2Percent,
     required this.hePercent,
+    this.usage,
   });
   final int index;
   final double o2Percent;
   final double hePercent;
+
+  /// Gas usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount); null when the computer reported no usage (DC_USAGE_NONE).
+  /// Set on the gas mix itself, so it is available even when the mix has no
+  /// tank/transmitter record.
+  final int? usage;
 }
 
 class TankInfo {
@@ -101,12 +179,25 @@ class TankInfo {
     this.volumeLiters,
     this.startPressureBar,
     this.endPressureBar,
+    this.usage,
+    this.transmitterSerial,
   });
   final int index;
   final int gasMixIndex;
   final double? volumeLiters;
   final double? startPressureBar;
   final double? endPressureBar;
+
+  /// Tank usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount, 4=the Avelo Hydrotank, a fork extension); null when the
+  /// computer reported no usage (DC_USAGE_NONE).
+  final int? usage;
+
+  /// Serial number of the air-integration transmitter that reported this
+  /// tank's pressures (`dc_tank_t.serial`, a fork extension); null when the
+  /// computer reported none. Identifies the physical cylinder across
+  /// computers paired to the same transmitter.
+  final int? transmitterSerial;
 }
 
 class DiveEvent {
@@ -142,6 +233,11 @@ class ParsedDive {
     this.decoConservatism,
     this.rawData,
     this.rawFingerprint,
+    this.entryLatitude,
+    this.entryLongitude,
+    this.exitLatitude,
+    this.exitLongitude,
+    this.surfacePressureBar,
   });
   final String fingerprint;
   final int dateTimeYear;
@@ -167,6 +263,13 @@ class ParsedDive {
   final int? decoConservatism;
   final Uint8List? rawData;
   final Uint8List? rawFingerprint;
+  // GPS entry/exit fixes (Shearwater Swift); decimal degrees, null if unavailable.
+  final double? entryLatitude;
+  final double? entryLongitude;
+  final double? exitLatitude;
+  final double? exitLongitude;
+  // Atmospheric pressure the computer measured at the surface; null if unavailable.
+  final double? surfacePressureBar;
 }
 
 class DownloadProgress {
@@ -199,7 +302,11 @@ abstract class DiveComputerHostApi {
   void stopDiscovery();
 
   @async
-  void startDownload(DiscoveredDevice device, String? fingerprint);
+  void startDownload(
+    DiscoveredDevice device,
+    String? fingerprint,
+    bool syncClock,
+  );
 
   void cancelDownload();
 
@@ -228,6 +335,11 @@ abstract class DiveComputerFlutterApi {
     int totalDives,
     String? serialNumber,
     String? firmwareVersion,
+    String? clockSyncStatus,
+    // The descriptor product and model code the device reported about
+    // itself, when they differ from the ones it was scanned as (issue #422).
+    String? reportedProduct,
+    int? reportedModel,
   );
   void onError(DiveComputerError error);
   void onPinCodeRequired(String deviceAddress);

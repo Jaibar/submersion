@@ -1,128 +1,310 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/accessibility/app_shortcuts.dart';
+import 'package:submersion/core/constants/feature_flags.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
+import 'package:submersion/core/router/nav_shortcut_pages.dart';
 
 import 'package:submersion/core/services/database_service.dart';
-import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/core/services/notification_service.dart';
+import 'package:submersion/features/agent_access/presentation/pages/agent_access_page.dart';
+import 'package:submersion/features/buddies/domain/services/buddy_card_codec.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_card_preview_page.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_swap_page.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_list_page.dart';
+import 'package:submersion/features/cylinder_passports/presentation/pages/foreign_passport_page.dart';
+import 'package:submersion/features/cylinder_passports/presentation/pages/passport_page.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/dive_import/presentation/providers/dive_import_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart'
     hide diveProvider;
+import 'package:submersion/features/gear_passports/presentation/pages/foreign_gear_page.dart';
+import 'package:submersion/features/gear_passports/presentation/pages/gear_passport_page.dart';
+import 'package:submersion/features/gear_passports/presentation/utils/gear_routes.dart';
 import 'package:submersion/features/import_wizard/data/adapters/healthkit_adapter.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/import_wizard/presentation/pages/unified_import_wizard.dart';
-import 'package:submersion/features/onboarding/presentation/pages/welcome_page.dart';
+import 'package:submersion/features/setup_wizard/domain/setup_wizard_models.dart';
+import 'package:submersion/features/setup_wizard/presentation/pages/setup_wizard_page.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
-import 'package:submersion/features/buddies/presentation/pages/buddy_edit_page.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_merge_page.dart';
-import 'package:submersion/features/divers/presentation/pages/diver_list_page.dart';
-import 'package:submersion/features/divers/presentation/pages/diver_detail_page.dart';
-import 'package:submersion/features/divers/presentation/pages/diver_edit_page.dart';
-import 'package:submersion/features/certifications/presentation/pages/certification_list_page.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/features/documents/presentation/pages/document_detail_page.dart';
+import 'package:submersion/features/documents/presentation/pages/document_edit_routes.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_detail_page.dart';
-import 'package:submersion/features/certifications/presentation/pages/certification_edit_page.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_edit_routes.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_wallet_page.dart';
-import 'package:submersion/features/courses/presentation/pages/course_list_page.dart';
+import 'package:submersion/features/checklists/presentation/pages/checklist_template_edit_page.dart';
+import 'package:submersion/features/checklists/presentation/pages/checklist_templates_page.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_session_runner_page.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_sessions_page.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_template_edit_page.dart';
+import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_templates_page.dart';
 import 'package:submersion/features/courses/presentation/pages/course_detail_page.dart';
-import 'package:submersion/features/courses/presentation/pages/course_edit_page.dart';
+import 'package:submersion/features/courses/presentation/pages/course_edit_routes.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_set_edit_routes.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
-import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_page.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_routes.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_import_page.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_list_page.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_map_page.dart';
+import 'package:submersion/features/dive_log/presentation/navigation/open_dive_list.dart';
+import 'package:submersion/features/trips/presentation/navigation/open_trip_list.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/data_quality/presentation/pages/data_quality_inbox_page.dart';
+import 'package:submersion/features/data_quality/presentation/pages/data_quality_settings_page.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_edit_page.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_search_page.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_prefill.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_create_builder.dart';
+import 'package:submersion/features/ocr_import/presentation/pages/ocr_scan_page.dart';
+import 'package:submersion/features/dive_3d/presentation/pages/compare_dives_3d_page.dart';
+import 'package:submersion/features/dive_log/presentation/pages/bulk_dive_edit_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_search_providers.dart';
 import 'package:submersion/features/dive_log/presentation/pages/profile_editor_page.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_editor_provider.dart';
 import 'package:submersion/features/maps/presentation/pages/dive_activity_map_page.dart';
 import 'package:submersion/features/maps/presentation/pages/offline_maps_page.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_list_page.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
-import 'package:submersion/features/dive_sites/presentation/pages/site_edit_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_merge_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/catalogue_gap_review_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/catalogue_site_page.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_import_page.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_map_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_match_review_page.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_list_page.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_detail_page.dart';
-import 'package:submersion/features/equipment/presentation/pages/equipment_edit_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_edit_routes.dart';
+import 'package:submersion/features/cylinder_configs/presentation/pages/cylinder_config_edit_page.dart';
+import 'package:submersion/features/cylinder_configs/presentation/pages/cylinder_config_list_page.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_set_list_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_location_detail_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_location_list_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/service_kind_list_page.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_set_detail_page.dart';
-import 'package:submersion/features/equipment/presentation/pages/equipment_set_edit_page.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_list_page.dart';
-import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
-import 'package:submersion/features/trips/presentation/pages/trip_edit_page.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_edit_routes.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_cylinder_board_page.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_gallery_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_overview_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/records_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_gas_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_progression_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_conditions_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_social_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_geographic_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_marine_life_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_time_patterns_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_equipment_page.dart';
-import 'package:submersion/features/statistics/presentation/pages/statistics_profile_page.dart';
+import 'package:submersion/features/connections/presentation/connections_links.dart';
+import 'package:submersion/features/connections/presentation/pages/connections_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_overview_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_page.dart';
+import 'package:submersion/features/insights/presentation/pages/records_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_gas_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_progression_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_conditions_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_social_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_geographic_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_marine_life_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_time_patterns_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_equipment_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_observations_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_focus_page.dart';
+import 'package:submersion/features/insights/presentation/pages/insights_profile_page.dart';
 import 'package:submersion/features/backup/presentation/pages/backup_settings_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_entry_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/manage_currency_rules_page.dart';
+import 'package:submersion/features/settings/presentation/pages/hidden_items_page.dart';
+import 'package:submersion/features/settings/presentation/pages/cloud_sync_page.dart';
+import 'package:submersion/features/settings/presentation/pages/nearby_pair_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/change_library_connection_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/connect_shared_library_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/library_backups_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/shared_libraries_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/shared_library_members_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/shared_library_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/suggestion_inbox_page.dart';
+import 'package:submersion/features/media_store/presentation/pages/photos_videos_page.dart';
+import 'package:submersion/features/media_store/presentation/pages/transfers_page.dart';
+import 'package:submersion/features/settings/presentation/pages/connected_accounts_page.dart';
+import 'package:submersion/features/settings/presentation/pages/account_detail_page.dart';
+import 'package:submersion/features/settings/presentation/pages/lightroom_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/fix_dive_times_page.dart';
+import 'package:submersion/features/settings/presentation/pages/raw_dive_data_page.dart';
+import 'package:submersion/features/settings/presentation/pages/reparse_dives_page.dart';
+import 'package:submersion/features/settings/presentation/pages/link_buddy_names_page.dart';
+import 'package:submersion/features/settings/presentation/pages/retype_other_gear_page.dart';
 import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
+import 'package:submersion/features/settings/presentation/settings_legacy_links.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_shortcuts.dart';
+import 'package:submersion/shared/widgets/record_editing/record_sitting_exit_blocker.dart';
+import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/features/settings/presentation/pages/appearance_page.dart';
+import 'package:submersion/features/settings/presentation/pages/home_appearance_page.dart';
+import 'package:submersion/features/settings/presentation/pages/home_key_numbers_page.dart';
 import 'package:submersion/features/settings/presentation/pages/column_config_page.dart';
 import 'package:submersion/features/settings/presentation/pages/default_visible_metrics_page.dart';
+import 'package:submersion/features/settings/presentation/pages/equipment_default_view_page.dart';
+import 'package:submersion/features/settings/presentation/pages/profile_metric_colors_page.dart';
 import 'package:submersion/features/settings/presentation/pages/dive_detail_sections_page.dart';
+import 'package:submersion/features/settings/presentation/pages/site_detail_sections_page.dart';
+import 'package:submersion/features/safety/presentation/pages/add_chamber_page.dart';
+import 'package:submersion/features/safety/presentation/pages/chambers_directory_page.dart';
+import 'package:submersion/features/safety/presentation/pages/incident_edit_page.dart';
+import 'package:submersion/features/safety/presentation/pages/cns_otu_page.dart';
+import 'package:submersion/features/safety/presentation/pages/no_fly_page.dart';
+import 'package:submersion/features/safety/presentation/pages/incidents_list_page.dart';
+import 'package:submersion/features/safety/presentation/pages/emergency_card_page.dart';
+import 'package:submersion/features/settings/presentation/pages/equipment_condition_settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/decompression_settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/planner_defaults_settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/safety_hub_page.dart';
+import 'package:submersion/features/settings/presentation/pages/safety_review_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/language_settings_page.dart';
+import 'package:submersion/features/settings/presentation/pages/nav_customization_page.dart';
 import 'package:submersion/features/settings/presentation/pages/theme_gallery_page.dart';
+import 'package:submersion/features/settings/presentation/pages/data_tools_page.dart';
+import 'package:submersion/features/table_editor/presentation/pages/table_editor_page.dart';
+import 'package:submersion/features/settings/presentation/pages/import_options_page.dart';
 import 'package:submersion/features/settings/presentation/pages/storage_settings_page.dart';
+import 'package:submersion/features/backup/presentation/pages/unrecognized_backups_page.dart';
+import 'package:submersion/features/settings/presentation/pages/storage_usage_page.dart';
 import 'package:submersion/features/settings/presentation/pages/diver_profile_hub_page.dart';
+import 'package:submersion/features/settings/presentation/pages/new_diver_page.dart';
 import 'package:submersion/features/settings/presentation/pages/personal_info_edit_page.dart';
 import 'package:submersion/features/settings/presentation/pages/emergency_contacts_edit_page.dart';
 import 'package:submersion/features/settings/presentation/pages/medical_info_edit_page.dart';
-import 'package:submersion/features/settings/presentation/pages/insurance_edit_page.dart';
 import 'package:submersion/features/settings/presentation/pages/notes_edit_page.dart';
+import 'package:submersion/features/settings/presentation/pages/body_weight_edit_page.dart';
+import 'package:submersion/features/settings/presentation/pages/prior_experience_edit_page.dart';
 import 'package:submersion/features/settings/presentation/pages/debug_log_viewer_page.dart';
+import 'package:submersion/features/media/presentation/pages/media_sources_page.dart';
+import 'package:submersion/features/media/presentation/pages/network_sources_page.dart';
 import 'package:submersion/features/settings/presentation/pages/section_appearance_page.dart';
+import 'package:submersion/features/settings/presentation/pages/set_up_device_page.dart';
 import 'package:submersion/features/transfer/presentation/pages/transfer_page.dart';
 import 'package:submersion/features/dive_types/presentation/pages/dive_types_page.dart';
+import 'package:submersion/features/site_types/presentation/pages/site_types_page.dart';
+import 'package:submersion/features/dive_roles/presentation/pages/dive_roles_page.dart';
+import 'package:submersion/features/query/presentation/pages/saved_queries_page.dart';
+import 'package:submersion/features/rules/presentation/pages/rule_edit_page.dart';
+import 'package:submersion/features/rules/presentation/pages/rule_history_page.dart';
+import 'package:submersion/features/rules/presentation/pages/rule_run_page.dart';
+import 'package:submersion/features/rules/presentation/pages/rules_page.dart';
 import 'package:submersion/features/tank_presets/presentation/pages/tank_presets_page.dart';
+import 'package:submersion/features/weight_presets/presentation/pages/weight_preset_editor_page.dart';
+import 'package:submersion/features/weight_presets/presentation/pages/weight_presets_page.dart';
 import 'package:submersion/features/tank_presets/presentation/pages/tank_preset_edit_page.dart';
+import 'package:submersion/features/transmitters/presentation/pages/transmitter_edit_routes.dart';
+import 'package:submersion/features/transmitters/presentation/pages/transmitter_item_redirect.dart';
+import 'package:submersion/features/transmitters/presentation/pages/transmitter_setup_redirect.dart';
+import 'package:submersion/features/transmitters/presentation/pages/transmitters_page.dart';
 import 'package:submersion/features/marine_life/presentation/pages/species_manage_page.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_page.dart';
 import 'package:submersion/features/tags/presentation/pages/tag_manage_page.dart';
-import 'package:submersion/features/marine_life/presentation/pages/species_edit_page.dart';
 import 'package:submersion/features/marine_life/presentation/pages/species_detail_page.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_edit_routes.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_map_page.dart';
+import 'package:submersion/features/planner/presentation/pages/plan_chart_fullscreen_page.dart';
 import 'package:submersion/features/planning/presentation/pages/planning_page.dart';
-import 'package:submersion/features/planning/presentation/widgets/planning_shell.dart';
-import 'package:submersion/features/planning/presentation/widgets/planning_welcome.dart';
-import 'package:submersion/features/tools/presentation/pages/weight_calculator_page.dart';
+import 'package:submersion/features/planning/presentation/widgets/planning_disclaimer_gate.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_align_page.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_detail_page.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_seascape_page.dart';
+import 'package:submersion/features/global_search/presentation/pages/global_search_page.dart';
+import 'package:submersion/features/gps_log/presentation/pages/gps_track_detail_page.dart';
+import 'package:submersion/core/router/global_search_location.dart';
+import 'package:submersion/core/router/track_locations.dart';
+import 'package:submersion/core/router/media_documents_locations.dart';
+import 'package:submersion/core/router/training_locations.dart';
+import 'package:submersion/features/media_documents/presentation/pages/media_documents_page.dart';
+import 'package:submersion/features/training/presentation/pages/training_page.dart';
+import 'package:submersion/features/tracks/domain/track_kind.dart';
+import 'package:submersion/features/tracks/presentation/pages/tracks_map_page.dart';
+import 'package:submersion/features/tracks/presentation/pages/tracks_page.dart';
+import 'package:submersion/features/weight_planner/presentation/pages/weight_planner_page.dart';
 import 'package:submersion/features/deco_calculator/presentation/pages/deco_calculator_page.dart';
+import 'package:submersion/features/gas_calculators/presentation/gas_calculator_tools.dart';
+import 'package:submersion/features/gas_calculators/presentation/pages/blender_settings_page.dart';
+import 'package:submersion/features/gas_calculators/presentation/pages/blender_invoice_archive_detail_page.dart';
+import 'package:submersion/features/gas_calculators/presentation/pages/blender_invoice_archive_page.dart';
+import 'package:submersion/features/gas_calculators/presentation/pages/gas_calculator_detail_page.dart';
 import 'package:submersion/features/gas_calculators/presentation/pages/gas_calculators_page.dart';
+import 'package:submersion/features/dive_computer/domain/entities/dive_computer_connection.dart';
+import 'package:submersion/features/dive_computer/domain/services/download_connection_selection.dart';
+import 'package:submersion/features/dive_computer/presentation/providers/dive_computer_connection_providers.dart';
 import 'package:submersion/features/dive_computer/presentation/pages/device_list_page.dart';
-import 'package:submersion/features/dive_computer/presentation/pages/device_detail_page.dart';
+import 'package:submersion/features/dive_computer/presentation/pages/dive_computer_item_redirect.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/download_providers.dart'
-    show diveImportServiceProvider;
+    show diveImportServiceProvider, importTripResolverProvider;
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/import_wizard/data/adapters/dive_computer_adapter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/divelogs_import_adapter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/garmin_cloud_adapter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_cloud_adapter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_file_adapter.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_buddy_writer.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_journal_writer.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_route_writer.dart';
+import 'package:submersion/features/nav_track/presentation/providers/nav_track_providers.dart';
 import 'package:submersion/features/dashboard/presentation/pages/dashboard_page.dart';
-import 'package:submersion/features/dive_planner/presentation/pages/dive_planner_page.dart';
+import 'package:submersion/features/planner/presentation/pages/plan_canvas_page.dart';
+import 'package:submersion/features/planner/presentation/pages/plan_compare_page.dart';
+import 'package:submersion/features/planning/presentation/pages/planned_dives_page.dart';
 import 'package:submersion/features/surface_interval_tool/presentation/pages/surface_interval_tool_page.dart';
-import 'package:submersion/features/import_wizard/data/adapters/universal_adapter.dart';
+import 'package:submersion/features/import_wizard/presentation/pages/universal_import_wizard_route.dart';
+import 'package:submersion/features/universal_import/data/services/garmin_device_detector.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/leave_running_import_dialog.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/main_scaffold.dart';
+import 'package:submersion/features/certification_agencies/presentation/pages/certification_agencies_page.dart';
+import 'package:submersion/features/certification_agencies/presentation/pages/certification_agency_edit_page.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_sealed_routes.dart';
+import 'package:submersion/features/demo_mode/presentation/pages/demo_unavailable_page.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/router/web_unavailable_routes.dart';
+import 'package:submersion/shared/widgets/web_unavailable_page.dart';
+import 'package:submersion/features/species_id/presentation/pages/marine_life_identification_page.dart';
+import 'package:submersion/features/species_id/presentation/pages/species_review_page.dart';
+import 'package:submersion/features/species_id/domain/entities/species_review.dart';
+
+/// Root navigator key, so app-wide modals (e.g. the replaced-library adopt
+/// dialog surfaced from the app root) can be shown above the shell.
+final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
+
+/// Reports when a route is pushed on top of, or popped back to, the Dive
+/// Computers section of the Transfer tab (issue #3361), so
+/// `AutoConnectController` can pause its passive scan while the discovery
+/// wizard, a computer detail page or the download page covers it, and
+/// resume when the diver backs out to it again.
+///
+/// go_router merges `GoRouter.observers` into every `ShellRoute`'s own
+/// nested `Navigator` by default (`notifyRootObserver: true`, unchanged
+/// here), so this one `RouteObserver` sees pushes/pops for every shell
+/// branch, not only the root `Navigator`.
+final computersRouteObserver = RouteObserver<ModalRoute<void>>();
 
 final appRouterProvider = Provider<GoRouter>((ref) {
   return GoRouter(
+    navigatorKey: rootNavigatorKey,
+    observers: [computersRouteObserver],
     initialLocation: '/dashboard',
     redirect: (context, state) async {
       // Skip redirect logic during database migration to prevent deadlock
       if (DatabaseService.instance.isMigrating) {
         return null;
       }
+
+      // Demo mode (issue #3708): a sealed screen explains itself instead.
+      final sealed = demoRedirect(state.uri.toString());
+      if (sealed != null) return sealed;
+
+      // A browser cannot serve the hardware and file-bound screens; a
+      // bookmark or deep link to one lands on a page that says so.
+      final unavailable = webUnavailableRedirect(
+        ref.read(deviceCapabilitiesProvider),
+        state.uri.toString(),
+      );
+      if (unavailable != null) return unavailable;
 
       final hasDivers = await ref.read(hasAnyDiversProvider.future);
       final isOnWelcome = state.matchedLocation == '/welcome';
@@ -134,11 +316,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return '/welcome';
       }
 
-      // Check for notification deep link (reading clears the value)
-      final equipmentId = NotificationService.instance.selectedEquipmentId;
-      if (equipmentId != null) {
-        return '/equipment/$equipmentId';
-      }
+      // Check for notification deep link (reading clears the value). A
+      // document reminder's payload opens the document, not equipment.
+      final payload = NotificationService.instance.selectedEquipmentId;
+      final tapped = payload == null ? null : notificationPayloadRoute(payload);
+      if (tapped != null) return tapped;
 
       // If has divers and on welcome, redirect to dashboard
       if (hasDivers && isOnWelcome) {
@@ -152,14 +334,37 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/welcome',
         name: 'welcome',
-        builder: (context, state) => const WelcomePage(),
+        builder: (context, state) =>
+            const SetupWizardPage(mode: SetupWizardMode.firstRun),
       ),
       ShellRoute(
         builder: (context, state, child) => CallbackShortcuts(
           bindings: AppShortcuts.globalBindings(context),
-          child: Focus(autofocus: true, child: MainScaffold(child: child)),
+          child: Focus(
+            autofocus: true,
+            // Unlock, Save and Cancel for the record page in view (#4527).
+            child: RecordEditShortcuts(child: MainScaffold(child: child)),
+          ),
         ),
         routes: [
+          GoRoute(
+            path: demoUnavailableLocation,
+            name: 'demoUnavailable',
+            builder: (context, state) => DemoUnavailablePage(
+              feature: DemoUnavailablePage.featureFromQuery(
+                state.uri.queryParameters['feature'],
+              ),
+            ),
+          ),
+          GoRoute(
+            path: webUnavailableLocation,
+            name: 'webUnavailable',
+            builder: (context, state) => WebUnavailablePage(
+              feature: WebUnavailablePage.featureFromQuery(
+                state.uri.queryParameters['feature'],
+              ),
+            ),
+          ),
           // Dashboard (Home)
           GoRoute(
             path: '/dashboard',
@@ -170,40 +375,79 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ),
           ),
 
-          // Planning Hub with ShellRoute for master/detail on wide screens
+          // Nav shortcuts: deep pages promoted to the main nav (#2936).
+          navShortcutRoute(),
+
+          // Planning hub and tools, gated behind the safety disclaimer
+          // (issue #3120). A plain GoRoute only wraps its own exact-match
+          // page: a deep link straight to a leaf route below (deco
+          // calculator, a gas calculator, weight/surface-interval/no-fly/
+          // CNS-OTU, ...) replaces PlanningPage/GasCalculatorsPage outright
+          // and would never reach a gate placed in their build() methods.
+          // A ShellRoute around the whole subtree instead wraps whichever
+          // leaf matched, so every route under /planning is covered.
           ShellRoute(
+            // A pageBuilder, not a builder: a builder-only ShellRoute gets a
+            // platform MaterialPage/CupertinoPage in the MainScaffold
+            // navigator, so switching to Planning would animate while every
+            // other tab switches instantly.
             pageBuilder: (context, state, child) => NoTransitionPage(
               key: state.pageKey,
-              child: PlanningShell(child: child),
+              child: PlanningDisclaimerGate(child: child),
             ),
             routes: [
               GoRoute(
                 path: '/planning',
                 name: 'planning',
                 pageBuilder: (context, state) {
-                  // On wide screens show welcome placeholder, on mobile show hub
-                  final isWide = ResponsiveBreakpoints.isMasterDetail(context);
+                  // The hub is the landing surface on every width; the shell
+                  // decides how much width it gets.
                   return NoTransitionPage(
                     key: state.pageKey,
-                    child: isWide
-                        ? const PlanningWelcome()
-                        : const PlanningPage(),
+                    child: const PlanningPage(),
                   );
                 },
                 routes: [
                   GoRoute(
                     path: 'dive-planner',
                     name: 'divePlanner',
-                    builder: (context, state) => const DivePlannerPage(),
+                    builder: (context, state) => const PlanCanvasPage(),
                     routes: [
                       GoRoute(
-                        path: ':planId',
-                        name: 'editPlan',
-                        builder: (context, state) => DivePlannerPage(
-                          planId: state.pathParameters['planId'],
+                        path: 'compare',
+                        name: 'comparePlans',
+                        builder: (context, state) => PlanComparePage(
+                          planIds: (state.uri.queryParameters['ids'] ?? '')
+                              .split(',')
+                              .where((id) => id.isNotEmpty)
+                              .toList(),
                         ),
                       ),
+                      GoRoute(
+                        path: 'chart',
+                        name: 'planChart',
+                        builder: (context, state) =>
+                            const PlanChartFullscreenPage(),
+                      ),
                     ],
+                  ),
+                  // Editing a saved plan is a SIBLING of the new-plan canvas, not a
+                  // child. Nesting it under 'dive-planner' made go_router build the
+                  // parent PlanCanvasPage() *and* the PlanCanvasPage(planId): since
+                  // both read the same shared divePlanNotifierProvider, the first
+                  // Back press only revealed the identical parent canvas, forcing a
+                  // second press. Declared after the divePlanner subtree so its
+                  // static children (compare/chart) still win route matching.
+                  GoRoute(
+                    path: 'dive-planner/:planId',
+                    name: 'editPlan',
+                    builder: (context, state) =>
+                        PlanCanvasPage(planId: state.pathParameters['planId']),
+                  ),
+                  GoRoute(
+                    path: 'planned-dives',
+                    name: 'plannedDives',
+                    builder: (context, state) => const PlannedDivesPage(),
                   ),
                   GoRoute(
                     path: 'deco-calculator',
@@ -214,17 +458,68 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                     path: 'gas-calculators',
                     name: 'gasCalculators',
                     builder: (context, state) => const GasCalculatorsPage(),
+                    // The calculators are children, not tabs. On a narrow
+                    // window each is pushed as its own page; in split view they
+                    // ride in ?calc= instead and these routes go unused.
+                    routes: [
+                      for (final id in kGasCalculatorIds)
+                        GoRoute(
+                          path: id,
+                          builder: (context, state) =>
+                              GasCalculatorDetailPage(toolId: id),
+                        ),
+                    ],
+                  ),
+                  // The blender's paid-invoice archive is a SIBLING of the
+                  // generated calculator routes above, not a child of the
+                  // 'blender' entry: that entry is built inside the loop and has
+                  // no routes: list of its own to extend. Declared after the loop
+                  // for the same reason 'dive-planner/:planId' is declared after
+                  // its subtree - static routes still win matching regardless of
+                  // declaration order here, but this keeps the generated block
+                  // readable as one unit.
+                  GoRoute(
+                    path: 'gas-calculators/blender/invoices',
+                    name: 'blenderInvoiceArchive',
+                    builder: (context, state) =>
+                        const BlenderInvoiceArchivePage(),
+                    routes: [
+                      GoRoute(
+                        path: ':invoiceId',
+                        name: 'blenderInvoiceArchiveDetail',
+                        builder: (context, state) =>
+                            BlenderInvoiceArchiveDetailPage(
+                              invoiceId: state.pathParameters['invoiceId']!,
+                            ),
+                      ),
+                    ],
                   ),
                   GoRoute(
                     path: 'weight-calculator',
                     name: 'weightCalculator',
-                    builder: (context, state) => const WeightCalculatorPage(),
+                    builder: (context, state) => const WeightPlannerPage(),
                   ),
                   GoRoute(
                     path: 'surface-interval',
                     name: 'surfaceInterval',
                     builder: (context, state) =>
                         const SurfaceIntervalToolPage(),
+                  ),
+                  GoRoute(
+                    path: 'no-fly',
+                    name: 'noFly',
+                    builder: (context, state) => const NoFlyPage(),
+                  ),
+                  GoRoute(
+                    path: 'cns-otu',
+                    name: 'cnsOtu',
+                    builder: (context, state) => const CnsOtuPage(),
+                  ),
+                  // The GPS logger moved into the Tracks area; keep old deep
+                  // links working.
+                  GoRoute(
+                    path: 'gps-logger',
+                    redirect: (context, state) => kTracksLocation,
                   ),
                 ],
               ),
@@ -235,9 +530,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/dives',
             name: 'dives',
+            // A dive's sitting in the list pane, or on a page pushed above
+            // it, is asked about before a tab or a link goes (issue #4527).
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
-              child: const DiveListPage(),
+              // Set when openDiveList pushed this list: what to put back
+              // when it goes away (#3292).
+              child: DiveListPage(
+                returnTo: switch (state.extra) {
+                  final DiveListReturn r => r,
+                  _ => null,
+                },
+              ),
             ),
             routes: [
               GoRoute(
@@ -248,24 +553,95 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newDive',
-                builder: (context, state) => const DiveEditPage(),
+                // A new dive with something entered asks before a `go`
+                // leaves it, as a dive's sitting does (issue #4527, plan 8).
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => newDivePage(state),
+              ),
+              GoRoute(
+                path: 'scan',
+                name: 'scanPaperLog',
+                builder: (context, state) => const OcrScanPage(),
               ),
               GoRoute(
                 path: 'search',
                 name: 'diveSearch',
-                builder: (context, state) => const DiveSearchPage(),
+                // Advanced Search became the Refine panel (#2773): an old
+                // link or bookmark lands on the dive list with its search
+                // row open.
+                redirect: redirectRetiredDiveSearch,
+              ),
+              GoRoute(
+                path: 'match-sites',
+                name: 'siteMatchReview',
+                builder: (context, state) {
+                  final ids = (state.extra as List<dynamic>?)?.cast<String>();
+                  return SiteMatchReviewPage(diveIds: ids);
+                },
+              ),
+              GoRoute(
+                path: 'bulk-edit',
+                name: 'bulkEditDives',
+                redirect: (context, state) {
+                  final ids = (state.extra as List<dynamic>?)?.cast<String>();
+                  // No ids (deep link / manual nav) means there is nothing to
+                  // bulk edit; send the user back to the dive list rather than
+                  // landing on what looks like the new-dive form.
+                  return (ids == null || ids.isEmpty) ? '/dives' : null;
+                },
+                builder: (context, state) {
+                  final ids =
+                      (state.extra as List<dynamic>?)?.cast<String>() ??
+                      const <String>[];
+                  return BulkDiveEditPage(
+                    diveIds: ids,
+                    popOnSave: state.uri.queryParameters['return'] == 'pop',
+                  );
+                },
+              ),
+              GoRoute(
+                path: 'compare-3d',
+                name: 'compareDives3d',
+                redirect: (context, state) {
+                  final ids = (state.extra as List<dynamic>?)?.cast<String>();
+                  // Needs at least two dives; otherwise there is nothing to
+                  // compare, so bounce back to the dive list.
+                  return (ids == null || ids.length < 2) ? '/dives' : null;
+                },
+                builder: (context, state) {
+                  final ids =
+                      (state.extra as List<dynamic>?)?.cast<String>() ??
+                      const <String>[];
+                  return CompareDives3dPage(diveIds: ids);
+                },
+              ),
+              GoRoute(
+                path: 'quality',
+                name: 'dataQuality',
+                builder: (context, state) => DataQualityInboxPage(
+                  filterDiveId: state.uri.queryParameters['dive'],
+                ),
+              ),
+              GoRoute(
+                path: 'explore',
+                name: 'explore',
+                // Explore is Ask in the search row now (#2773).
+                redirect: redirectRetiredDiveSearch,
               ),
               GoRoute(
                 path: ':diveId',
                 name: 'diveDetail',
-                builder: (context, state) =>
-                    DiveDetailPage(diveId: state.pathParameters['diveId']!),
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => DiveDetailPage(
+                  diveId: state.pathParameters['diveId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
+                ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editDive',
-                    builder: (context, state) =>
-                        DiveEditPage(diveId: state.pathParameters['diveId']),
+                    redirect: (context, state) =>
+                        '/dives/${state.pathParameters['diveId']}?mode=edit',
                   ),
                   GoRoute(
                     path: 'edit-profile',
@@ -283,6 +659,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                       return ProfileEditorPage(
                         diveId: state.pathParameters['diveId']!,
                         initialMode: initialMode,
+                        sourceId: state.uri.queryParameters['sourceId'],
                       );
                     },
                   ),
@@ -295,6 +672,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/sites',
             name: 'sites',
+            // A site's sitting, or one on a page pushed above the list, is
+            // asked about before a tab or a link goes (issue #4527).
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
               child: const SiteListPage(),
@@ -303,39 +683,68 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'map',
                 name: 'sitesMap',
-                builder: (context, state) => const SiteMapPage(),
+                builder: (context, state) => SiteMapPage(
+                  initialSiteId: state.uri.queryParameters['site'],
+                  initialScape3d: state.uri.queryParameters['scape'] == '3d',
+                ),
               ),
               GoRoute(
                 path: 'import',
                 name: 'importSite',
-                builder: (context, state) => const SiteImportPage(),
+                builder: (context, state) => SiteImportPage(
+                  initialQuery: state.uri.queryParameters['q'],
+                ),
               ),
               GoRoute(
                 path: 'new',
                 name: 'newSite',
-                builder: (context, state) => const SiteEditPage(),
+                // A new site with something entered asks before a `go`
+                // leaves it (issue #4527, plan 6).
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => newSitePage(
+                  state.extra,
+                  duplicateOfId: state.uri.queryParameters['duplicateOf'],
+                ),
+              ),
+              GoRoute(
+                path: 'catalogue-review',
+                name: 'siteCatalogueReview',
+                builder: (context, state) => const CatalogueGapReviewPage(),
               ),
               GoRoute(
                 path: 'merge',
                 name: 'mergeSite',
-                builder: (context, state) {
-                  final siteIds =
-                      (state.extra as List<dynamic>?)?.cast<String>() ??
-                      const <String>[];
-                  return SiteMergePage(siteIds: siteIds);
-                },
+                // A reload or a bookmark hands it no sites: the list.
+                redirect: siteMergeRedirect,
+                builder: (context, state) =>
+                    SiteMergePage(siteIds: siteMergeIds(state.extra)),
+              ),
+              // A built-in catalogue record's own page. Before ':siteId',
+              // which would otherwise read "catalogue" as a site id.
+              GoRoute(
+                path: 'catalogue/:catalogueId',
+                name: 'catalogueSite',
+                builder: (context, state) => CatalogueSitePage(
+                  catalogueId: state.pathParameters['catalogueId']!,
+                ),
               ),
               GoRoute(
                 path: ':siteId',
                 name: 'siteDetail',
-                builder: (context, state) =>
-                    SiteDetailPage(siteId: state.pathParameters['siteId']!),
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => SiteDetailPage(
+                  siteId: state.pathParameters['siteId']!,
+                  // The old edit address opens the page unlocked
+                  // (issue #4527, phase 2).
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
+                ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editSite',
-                    builder: (context, state) =>
-                        SiteEditPage(siteId: state.pathParameters['siteId']),
+                    // The old edit address, `?suggest=1` too, opens the
+                    // site page unlocked (issue #4527, phase 2).
+                    redirect: siteEditRedirect,
                   ),
                 ],
               ),
@@ -346,6 +755,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/equipment',
             name: 'equipment',
+            // A sitting in the gear or sets pane, or on a page pushed above
+            // it, is asked about before a tab or a link goes (issue #4527).
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
               child: const EquipmentListPage(),
@@ -354,48 +766,154 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newEquipment',
-                builder: (context, state) => const EquipmentEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // The item page opened on a new item or a clone (issue #4527,
+                // plan 11).
+                builder: (context, state) =>
+                    newGearItemPage(state.uri.queryParameters),
               ),
               GoRoute(
                 path: 'sets',
                 name: 'equipmentSets',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => const EquipmentSetListPage(),
                 routes: [
                   GoRoute(
                     path: 'new',
                     name: 'newEquipmentSet',
-                    builder: (context, state) => const EquipmentSetEditPage(),
+                    onExit: confirmLeaveRecordSitting,
+                    // The set page opened on a new set or a set page's Clone
+                    // (issues #2156, #4527).
+                    builder: (context, state) => newEquipmentSetPage(
+                      cloneFromId: state.uri.queryParameters['cloneFrom'],
+                    ),
                   ),
                   GoRoute(
                     path: ':setId',
                     name: 'equipmentSetDetail',
+                    onExit: confirmLeaveRecordSitting,
                     builder: (context, state) => EquipmentSetDetailPage(
                       setId: state.pathParameters['setId']!,
+                      // The old edit address opens the page unlocked
+                      // (issue #4527, phase 3).
+                      openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                     ),
                     routes: [
                       GoRoute(
                         path: 'edit',
                         name: 'editEquipmentSet',
-                        builder: (context, state) => EquipmentSetEditPage(
-                          setId: state.pathParameters['setId'],
-                        ),
+                        // The old address opens the page unlocked (issue
+                        // #4527).
+                        redirect: equipmentSetEditRedirect,
                       ),
                     ],
                   ),
                 ],
               ),
               GoRoute(
+                path: 'service-types',
+                name: 'manageServiceTypes',
+                // The service record dialog links here and is shown with
+                // showDialog (root navigator by default); on the shell's
+                // nested navigator this page would open behind that dialog.
+                parentNavigatorKey: rootNavigatorKey,
+                builder: (context, state) => const ServiceKindListPage(),
+              ),
+              // Settings > Manage > Locations (v268). Before the
+              // ':equipmentId' catch-all, like service-types.
+              GoRoute(
+                path: 'locations',
+                name: 'manageEquipmentLocations',
+                parentNavigatorKey: rootNavigatorKey,
+                builder: (context, state) => const EquipmentLocationListPage(),
+                routes: [
+                  GoRoute(
+                    path: ':locationId',
+                    name: 'equipmentLocationDetail',
+                    parentNavigatorKey: rootNavigatorKey,
+                    builder: (context, state) => EquipmentLocationDetailPage(
+                      locationId: state.pathParameters['locationId']!,
+                    ),
+                  ),
+                ],
+              ),
+              // Must precede the ':equipmentId' catch-all below, which would
+              // otherwise swallow 'cylinder-configs' as an equipment id.
+              GoRoute(
+                path: 'cylinder-configs',
+                name: 'cylinderConfigs',
+                builder: (context, state) => const CylinderConfigListPage(),
+                routes: [
+                  GoRoute(
+                    path: 'new',
+                    name: 'newCylinderConfig',
+                    // An editor with no read page (issue #4527, phase 4).
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => CylinderConfigEditPage(
+                      equipmentId: state.uri.queryParameters['equipmentId'],
+                    ),
+                  ),
+                  GoRoute(
+                    path: ':configId',
+                    name: 'cylinderConfigEdit',
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => CylinderConfigEditPage(
+                      configId: state.pathParameters['configId'],
+                    ),
+                  ),
+                ],
+              ),
+              // A scanned cylinder tag the diver does not hold (issue #2335).
+              // Before ':equipmentId' so 'tag' is never read as an id.
+              GoRoute(
+                path: 'tag',
+                name: 'foreignPassport',
+                builder: (context, state) => ForeignPassportPage(
+                  tag: foreignTagFromQuery(state.uri.queryParameters['t']),
+                ),
+              ),
+              // A scanned gear tag the diver does not hold (issue #2652).
+              // Before ':equipmentId' so 'gear-tag' is never read as an id.
+              GoRoute(
+                path: 'gear-tag',
+                name: 'foreignGearTag',
+                builder: (context, state) =>
+                    ForeignGearPage.fromQuery(state.uri.queryParameters['t']),
+              ),
+              GoRoute(
                 path: ':equipmentId',
                 name: 'equipmentDetail',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => EquipmentDetailPage(
                   equipmentId: state.pathParameters['equipmentId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                 ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editEquipment',
-                    builder: (context, state) => EquipmentEditPage(
-                      equipmentId: state.pathParameters['equipmentId'],
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: gearItemEditRedirect,
+                  ),
+                  GoRoute(
+                    path: 'passport',
+                    name: 'equipmentPassport',
+                    // A satellite of the item: it may hold a sitting.
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => PassportPage(
+                      equipmentId: state.pathParameters['equipmentId']!,
+                      scannedTag: scannedTagFrom(state.extra),
+                    ),
+                  ),
+                  ...transmitterEditRoutes(),
+                  // Any other gear's tag page (issue #2652).
+                  GoRoute(
+                    path: 'gear-passport',
+                    name: 'gearPassport',
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => GearPassportPage(
+                      equipmentId: state.pathParameters['equipmentId']!,
+                      scannedTag: scannedGearTagFrom(state.extra),
                     ),
                   ),
                 ],
@@ -407,6 +925,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/buddies',
             name: 'buddies',
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
               child: const BuddyListPage(),
@@ -415,80 +934,80 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newBuddy',
-                builder: (context, state) {
-                  final extra = state.extra as Map<String, dynamic>?;
-                  return BuddyEditPage(
-                    initialName: extra?['name'] as String?,
-                    initialEmail: extra?['email'] as String?,
-                    initialPhone: extra?['phone'] as String?,
-                  );
-                },
+                // Bulk dive editing opens the buddy picker inside a
+                // showDialog (root navigator by default); "Add New Buddy"
+                // must land on that same root navigator or it renders
+                // underneath the still-open dialog/bottom sheet instead of
+                // in the foreground (see app_router_test.dart and
+                // buddy_picker_navigation_render_test.dart).
+                parentNavigatorKey: rootNavigatorKey,
+                onExit: confirmLeaveRecordSitting,
+                // The buddy page opened on a new buddy (issue #4527, plan 11).
+                builder: (context, state) => newBuddyPage(state.extra),
               ),
               GoRoute(
                 path: 'merge',
                 name: 'mergeBuddy',
-                builder: (context, state) {
-                  final buddyIds =
-                      (state.extra as List<dynamic>?)?.cast<String>() ??
-                      const <String>[];
-                  return BuddyMergePage(buddyIds: buddyIds);
-                },
+                // Fewer than two buddies is nothing to merge: the list.
+                redirect: buddyMergeRedirect,
+                builder: (context, state) =>
+                    BuddyMergePage(buddyIds: buddyMergeIds(state.extra)),
+              ),
+              GoRoute(
+                path: 'swap',
+                name: 'buddySwap',
+                builder: (context, state) => const BuddySwapPage(),
+              ),
+              GoRoute(
+                path: 'card',
+                name: 'buddyCardPreview',
+                // A card can arrive from anywhere (a link, a file, a tap):
+                // on the root navigator it opens over whatever is showing.
+                parentNavigatorKey: rootNavigatorKey,
+                // Restored or typed without its card, there is nothing to
+                // preview.
+                redirect: (context, state) =>
+                    state.extra is BuddyCardDecoded ? null : '/buddies',
+                builder: (context, state) => BuddyCardPreviewPage(
+                  decoded: state.extra! as BuddyCardDecoded,
+                ),
               ),
               GoRoute(
                 path: ':buddyId',
                 name: 'buddyDetail',
-                builder: (context, state) =>
-                    BuddyDetailPage(buddyId: state.pathParameters['buddyId']!),
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => BuddyDetailPage(
+                  buddyId: state.pathParameters['buddyId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
+                ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editBuddy',
-                    builder: (context, state) =>
-                        BuddyEditPage(buddyId: state.pathParameters['buddyId']),
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: buddyEditRedirect,
                   ),
                 ],
               ),
             ],
           ),
 
-          // Divers
+          // Training is the nav entry for the Certifications and Courses
+          // tabs (#3437); its own address opens Certifications.
           GoRoute(
-            path: '/divers',
-            name: 'divers',
-            pageBuilder: (context, state) => NoTransitionPage(
-              key: state.pageKey,
-              child: const DiverListPage(),
-            ),
-            routes: [
-              GoRoute(
-                path: 'new',
-                name: 'newDiver',
-                builder: (context, state) => const DiverEditPage(),
-              ),
-              GoRoute(
-                path: ':diverId',
-                name: 'diverDetail',
-                builder: (context, state) =>
-                    DiverDetailPage(diverId: state.pathParameters['diverId']!),
-                routes: [
-                  GoRoute(
-                    path: 'edit',
-                    name: 'editDiver',
-                    builder: (context, state) =>
-                        DiverEditPage(diverId: state.pathParameters['diverId']),
-                  ),
-                ],
-              ),
-            ],
+            path: kTrainingLocation,
+            redirect: (_, _) => TrainingTab.certifications.path,
           ),
 
           // Certifications
           GoRoute(
             path: '/certifications',
             name: 'certifications',
-            pageBuilder: (context, state) => NoTransitionPage(
-              key: state.pageKey,
-              child: const CertificationListPage(),
+            onExit: confirmLeaveRecordSitting,
+            // Both Training tabs build one host under one page key, so it
+            // stays mounted across a switch (#3437).
+            pageBuilder: (context, state) => trainingHostPage(
+              const TrainingPage(tab: TrainingTab.certifications),
             ),
             routes: [
               GoRoute(
@@ -499,54 +1018,105 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newCertification',
-                builder: (context, state) => const CertificationEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // The certification page opened on a new certification (issue
+                // #4527, plan 11).
+                builder: (context, state) => newCertificationPage(),
               ),
               GoRoute(
                 path: ':certificationId',
                 name: 'certificationDetail',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => CertificationDetailPage(
                   certificationId: state.pathParameters['certificationId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                 ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editCertification',
-                    builder: (context, state) => CertificationEditPage(
-                      certificationId: state.pathParameters['certificationId'],
-                    ),
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: certificationEditRedirect,
                   ),
                 ],
               ),
             ],
           ),
 
-          // Training Courses
+          // Documents (issue #2613), merged with Media into two tabs of one
+          // host (#3631), the way Training merged Certifications and
+          // Courses (#3437).
           GoRoute(
-            path: '/courses',
-            name: 'courses',
-            pageBuilder: (context, state) => NoTransitionPage(
-              key: state.pageKey,
-              child: const CourseListPage(),
+            path: '/documents',
+            name: 'documents',
+            onExit: confirmLeaveRecordSitting,
+            // Documents' filters (type/filter/owner/tag) are not read from
+            // this route's state: the shared host also rebuilds for /media,
+            // which carries none of them. The host hands each tab its own
+            // cached query instead.
+            pageBuilder: (context, state) => mediaDocumentsHostPage(
+              const MediaDocumentsPage(tab: MediaDocumentsTab.documents),
             ),
             routes: [
               GoRoute(
                 path: 'new',
+                name: 'newDocument',
+                onExit: confirmLeaveRecordSitting,
+                // The document page opened on a new document (issue #4527, plan
+                // 11).
+                builder: (context, state) =>
+                    newDocumentPage(state.uri.queryParameters),
+              ),
+              GoRoute(
+                path: ':documentId',
+                name: 'documentDetail',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => DocumentDetailPage(
+                  documentId: state.pathParameters['documentId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
+                ),
+                routes: [
+                  GoRoute(
+                    path: 'edit',
+                    name: 'editDocument',
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: documentEditRedirect,
+                  ),
+                ],
+              ),
+            ],
+          ),
+
+          // Training Courses, the second Training tab
+          GoRoute(
+            path: '/courses',
+            name: 'courses',
+            onExit: confirmLeaveRecordSitting,
+            pageBuilder: (context, state) =>
+                trainingHostPage(const TrainingPage(tab: TrainingTab.courses)),
+            routes: [
+              GoRoute(
+                path: 'new',
                 name: 'newCourse',
-                builder: (context, state) => const CourseEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // The course page opened on a new course (issue #4527, plan
+                // 11).
+                builder: (context, state) => newCoursePage(),
               ),
               GoRoute(
                 path: ':courseId',
                 name: 'courseDetail',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => CourseDetailPage(
                   courseId: state.pathParameters['courseId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                 ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editCourse',
-                    builder: (context, state) => CourseEditPage(
-                      courseId: state.pathParameters['courseId'],
-                    ),
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: courseEditRedirect,
                   ),
                 ],
               ),
@@ -557,6 +1127,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/dive-centers',
             name: 'diveCenters',
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
               child: const DiveCenterListPage(),
@@ -575,21 +1146,25 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newDiveCenter',
-                builder: (context, state) => const DiveCenterEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // The centre page opened on a new centre (issue #4527, plan
+                // 11).
+                builder: (context, state) => newDiveCenterPage(),
               ),
               GoRoute(
                 path: ':centerId',
                 name: 'diveCenterDetail',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => DiveCenterDetailPage(
                   centerId: state.pathParameters['centerId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                 ),
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editDiveCenter',
-                    builder: (context, state) => DiveCenterEditPage(
-                      centerId: state.pathParameters['centerId'],
-                    ),
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: diveCenterEditRedirect,
                   ),
                 ],
               ),
@@ -600,27 +1175,39 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/trips',
             name: 'trips',
+            // A trip pane's sitting asks before the list goes (issue #4527).
+            onExit: confirmLeaveRecordSitting,
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
-              child: const TripListPage(),
+              // Set when openTripList pushed this list: what to put back
+              // when it goes away (#3350).
+              child: TripListPage(
+                returnTo: switch (state.extra) {
+                  final TripListReturn r => r,
+                  _ => null,
+                },
+              ),
             ),
             routes: [
               GoRoute(
                 path: 'new',
                 name: 'newTrip',
-                builder: (context, state) => const TripEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // Selected dives can arrive as a prefilled draft (#3658). The
+                // trip page opened on a new trip (issue #4527).
+                builder: (context, state) => newTripPage(state.extra),
               ),
               GoRoute(
                 path: ':tripId',
                 name: 'tripDetail',
-                builder: (context, state) =>
-                    TripDetailPage(tripId: state.pathParameters['tripId']!),
+                onExit: confirmLeaveRecordSitting,
+                builder: tripDetailRoutePage,
                 routes: [
                   GoRoute(
                     path: 'edit',
                     name: 'editTrip',
-                    builder: (context, state) =>
-                        TripEditPage(tripId: state.pathParameters['tripId']),
+                    // The old address opens the page unlocked (issue #4527).
+                    redirect: tripEditRedirect,
                   ),
                   GoRoute(
                     path: 'gallery',
@@ -630,71 +1217,118 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                       initialMediaId: state.uri.queryParameters['mediaId'],
                     ),
                   ),
+                  GoRoute(
+                    path: 'cylinders',
+                    name: 'tripCylinders',
+                    // The board has a lock of its own (issue #4527): leaving
+                    // its own sitting asks first.
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => TripCylinderBoardPage(
+                      tripId: state.pathParameters['tripId']!,
+                    ),
+                  ),
                 ],
               ),
             ],
           ),
 
-          // Statistics
+          // Media section (DAM console), merged with Documents into two
+          // tabs of one host (#3631).
           GoRoute(
-            path: '/statistics',
-            name: 'statistics',
+            path: '/media',
+            name: 'media',
+            pageBuilder: (context, state) => mediaDocumentsHostPage(
+              const MediaDocumentsPage(tab: MediaDocumentsTab.media),
+            ),
+          ),
+
+          // Insights
+          GoRoute(
+            path: '/insights',
+            name: 'insights',
             pageBuilder: (context, state) => NoTransitionPage(
               key: state.pageKey,
-              child: const StatisticsPage(),
+              child: const InsightsPage(),
             ),
             routes: [
               GoRoute(
                 path: 'overview',
-                name: 'statisticsOverview',
-                builder: (context, state) => const StatisticsOverviewPage(),
+                name: 'insightsOverview',
+                builder: (context, state) => const InsightsOverviewPage(),
               ),
               GoRoute(
                 path: 'gas',
-                name: 'statisticsGas',
-                builder: (context, state) => const StatisticsGasPage(),
+                name: 'insightsGas',
+                builder: (context, state) => const InsightsGasPage(),
               ),
               GoRoute(
                 path: 'progression',
-                name: 'statisticsProgression',
-                builder: (context, state) => const StatisticsProgressionPage(),
+                name: 'insightsProgression',
+                builder: (context, state) => const InsightsProgressionPage(),
               ),
               GoRoute(
                 path: 'conditions',
-                name: 'statisticsConditions',
-                builder: (context, state) => const StatisticsConditionsPage(),
+                name: 'insightsConditions',
+                builder: (context, state) => const InsightsConditionsPage(),
               ),
               GoRoute(
                 path: 'social',
-                name: 'statisticsSocial',
-                builder: (context, state) => const StatisticsSocialPage(),
+                name: 'insightsSocial',
+                builder: (context, state) => const InsightsSocialPage(),
               ),
               GoRoute(
                 path: 'geographic',
-                name: 'statisticsGeographic',
-                builder: (context, state) => const StatisticsGeographicPage(),
+                name: 'insightsGeographic',
+                builder: (context, state) => const InsightsGeographicPage(),
               ),
               GoRoute(
                 path: 'marine-life',
-                name: 'statisticsMarineLife',
-                builder: (context, state) => const StatisticsMarineLifePage(),
+                name: 'insightsMarineLife',
+                builder: (context, state) => const InsightsMarineLifePage(),
               ),
               GoRoute(
                 path: 'time-patterns',
-                name: 'statisticsTimePatterns',
-                builder: (context, state) => const StatisticsTimePatternsPage(),
+                name: 'insightsTimePatterns',
+                builder: (context, state) => const InsightsTimePatternsPage(),
               ),
               GoRoute(
                 path: 'equipment',
-                name: 'statisticsEquipment',
-                builder: (context, state) => const StatisticsEquipmentPage(),
+                name: 'insightsEquipment',
+                builder: (context, state) => const InsightsEquipmentPage(),
               ),
               GoRoute(
                 path: 'profile',
-                name: 'statisticsProfile',
-                builder: (context, state) => const StatisticsProfilePage(),
+                name: 'insightsProfile',
+                builder: (context, state) => const InsightsProfilePage(),
+              ),
+              GoRoute(
+                path: 'observations',
+                name: 'insightsObservations',
+                builder: (context, state) => const InsightsObservationsPage(),
+              ),
+              GoRoute(
+                path: 'focus',
+                name: 'insightsFocus',
+                builder: (context, state) => const InsightsFocusPage(),
+              ),
+              // Connections opens from Insights as its own full page.
+              GoRoute(
+                path: kConnectionsSegment,
+                name: 'connections',
+                builder: (context, state) => ConnectionsPage(
+                  args: ConnectionsRouteArgs.fromQuery(
+                    state.uri.queryParameters,
+                  ),
+                ),
               ),
             ],
+          ),
+
+          // Connections moved under Insights; links saved before the move
+          // (and phase 1 deep links) still land there.
+          GoRoute(
+            path: '/connections',
+            redirect: (context, state) => connectionsLegacyRedirect(state.uri),
           ),
 
           // Records
@@ -719,8 +1353,158 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'import-wizard',
                 name: 'universalImport',
+                onExit: confirmLeaveRunningImport,
+                // The Garmin download is a desktop import: a browser or a
+                // phone handed its location opens the plain file import.
+                builder: (context, state) => UniversalImportWizardRoute(
+                  garminImport: GarminDeviceDetector.isSupportedPlatform
+                      ? UniversalImportWizardRoute.garminImportFrom(state.uri)
+                      : null,
+                ),
+              ),
+              GoRoute(
+                path: 'import-cloud/suunto',
+                name: 'importFromCloudSuunto',
+                onExit: confirmLeaveRunningImport,
                 builder: (context, state) =>
-                    const _UniversalImportWizardRoute(),
+                    const _SuuntoCloudImportWizardRoute(),
+              ),
+              GoRoute(
+                path: 'import-file/suunto',
+                name: 'importFromFileSuunto',
+                onExit: confirmLeaveRunningImport,
+                builder: (context, state) => _SuuntoFileImportWizardRoute(
+                  initialFiles: state.extra is List<SuuntoJsonFile>
+                      ? state.extra! as List<SuuntoJsonFile>
+                      : const [],
+                ),
+              ),
+              GoRoute(
+                path: 'import-cloud/garmin',
+                name: 'importFromCloudGarmin',
+                onExit: confirmLeaveRunningImport,
+                builder: (context, state) =>
+                    const _GarminCloudImportWizardRoute(),
+              ),
+              GoRoute(
+                path: 'import-cloud/divelogs',
+                name: 'importFromCloudDivelogs',
+                onExit: confirmLeaveRunningImport,
+                builder: (context, state) => const _DivelogsImportWizardRoute(),
+              ),
+            ],
+          ),
+
+          // Tracks: GPS surface tracks and underwater tracks in one area
+          // (spec 2026-10-02-tracks-navigation-consolidation-design.md).
+          // Every page is a top-level SIBLING of /tracks, never a child:
+          // go_router builds one page per matched segment, and /tracks has
+          // its own pageBuilder, so nesting stacked the landing page under a
+          // detail pushed from a dive and needed two Back presses. Static
+          // paths are declared before parameterised ones so 'map' is not
+          // swallowed by ':id'.
+          GoRoute(
+            path: kTracksLocation,
+            name: 'tracks',
+            pageBuilder: (context, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: TracksPage(
+                initialKind: TrackKindFilter.fromQuery(
+                  state.uri.queryParameters['kind'],
+                ),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: kTracksMapLocation,
+            name: 'tracksMap',
+            builder: (context, state) => const TracksMapPage(),
+          ),
+          GoRoute(
+            path: '$kTracksLocation/gps/:id',
+            name: 'gpsTrackDetail',
+            onExit: confirmLeaveRecordSitting,
+            builder: (context, state) =>
+                GpsTrackDetailPage(trackId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '$kTracksLocation/underwater/:id',
+            name: 'underwaterTrackDetail',
+            onExit: confirmLeaveRecordSitting,
+            builder: (context, state) =>
+                NavTrackDetailPage(trackId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '$kTracksLocation/underwater/:id/align',
+            name: 'underwaterTrackAlign',
+            onExit: confirmLeaveRecordSitting,
+            builder: (context, state) =>
+                NavTrackAlignPage(routeId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '$kTracksLocation/underwater/:id/3d',
+            name: 'underwaterTrackSeascape',
+            builder: (context, state) =>
+                NavTrackSeascapePage(trackId: state.pathParameters['id']!),
+          ),
+
+          // Locations from before the Tracks area, kept so stale links (a
+          // bookmark, an older synced build's deep link) still land.
+          GoRoute(
+            path: '/gps-log',
+            redirect: (context, state) => kTracksLocation,
+          ),
+          GoRoute(
+            path: '/gps-log/map',
+            redirect: (context, state) => kTracksMapLocation,
+          ),
+          GoRoute(
+            path: '/gps-log/:id',
+            redirect: (context, state) =>
+                gpsTrackLocation(state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/nav-routes',
+            redirect: (context, state) => kUnderwaterTracksLocation,
+          ),
+          GoRoute(
+            path: '/nav-routes/:id',
+            redirect: (context, state) =>
+                underwaterTrackLocation(state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/nav-routes/:id/align',
+            redirect: (context, state) =>
+                underwaterTrackAlignLocation(state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/nav-routes/:id/3d',
+            redirect: (context, state) =>
+                underwaterTrackSeascapeLocation(state.pathParameters['id']!),
+          ),
+
+          // Near-miss incident log (entry point: Settings > Diver Profile)
+          GoRoute(
+            path: '/incidents',
+            name: 'incidents',
+            builder: (context, state) => const IncidentsListPage(),
+            routes: [
+              GoRoute(
+                path: 'new',
+                name: 'incidentNew',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => IncidentEditPage(
+                  diveId: state.uri.queryParameters['diveId'],
+                  observationId: state.uri.queryParameters['observationId'],
+                ),
+              ),
+              GoRoute(
+                path: ':incidentId',
+                name: 'incidentEdit',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => IncidentEditPage(
+                  incidentId: state.pathParameters['incidentId'],
+                ),
               ),
             ],
           ),
@@ -734,16 +1518,124 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               child: const SettingsPage(),
             ),
             routes: [
+              // Shared detail route for settings sections that have no
+              // dedicated page of their own (About, Units, Data, ...).
+              // Deliberately a child route with a plain builder: go_router
+              // then wraps it in the platform-adaptive MaterialPage, so these
+              // sections slide in exactly like '/settings/appearance'.
+              // Rendering them by re-matching '/settings?selected=<id>'
+              // instead reused this route's NoTransitionPage and made them
+              // appear instantly.
+              GoRoute(
+                path: 'section/:sectionId',
+                name: 'settingsSection',
+                // Sections that render a full page of their own would get a
+                // second app bar from the wrapper, so send deep links to the
+                // dedicated route. Returns null for genuine section content,
+                // which belongs in the wrapper. The old Decompression section
+                // follows the window: the Safety pane on a master-detail
+                // window, its own page on a phone.
+                redirect: (context, state) => resolveSettingsSectionRedirect(
+                  state.pathParameters['sectionId'],
+                  masterDetail: ResponsiveBreakpoints.isMasterDetail(context),
+                ),
+                builder: (context, state) => SettingsSectionDetailPage(
+                  sectionId: state.pathParameters['sectionId']!,
+                ),
+              ),
+              GoRoute(
+                path: 'change-log',
+                name: 'changeLog',
+                builder: (context, state) => ChangeLogPage(
+                  rootTable: state.uri.queryParameters['rootTable'],
+                  rootId: state.uri.queryParameters['rootId'],
+                ),
+                routes: [
+                  GoRoute(
+                    path: 'settings',
+                    name: 'changeLogSettings',
+                    builder: (context, state) => const ChangeLogSettingsPage(),
+                  ),
+                  GoRoute(
+                    path: ':id',
+                    name: 'changeLogEntry',
+                    builder: (context, state) => ChangeLogEntryPage(
+                      operationId: state.pathParameters['id']!,
+                    ),
+                  ),
+                ],
+              ),
               GoRoute(
                 path: 'storage',
                 name: 'storageSettings',
                 builder: (context, state) => const StorageSettingsPage(),
               ),
               GoRoute(
+                path: 'setup',
+                name: 'setUpDevice',
+                builder: (context, state) => SetUpDevicePage.fromUri(state.uri),
+              ),
+              GoRoute(
+                path: 'import-options',
+                name: 'importOptions',
+                builder: (context, state) => const ImportOptionsPage(),
+              ),
+              GoRoute(
+                path: 'data-tools',
+                name: 'dataTools',
+                builder: (context, state) => const DataToolsPage(),
+              ),
+              GoRoute(
+                path: 'agent-access',
+                name: 'agentAccess',
+                builder: (context, state) => const AgentAccessPage(),
+              ),
+              GoRoute(
+                path: 'storage-usage',
+                name: 'storageUsage',
+                builder: (context, state) => const StorageUsagePage(),
+                routes: [
+                  GoRoute(
+                    path: 'unrecognized-backups',
+                    name: 'unrecognizedBackups',
+                    builder: (context, state) =>
+                        const UnrecognizedBackupsPage(),
+                  ),
+                ],
+              ),
+              GoRoute(
+                path: 'data-quality',
+                name: 'dataQualitySettings',
+                builder: (context, state) => const DataQualitySettingsPage(),
+              ),
+              GoRoute(
+                path: 'table-editor',
+                name: 'tableEditor',
+                onExit: confirmLeaveTableEditor,
+                builder: (context, state) => const TableEditorPage(),
+              ),
+              GoRoute(
                 path: 'appearance',
                 name: 'appearance',
                 builder: (context, state) => const AppearancePage(),
                 routes: [
+                  GoRoute(
+                    path: 'home',
+                    name: 'appearanceHome',
+                    builder: (context, state) => const HomeAppearancePage(),
+                    routes: [
+                      GoRoute(
+                        path: 'key-numbers',
+                        name: 'appearanceHomeKeyNumbers',
+                        builder: (context, state) => const HomeKeyNumbersPage(),
+                      ),
+                    ],
+                  ),
+                  GoRoute(
+                    path: 'navigation',
+                    name: 'navCustomization',
+                    builder: (context, state) => const NavCustomizationPage(),
+                  ),
                   GoRoute(
                     path: 'column-config',
                     name: 'columnConfig',
@@ -808,9 +1700,55 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (context, state) => const DiveDetailSectionsPage(),
               ),
               GoRoute(
+                path: 'site-detail-sections',
+                name: 'siteDetailSections',
+                builder: (context, state) => const SiteDetailSectionsPage(),
+              ),
+              GoRoute(
+                path: 'safety',
+                name: 'safetySettings',
+                builder: (context, state) => const SafetyHubPage(),
+                routes: [
+                  GoRoute(
+                    path: 'review',
+                    name: 'safetyReviewSettings',
+                    builder: (context, state) =>
+                        const SafetyReviewSettingsPage(),
+                  ),
+                  GoRoute(
+                    path: 'decompression',
+                    name: 'decompressionSettings',
+                    builder: (context, state) =>
+                        const DecompressionSettingsPage(),
+                  ),
+                  GoRoute(
+                    path: 'planner-defaults',
+                    name: 'plannerDefaultsSettings',
+                    builder: (context, state) =>
+                        const PlannerDefaultsSettingsPage(),
+                  ),
+                  GoRoute(
+                    path: 'equipment-condition',
+                    name: 'equipmentConditionSettings',
+                    builder: (context, state) =>
+                        const EquipmentConditionSettingsPage(),
+                  ),
+                ],
+              ),
+              GoRoute(
+                path: 'equipment-default-view',
+                name: 'equipmentDefaultView',
+                builder: (context, state) => const EquipmentDefaultViewPage(),
+              ),
+              GoRoute(
                 path: 'default-metrics',
                 name: 'defaultMetrics',
                 builder: (context, state) => const DefaultVisibleMetricsPage(),
+              ),
+              GoRoute(
+                path: 'metric-colors',
+                name: 'metricColors',
+                builder: (context, state) => const ProfileMetricColorsPage(),
               ),
               GoRoute(
                 path: 'themes',
@@ -828,8 +1766,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (context, state) => const OfflineMapsPage(),
               ),
               GoRoute(
+                path: 'marine-life-identification',
+                name: 'marineLifeIdentification',
+                builder: (context, state) =>
+                    const MarineLifeIdentificationPage(),
+              ),
+              GoRoute(
                 path: 'wearable-import',
                 name: 'wearableImport',
+                onExit: confirmLeaveRunningImport,
                 builder: (context, state) =>
                     const _HealthKitImportWizardRoute(),
               ),
@@ -838,15 +1783,198 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 name: 'backupSettings',
                 builder: (context, state) => const BackupSettingsPage(),
               ),
+              // A profile's hidden shared trips and sites (issue #2594).
+              GoRoute(
+                path: 'hidden-items',
+                name: 'hiddenItems',
+                builder: (context, state) => const HiddenItemsPage(),
+              ),
+              GoRoute(
+                path: 'setup-assistant',
+                name: 'setupAssistant',
+                builder: (context, state) =>
+                    const SetupWizardPage(mode: SetupWizardMode.settings),
+              ),
+              GoRoute(
+                path: 'cloud-sync',
+                name: 'cloudSync',
+                builder: (context, state) => const CloudSyncPage(),
+                routes: [
+                  // The S3 and WebDAV settings pages became the account
+                  // detail view (#3482); an old link or a restored window
+                  // lands on Connected accounts instead of an error.
+                  GoRoute(
+                    path: 's3-config',
+                    redirect: (_, _) => '/settings/connected-accounts',
+                  ),
+                  GoRoute(
+                    path: 'webdav-config',
+                    redirect: (_, _) => '/settings/connected-accounts',
+                  ),
+                  // Pairing for nearby Bluetooth sync (issue #3731).
+                  GoRoute(
+                    path: 'nearby-pair',
+                    name: 'nearbyPair',
+                    builder: (context, state) => const NearbyPairPage(),
+                  ),
+                ],
+              ),
+              // Shared site libraries (issue #2567).
+              GoRoute(
+                path: 'shared-libraries',
+                name: 'sharedLibraries',
+                builder: (context, state) => const SharedLibrariesPage(),
+                routes: [
+                  GoRoute(
+                    path: 'connect',
+                    name: 'sharedLibraryConnect',
+                    builder: (context, state) => ConnectSharedLibraryPage(
+                      initialPrefix: state.uri.queryParameters['prefix'],
+                    ),
+                  ),
+                  GoRoute(
+                    path: ':libraryId',
+                    name: 'sharedLibrary',
+                    builder: (context, state) => SharedLibraryPage(
+                      libraryId: state.pathParameters['libraryId']!,
+                    ),
+                    routes: [
+                      GoRoute(
+                        path: 'members',
+                        name: 'sharedLibraryMembers',
+                        builder: (context, state) => SharedLibraryMembersPage(
+                          libraryId: state.pathParameters['libraryId']!,
+                        ),
+                      ),
+                      GoRoute(
+                        path: 'suggestions',
+                        name: 'sharedLibrarySuggestions',
+                        builder: (context, state) => SuggestionInboxPage(
+                          libraryId: state.pathParameters['libraryId']!,
+                        ),
+                      ),
+                      GoRoute(
+                        path: 'backups',
+                        name: 'sharedLibraryBackups',
+                        builder: (context, state) => LibraryBackupsPage(
+                          libraryId: state.pathParameters['libraryId']!,
+                        ),
+                      ),
+                      GoRoute(
+                        path: 'connection',
+                        name: 'sharedLibraryConnection',
+                        builder: (context, state) =>
+                            ChangeLibraryConnectionPage(
+                              libraryId: state.pathParameters['libraryId']!,
+                            ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              // Media Storage merged into Photos & videos (issue #3482); old
+              // links and pending setup items land on the new page.
+              GoRoute(
+                path: 'media-storage',
+                name: 'mediaStorage',
+                redirect: (context, state) =>
+                    state.uri.path.endsWith('/transfers')
+                    ? '/settings/photos-media/uploads'
+                    : '/settings/photos-media',
+                routes: [
+                  GoRoute(
+                    path: 'transfers',
+                    name: 'mediaStorageTransfers',
+                    redirect: (context, state) =>
+                        '/settings/photos-media/uploads',
+                  ),
+                ],
+              ),
+              // Lightroom settings page hidden pending Adobe review
+              // (lightroomUiEnabled). The route stays defined so any lingering
+              // navigation to it (a deep link, or PendingSetupService which
+              // computes '/settings/lightroom' for an on-device Lightroom
+              // account) degrades gracefully by redirecting to the media
+              // sources page instead of hitting an unknown-route error screen.
+              GoRoute(
+                path: 'lightroom',
+                name: 'lightroom',
+                redirect: (context, state) =>
+                    lightroomUiEnabled ? null : '/settings/media-sources',
+                builder: (context, state) => const LightroomSettingsPage(),
+              ),
+              GoRoute(
+                path: 'photos-media',
+                name: 'photosMedia',
+                builder: (context, state) => const PhotosVideosPage(),
+                routes: [
+                  GoRoute(
+                    path: 'uploads',
+                    name: 'photosUploads',
+                    builder: (context, state) => const TransfersPage(),
+                  ),
+                ],
+              ),
+              GoRoute(
+                path: 'connected-accounts',
+                name: 'connectedAccounts',
+                builder: (context, state) => const ConnectedAccountsPage(),
+                routes: [
+                  GoRoute(
+                    path: ':accountId',
+                    name: 'connectedAccount',
+                    builder: (context, state) => AccountDetailPage(
+                      accountId: state.pathParameters['accountId']!,
+                    ),
+                  ),
+                ],
+              ),
               GoRoute(
                 path: 'fix-dive-times',
                 name: 'fixDiveTimes',
                 builder: (context, state) => const FixDiveTimesPage(),
               ),
               GoRoute(
+                path: 'reparse-dives',
+                name: 'reparseDives',
+                builder: (context, state) => const ReparseDivesPage(),
+              ),
+              GoRoute(
+                path: 'raw-dive-data',
+                name: 'rawDiveData',
+                builder: (context, state) => const RawDiveDataPage(),
+              ),
+              GoRoute(
+                path: 'link-buddy-names',
+                name: 'linkBuddyNames',
+                builder: (context, state) => const LinkBuddyNamesPage(),
+              ),
+              GoRoute(
+                path: 'retype-other-gear',
+                name: 'retypeOtherGear',
+                builder: (context, state) => const RetypeOtherGearPage(),
+              ),
+              GoRoute(
                 path: 'debug-logs',
                 name: 'debugLogs',
                 builder: (context, state) => const DebugLogViewerPage(),
+              ),
+              GoRoute(
+                path: 'trimix-mixer',
+                name: 'trimixMixerSettings',
+                builder: (context, state) => const BlenderSettingsPage(),
+              ),
+              GoRoute(
+                path: 'media-sources',
+                name: 'mediaSources',
+                builder: (context, state) => const MediaSourcesPage(),
+                routes: [
+                  GoRoute(
+                    path: 'network-sources',
+                    name: 'networkSources',
+                    builder: (context, state) => const NetworkSourcesPage(),
+                  ),
+                ],
               ),
               GoRoute(
                 path: 'diver-profile',
@@ -856,34 +1984,71 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                   GoRoute(
                     path: 'new',
                     name: 'newDiverProfile',
-                    builder: (context, state) =>
-                        const PersonalInfoEditPage(isNewDiver: true),
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) => const NewDiverPage(),
                   ),
                   GoRoute(
                     path: 'personal',
                     name: 'editPersonalInfo',
+                    onExit: confirmLeaveRecordSitting,
                     builder: (context, state) => const PersonalInfoEditPage(),
                   ),
                   GoRoute(
                     path: 'emergency',
                     name: 'editEmergencyContacts',
+                    onExit: confirmLeaveRecordSitting,
                     builder: (context, state) =>
                         const EmergencyContactsEditPage(),
                   ),
                   GoRoute(
+                    path: 'emergency-card',
+                    name: 'emergencyCard',
+                    builder: (context, state) => const EmergencyCardPage(),
+                    routes: [
+                      GoRoute(
+                        path: 'add-chamber',
+                        name: 'addChamber',
+                        onExit: confirmLeaveRecordSitting,
+                        builder: (context, state) => const AddChamberPage(),
+                      ),
+                      GoRoute(
+                        path: 'chambers',
+                        name: 'chambersDirectory',
+                        builder: (context, state) =>
+                            const ChambersDirectoryPage(),
+                      ),
+                    ],
+                  ),
+                  GoRoute(
                     path: 'medical',
                     name: 'editMedicalInfo',
+                    onExit: confirmLeaveRecordSitting,
                     builder: (context, state) => const MedicalInfoEditPage(),
                   ),
                   GoRoute(
+                    // Insurance is a document now (issue #2613); old links
+                    // land on the insurance documents.
                     path: 'insurance',
                     name: 'editInsurance',
-                    builder: (context, state) => const InsuranceEditPage(),
+                    redirect: (context, state) => '/documents?type=insurance',
                   ),
                   GoRoute(
                     path: 'notes',
                     name: 'editNotes',
+                    onExit: confirmLeaveRecordSitting,
                     builder: (context, state) => const NotesEditPage(),
+                  ),
+                  GoRoute(
+                    path: 'prior',
+                    name: 'editPriorExperience',
+                    onExit: confirmLeaveRecordSitting,
+                    builder: (context, state) =>
+                        const PriorExperienceEditPage(),
+                  ),
+                  GoRoute(
+                    path: 'body-weight',
+                    name: 'editBodyWeight',
+                    builder: (context, state) => const BodyWeightEditPage(),
                   ),
                 ],
               ),
@@ -896,6 +2061,113 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             name: 'diveTypes',
             builder: (context, state) => const DiveTypesPage(),
           ),
+          // Certification currency rules (issue #2267)
+          GoRoute(
+            path: '/currency-rules',
+            name: 'currencyRules',
+            builder: (context, state) => const ManageCurrencyRulesPage(),
+          ),
+          // Site Types Management (issue #1765)
+          GoRoute(
+            path: '/site-types',
+            name: 'siteTypes',
+            builder: (context, state) => const SiteTypesPage(),
+          ),
+
+          // Dive Roles Management
+          GoRoute(
+            path: '/dive-roles',
+            name: 'diveRoles',
+            builder: (context, state) => const DiveRolesPage(),
+          ),
+
+          // Certification agencies and their certifications (issue #690).
+          // :id is a built-in enum name or a custom agency id.
+          GoRoute(
+            path: '/certification-agencies',
+            name: 'certificationAgencies',
+            builder: (context, state) => const CertificationAgenciesPage(),
+            routes: [
+              GoRoute(
+                path: ':id',
+                name: 'certificationAgencyEdit',
+                builder: (context, state) => CertificationAgencyEditPage(
+                  agencyId: state.pathParameters['id']!,
+                ),
+              ),
+            ],
+          ),
+
+          // Saved queries management (#2365)
+          GoRoute(
+            path: '/saved-queries',
+            name: 'savedQueries',
+            builder: (context, state) => const SavedQueriesPage(),
+          ),
+
+          // Logbook rules (#3513)
+          GoRoute(
+            path: '/rules',
+            name: 'rules',
+            builder: (context, state) => const RulesPage(),
+          ),
+          GoRoute(
+            path: '/rules/new',
+            name: 'ruleNew',
+            onExit: confirmLeaveRecordSitting,
+            builder: (context, state) => const RuleEditPage(),
+          ),
+          GoRoute(
+            path: '/rules/history',
+            name: 'ruleHistory',
+            builder: (context, state) {
+              // ?runs= lists just those runs (one import's, any profile).
+              final runs = state.uri.queryParameters['runs'];
+              return RuleHistoryPage(
+                runIds: runs == null || runs.isEmpty ? null : runs.split(','),
+              );
+            },
+          ),
+          GoRoute(
+            path: '/rules/history/:runId',
+            name: 'ruleRun',
+            builder: (context, state) =>
+                RuleRunPage(runId: state.pathParameters['runId']!),
+          ),
+          GoRoute(
+            path: '/rules/:id',
+            name: 'ruleEdit',
+            onExit: confirmLeaveRecordSitting,
+            builder: (context, state) =>
+                RuleEditPage(ruleId: state.pathParameters['id']),
+          ),
+
+          // Transmitter registry (issue #1365)
+          GoRoute(
+            path: '/transmitters',
+            name: 'transmitters',
+            builder: (context, state) => const TransmittersPage(),
+            routes: [
+              // A transmitter is an Equipment item (issue #3676): adding one
+              // opens the item behind the serial, or starts one carrying it,
+              // and an old edit link forwards to the item.
+              GoRoute(
+                path: 'new',
+                name: 'newTransmitter',
+                builder: (context, state) => TransmitterSetupRedirect(
+                  serial: state.uri.queryParameters['serial'],
+                  diveId: state.uri.queryParameters['dive'],
+                ),
+              ),
+              GoRoute(
+                path: ':transmitterId/edit',
+                name: 'editTransmitter',
+                builder: (context, state) => TransmitterItemRedirect(
+                  transmitterId: state.pathParameters['transmitterId']!,
+                ),
+              ),
+            ],
+          ),
 
           // Tank Presets Management
           GoRoute(
@@ -906,11 +2178,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'new',
                 name: 'newTankPreset',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => const TankPresetEditPage(),
               ),
               GoRoute(
                 path: ':presetId/edit',
                 name: 'editTankPreset',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => TankPresetEditPage(
                   presetId: state.pathParameters['presetId'],
                 ),
@@ -918,30 +2192,166 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ],
           ),
 
-          // Species Management
+          // Weight Presets Management (issue #1609, #1663)
           GoRoute(
-            path: '/species',
-            name: 'speciesManage',
-            builder: (context, state) => const SpeciesManagePage(),
+            path: '/weight-presets',
+            name: 'weightPresets',
+            builder: (context, state) => const WeightPresetsPage(),
             routes: [
               GoRoute(
                 path: 'new',
+                name: 'newWeightPreset',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => const WeightPresetEditorPage(),
+              ),
+              GoRoute(
+                path: ':presetId/edit',
+                name: 'editWeightPreset',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => WeightPresetEditorPage(
+                  presetId: state.pathParameters['presetId'],
+                ),
+              ),
+            ],
+          ),
+
+          // Checklist Templates Management
+          GoRoute(
+            path: '/checklist-templates',
+            name: 'checklistTemplates',
+            builder: (context, state) => const ChecklistTemplatesPage(),
+            routes: [
+              GoRoute(
+                path: 'new',
+                name: 'newChecklistTemplate',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => const ChecklistTemplateEditPage(),
+              ),
+              GoRoute(
+                path: ':templateId/edit',
+                name: 'editChecklistTemplate',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => ChecklistTemplateEditPage(
+                  templateId: state.pathParameters['templateId'],
+                ),
+              ),
+            ],
+          ),
+
+          // Pre-dive checklists
+          GoRoute(
+            path: '/pre-dive-checklists',
+            name: 'preDiveTemplates',
+            builder: (context, state) => const PreDiveTemplatesPage(),
+            routes: [
+              GoRoute(
+                path: 'new',
+                name: 'newPreDiveTemplate',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => const PreDiveTemplateEditPage(),
+              ),
+              GoRoute(
+                path: ':templateId/edit',
+                name: 'editPreDiveTemplate',
+                onExit: confirmLeaveRecordSitting,
+                builder: (context, state) => PreDiveTemplateEditPage(
+                  templateId: state.pathParameters['templateId'],
+                ),
+              ),
+            ],
+          ),
+          GoRoute(
+            path: '/pre-dive-sessions',
+            name: 'preDiveSessions',
+            pageBuilder: (context, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const PreDiveSessionsPage(),
+            ),
+            routes: [
+              GoRoute(
+                path: ':sessionId',
+                name: 'preDiveSessionRunner',
+                builder: (context, state) => PreDiveSessionRunnerPage(
+                  sessionId: state.pathParameters['sessionId']!,
+                ),
+              ),
+            ],
+          ),
+
+          // Global search (#3882): a nav destination, inside the shell, so
+          // the rail and bottom bar stay up beside it.
+          GoRoute(
+            path: kGlobalSearchLocation,
+            name: 'globalSearch',
+            pageBuilder: (context, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const GlobalSearchPage(),
+            ),
+          ),
+
+          // Species: the seen-species page, with the catalog manager, the
+          // species map, the editor and the detail page nested under it.
+          // `manage`, `map` and `new` are declared before `:speciesId` so the
+          // static segments win.
+          GoRoute(
+            path: '/species',
+            name: 'species',
+            // A nav destination: the rail and bottom bar reach it with `go`,
+            // so it cross-fades like its siblings instead of animating in.
+            pageBuilder: (context, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const SpeciesPage(),
+            ),
+            routes: [
+              GoRoute(
+                path: 'manage',
+                name: 'speciesManage',
+                builder: (context, state) => const SpeciesManagePage(),
+              ),
+              GoRoute(
+                path: 'map',
+                name: 'speciesMap',
+                builder: (context, state) => SpeciesMapPage(
+                  initialSpeciesId: state.uri.queryParameters['species'],
+                ),
+              ),
+              GoRoute(
+                path: 'new',
                 name: 'newSpecies',
-                builder: (context, state) => const SpeciesEditPage(),
+                onExit: confirmLeaveRecordSitting,
+                // The species page opened on a new species (issue #4527, plan
+                // 11).
+                builder: (context, state) => newSpeciesPage(),
+              ),
+              // Species to review (issue #4727): one dive with `?dive=`,
+              // else the whole log. Before `:speciesId`, which would take
+              // it for an id.
+              GoRoute(
+                path: 'review',
+                name: 'speciesReview',
+                builder: (context, state) {
+                  final dive = state.uri.queryParameters['dive'];
+                  return SpeciesReviewPage(
+                    scope: dive == null
+                        ? const LogReviewScope()
+                        : DiveReviewScope(dive),
+                  );
+                },
               ),
               GoRoute(
                 path: ':speciesId',
                 name: 'speciesDetail',
+                onExit: confirmLeaveRecordSitting,
                 builder: (context, state) => SpeciesDetailPage(
                   speciesId: state.pathParameters['speciesId']!,
+                  openUnlocked: state.uri.queryParameters['mode'] == 'edit',
                 ),
               ),
               GoRoute(
                 path: ':speciesId/edit',
                 name: 'editSpecies',
-                builder: (context, state) => SpeciesEditPage(
-                  speciesId: state.pathParameters['speciesId'],
-                ),
+                // The old address opens the page unlocked (issue #4527).
+                redirect: speciesEditRedirect,
               ),
             ],
           ),
@@ -962,25 +2372,33 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'discover',
                 name: 'discoverDevice',
-                builder: (context, state) =>
-                    const _DiveComputerDiscoveryWizardRoute(),
+                onExit: confirmLeaveRunningImport,
+                // ?equipment= binds the device it finds to that hand-added
+                // Dive Computer item (issue #3676).
+                builder: (context, state) => _DiveComputerDiscoveryWizardRoute(
+                  bindEquipmentId: state.uri.queryParameters['equipment'],
+                ),
               ),
               GoRoute(
                 path: ':computerId',
                 name: 'computerDetail',
-                builder: (context, state) => DeviceDetailPage(
+                // A dive computer's page is its Equipment item's (issue
+                // #3676); this forwards there, and its download child stays.
+                builder: (context, state) => DiveComputerItemRedirect(
                   computerId: state.pathParameters['computerId']!,
                 ),
                 routes: [
                   GoRoute(
                     path: 'download',
                     name: 'computerDownload',
+                    onExit: confirmLeaveRunningImport,
                     builder: (context, state) =>
                         _DiveComputerDownloadWizardRoute(
                           computerId: state.pathParameters['computerId']!,
                           forceFullDownload: parseForceFullQueryParam(
                             state.uri.queryParameters['forceFull'],
                           ),
+                          connectionId: state.uri.queryParameters['connection'],
                         ),
                   ),
                 ],
@@ -1013,7 +2431,7 @@ class _HealthKitImportWizardRoute extends ConsumerWidget {
     final converter = ref.watch(importedDiveConverterProvider);
     final diveRepo = ref.watch(diveRepositoryProvider);
 
-    final settings = ref.watch(settingsProvider);
+    final settings = ref.watch(unitFormatterProvider).settings;
 
     return UnifiedImportWizard(
       adapter: HealthKitAdapter(
@@ -1024,6 +2442,7 @@ class _HealthKitImportWizardRoute extends ConsumerWidget {
         diverId: diverId,
         ref: ref,
         settings: settings,
+        tripForImports: ref.watch(importTripResolverProvider),
       ),
     );
   }
@@ -1081,7 +2500,9 @@ class _HealthKitUnavailableScreen extends StatelessWidget {
 
 /// Wrapper that creates a [DiveComputerAdapter] for device discovery.
 class _DiveComputerDiscoveryWizardRoute extends ConsumerWidget {
-  const _DiveComputerDiscoveryWizardRoute();
+  const _DiveComputerDiscoveryWizardRoute({this.bindEquipmentId});
+
+  final String? bindEquipmentId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1089,14 +2510,17 @@ class _DiveComputerDiscoveryWizardRoute extends ConsumerWidget {
     final importService = ref.watch(diveImportServiceProvider);
     final computerRepo = ref.watch(diveComputerRepositoryProvider);
     final diveRepo = ref.watch(diveRepositoryProvider);
+    final consolidationService = ref.watch(diveConsolidationServiceProvider);
 
     return UnifiedImportWizard(
       adapter: DiveComputerAdapter(
         importService: importService,
         computerRepository: computerRepo,
         diveRepository: diveRepo,
+        consolidationService: consolidationService,
         diverId: diverId,
         ref: ref,
+        bindEquipmentId: bindEquipmentId,
       ),
     );
   }
@@ -1104,14 +2528,117 @@ class _DiveComputerDiscoveryWizardRoute extends ConsumerWidget {
 
 /// Wrapper that creates a [DiveComputerAdapter] for quick download
 /// from a known (previously paired) computer.
-class _DiveComputerDownloadWizardRoute extends ConsumerWidget {
+///
+/// The adapter is created once per route instance and reused across
+/// rebuilds. [diveComputerByIdProvider] re-emits on every dive_computers
+/// table tick, and a completed download writes that table (device serial
+/// and firmware), so this widget rebuilds in the middle of the wizard. A
+/// fresh adapter built here on every rebuild would carry none of the
+/// downloaded dives, and the wizard's Review step would list nothing.
+class _DiveComputerDownloadWizardRoute extends ConsumerStatefulWidget {
   const _DiveComputerDownloadWizardRoute({
     required this.computerId,
     this.forceFullDownload = false,
+    this.connectionId,
   });
 
   final String computerId;
   final bool forceFullDownload;
+
+  /// The connection to download over (issue #3106), from the detail page's
+  /// Connections card; null downloads over this device's last-used one.
+  final String? connectionId;
+
+  @override
+  ConsumerState<_DiveComputerDownloadWizardRoute> createState() =>
+      _DiveComputerDownloadWizardRouteState();
+}
+
+class _DiveComputerDownloadWizardRouteState
+    extends ConsumerState<_DiveComputerDownloadWizardRoute> {
+  DiveComputerAdapter? _adapter;
+
+  @override
+  void didUpdateWidget(_DiveComputerDownloadWizardRoute oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.computerId != widget.computerId ||
+        oldWidget.forceFullDownload != widget.forceFullDownload ||
+        oldWidget.connectionId != widget.connectionId) {
+      _adapter = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final computerAsync = ref.watch(
+      diveComputerByIdProvider(widget.computerId),
+    );
+    final connectionsAsync = ref.watch(
+      diveComputerConnectionsProvider(widget.computerId),
+    );
+    if (connectionsAsync.isLoading && !connectionsAsync.hasValue) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    // A failed connection read falls back to the legacy columns, as for a
+    // computer with no connections yet.
+    final connections =
+        connectionsAsync.valueOrNull ?? const <DiveComputerConnection>[];
+
+    return computerAsync.when(
+      data: (computer) {
+        if (computer == null) {
+          return Scaffold(
+            appBar: AppBar(
+              title: Text(context.l10n.diveComputer_download_title),
+            ),
+            body: Center(
+              child: Text(context.l10n.diveComputer_download_computerNotFound),
+            ),
+          );
+        }
+        final adapter = _adapter ??= DiveComputerAdapter(
+          importService: ref.read(diveImportServiceProvider),
+          computerRepository: ref.read(diveComputerRepositoryProvider),
+          diveRepository: ref.read(diveRepositoryProvider),
+          consolidationService: ref.read(diveConsolidationServiceProvider),
+          diverId: ref.read(currentDiverIdProvider) ?? '',
+          // This device's transport and address for it (issue #3106).
+          knownComputer: computerForDownload(
+            computer,
+            connections,
+            selected: connectionForDownload(
+              connections,
+              connectionId: widget.connectionId,
+            ),
+          ),
+          ref: ref,
+          forceFullDownload: widget.forceFullDownload,
+        );
+        // A new adapter is a new session: key the wizard on it so the reset
+        // in didUpdateWidget starts the wizard over instead of handing a
+        // fresh adapter to a wizard mid-flow (which pins the one it started
+        // with).
+        return UnifiedImportWizard(key: ObjectKey(adapter), adapter: adapter);
+      },
+      loading: () =>
+          const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (e, _) => Scaffold(
+        appBar: AppBar(title: Text(context.l10n.diveComputer_download_title)),
+        body: Center(
+          child: Text(
+            context.l10n.diveComputer_download_errorWithMessage('$e'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Wrapper that creates a [SuuntoCloudAdapter] with dependencies from
+/// Riverpod, for importing dives from a Suunto cloud (app.suunto.com)
+/// account.
+class _SuuntoCloudImportWizardRoute extends ConsumerWidget {
+  const _SuuntoCloudImportWizardRoute();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1119,45 +2646,99 @@ class _DiveComputerDownloadWizardRoute extends ConsumerWidget {
     final importService = ref.watch(diveImportServiceProvider);
     final computerRepo = ref.watch(diveComputerRepositoryProvider);
     final diveRepo = ref.watch(diveRepositoryProvider);
-    final computerAsync = ref.watch(diveComputerByIdProvider(computerId));
+    final consolidationService = ref.watch(diveConsolidationServiceProvider);
 
-    return computerAsync.when(
-      data: (computer) {
-        if (computer == null) {
-          return Scaffold(
-            appBar: AppBar(title: const Text('Download')),
-            body: const Center(child: Text('Computer not found')),
-          );
-        }
-        return UnifiedImportWizard(
-          adapter: DiveComputerAdapter(
-            importService: importService,
-            computerRepository: computerRepo,
-            diveRepository: diveRepo,
-            diverId: diverId,
-            knownComputer: computer,
-            ref: ref,
-            forceFullDownload: forceFullDownload,
-          ),
-        );
-      },
-      loading: () =>
-          const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (e, _) => Scaffold(
-        appBar: AppBar(title: const Text('Download')),
-        body: Center(child: Text('Error: $e')),
+    return UnifiedImportWizard(
+      adapter: SuuntoCloudAdapter(
+        importService: importService,
+        computerRepository: computerRepo,
+        diveRepository: diveRepo,
+        consolidationService: consolidationService,
+        diverId: diverId,
+        routeWriter: SuuntoRouteWriter(
+          repository: ref.watch(navTrackRepositoryProvider),
+        ),
+        buddyWriter: SuuntoBuddyWriter(
+          repository: ref.watch(buddyRepositoryProvider),
+        ),
+        journalWriter: SuuntoJournalWriter(
+          centers: ref.watch(diveCenterRepositoryProvider),
+          dives: diveRepo,
+          species: ref.watch(speciesRepositoryProvider),
+        ),
+        ref: ref,
       ),
     );
   }
 }
 
-/// Wrapper that creates a [UniversalAdapter] with Ref from Riverpod.
-class _UniversalImportWizardRoute extends ConsumerWidget {
-  const _UniversalImportWizardRoute();
+/// Wrapper that creates a [SuuntoFileAdapter] with dependencies from
+/// Riverpod, for importing Suunto app JSON exports (issue #1445), opened
+/// with the files a hand-off, share or drop already chose.
+class _SuuntoFileImportWizardRoute extends ConsumerWidget {
+  const _SuuntoFileImportWizardRoute({required this.initialFiles});
+
+  final List<SuuntoJsonFile> initialFiles;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return UnifiedImportWizard(adapter: UniversalAdapter(ref: ref));
+    final diverId = ref.watch(currentDiverIdProvider) ?? '';
+    final importService = ref.watch(diveImportServiceProvider);
+    final computerRepo = ref.watch(diveComputerRepositoryProvider);
+    final diveRepo = ref.watch(diveRepositoryProvider);
+    final consolidationService = ref.watch(diveConsolidationServiceProvider);
+
+    return UnifiedImportWizard(
+      adapter: SuuntoFileAdapter(
+        importService: importService,
+        computerRepository: computerRepo,
+        diveRepository: diveRepo,
+        consolidationService: consolidationService,
+        diverId: diverId,
+        routeWriter: SuuntoRouteWriter(
+          repository: ref.watch(navTrackRepositoryProvider),
+        ),
+        ref: ref,
+        initialFiles: initialFiles,
+      ),
+    );
+  }
+}
+
+/// Wrapper that creates a [GarminCloudAdapter] with dependencies from
+/// Riverpod, for importing dives from a Garmin Connect account.
+class _GarminCloudImportWizardRoute extends ConsumerWidget {
+  const _GarminCloudImportWizardRoute();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final diverId = ref.watch(currentDiverIdProvider) ?? '';
+    final importService = ref.watch(diveImportServiceProvider);
+    final computerRepo = ref.watch(diveComputerRepositoryProvider);
+    final diveRepo = ref.watch(diveRepositoryProvider);
+    final consolidationService = ref.watch(diveConsolidationServiceProvider);
+
+    return UnifiedImportWizard(
+      adapter: GarminCloudAdapter(
+        importService: importService,
+        computerRepository: computerRepo,
+        diveRepository: diveRepo,
+        consolidationService: consolidationService,
+        diverId: diverId,
+        ref: ref,
+      ),
+    );
+  }
+}
+
+/// Wrapper that creates a [DivelogsImportAdapter], for importing a logbook
+/// from a divelogs.de account.
+class _DivelogsImportWizardRoute extends ConsumerWidget {
+  const _DivelogsImportWizardRoute();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return UnifiedImportWizard(adapter: DivelogsImportAdapter(ref: ref));
   }
 }
 
@@ -1167,3 +2748,27 @@ class _UniversalImportWizardRoute extends ConsumerWidget {
 /// case variants, arbitrary strings) returns false. This conservative rule
 /// keeps the URL contract unambiguous for shareability and logging.
 bool parseForceFullQueryParam(String? value) => value == 'true';
+
+/// The new-dive page for [state]: a prefill passed as `extra` (the OCR scan,
+/// a passport tag), and the board's Log dive shortcut as the `tripId` and
+/// `tripCylinderId` query parameters, on the dive page opened unlocked
+/// ([newDiveRoutePage]).
+Widget newDivePage(GoRouterState state) => newDiveRoutePage(
+  prefill: state.extra as DivePrefill?,
+  tripId: state.uri.queryParameters['tripId'],
+  tripCylinderId: state.uri.queryParameters['tripCylinderId'],
+);
+
+/// `/dives/search` was Advanced Search and `/dives/explore` was Explore;
+/// they are the Refine panel and Ask in the search row now (#2773), so an
+/// old link or a bookmark lands on the dive list with its search row open.
+/// The open flag is written after the frame: go_router evaluates a redirect
+/// while parsing the location, which on a cold start happens while the
+/// widget tree builds, where Riverpod refuses provider writes.
+String redirectRetiredDiveSearch(BuildContext context, GoRouterState state) {
+  final container = ProviderScope.containerOf(context, listen: false);
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    container.read(diveSearchBarOpenProvider.notifier).state = true;
+  });
+  return '/dives';
+}

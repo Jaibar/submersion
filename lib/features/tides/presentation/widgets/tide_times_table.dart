@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/tide/entities/tide_extremes.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Table widget displaying high and low tide times.
@@ -43,6 +44,10 @@ class TideTimesTable extends StatelessWidget {
   /// Time format preference (12h or 24h). Defaults to 24-hour if not specified.
   final TimeFormat timeFormat;
 
+  /// Date format preference, which decides whether dates read month-first
+  /// ("Jan 15") or day-first ("15 Jan"). Defaults to month-first.
+  final DateFormatPreference dateFormat;
+
   const TideTimesTable({
     super.key,
     required this.extremes,
@@ -52,6 +57,7 @@ class TideTimesTable extends StatelessWidget {
     this.compact = false,
     this.depthUnit = DepthUnit.meters,
     this.timeFormat = TimeFormat.twentyFourHour,
+    this.dateFormat = DateFormatPreference.mmddyyyy,
   });
 
   @override
@@ -155,11 +161,21 @@ class TideTimesTable extends StatelessWidget {
 
     // Format time using user preference
     final timeFormatter = DateFormat(timeFormat.pattern);
-    final dateFormat = DateFormat('EEE, MMM d');
+    final dateFormatter = DateFormat(
+      UnitFormatter.weekdayMonthDayPattern(dateFormat),
+    );
     final isToday = _isSameDay(extreme.time, reference);
+    // Tomorrow's calendar date, not the instant 24 hours from now:
+    // `reference` is a local instant and a `Duration` is elapsed time, so
+    // on the two days a year that are not 24 hours long the two disagree.
+    // A fall-back day runs 25 hours, so from 00:30 the offset instant is
+    // still that same date and the next day stops being "tomorrow"; the
+    // evening before a spring-forward it overshoots to the day after,
+    // which both drops the label from the real tomorrow and hands it to
+    // the wrong row (issue #2242).
     final isTomorrow = _isSameDay(
       extreme.time,
-      reference.add(const Duration(days: 1)),
+      DateTime(reference.year, reference.month, reference.day + 1),
     );
 
     String dateLabel;
@@ -168,7 +184,7 @@ class TideTimesTable extends StatelessWidget {
     } else if (isTomorrow) {
       dateLabel = context.l10n.tides_label_tomorrow;
     } else {
-      dateLabel = dateFormat.format(extreme.time.toLocal());
+      dateLabel = dateFormatter.format(extreme.time);
     }
 
     // Colors based on type
@@ -180,7 +196,7 @@ class TideTimesTable extends StatelessWidget {
     final tideTypeLabel = isHigh
         ? context.l10n.tides_label_highTide
         : context.l10n.tides_label_lowTide;
-    final timeLabel = timeFormatter.format(extreme.time.toLocal());
+    final timeLabel = timeFormatter.format(extreme.time);
     final durationLabel = isPast
         ? context.l10n.tides_label_ago(_formatDuration(duration))
         : context.l10n.tides_label_fromNow(_formatDuration(duration));
@@ -227,7 +243,7 @@ class TideTimesTable extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      timeFormatter.format(extreme.time.toLocal()),
+                      timeFormatter.format(extreme.time),
                       style:
                           (compact
                                   ? textTheme.titleMedium
@@ -388,7 +404,7 @@ class NextTideTimes extends StatelessWidget {
           Icon(Icons.arrow_upward, size: 14, color: Colors.red.shade600),
           const SizedBox(width: 4),
           Text(
-            timeFormatter.format(nextHigh.time.toLocal()),
+            timeFormatter.format(nextHigh.time),
             style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
           ),
           Text(
@@ -410,7 +426,7 @@ class NextTideTimes extends StatelessWidget {
           Icon(Icons.arrow_downward, size: 14, color: Colors.blue.shade600),
           const SizedBox(width: 4),
           Text(
-            timeFormatter.format(nextLow.time.toLocal()),
+            timeFormatter.format(nextLow.time),
             style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
           ),
           Text(

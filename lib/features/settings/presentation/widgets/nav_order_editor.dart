@@ -1,0 +1,416 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/router/web_unavailable_routes.dart';
+import 'package:submersion/features/settings/presentation/widgets/nav_shortcut_picker.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
+import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
+import 'package:submersion/shared/widgets/nav/nav_shortcuts.dart';
+import 'package:submersion/shared/widgets/nav/nav_slot_count.dart';
+
+/// Which navigation surface an editor is arranging.
+///
+/// The two orders are stored separately, so a phone bottom bar and a desktop
+/// rail can be arranged independently on the same account.
+enum NavOrderScope {
+  /// Phone: the first [kMinPhonePrimarySlotCount] rows are guaranteed
+  /// bottom-bar slots (a wider phone may show more; see
+  /// `phonePrimarySlotCount`) and the rest is the More menu, which is why
+  /// this scope shows a divider.
+  phone,
+
+  /// Wide screens: one flat rail with no overflow, so no divider.
+  desktop,
+}
+
+/// Applies a Flutter `ReorderableListView` reorder event to a movable-items
+/// list while keeping a non-draggable divider at [dividerIndex].
+///
+/// `oldIndex` and `newIndex` are indices in the flat list that the
+/// ReorderableListView sees, i.e. `movable` with a divider inserted at
+/// [dividerIndex]. Pass a null [dividerIndex] when the list has no divider, in
+/// which case flat indices and movable indices are the same thing. Returns the
+/// new order of `movable` (length unchanged).
+///
+/// If the user attempts to drag the divider itself, returns `movable` unchanged.
+List<String> applyReorderPreservingDivider({
+  required List<String> movable,
+  required int? dividerIndex,
+  required int oldIndex,
+  required int newIndex,
+}) {
+  if (dividerIndex == null) {
+    return _moveItem(movable, from: oldIndex, to: newIndex);
+  }
+
+  // No-op if the user tried to drag the divider itself.
+  if (oldIndex == dividerIndex) return movable;
+
+  // Translate flat indices (which include the divider) into movable indices.
+  int flatToMovable(int flatIndex) {
+    return flatIndex > dividerIndex ? flatIndex - 1 : flatIndex;
+  }
+
+  // onReorderItem already adjusts newIndex for the removed item, so both
+  // indices translate straight into movable-index space.
+  return _moveItem(
+    movable,
+    from: flatToMovable(oldIndex),
+    to: flatToMovable(newIndex),
+  );
+}
+
+List<String> _moveItem(
+  List<String> items, {
+  required int from,
+  required int to,
+}) {
+  if (from < 0 || from >= items.length) return items;
+  final copy = List<String>.from(items);
+  final item = copy.removeAt(from);
+  copy.insert(to.clamp(0, copy.length), item);
+  return copy;
+}
+
+/// Reorderable list for one navigation surface, with the pinned rows that
+/// bracket it, an Add shortcut control (#2936) and a reset control.
+///
+/// Everything, [header] included, sits on the list's own scroll axis. On a
+/// short screen the fixed blocks around a separately scrolling list left room
+/// for only a row or two, so a drag had nowhere to go (#3370); sharing one
+/// axis gives the rows, and the drag auto-scroll, the whole height below the
+/// app bar.
+///
+/// Give each instance a key tied to its [scope] so switching surfaces rebuilds
+/// the local mirror from the right provider instead of carrying the old order
+/// across.
+class NavOrderEditor extends ConsumerStatefulWidget {
+  const NavOrderEditor({super.key, required this.scope, this.header});
+
+  final NavOrderScope scope;
+
+  /// Content shown above the pinned Home row that scrolls with the list.
+  final Widget? header;
+
+  @override
+  ConsumerState<NavOrderEditor> createState() => _NavOrderEditorState();
+}
+
+class _NavOrderEditorState extends ConsumerState<NavOrderEditor> {
+  // INVARIANT: this editor is the sole writer to its provider while mounted.
+  // We hold a local mirror for drag responsiveness and reconcile from the
+  // provider only when it diverges.
+  List<String>? _local;
+
+  /// Drives the page's single scroll view, so an add made from the bottom of
+  /// a long page can bring its new row (inserted at the top) into view.
+  final _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  bool get _isPhone => widget.scope == NavOrderScope.phone;
+
+  StateNotifierProvider<NavOrderNotifier, List<String>> get _orderProvider =>
+      _isPhone ? navPhoneOrderNotifierProvider : navRailOrderNotifierProvider;
+
+  /// Flat index of the non-draggable divider row, or null when the surface has
+  /// no overflow to divide off.
+  ///
+  /// Fixed at the guaranteed minimum rather than the current device's actual
+  /// slot count: this editor can be opened on any device to arrange a
+  /// surface's order (e.g. preparing the phone order from a desktop), so it
+  /// has no reliable phone width to compute against. The divider therefore
+  /// marks "guaranteed to show", not "will show on this device" -- a wider
+  /// phone may display more items above it at render time (#1424).
+  int? get _dividerIndex => _isPhone ? kMinPhonePrimarySlotCount : null;
+
+  /// Number of rows the ReorderableListView shows, divider included.
+  int get _flatCount => _local!.length + (_dividerIndex == null ? 0 : 1);
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+
+    // Reconcile the local mirror when the provider emits a different order
+    // than the one on screen. This covers the cold-start race where the
+    // notifier starts on the canonical order synchronously and emits the
+    // stored customization once its async load completes; without this,
+    // _local would stay frozen on defaults until the user interacted.
+    ref.listen<List<String>>(_orderProvider, (previous, next) {
+      if (listEquals(_local, next)) return;
+      setState(() => _local = List<String>.from(next));
+    });
+
+    final order = ref.watch(_orderProvider);
+    final destinationsById = {
+      for (final d in ref.watch(navDestinationsProvider)) d.id: d,
+    };
+
+    _local ??= List<String>.from(order);
+
+    final dividerIndex = _dividerIndex;
+    // Judged against the mirror, not the provider, so the button tracks the
+    // list the user is looking at during an optimistic drag rather than the
+    // last value that finished persisting.
+    final listIsDefault = listEquals(_local, kDefaultNavOrder);
+
+    return ReorderableListView.builder(
+      scrollController: _scrollController,
+      buildDefaultDragHandles: false,
+      header: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ?widget.header,
+          // Pinned Home row (outside the reorderable items).
+          _pinnedTile(context, destinationsById['dashboard']!),
+          const Divider(height: 1),
+        ],
+      ),
+      footer: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Divider(height: 1),
+          // Only phone has a More control to pin below the list.
+          if (_isPhone) _pinnedTile(context, destinationsById['more']!),
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                children: [
+                  TextButton.icon(
+                    icon: const Icon(Icons.add_link),
+                    label: Text(l10n.settings_navCustomization_addShortcut),
+                    onPressed: _addShortcut,
+                  ),
+                  TextButton.icon(
+                    icon: const Icon(Icons.restore),
+                    label: Text(l10n.settings_navCustomization_resetButton),
+                    onPressed: listIsDefault ? null : _reset,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+      itemCount: _flatCount,
+      itemBuilder: (context, flatIndex) {
+        if (flatIndex == dividerIndex) return _buildDivider(context);
+        final movableIndex = dividerIndex == null || flatIndex < dividerIndex
+            ? flatIndex
+            : flatIndex - 1;
+        final id = _local![movableIndex];
+        // A shortcut can be taken off the nav; a built-in cannot.
+        final isShortcut = navShortcutForOrderId(id) != null;
+        return _buildMovableTile(
+          context: context,
+          key: ValueKey('nav-item-$id'),
+          index: flatIndex,
+          destination: resolveNavDestination(id, destinationsById)!,
+          onRemove: isShortcut ? () => _removeShortcut(id) : null,
+        );
+      },
+      onReorderItem: _commitReorder,
+    );
+  }
+
+  Widget _pinnedTile(BuildContext context, NavDestination destination) {
+    final l10n = context.l10n;
+    return ListTile(
+      leading: Icon(destination.icon),
+      title: Text(destination.label(l10n)),
+      trailing: Tooltip(
+        message: l10n.settings_navCustomization_pinnedTooltip,
+        child: const Icon(Icons.lock_outline),
+      ),
+    );
+  }
+
+  Widget _buildDivider(BuildContext context) {
+    final l10n = context.l10n;
+    return Container(
+      key: const ValueKey('nav-divider'),
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Text(
+        l10n.settings_navCustomization_dividerLabel,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMovableTile({
+    required BuildContext context,
+    required Key key,
+    required int index,
+    required NavDestination destination,
+    VoidCallback? onRemove,
+  }) {
+    final l10n = context.l10n;
+    return ListTile(
+      key: key,
+      leading: Icon(destination.icon),
+      title: Text(destination.label(l10n)),
+      subtitle: destination.subtitle != null
+          ? Text(destination.subtitle!(l10n))
+          : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (onRemove != null)
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: l10n.settings_navCustomization_removeShortcutLabel(
+                destination.label(l10n),
+              ),
+              onPressed: onRemove,
+            ),
+          IconButton(
+            icon: const Icon(Icons.arrow_upward),
+            tooltip: l10n.settings_navCustomization_moveUpLabel(
+              destination.label(l10n),
+            ),
+            onPressed: index == 0 ? null : () => _moveUp(index),
+          ),
+          IconButton(
+            icon: const Icon(Icons.arrow_downward),
+            tooltip: l10n.settings_navCustomization_moveDownLabel(
+              destination.label(l10n),
+            ),
+            onPressed: index == _flatCount - 1 ? null : () => _moveDown(index),
+          ),
+          ReorderableDragStartListener(
+            index: index,
+            child: const Padding(
+              padding: EdgeInsets.all(8),
+              child: Icon(Icons.drag_handle),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _moveUp(int index) {
+    // When stepping across the divider, skip over it to the slot above.
+    final divider = _dividerIndex;
+    final target = (divider != null && index == divider + 1)
+        ? divider - 1
+        : index - 1;
+    _commitReorder(index, target);
+  }
+
+  void _moveDown(int index) {
+    // applyReorderPreservingDivider expects onReorderItem-style indices
+    // (already adjusted for the removed item), so the slot below is index + 1;
+    // stepping across the divider lands at dividerIndex + 1.
+    final divider = _dividerIndex;
+    final target = (divider != null && index == divider - 1)
+        ? divider + 1
+        : index + 1;
+    _commitReorder(index, target);
+  }
+
+  Future<void> _reset() async {
+    try {
+      await ref.read(_orderProvider.notifier).resetToDefaults();
+      if (!mounted) return;
+      setState(() => _local = null);
+    } catch (_) {
+      if (!mounted) return;
+      _restoreSaved();
+      _showSaveError();
+    }
+  }
+
+  /// Shared reorder path for both the drag handle and the move-up /
+  /// move-down buttons.
+  Future<void> _commitReorder(int oldIndex, int newIndex) {
+    return _commitOrder(
+      applyReorderPreservingDivider(
+        movable: _local!,
+        dividerIndex: _dividerIndex,
+        oldIndex: oldIndex,
+        newIndex: newIndex,
+      ),
+    );
+  }
+
+  /// Asks which page to add, then puts it right after Home: on phone that is
+  /// the first bar slot, so adding a shortcut visibly puts it on the bar.
+  Future<void> _addShortcut() async {
+    final alreadyAdded = {
+      for (final id in _local!) ?navShortcutForOrderId(id)?.id,
+    };
+    final caps = ref.read(deviceCapabilitiesProvider);
+    final picked = await showNavShortcutPicker(
+      context,
+      alreadyAdded: alreadyAdded,
+      isAvailable: (shortcut) => navShortcutServable(caps, shortcut),
+    );
+    if (picked == null || !mounted) return;
+    final commit = _commitOrder([navShortcutOrderId(picked), ..._local!]);
+    // The Add button sits below the last row, so on a short screen the new
+    // row is off screen when it lands; scroll up to show it.
+    if (_scrollController.hasClients && _scrollController.offset > 0) {
+      unawaited(
+        _scrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        ),
+      );
+    }
+    await commit;
+  }
+
+  Future<void> _removeShortcut(String orderId) {
+    return _commitOrder(_local!.where((id) => id != orderId).toList());
+  }
+
+  /// Shared commit path for every edit. Optimistically updates the local
+  /// mirror, writes through to the notifier, and on failure rolls back with
+  /// a SnackBar.
+  Future<void> _commitOrder(List<String> newList) async {
+    if (listEquals(newList, _local)) return; // no-op edit
+    setState(() => _local = newList);
+    try {
+      await ref.read(_orderProvider.notifier).setOrder(newList);
+    } catch (_) {
+      if (!mounted) return;
+      _restoreSaved();
+      _showSaveError();
+    }
+  }
+
+  /// Rolls the mirror back to the last order that actually saved.
+  ///
+  /// Not to the list from before the failed edit: edits overlap (a second one
+  /// can start, and save, while the first is still writing), and a late
+  /// failure restoring its own "before" would discard the newer saved edit.
+  /// The notifier only takes an order once its write succeeds, so its state
+  /// is always what is stored.
+  void _restoreSaved() {
+    setState(() => _local = List<String>.from(ref.read(_orderProvider)));
+  }
+
+  void _showSaveError() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.settings_navCustomization_saveError)),
+    );
+  }
+}

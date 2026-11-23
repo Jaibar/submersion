@@ -1,0 +1,151 @@
+import 'package:submersion/features/data_quality/domain/quality_thresholds.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/data_quality/domain/entities/shared_gear_overlap.dart';
+
+export 'package:submersion/features/data_quality/domain/entities/shared_gear_overlap.dart';
+
+class QualitySample {
+  const QualitySample({required this.t, required this.depth, this.temp});
+
+  /// Seconds from dive start.
+  final int t;
+  final double depth;
+  final double? temp;
+}
+
+class QualityPressureSample {
+  const QualityPressureSample({required this.t, required this.bar});
+  final int t;
+  final double bar;
+}
+
+class QualityNeighbor {
+  const QualityNeighbor({
+    required this.id,
+    required this.entryTime,
+    this.exitTime,
+    this.maxDepth,
+    this.durationSeconds,
+    this.computerSerial,
+    this.firstSampleDepth,
+    this.lastSampleDepth,
+    this.sampleCount,
+    this.carriesDiverData,
+  });
+
+  final String id;
+  final DateTime entryTime;
+  final DateTime? exitTime;
+  final double? maxDepth;
+  final int? durationSeconds;
+  final String? computerSerial;
+  final double? firstSampleDepth;
+  final double? lastSampleDepth;
+
+  /// Samples stored across the neighbor's primary series, from the same
+  /// column [DiveQualityContext.primarySampleCount] reads, so the two sides
+  /// of a pair are compared on one measure. Null when unknown.
+  final int? sampleCount;
+
+  /// Whether the diver has written anything of their own onto this dive, from
+  /// the same measure [DiveQualityContext.carriesDiverData] reads. Null when
+  /// unknown. See that field for what counts.
+  final bool? carriesDiverData;
+}
+
+/// Everything a detector may look at for one dive. Built once per dive per
+/// scan; detectors are pure functions over this. All numeric series are
+/// sanitized (finite values only) and sorted by timestamp.
+class DiveQualityContext {
+  const DiveQualityContext({
+    required this.dive,
+    required this.now,
+    this.sources = const [],
+    this.primarySamples = const [],
+    this.sourceSamples = const {},
+    this.primarySampleCount,
+    this.carriesDiverData,
+    this.tanks = const [],
+    this.pressuresByTankId = const {},
+    this.ownComputerPressuresByTankId = const {},
+    this.gasSwitches = const [],
+    this.neighbors = const [],
+    this.ppO2MaxBar = QualityThresholds.ppO2WarnBar,
+    this.knownTransmitterSerials = const {},
+    this.mismatchedTransmitterSerials = const {},
+    this.sharedGearOverlaps = const [],
+  });
+
+  /// The dive, with its [domain.Dive.profile] empty on nearly every context:
+  /// read [primarySamples] instead, which also keeps to the primary recording
+  /// where the profile would merge every source (issue #3864).
+  final domain.Dive dive;
+  final DateTime now;
+  final List<DiveDataSource> sources;
+  final List<QualitySample> primarySamples;
+
+  /// Non-primary source id -> that source's own samples, where the dive
+  /// places them on the primary's timeline (a consolidation re-bases them
+  /// by its offset). Only loaded for a dive with more than one source, so a
+  /// detector can check that placement against the primary's trace (#4296).
+  final Map<String, List<QualitySample>> sourceSamples;
+
+  /// Samples stored across the dive's primary series, as the series report
+  /// them. Deliberately not `primarySamples.length`: that list is sanitized
+  /// and merged, and a neighbor's count comes straight from the stored
+  /// column, so comparing the two would make a pair's richer side depend on
+  /// which dive the scan happened to start from. Null when unknown.
+  final int? primarySampleCount;
+
+  /// Whether the diver has written anything of their own onto this dive:
+  /// gear, buddies, tags, marine life, weights, media, custom fields, notes,
+  /// a rating, a favourite mark, or a link to a site, trip, dive centre or
+  /// course. Deliberately excludes everything a dive computer download
+  /// produces by itself (tanks, dive types, profile series and their events),
+  /// so it reads as "a human has been here" rather than "this row is
+  /// populated".
+  ///
+  /// A pair's two sides must be measured the same way or the verdict would
+  /// depend on which dive the scan reached first, so this comes from the same
+  /// query [QualityNeighbor.carriesDiverData] does rather than from the
+  /// hydrated entity. Null when unknown.
+  final bool? carriesDiverData;
+
+  final List<domain.DiveTank> tanks;
+  final Map<String, List<QualityPressureSample>> pressuresByTankId;
+  final List<GasSwitch> gasSwitches;
+  final List<QualityNeighbor> neighbors;
+
+  /// The diver's maximum (deco / contingency) ppO2 ceiling in bar, from
+  /// decompression settings. Detectors treat a recorded gas/depth combination
+  /// as suspect above this, and genuinely wrong further above it. Defaults to
+  /// [QualityThresholds.ppO2WarnBar] (1.6) when settings are unavailable.
+  final double ppO2MaxBar;
+
+  /// For a tank whose role was read off its transmitter's name (issue
+  /// #3307), and for a loop cylinder (diluent or O2 supply, issue #3652),
+  /// the series its own computer logged. On a consolidated dive the merged
+  /// [pressuresByTankId] series can be another computer's reading of the
+  /// same transmitter, which must not be judged against this computer's gas
+  /// switches.
+  final Map<String, List<QualityPressureSample>> ownComputerPressuresByTankId;
+
+  /// Normalized serials of the diver's registered transmitters (issue #1365),
+  /// so a detector can tell a downloaded tank nobody has assigned yet.
+  final Set<String> knownTransmitterSerials;
+
+  /// Normalized serials of registry entries whose linked transmitter gear
+  /// item carries a different, non-empty serial of its own (issue #3367).
+  /// The gap this closes: a diver who creates the transmitter as a gear
+  /// item first (for battery/service tracking) and links it to a registry
+  /// entry afterward can end up with two serials that silently drift apart.
+  final Set<String> mismatchedTransmitterSerials;
+
+  /// Other profiles' dives in the neighbour window that share gear with
+  /// this one (issue #2853). Empty for a dive without a profile and in a
+  /// library with fewer than two profiles.
+  final List<SharedGearOverlap> sharedGearOverlaps;
+}

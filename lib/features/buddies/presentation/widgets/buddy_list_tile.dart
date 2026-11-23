@@ -1,0 +1,366 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/shared/widgets/country_flag.dart';
+import 'package:submersion/shared/widgets/profile_photo/profile_avatar.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy_with_dive_count.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_favorite_button.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/dive_role_display.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/buddies/presentation/buddy_certification_l10n.dart';
+import 'package:submersion/shared/selection/selection_inset.dart';
+import 'package:submersion/shared/selection/selection_leading.dart';
+import 'package:submersion/shared/widgets/entity_card/card_slot_resolver.dart';
+import 'package:submersion/shared/widgets/entity_card/entity_card_extra_fields.dart';
+import 'package:submersion/shared/widgets/entity_card/entity_card_stat.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
+
+/// Detailed list card for one buddy.
+///
+/// Configurable slots come from [buddyDetailedCardConfigProvider]; the
+/// avatar, certification chip, usual-role chip and contact icons are fixed
+/// identity elements. Hand-rolled rather than a ListTile so the title keeps
+/// its font role under every theme preset and nothing text-bearing sits in
+/// the trailing slot (issue #935).
+class BuddyListTile extends ConsumerWidget {
+  final BuddyWithDiveCount entry;
+  final bool isSelected;
+  final bool isChecked;
+  final bool isSelectionMode;
+  final VoidCallback? onTap;
+
+  const BuddyListTile({
+    super.key,
+    required this.entry,
+    this.isSelected = false,
+    this.isChecked = false,
+    this.isSelectionMode = false,
+    this.onTap,
+  });
+
+  Buddy get buddy => entry.buddy;
+  int get diveCount => entry.diveCount;
+
+  static const _contentInset = 52.0;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(certificationCatalogSyncProvider);
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final units = ref.watch(unitFormatterProvider);
+    final config = ref.watch(buddyDetailedCardConfigProvider);
+    final roleMap = ref.watch(diveRoleMapProvider).value;
+    final accent = resolveFeatureAccent(
+      context,
+      ref,
+      surface: AccentSurface.list,
+      featureId: 'buddies',
+    );
+    final secondaryTextColor = colorScheme.onSurfaceVariant;
+    final statColor = accent ?? colorScheme.primary;
+    final agencyId = buddy.certificationAgency;
+    final agencyColor = agencyId == null
+        ? null
+        : context.certificationCatalog.agency(agencyId).primaryColor;
+
+    final adapter = BuddyFieldAdapter.withCatalog(context.certificationCatalog);
+    final slots = config.slots;
+
+    String? slotText(BuddyField field) {
+      final value = adapter.extractValue(field, entry);
+      if (value == null) return null;
+      final text = adapter.formatValue(field, value, units);
+      return text.isEmpty || text == '--' ? null : text;
+    }
+
+    final title =
+        slotText(resolveCardSlot(slots, 'title', BuddyField.buddyName)) ??
+        buddy.name;
+    final subtitleField = resolveCardSlot(slots, 'subtitle', BuddyField.email);
+    final subtitle = slotText(subtitleField);
+    // A subtitle naming the country gets its flag, as a site row's does
+    // (issue #4457).
+    final flagBuddy = subtitleField == BuddyField.country ? buddy : null;
+
+    String formatStat(BuddyField field, dynamic value) {
+      if (field == BuddyField.diveCount) {
+        return l10n.buddies_label_diveCount(value as int);
+      }
+      return adapter.formatValue(field, value, units);
+    }
+
+    Widget stat(String slotId, BuddyField fallback) {
+      return EntityCardStat<BuddyWithDiveCount, BuddyField>(
+        adapter: adapter,
+        entity: entry,
+        field: resolveCardSlot(slots, slotId, fallback),
+        units: units,
+        color: statColor,
+        formatter: formatStat,
+      );
+    }
+
+    final usualRoleId = entry.usualRoleId;
+    final usualRole = usualRoleId == null || usualRoleId == DiveRole.buddyId
+        ? null
+        : (roleMap?[usualRoleId] ?? DiveRole.synthetic(usualRoleId));
+
+    final certLine = buddyCertificationLineL10n(
+      buddy,
+      context.l10n,
+      catalog: context.certificationCatalog,
+    );
+
+    final trailer = <Widget>[
+      // A buddy that IS a local profile (issue #2002).
+      if (buddy.linkedDiverId != null)
+        _BuddyChip(
+          icon: Icons.account_circle_outlined,
+          label: l10n.buddies_linkedProfile_chip,
+          color: statColor,
+        ),
+      if (certLine != null)
+        _BuddyChip(
+          icon: Icons.card_membership,
+          label: certLine,
+          color: agencyColor ?? statColor,
+        ),
+      if (usualRole != null)
+        _BuddyChip(
+          icon: Icons.badge_outlined,
+          label: usualRole.localizedName(l10n),
+          color: statColor,
+        ),
+      if (buddy.email != null && buddy.email!.isNotEmpty)
+        Tooltip(
+          message: buddy.email!,
+          child: Icon(Icons.mail_outline, size: 16, color: secondaryTextColor),
+        ),
+      if (buddy.phone != null && buddy.phone!.isNotEmpty)
+        Tooltip(
+          message: buddy.phone!,
+          child: Icon(
+            Icons.phone_outlined,
+            size: 16,
+            color: secondaryTextColor,
+          ),
+        ),
+    ];
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      color: isChecked
+          ? colorScheme.primaryContainer.withValues(alpha: 0.3)
+          : isSelected
+          ? colorScheme.primaryContainer.withValues(alpha: 0.5)
+          : null,
+      child: Semantics(
+        button: true,
+        selected: isSelected,
+        label: buddy.name,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.all(kRecordCardDetailedPadding),
+            child: RecordListChevronRow(
+              showChevron: !isSelectionMode,
+              chevronColor: colorScheme.outline,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      SelectionLeading(
+                        isSelectionMode: isSelectionMode,
+                        isChecked: isChecked,
+                        onChanged: (_) => onTap?.call(),
+                        child: SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: Center(
+                            child: _BuddyAvatar(
+                              buddy: buddy,
+                              backgroundColor:
+                                  accent?.withValues(alpha: 0.15) ??
+                                  colorScheme.primaryContainer,
+                              foregroundColor:
+                                  accent ?? colorScheme.onPrimaryContainer,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (subtitle != null) ...[
+                              const SizedBox(height: 2),
+                              LocationWithFlag(
+                                country: flagBuddy?.country,
+                                countryCode: flagBuddy?.countryCode,
+                                text: Text(
+                                  subtitle,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    color: secondaryTextColor,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      // The favorite (issue #1336) shows whatever the bulk
+                      // selection, unlike the chevron after the content; it
+                      // is set on the buddy's page.
+                      BuddyFavoriteButton(
+                        isFavorite: buddy.isFavorite,
+                        iconSize: 20,
+                        unselectedColor: secondaryTextColor,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  SelectionInset(
+                    isSelectionMode: isSelectionMode,
+                    start: _contentInset,
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 16,
+                      runSpacing: 6,
+                      children: [
+                        stat('stat1', BuddyField.diveCount),
+                        stat('stat2', BuddyField.lastDive),
+                      ],
+                    ),
+                  ),
+                  if (trailer.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    SelectionInset(
+                      isSelectionMode: isSelectionMode,
+                      start: _contentInset,
+                      child: Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: trailer,
+                      ),
+                    ),
+                  ],
+                  if (config.extraFields.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    SelectionInset(
+                      isSelectionMode: isSelectionMode,
+                      start: _contentInset,
+                      child:
+                          EntityCardExtraFields<BuddyWithDiveCount, BuddyField>(
+                            adapter: adapter,
+                            entity: entry,
+                            fields: config.extraFields,
+                            units: units,
+                            labelColor: secondaryTextColor,
+                            valueColor: colorScheme.onSurface,
+                          ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Photo when the stored file exists, initials otherwise. No ring, so it
+/// matches the leading badge in every other section (issue #3466); the
+/// agency colour shows on the certification chip. A buddy without a photo
+/// that is a local profile borrows that profile's photo (issue #2002).
+class _BuddyAvatar extends ConsumerWidget {
+  final Buddy buddy;
+  final Color backgroundColor;
+  final Color foregroundColor;
+
+  const _BuddyAvatar({
+    required this.buddy,
+    required this.backgroundColor,
+    required this.foregroundColor,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(certificationCatalogSyncProvider);
+    final linkedId = buddy.linkedDiverId;
+    final profilePhoto = buddy.photo == null && linkedId != null
+        ? ref.watch(diverByIdProvider(linkedId)).value?.photo
+        : null;
+    return ProfileAvatar(
+      photo: buddy.photo ?? profilePhoto,
+      initials: buddy.initials,
+      backgroundColor: backgroundColor,
+      foregroundColor: foregroundColor,
+    );
+  }
+}
+
+class _BuddyChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  const _BuddyChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ExcludeSemantics(child: Icon(icon, size: 12, color: color)),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

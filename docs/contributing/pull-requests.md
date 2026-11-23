@@ -8,7 +8,10 @@ This guide explains how to submit effective pull requests.
 
 1. Search [existing issues](https://github.com/submersion-app/submersion/issues)
 2. Check [open PRs](https://github.com/submersion-app/submersion/pulls)
-3. Review the [roadmap](contributing/roadmap.md)
+3. Review the [roadmap](roadmap.md)
+
+Every PR must relate to an issue (see [Linking Issues](#linking-issues)). If
+none exists for your change, open one before you open the PR.
 
 ### Discuss Large Changes
 
@@ -32,10 +35,11 @@ git remote add upstream https://github.com/submersion-app/submersion.git
 
 # Create branch
 git checkout -b feature/your-feature
-```text
+```
+
 ### 2. Make Changes
 
-- Follow [code style](contributing/code-style.md)
+- Follow [code style](code-style.md)
 - Write tests for new code
 - Update documentation if needed
 
@@ -48,12 +52,14 @@ git commit -m "feat: add nitrox calculator"
 git commit -m "fix: correct MOD calculation for trimix"
 git commit -m "docs: add calculator documentation"
 git commit -m "test: add unit tests for gas calculations"
-```text
+```
+
 ### 4. Push
 
 ```bash
 git push origin feature/your-feature
-```text
+```
+
 ### 5. Open PR
 
 1. Go to your fork on GitHub
@@ -62,46 +68,180 @@ git push origin feature/your-feature
 
 ## PR Template
 
+GitHub pre-fills new PRs from
+[`.github/PULL_REQUEST_TEMPLATE.md`](https://github.com/submersion-app/submersion/blob/main/.github/PULL_REQUEST_TEMPLATE.md).
+A filled-out description looks like this:
+
 ```markdown
-## Description
+## Related Issue
 
-Brief description of what this PR does.
+Closes #123
 
-## Type of Change
+## Summary
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Breaking change
-- [ ] Documentation
+Fixes the MOD calculation for trimix, which used the O2 fraction of air.
 
-## Changes Made
+## Changes
 
-- Added X
-- Modified Y
-- Removed Z
+- Pass the mix's own O2 fraction into `calculateMod`
+- Add unit tests for air, EAN32 and 18/45 trimix
 
-## Testing
+## Test Plan
 
-- [ ] Unit tests added/updated
-- [ ] Widget tests added/updated
-- [ ] Manual testing performed
+- [x] `flutter test` passes
+- [x] `flutter analyze` passes
+- [x] Manual testing on: macOS
 
-## Checklist
+## Browser
 
-- [ ] Code follows style guidelines
-- [ ] Tests pass locally
-- [ ] Documentation updated
-- [ ] No new warnings from `flutter analyze`
+- [x] Nothing device-only: no hardware, local files, background work, new plugin, media write or database swap
+```
 
+This PR touches no UI code, so its author deleted the Screenshots section.
+Its change is shared calculation code, which the web app runs as is, so
+one box covers the [browser check](#the-browser-check).
+For a PR that does, see
+[Screenshots for UI Changes](#screenshots-for-ui-changes).
+
+## Linking Issues
+
+Every PR must relate to an issue. The **PR Issue Link** check blocks the merge
+until the description links one, and re-runs whenever the description is
+edited.
+
+| The PR... | Write | On merge |
+| --- | --- | --- |
+| fully resolves the issue | `Closes #123` (or `Fixes` / `Resolves`) | the issue closes |
+| is one step of a larger issue | `Part of #123` | the issue stays open |
+| is related work or a follow-up | `Refs #123` or `Related to #123` | the issue stays open |
+
+Things that trip people up:
+
+- **Only the description counts.** GitHub closes an issue only when a closing
+  keyword sits directly before the number in the PR description. A number in
+  the PR title, or a passing mention like "builds on #123", links nothing.
+- **One keyword per issue.** `Closes #1, closes #2` closes both;
+  `Closes #1, #2` closes only #1.
+- **Comments and code do not count.** A link inside an HTML comment
+  (`<!-- -->`) or a code span is ignored, by GitHub and by the check. The
+  template's examples live in a comment for that reason, so an unedited
+  template fails.
+- **Branch names are checked.** If the branch name contains an issue number
+  (`issue-123-...`, `github-issue-123-...`, `feature-request-123-...`), the
+  description must link that issue, with `Refs` if the PR does not resolve it.
+- **No issue yet?** Open one first. Only bot-authored PRs (version bumps,
+  Dependabot) are exempt.
+
+## Screenshots for UI Changes
+
+Every PR that changes anything a user can see must show the change in
+screenshots in its description. Reviewers judge UI work from the images, and
+the images record what shipped long after the branch is gone.
+
+### What counts as a UI change
+
+A PR needs screenshots when it changes files in any of these places:
+
+| Area | Paths |
+| --- | --- |
+| Feature screens, widgets and their providers | `lib/**/presentation/` |
+| Shared widgets, theme and icons | `lib/shared/widgets/`, `lib/core/theme/`, `lib/core/ui/`, `lib/core/icons/` |
+| Platform UI resources | launch screens, app icons and window chrome under `android/`, `ios/`, `macos/`, `windows/`, `linux/` |
+| The browser's shell and what a browser may show | `web/` (the page, its manifest and icons), `lib/core/platform/device_capabilities*.dart` (which features each device offers) |
+
+When in doubt, include a screenshot.
+
+### What to capture
+
+- **Before and after**, side by side or one after the other, for anything that
+  changed. A new screen needs only the after.
+- **Light and dark mode** when the change touches colours, tints or contrast.
+- **Phone and desktop widths** when the change touches layout. Submersion
+  switches between single-pane and master-detail layouts by width, so a change
+  that looks right on one can break on the other.
+- **The platform it affects**, when the change is platform-specific.
+- **Realistic data.** Use a dive with a profile, tanks and a site rather than an
+  empty record, and test with the units that make the change visible (metric
+  and imperial when the change displays units).
+
+### How to add them
+
+In the browser, drag the images into the PR description on github.com. GitHub
+hosts them and puts the Markdown in for you.
+
+`gh` and the REST API cannot upload images, so a PR opened from the command line
+attaches them through a secret gist instead. Each author keeps one gist for this
+project:
+
+1. Find your gist described `PR screenshots: submersion-app/submersion` with
+   `gh gist list --limit 1000`. If there is none, `gh gist create` a short text
+   file and give it that description.
+2. `gh gist clone` it. A gist has no folders, so name the images
+   `<pr>-<nn>-<screen>-<state>.png`. Copy them in, commit and push.
+3. Embed them in the description with raw URLs pinned to that commit:
+   `https://gist.githubusercontent.com/<owner>/<gist id>/raw/<commit>/<file>`
+
+Deleting the gist breaks the images in every PR that links it, so keep it. Treat
+a PR as not ready for review until its screenshots are there.
+
+A filled-out section looks like this:
+
+```markdown
 ## Screenshots
 
-(If applicable)
+| Before | After |
+| --- | --- |
+| ![before](https://github.com/user-attachments/assets/...) | ![after](https://github.com/user-attachments/assets/...) |
 
-## Related Issues
+Dark mode:
 
-Fixes #123
-Related to #456
-```text
+![after, dark](https://github.com/user-attachments/assets/...)
+```
+
+### No visible change
+
+Some PRs touch UI paths without changing what anyone sees: a refactor, a
+provider rewrite, a renamed widget. Tick the template's **No visible UI
+change** box and say in the Summary why nothing looks different. A reviewer who
+disagrees will ask for screenshots.
+
+A PR that touches none of those paths deletes the Screenshots section.
+
+## The browser check
+
+The web app is the same code as the installed apps, built for a browser.
+CI proves that it compiles (`test/architecture/` keeps native-only imports
+and `dart:io`'s `Platform` out of shared code) and that its first run,
+sync round trip, restore and sample logbook work in Firefox and WebKit. It
+cannot prove that a new feature behaves there, so the template's
+**Browser** section asks.
+
+Most PRs tick the first box. A change with a device-only part ticks each
+line it covers:
+
+- **Hardware, local files or background work.** A browser has no
+  Bluetooth, USB, NFC, camera, file paths or background tasks. Add a field
+  to `DeviceCapabilities`, set it false in `DeviceCapabilities.web`, and
+  hide the feature behind it. A screen with its own route also goes in
+  `webUnavailableRoutePrefixes` (or `webUnavailableSections` for a
+  `?selected=` section), so a link to it explains itself instead of
+  failing.
+- **Plugins and files.** A plugin with no web implementation, or code that
+  uses `dart:io` files or `path_provider` behind a shared seam, still
+  builds and then fails when a browser runs it.
+- **Media writes.** Media is read-only in a browser, so anything that
+  writes media, or a synced row about media, checks `mediaAttach`.
+- **Swapping or wiping the database.** Browser tabs share one database, so
+  the step runs under `SyncCoordinator.joinAcrossTabs`, which no tab's sync
+  runs beside.
+- **Opened in a browser.** When the change shows on a screen a browser
+  reaches, build with `scripts/build_web.sh`, serve with
+  `python3 scripts/web/serve_bundle.py --dir build/web --port 8080` and
+  look.
+
+[docs/developer/web.md](../developer/web.md#platform-seams) explains the
+seams behind each line.
+
 ## PR Best Practices
 
 ### Keep PRs Small
@@ -114,15 +254,13 @@ Related to #456
 
 - Explain what and why
 - Include context
-- Link related issues
+- Link the issue with `Closes #N` or `Refs #N` (see [Linking Issues](#linking-issues))
 
 ### Add Screenshots
 
-For UI changes:
-
-- Before and after
-- Different screen sizes
-- Light and dark mode
+Required for every UI change. See
+[Screenshots for UI Changes](#screenshots-for-ui-changes) for what counts and
+what to capture.
 
 ### Respond to Feedback
 
@@ -155,7 +293,8 @@ For UI changes:
 git add .
 git commit -m "fix: address review feedback"
 git push origin feature/your-feature
-```text
+```
+
 ## After Merge
 
 ### Clean Up
@@ -169,7 +308,8 @@ git branch -d feature/your-feature
 
 # Update from upstream
 git pull upstream main
-```text
+```
+
 ### Celebrate
 
 Your contribution is now part of Submersion!
@@ -179,6 +319,9 @@ Your contribution is now part of Submersion!
 ### Bug Fixes
 
 ```markdown
+## Related Issue
+Closes #123
+
 ## Description
 Fixes incorrect depth unit conversion when switching between metric and imperial.
 
@@ -191,10 +334,14 @@ Corrected the conversion factor from 3.28084 to 0.3048 for feet to meters.
 ## Testing
 - Added unit tests for both conversion directions
 - Manually verified in settings page
-```text
+```
+
 ### New Features
 
 ```markdown
+## Related Issue
+Closes #456
+
 ## Description
 Adds a nitrox calculator to the tools section.
 
@@ -209,10 +356,14 @@ Adds a nitrox calculator to the tools section.
 
 ## Documentation
 - Updated tools section in user guide
-```text
+```
+
 ### Refactoring
 
 ```markdown
+## Related Issue
+Refs #789
+
 ## Description
 Refactors dive repository to use a base repository class.
 
@@ -226,7 +377,8 @@ Reduces code duplication across repositories.
 
 ## Testing
 All existing tests pass without modification.
-```text
+```
+
 ## Common Issues
 
 ### Merge Conflicts

@@ -1,0 +1,328 @@
+import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show compute;
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/dive_source_stamp.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_worker.dart';
+import 'package:submersion/features/dive_log/data/sql/analysis_inputs_stamp_sql.dart';
+import 'package:submersion/features/dive_log/domain/entities/derived_metrics.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank.dart'
+    as domain
+    show DiveTank;
+import 'package:submersion/features/dive_log/domain/services/dive_surface_breathing.dart';
+import 'package:submersion/features/dive_log/domain/services/gas_use_window.dart';
+import 'package:submersion/features/dive_log/domain/services/derived_metrics_service.dart';
+
+typedef DerivedMetricsRunner =
+    Future<DiveDerivedMetrics> Function(DerivedMetricsWorkInput input);
+
+/// A dive's merged profile, every recording the dive page shows.
+typedef MergedProfileReader =
+    Future<List<DiveProfilePoint>> Function(String diveId);
+
+/// One repository for every read: a sweep reads thousands of dives, and
+/// each [DiveRepository] builds its own media and deletion collaborators.
+final DiveRepository _mergedProfileSource = DiveRepository();
+
+Future<List<DiveProfilePoint>> _readMergedProfile(String diveId) =>
+    _mergedProfileSource.getMergedProfile(diveId);
+
+Future<DiveDerivedMetrics> _computeOnIsolate(DerivedMetricsWorkInput input) =>
+    compute(computeDerivedMetricsFromBlobs, input);
+
+/// Reads and writes the Explore derived metrics, computing them on a worker
+/// isolate when the stored row is missing or stale.
+///
+/// The stored row carries the query-ready columns the dive query fields
+/// read (`sac_trend`, `final_stop_state`, `sac_change_pct`), written from
+/// the value type's getters so the thresholds live in one place. Tests
+/// substitute a same-isolate [DerivedMetricsRunner].
+class DerivedMetricsRepository {
+  DerivedMetricsRepository({
+    AppDatabase? database,
+    DerivedMetricsRunner? runner,
+    MergedProfileReader? mergedProfile,
+  }) : assert(
+         database == null || mergedProfile != null,
+         'The default merged profile reads DatabaseService.instance, so a '
+         'repository bound to another database must say how to read it.',
+       ),
+       _dbOverride = database,
+       _runner = runner ?? _computeOnIsolate,
+       _mergedProfile = mergedProfile ?? _readMergedProfile;
+
+  final AppDatabase? _dbOverride;
+  final DerivedMetricsRunner _runner;
+  final MergedProfileReader _mergedProfile;
+
+  AppDatabase get _db => _dbOverride ?? DatabaseService.instance.database;
+
+  ProfileSeriesRepository get _series =>
+      ProfileSeriesRepository(database: _dbOverride);
+
+  /// The stored metrics when they describe the dive as it is now, otherwise
+  /// freshly computed and stored before they are returned. Null when the
+  /// dive does not exist.
+  ///
+  /// [force] rebuilds a row that looks current, for a data-quality repair
+  /// that may leave the source stamp where it was (a rewrite that keeps the
+  /// dive's and its series' `updated_at`).
+  Future<DiveDerivedMetrics?> ensureCurrent(
+    String diveId, {
+    bool force = false,
+  }) async {
+    // The dive plus its synced series, which never re-stamp it (#1769).
+    // The stamp is read before anything the row is built from: an edit or
+    // a synced series landing mid-build then leaves a row older than its
+    // stamp, which reads as stale and is rebuilt, never the reverse.
+    final stamp = await _readStamp(diveId);
+    if (stamp == null) return null;
+    if (!force) {
+      final stored = await getMetrics(diveId);
+      if (stored != null && DerivedMetricsService.isCurrent(stored, stamp)) {
+        return stored;
+      }
+    }
+
+    final dive = await (_db.select(
+      _db.dives,
+    )..where((t) => t.id.equals(diveId))).getSingleOrNull();
+    if (dive == null) return null;
+    // By name, so a legacy empty string reads as none recorded, as the query
+    // fields read it.
+    final waterTypes = WaterType.values.asNameMap();
+    final ownWaterType = waterTypes[dive.waterType];
+    final siteId = dive.siteId;
+    final site = ownWaterType != null || siteId == null
+        ? null
+        : await (_db.select(
+            _db.diveSites,
+          )..where((t) => t.id.equals(siteId))).getSingleOrNull();
+
+    final seriesRows = await _series.getPrimaryRowsForDives([diveId]);
+    final tankRows = await (_db.select(
+      _db.diveTanks,
+    )..where((t) => t.diveId.equals(diveId))).get();
+    final pressureRows = await (_db.select(
+      _db.tankPressureSeries,
+    )..where((t) => t.diveId.equals(diveId))).get();
+
+    // A breathed Avelo Hydrotank's pressure rises with the water pumped in
+    // (#4657), and its dive has no whole-dive rate: no cylinder feeds the SAC
+    // drift then, or a pony would stand in for the dive.
+    final unmeasured = tankRows.any(
+      (t) => TankRole.fromName(t.tankRole).isUnmeasuredBreathingGas,
+    );
+    final metrics = await _runner(
+      DerivedMetricsWorkInput(
+        diveId: diveId,
+        primaryBlobs: [for (final r in seriesRows) r.samples],
+        // A suit inflation bottle's pressure is not breathing (issue #4243),
+        // so it never becomes the SAC drift reference.
+        tankBlobs: [
+          for (final t in tankRows)
+            if (!unmeasured &&
+                TankRole.fromName(t.tankRole).pressureMeasuresGasUse)
+              if (_richestSeriesFor(pressureRows, t.id) case final series?)
+                TankPressureBlob(
+                  tankId: t.id,
+                  volumeLiters: t.volume,
+                  samples: series.samples,
+                ),
+        ],
+        diveMode: DiveMode.fromCode(dive.diveMode),
+        sourceUpdatedAt: stamp,
+        computedAtMs: DateTime.now().millisecondsSinceEpoch,
+        environment: DiveEnvironment.forConditions(
+          altitudeMeters: dive.altitude,
+          surfacePressureBar: dive.surfacePressure,
+          waterType: ownWaterType ?? waterTypes[site?.waterType],
+        ),
+      ),
+    );
+
+    // The gas-use window comes from the merged profile, the samples the dive
+    // page computes its own SAC from, so a dive logged by two computers
+    // reports one number everywhere (issue #2930). Every mode gets one: a
+    // gauge dive with logged pressures still shows a SAC. It stretches over
+    // surface time a switch or a falling pressure says a cylinder was
+    // breathed in, from the switches and series the dive page reads.
+    final merged = await _mergedProfile(diveId);
+    final switchRows = await (_db.select(
+      _db.gasSwitches,
+    )..where((t) => t.diveId.equals(diveId))).get();
+    final pressures = await TankPressureRepository(
+      database: _dbOverride,
+    ).getDisplayedTankPressuresForDives([diveId]);
+    final gasUse = diveGasUseWindow(
+      profile: merged,
+      tanks: [
+        for (final t in tankRows)
+          domain.DiveTank(
+            id: t.id,
+            role: TankRole.fromName(t.tankRole),
+            order: t.tankOrder,
+          ),
+      ],
+      switches: [
+        for (final sw in switchRows)
+          (tankId: sw.tankId, timestamp: sw.timestamp),
+      ],
+      tankPressures: pressures[diveId],
+    );
+    final withGasUse = metrics.withGasUse(
+      gasUse.window,
+      breathing: gasUse.breathing,
+    );
+
+    await saveMetrics(withGasUse);
+    return withGasUse;
+  }
+
+  /// A tank can carry one series per computer that logged it. Pick the
+  /// longest, breaking a tie on id, so the same database always produces
+  /// the same metrics.
+  TankPressureSeriesRow? _richestSeriesFor(
+    List<TankPressureSeriesRow> rows,
+    String tankId,
+  ) {
+    TankPressureSeriesRow? best;
+    for (final row in rows) {
+      if (row.tankId != tankId) continue;
+      if (best == null ||
+          row.sampleCount > best.sampleCount ||
+          (row.sampleCount == best.sampleCount &&
+              row.id.compareTo(best.id) < 0)) {
+        best = row;
+      }
+    }
+    return best;
+  }
+
+  /// [diveSourceStampSql] plus the analysis inputs the SAC metrics and the
+  /// surface-breathing window read ([diveAnalysisInputsStampSql]).
+  static final String _stampSql =
+      '(${diveSourceStampSql()} + ${diveAnalysisInputsStampSql('d')})';
+
+  Set<ResultSetImplementation<dynamic, dynamic>> get _stampTables => {
+    ...diveSourceStampTables(_db),
+    ...diveAnalysisInputsStampTables(_db),
+  };
+
+  /// [_stampSql] for one dive, or null when [diveId] does not exist.
+  Future<int?> _readStamp(String diveId) async {
+    final row = await _db
+        .customSelect(
+          'SELECT $_stampSql AS stamp FROM dives d WHERE d.id = ?',
+          variables: [Variable.withString(diveId)],
+          readsFrom: _stampTables,
+        )
+        .getSingleOrNull();
+    return row?.read<int>('stamp');
+  }
+
+  Future<DiveDerivedMetrics?> getMetrics(String diveId) async {
+    final row = await (_db.select(
+      _db.diveDerivedMetricsRows,
+    )..where((t) => t.diveId.equals(diveId))).getSingleOrNull();
+    if (row == null) return null;
+    return DiveDerivedMetrics(
+      diveId: row.diveId,
+      engineVersion: row.engineVersion,
+      sourceUpdatedAt: row.sourceUpdatedAt,
+      computedAt: row.computedAt,
+      finalStopKind: FinalStopKind.values.firstWhere(
+        (k) => k.name == row.finalStopKind,
+        orElse: () => FinalStopKind.none,
+      ),
+      finalStopStartSeconds: row.finalStopStartS,
+      finalStopDurationSeconds: row.finalStopDurationS,
+      finalStopDepthStdDevMeters: row.finalStopDepthStddevM,
+      finalStopMaxExcursionMeters: row.finalStopMaxExcursionM,
+      sacMeanBarPerMin: row.sacMeanBarMin,
+      sacSlopeBarPerMinPerMin: row.sacSlopeBarMinPerMin,
+      sacChangePercent: row.sacChangePct,
+      runtimeSeconds: row.runtimeS,
+      gasUseSeconds: row.gasUseS,
+      gasUseAvgDepthMeters: row.gasUseAvgDepthM,
+      surfaceBreathing:
+          row.surfaceBreathedFromS == null && row.surfaceBreathedUntilS == null
+          ? null
+          : SurfaceBreathing(
+              from: row.surfaceBreathedFromS,
+              until: row.surfaceBreathedUntilS,
+            ),
+      unsupportedReason: row.unsupportedReason == null
+          ? null
+          : UnsupportedReason.values.firstWhere(
+              (r) => r.name == row.unsupportedReason,
+              orElse: () => UnsupportedReason.noProfile,
+            ),
+    );
+  }
+
+  /// Through Drift, so the table tick reaches every list filtered on a
+  /// derived field.
+  Future<void> saveMetrics(DiveDerivedMetrics m) async {
+    await _db
+        .into(_db.diveDerivedMetricsRows)
+        .insertOnConflictUpdate(
+          DiveDerivedMetricsRowsCompanion(
+            diveId: Value(m.diveId),
+            engineVersion: Value(m.engineVersion),
+            sourceUpdatedAt: Value(m.sourceUpdatedAt),
+            computedAt: Value(m.computedAt),
+            finalStopKind: Value(m.finalStopKind.name),
+            finalStopState: Value(m.finalStopState?.name),
+            finalStopStartS: Value(m.finalStopStartSeconds),
+            finalStopDurationS: Value(m.finalStopDurationSeconds),
+            finalStopDepthStddevM: Value(m.finalStopDepthStdDevMeters),
+            finalStopMaxExcursionM: Value(m.finalStopMaxExcursionMeters),
+            sacMeanBarMin: Value(m.sacMeanBarPerMin),
+            sacSlopeBarMinPerMin: Value(m.sacSlopeBarPerMinPerMin),
+            sacTrend: Value(m.sacTrend?.name),
+            sacChangePct: Value(m.sacChangePercent),
+            runtimeS: Value(m.runtimeSeconds),
+            gasUseS: Value(m.gasUseSeconds),
+            gasUseAvgDepthM: Value(m.gasUseAvgDepthMeters),
+            surfaceBreathedFromS: Value(m.surfaceBreathing?.from),
+            surfaceBreathedUntilS: Value(m.surfaceBreathing?.until),
+            unsupportedReason: Value(m.unsupportedReason?.name),
+          ),
+        );
+  }
+
+  /// Dives whose row is missing, built by an older engine, or built from a
+  /// different dive version. Newest dive first: the dives a diver searches
+  /// most are the recent ones, so a long first sweep answers for them early.
+  // stats-scope-exempt: a work list, not an aggregate; an excluded dive
+  // still needs its metrics for the query fields to answer about it.
+  Future<List<String>> staleDiveIds({String? diverId}) async {
+    final diverFilter = diverId != null ? 'AND d.diver_id = ?' : '';
+    final rows = await _db
+        .customSelect(
+          'SELECT d.id AS id FROM dives d '
+          'LEFT JOIN dive_derived_metrics m ON m.dive_id = d.id '
+          'WHERE (m.dive_id IS NULL OR m.engine_version < ? '
+          'OR m.source_updated_at != $_stampSql) $diverFilter '
+          'ORDER BY d.dive_date_time DESC, d.id ASC',
+          variables: [
+            const Variable(DerivedMetricsService.version),
+            if (diverId != null) Variable(diverId),
+          ],
+          readsFrom: {_db.diveDerivedMetricsRows, ..._stampTables},
+        )
+        .get();
+    return rows.map((r) => r.read<String>('id')).toList();
+  }
+
+  Stream<void> watchChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.diveDerivedMetricsRows));
+}

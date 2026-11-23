@@ -4,12 +4,22 @@ Welcome to the Submersion developer documentation. This section covers architect
 
 ## Quick Links
 
-- [Architecture](developer/architecture.md) - System design and layers
-- [Database](developer/database.md) - Schema and Drift ORM
-- [State Management](developer/state-management.md) - Riverpod patterns
-- [Navigation](developer/navigation.md) - go_router setup
-- [Testing](developer/testing.md) - Test organization and running
-- [Building](developer/building.md) - Build and run instructions
+- [Architecture](architecture.md): System design and layers
+- [Database](database.md): Schema and Drift ORM
+- [State Management](state-management.md): Riverpod patterns
+- [Navigation](navigation.md): go_router setup
+- [Testing](testing.md): Test organization and running
+- [Agent access](agent-access.md): The in-app MCP server, its tools, security rules and lifecycle
+- [Local Test Performance](local-test-performance.md): Making local test runs fast
+- [Building](building.md): Build and run instructions
+- [The Web Build](web.md): The browser build: facades, workers, guards, tests and the smoke
+- [Submersion's Own Web Site](web-site-setup.md): web.submersion.app: how releases deploy there, its one-time setup, and rolling back
+- [Release Process](release-process.md): Beta and production releases
+- [Release Secrets](release-secrets-setup.md): Store and signing credentials
+- [Play Production Access](play-production-access.md): Google Play access record and Data safety declaration
+- [Reference](reference/README.md): Entities, enums and file formats
+- [Species Catalog](species-catalog.md): Maintaining the bundled species catalog
+- [Species Identification](species-identification.md): The on-device marine life model pack: building, serving and turning the feature on
 
 ## Technology Stack
 
@@ -162,11 +172,11 @@ class DiveRepository {
 
 ## Contributing
 
-See the [Contributing Guide](contributing/) for:
+See the [Contributing Guide](../contributing/README.md) for:
 
-- [Code Style](contributing/code-style.md)
-- [Pull Requests](contributing/pull-requests.md)
-- [Roadmap](contributing/roadmap.md)
+- [Code Style](../contributing/code-style.md)
+- [Pull Requests](../contributing/pull-requests.md)
+- [Roadmap](../contributing/roadmap.md)
 
 ## Need Help?
 

@@ -1,25 +1,61 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_finding.dart';
+import 'package:submersion/features/equipment/presentation/providers/condition_badge_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/condition_finding_text.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_status_indicator.dart';
+import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Single-row flat tile for the equipment list (maximum density).
 ///
 /// Row: Equipment name (expanded) | Type label (~80px) | Service status (~80px) | Chevron
-class DenseEquipmentListTile extends StatelessWidget {
+class DenseEquipmentListTile extends ConsumerWidget {
   final EquipmentItem item;
   final bool isSelected;
   final VoidCallback? onTap;
+  final bool isSelectionMode;
+  final bool isChecked;
+  final ValueChanged<bool>? onCheckChanged;
 
   const DenseEquipmentListTile({
     super.key,
     required this.item,
     this.isSelected = false,
     this.onTap,
+    this.isSelectionMode = false,
+    this.isChecked = false,
+    this.onCheckChanged,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The rollup (issue #1487): a due part lights its assembly.
+    final rollup = ref.watch(equipmentRollupClockProvider).value?[item.id];
+    final worstClock =
+        rollup == null || rollup.status.severity == ServiceClockSeverity.ok
+        ? null
+        : rollup;
+    // A condition finding competes with the clock for the one badge slot
+    // (condition phase 4b); info findings never reach the map.
+    final finding = ref.watch(conditionBadgeProvider).value?[item.id];
+    final source = pickBadgeSource(
+      clockSeverity: worstClock?.status.severity,
+      finding: finding,
+    );
+    final isAssembly =
+        ref
+            .watch(equipmentComponentsIndexProvider)
+            .value
+            ?.isAssembly(item.id) ??
+        false;
     final colorScheme = Theme.of(context).colorScheme;
     final rowColor = isSelected
         ? colorScheme.primaryContainer.withValues(alpha: 0.5)
@@ -42,9 +78,26 @@ class DenseEquipmentListTile extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(
+              horizontal: kRecordRowDenseHorizontalPadding,
+              vertical: 10,
+            ),
             child: Row(
               children: [
+                SelectionCheckboxSlot(
+                  isSelectionMode: isSelectionMode,
+                  isChecked: isChecked,
+                  onChanged: onCheckChanged,
+                  gap: 8,
+                ),
+                if (isAssembly) ...[
+                  Icon(
+                    Icons.account_tree_outlined,
+                    size: 14,
+                    color: secondaryTextColor,
+                  ),
+                  const SizedBox(width: 4),
+                ],
                 // Equipment name (expanded)
                 Expanded(
                   child: Text(
@@ -60,7 +113,7 @@ class DenseEquipmentListTile extends StatelessWidget {
                 SizedBox(
                   width: 80,
                   child: Text(
-                    item.type.displayName,
+                    item.type.localizedName(context.l10n),
                     style: Theme.of(
                       context,
                     ).textTheme.bodySmall?.copyWith(color: secondaryTextColor),
@@ -70,13 +123,15 @@ class DenseEquipmentListTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 // Service status indicator (~80px)
-                SizedBox(width: 80, child: _buildServiceStatus(context)),
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: secondaryTextColor,
-                    size: 18,
-                  ),
+                SizedBox(
+                  width: 80,
+                  child: source == BadgeSource.finding
+                      ? _buildFindingStatus(context, finding!)
+                      : _buildServiceStatus(context, worstClock),
+                ),
+                RecordListChevron(
+                  size: RecordListChevron.denseSize,
+                  color: secondaryTextColor,
                 ),
               ],
             ),
@@ -86,36 +141,38 @@ class DenseEquipmentListTile extends StatelessWidget {
     );
   }
 
-  Widget _buildServiceStatus(BuildContext context) {
+  Widget _buildFindingStatus(BuildContext context, ConditionBadge finding) {
+    final theme = Theme.of(context);
+    final significant = finding.severity == ConditionSeverity.significant;
+    return Text(
+      conditionFindingShortLabel(finding.rule, context.l10n),
+      style: theme.textTheme.labelSmall?.copyWith(
+        color: significant
+            ? theme.colorScheme.error
+            : theme.colorScheme.tertiary,
+        fontWeight: FontWeight.w600,
+      ),
+      textAlign: TextAlign.right,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _buildServiceStatus(BuildContext context, RollupClock? worstClock) {
     final theme = Theme.of(context);
 
-    if (item.isServiceDue) {
-      return Text(
-        'Service Due',
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.error,
-          fontWeight: FontWeight.w600,
-        ),
+    if (worstClock != null) {
+      // Right-aligned like every other state in this column and the type
+      // column beside it.
+      return ServiceStatusIndicator(
+        clock: worstClock,
+        subjectId: item.id,
         textAlign: TextAlign.right,
-        overflow: TextOverflow.ellipsis,
-      );
-    }
-
-    if (item.daysUntilService != null) {
-      final days = item.daysUntilService!;
-      return Text(
-        'In $days days',
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-        textAlign: TextAlign.right,
-        overflow: TextOverflow.ellipsis,
       );
     }
 
     if (item.status != EquipmentStatus.active) {
       return Text(
-        item.status.displayName,
+        item.status.localizedName(context.l10n),
         style: theme.textTheme.labelSmall?.copyWith(
           color: theme.colorScheme.onSecondaryContainer,
           fontWeight: FontWeight.w500,

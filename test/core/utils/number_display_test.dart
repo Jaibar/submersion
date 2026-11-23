@@ -1,0 +1,198 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:submersion/core/utils/number_display.dart';
+import 'package:submersion/core/utils/number_input.dart';
+
+/// These helpers resolve against `Intl.defaultLocale`, a process global the
+/// app sets from the diver's language at `lib/app.dart`. Pin it per test so
+/// the assertions do not ride on intl's implicit en_US fallback. Number
+/// symbols are statically bundled, so no async initialization is needed here.
+void main() {
+  late String? previousLocale;
+
+  setUp(() {
+    previousLocale = Intl.defaultLocale;
+  });
+
+  tearDown(() {
+    Intl.defaultLocale = previousLocale;
+  });
+
+  group('formatFixedForDisplay', () {
+    test('uses the locale decimal separator', () {
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(12.5, 1), '12,5');
+      Intl.defaultLocale = 'fr';
+      expect(formatFixedForDisplay(12.5, 1), '12,5');
+      Intl.defaultLocale = 'en_US';
+      expect(formatFixedForDisplay(12.5, 1), '12.5');
+    });
+
+    test('keeps trailing zeros, unlike the input seeding helpers', () {
+      // Display precision is load-bearing: "200.0 bar" says the reading was
+      // taken to a tenth. formatDecimalForInput drops that zero on purpose
+      // because a field wants "200", which is why display needs its own helper.
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(200, 1), '200,0');
+      expect(formatFixedForDisplay(2, 2), '2,00');
+    });
+
+    test('renders whole numbers without a separator', () {
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(1250, 0), '1250');
+    });
+
+    test('adds no grouping separator', () {
+      // Grouping is a separate decision from the decimal separator, and #1683
+      // is only about the latter. formatAltitude keeps its own NumberFormat
+      // for the places that do want groups.
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(1250.5, 1), '1250,5');
+    });
+
+    test('localises the minus sign alongside the separator', () {
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(-3.5, 1), '-3,5');
+    });
+
+    test('rounds the way toStringAsFixed does', () {
+      Intl.defaultLocale = 'de';
+      expect(formatFixedForDisplay(25.5555, 1), '25,6');
+      expect(formatFixedForDisplay(25.04, 0), '25');
+    });
+
+    test(
+      'renders the shortest round-tripping decimal, not the binary value',
+      () {
+        // NumberFormat renders the exact binary value, so a fraction cap raised
+        // far enough to stop it rounding makes it emit noise: 12.05 becomes
+        // "12.050000000000001". Going through toStringAsFixed avoids that.
+        Intl.defaultLocale = 'de';
+        expect(formatFixedForDisplay(12.05, 2), '12,05');
+      },
+    );
+  });
+
+  group('localiseDecimalText', () {
+    test('swaps an already-formatted ASCII number', () {
+      Intl.defaultLocale = 'de';
+      expect(localiseDecimalText('25.6'), '25,6');
+      expect(localiseDecimalText('-3.5'), '-3,5');
+    });
+
+    test('leaves a number with no fractional part alone', () {
+      Intl.defaultLocale = 'de';
+      expect(localiseDecimalText('26'), '26');
+    });
+
+    test('is a no-op under a dot-decimal locale', () {
+      Intl.defaultLocale = 'en_US';
+      expect(localiseDecimalText('25.6'), '25.6');
+    });
+  });
+
+  group('formatDecimalForDisplay', () {
+    test('uses the locale decimal separator', () {
+      Intl.defaultLocale = 'de';
+      expect(formatDecimalForDisplay(200.0), '200,0');
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(200.0), '200.0');
+    });
+
+    test('keeps a trailing zero where the input form drops it', () {
+      // Asserted as a pair on purpose: these two differ in exactly one way,
+      // and it is load bearing. A field seeded "200.0" reads as a
+      // half-finished edit, so the input form strips it; a recorded reading
+      // of 200.0 bar states a precision the diver logged, so the display form
+      // keeps it. Routing a display through the input helper silently drops
+      // a decimal the tile was claiming.
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(200.0), '200.0');
+      expect(formatDecimalForInput(200.0), '200');
+    });
+
+    test('localises a negative value', () {
+      Intl.defaultLocale = 'de';
+      expect(formatDecimalForDisplay(-3.5), '-3,5');
+    });
+
+    test('omits grouping separators, matching the input form', () {
+      Intl.defaultLocale = 'de';
+      expect(formatDecimalForDisplay(1250.5), '1250,5');
+    });
+
+    test('does not silently truncate precision', () {
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(12.345678), '12.345678');
+    });
+
+    test('drops floating-point noise, keeping the display trailing zero '
+        '(#2032)', () {
+      // Dart doubles are IEEE-754 binary64 on every platform, so these inputs
+      // are noisy everywhere; the guards make any change to that loud rather
+      // than letting the assertions below pass on a clean input.
+      const noisyHe = 55 / 100.0 * 100.0;
+      const noisySum = 0.1 + 0.2;
+      expect(noisyHe, isNot(55.0), reason: 'guard: the input must be noisy');
+      expect(noisySum, isNot(0.3), reason: 'guard: the input must be noisy');
+
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(noisyHe), '55.0');
+      expect(formatDecimalForDisplay(noisySum), '0.3');
+    });
+
+    test('spells out a magnitude that stringifies in exponent notation', () {
+      // No diver can read "1e+21" off a checklist tile.
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(1e21), isNot(contains('e')));
+    });
+
+    test('renders negative zero as plain zero', () {
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(-0.0), '0.0');
+    });
+
+    test('renders nothing for a non-finite value', () {
+      // Unreachable through parseUserDecimal, which rejects both, but the
+      // display form must not put "NaN" in front of a diver either way.
+      Intl.defaultLocale = 'en_US';
+      expect(formatDecimalForDisplay(double.nan), '');
+      expect(formatDecimalForDisplay(double.infinity), '');
+    });
+  });
+
+  group('formatRatingForDisplay', () {
+    test('shows a whole star count without a decimal, as a dive does', () {
+      // Issue #4573: sites and centers store their rating as a double, so a
+      // 3-star site read "3.0" beside a 3-star dive's "3".
+      Intl.defaultLocale = 'en_US';
+      expect(formatRatingForDisplay(1), '1');
+      expect(formatRatingForDisplay(3.0), '3');
+      expect(formatRatingForDisplay(5), '5');
+    });
+
+    test('keeps a fraction an import brought in, to one decimal', () {
+      Intl.defaultLocale = 'en_US';
+      expect(formatRatingForDisplay(3.5), '3.5');
+      expect(formatRatingForDisplay(4.25), '4.3');
+    });
+
+    test('drops a ".0" left by rounding to one decimal', () {
+      Intl.defaultLocale = 'en_US';
+      expect(formatRatingForDisplay(4.96), '5');
+      expect(formatRatingForDisplay(2.04), '2');
+    });
+
+    test('uses the locale decimal separator for a fraction', () {
+      Intl.defaultLocale = 'de';
+      expect(formatRatingForDisplay(3.5), '3,5');
+      expect(formatRatingForDisplay(3), '3');
+    });
+
+    test('renders nothing for a non-finite value', () {
+      Intl.defaultLocale = 'en_US';
+      expect(formatRatingForDisplay(double.nan), '');
+      expect(formatRatingForDisplay(double.infinity), '');
+    });
+  });
+}

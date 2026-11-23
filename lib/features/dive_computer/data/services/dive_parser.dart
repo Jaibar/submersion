@@ -1,7 +1,7 @@
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
 export '../../../../features/dive_log/data/repositories/dive_computer_repository_impl.dart'
-    show EventData, TankData;
+    show EventData, TankData, GasSwitchData;
 
 /// Service for parsing downloaded dive data into app entities.
 ///
@@ -27,8 +27,11 @@ class DiveParser {
           pressure: sample.pressure,
           temperature: sample.temperature,
           heartRate: sample.heartRate,
+          heading: sample.heading,
           // Preserve tank index for multi-tank pressure tracking
           tankIndex: sample.tankIndex,
+          // Every transmitter's reading at this sample (issue #1223)
+          tankPressures: sample.tankPressures,
           // Decompression and rebreather data
           setpoint: sample.setpoint,
           ppO2: sample.ppo2,
@@ -41,6 +44,21 @@ class DiveParser {
           decoTime: sample.decoTime,
           decoDepth: sample.decoDepth,
           tts: sample.tts,
+          o2Sensor1: sample.o2Sensor1,
+          o2Sensor2: sample.o2Sensor2,
+          o2Sensor3: sample.o2Sensor3,
+          o2Sensor4: sample.o2Sensor4,
+          o2Sensor5: sample.o2Sensor5,
+          o2Sensor6: sample.o2Sensor6,
+          o2SensorMv1: sample.o2SensorMv1,
+          o2SensorMv2: sample.o2SensorMv2,
+          o2SensorMv3: sample.o2SensorMv3,
+          o2SensorMv4: sample.o2SensorMv4,
+          o2SensorMv5: sample.o2SensorMv5,
+          o2SensorMv6: sample.o2SensorMv6,
+          aveloBuoyancy: sample.aveloBuoyancy,
+          aveloGasRemaining: sample.aveloGasRemaining,
+          computerRmv: sample.computerRmv,
         ),
       );
     }
@@ -51,23 +69,36 @@ class DiveParser {
   /// Convert a downloaded dive's tank data to TankData.
   ///
   /// This extracts tank information including gas mix and pressures.
-  List<TankData> parseTanks(DownloadedDive dive) {
-    final tanks = <TankData>[];
+  List<TankData> parseTanks(DownloadedDive dive) =>
+      dive.tanks.map(tankDataFrom).toList();
 
-    for (final tank in dive.tanks) {
-      tanks.add(
-        TankData(
-          index: tank.index,
-          o2Percent: tank.o2Percent,
-          hePercent: tank.hePercent,
-          startPressure: tank.startPressure,
-          endPressure: tank.endPressure,
-          volumeLiters: tank.volumeLiters,
-        ),
-      );
-    }
+  /// One [DownloadedTank] as the repository's [TankData]. Shared with the
+  /// re-parse path so both apply the transmitter registry to the same shape.
+  static TankData tankDataFrom(DownloadedTank tank) => TankData(
+    index: tank.index,
+    o2Percent: tank.o2Percent,
+    hePercent: tank.hePercent,
+    startPressure: tank.startPressure,
+    endPressure: tank.endPressure,
+    volumeLiters: tank.volumeLiters,
+    role: tank.role,
+    roleSource: tank.roleSource?.name,
+    transmitterSerial: tank.transmitterSerial,
+    mixRecorded: tank.mixRecorded,
+    unusedOcGas: tank.unusedOcGas,
+  );
 
-    return tanks;
+  /// Convert a downloaded dive's gas switches to GasSwitchData.
+  List<GasSwitchData> parseGasSwitches(DownloadedDive dive) {
+    return dive.gasSwitches
+        .map(
+          (s) => GasSwitchData(
+            timestamp: s.timeSeconds,
+            depth: s.depth,
+            toTankIndex: s.toTankIndex,
+          ),
+        )
+        .toList();
   }
 
   /// Extract the maximum depth from a dive's profile.
@@ -194,48 +225,6 @@ class DiveParser {
     if (ratePerMin <= 12.0) return AscentRateSeverity.warning;
     return AscentRateSeverity.critical;
   }
-
-  /// Extract dive phases (descent, bottom, ascent).
-  DivePhases analyzeDivePhases(List<ProfileSample> profile) {
-    if (profile.isEmpty) {
-      return const DivePhases(descentEnd: 0, ascentStart: 0, bottomTime: 0);
-    }
-
-    // Find max depth point
-    int maxDepthIndex = 0;
-    double maxDepth = 0.0;
-    for (int i = 0; i < profile.length; i++) {
-      if (profile[i].depth > maxDepth) {
-        maxDepth = profile[i].depth;
-        maxDepthIndex = i;
-      }
-    }
-
-    // Find descent end (first point within 10% of max depth)
-    int descentEnd = 0;
-    final threshold = maxDepth * 0.9;
-    for (int i = 0; i < maxDepthIndex; i++) {
-      if (profile[i].depth >= threshold) {
-        descentEnd = profile[i].timeSeconds;
-        break;
-      }
-    }
-
-    // Find ascent start (last point within 10% of max depth)
-    int ascentStart = profile[maxDepthIndex].timeSeconds;
-    for (int i = profile.length - 1; i > maxDepthIndex; i--) {
-      if (profile[i].depth >= threshold) {
-        ascentStart = profile[i].timeSeconds;
-        break;
-      }
-    }
-
-    return DivePhases(
-      descentEnd: descentEnd,
-      ascentStart: ascentStart,
-      bottomTime: ascentStart - descentEnd,
-    );
-  }
 }
 
 /// Information about a detected safety stop.
@@ -271,17 +260,4 @@ enum AscentRateSeverity {
   safe, // < 9 m/min
   warning, // 9-12 m/min
   critical, // > 12 m/min
-}
-
-/// Information about dive phases.
-class DivePhases {
-  final int descentEnd; // seconds
-  final int ascentStart; // seconds
-  final int bottomTime; // seconds
-
-  const DivePhases({
-    required this.descentEnd,
-    required this.ascentStart,
-    required this.bottomTime,
-  });
 }

@@ -1,0 +1,1037 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/gas_model.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/utils/gas_compressibility.dart';
+import 'package:submersion/features/dive_log/data/services/gas_analysis_service.dart';
+import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart'
+    show DivePhase, SacSegment;
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/deco_stop_windows.dart';
+
+void main() {
+  late GasAnalysisService service;
+
+  setUp(() {
+    service = const GasAnalysisService();
+  });
+
+  // Helper to generate a flat profile at a given depth
+  List<DiveProfilePoint> flatProfile(int seconds, double depth) {
+    return List.generate(
+      seconds ~/ 10 + 1,
+      (i) => DiveProfilePoint(timestamp: i * 10, depth: depth),
+    );
+  }
+
+  List<TankPressurePoint> linearPressure(
+    String tankId,
+    double start,
+    double end,
+    int durationSec,
+  ) {
+    const step = 30;
+    final points = <TankPressurePoint>[];
+    for (int t = 0; t <= durationSec; t += step) {
+      final frac = t / durationSec;
+      points.add(
+        TankPressurePoint(
+          tankId: tankId,
+          timestamp: t,
+          pressure: start + (end - start) * frac,
+        ),
+      );
+    }
+    return points;
+  }
+
+  group('average depth over uneven samples (#3891)', () {
+    // 60 s at 10 m, a 60 s ramp to 30 m, then 480 s at 30 m: 27 m over time
+    // and 20 m over samples.
+    const uneven = [
+      DiveProfilePoint(timestamp: 0, depth: 10),
+      DiveProfilePoint(timestamp: 60, depth: 10),
+      DiveProfilePoint(timestamp: 120, depth: 30),
+      DiveProfilePoint(timestamp: 600, depth: 30),
+    ];
+    const tank = DiveTank(
+      id: 't1',
+      volume: 12,
+      startPressure: 200,
+      endPressure: 100,
+      gasMix: GasMix(o2: 21, he: 0),
+    );
+
+    const backGas = DiveTank(
+      id: 't0',
+      volume: 12,
+      startPressure: 200,
+      endPressure: 150,
+      gasMix: GasMix(o2: 21, he: 0),
+    );
+    GasSwitchWithTank switchTo(String tankId, int timestamp) =>
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs-$tankId-$timestamp',
+            diveId: 'dive-1',
+            timestamp: timestamp,
+            tankId: tankId,
+            createdAt: DateTime(2026),
+          ),
+          tankName: tankId,
+          gasMix: 'air',
+          o2Fraction: 0.21,
+        );
+
+    test('a gas switch segment normalizes by its time-weighted depth', () {
+      final switches = [switchTo('t1', 0)];
+
+      SacSegment segmentOf(List<DiveProfilePoint> profile) => service
+          .calculateGasSwitchSegments(
+            profile: profile,
+            tanks: const [tank],
+            gasSwitches: switches,
+            tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+          )!
+          .single;
+
+      final segment = segmentOf(uneven);
+      expect(segment.avgDepth, closeTo(27, 1e-9));
+      // The same breathing as a flat dive at that depth.
+      final flat = segmentOf([
+        for (final point in uneven)
+          DiveProfilePoint(timestamp: point.timestamp, depth: 27),
+      ]);
+      expect(segment.sacRate, closeTo(flat.sacRate, 1e-9));
+    });
+
+    test('a gas switch between samples starts the mean on the ramp', () {
+      final segment = service
+          .calculateGasSwitchSegments(
+            profile: uneven,
+            tanks: const [tank],
+            gasSwitches: [switchTo('t1', 90)],
+            tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+          )!
+          .last;
+
+      // 20 m at 90 s: 30 s averaging 25 m, then 480 s at 30 m.
+      expect(segment.avgDepth, closeTo((30 * 25 + 480 * 30) / 510, 1e-9));
+      // The average stays inside the band it is reported with.
+      expect(segment.minDepth, closeTo(20, 1e-9));
+      expect(segment.maxDepth, closeTo(30, 1e-9));
+    });
+
+    test('a stint between two samples is still a segment', () {
+      const profile = [
+        DiveProfilePoint(timestamp: 0, depth: 10),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+      ];
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: const [backGas, tank],
+        gasSwitches: [
+          switchTo('t0', 0),
+          switchTo('t1', 120),
+          switchTo('t0', 420),
+        ],
+        tankPressures: {
+          't0': linearPressure('t0', 200, 150, 600),
+          't1': linearPressure('t1', 200, 100, 600),
+        },
+      )!;
+
+      // 120 s to 420 s, from 14 m to 24 m.
+      final stint = segments.singleWhere((s) => s.tankId == 't1');
+      expect(stint.avgDepth, closeTo(19, 1e-9));
+      expect(stint.minDepth, closeTo(14, 1e-9));
+      expect(stint.maxDepth, closeTo(24, 1e-9));
+    });
+
+    test('a usage range between samples still reads the depth there', () {
+      const profile = [
+        DiveProfilePoint(timestamp: 0, depth: 10),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+      ];
+      final results = service.calculateCylinderSac(
+        dive: Dive(
+          id: 'dive-1',
+          dateTime: DateTime(2026),
+          profile: profile,
+          tanks: const [backGas, tank],
+        ),
+        profile: profile,
+        gasSwitches: [switchTo('t0', 0), switchTo('t1', 120)],
+        tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+      );
+
+      // From 120 s, at 14 m, to the end at 30 m.
+      final used = results.singleWhere((c) => c.tankId == 't1');
+      expect(used.avgDepthDuringUse, closeTo(22, 1e-9));
+    });
+
+    test('a phase segment is unchanged by a sample on a flat stretch', () {
+      // A bottom phase on two levels, both within 15% of the maximum: a sample
+      // average moves with each sample added at 30 m, the mean over time does
+      // not.
+      const sparse = [
+        DiveProfilePoint(timestamp: 0, depth: 0),
+        DiveProfilePoint(timestamp: 120, depth: 30),
+        DiveProfilePoint(timestamp: 240, depth: 30),
+        DiveProfilePoint(timestamp: 360, depth: 30),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+        DiveProfilePoint(timestamp: 660, depth: 27),
+        DiveProfilePoint(timestamp: 900, depth: 27),
+        DiveProfilePoint(timestamp: 1100, depth: 27),
+        DiveProfilePoint(timestamp: 1200, depth: 27),
+        DiveProfilePoint(timestamp: 1300, depth: 5),
+        DiveProfilePoint(timestamp: 1480, depth: 5),
+        DiveProfilePoint(timestamp: 1540, depth: 0),
+      ];
+      final dense = [
+        ...sparse.take(2),
+        const DiveProfilePoint(timestamp: 180, depth: 30),
+        ...sparse.skip(2).take(1),
+        const DiveProfilePoint(timestamp: 300, depth: 30),
+        ...sparse.skip(3),
+      ];
+
+      List<double> depthsOf(List<DiveProfilePoint> profile) => service
+          .calculatePhaseSegments(
+            profile: profile,
+            tanks: const [tank],
+            tankPressures: {'t1': linearPressure('t1', 200, 50, 1540)},
+          )!
+          .map((s) => s.avgDepth)
+          .toList();
+
+      final sparseDepths = depthsOf(sparse);
+      final denseDepths = depthsOf(dense);
+      expect(sparseDepths, isNotEmpty);
+      expect(denseDepths, hasLength(sparseDepths.length));
+      for (var i = 0; i < sparseDepths.length; i++) {
+        expect(denseDepths[i], closeTo(sparseDepths[i], 1e-9));
+      }
+    });
+
+    test('a cylinder reports its time-weighted depth during use', () {
+      final results = service.calculateCylinderSac(
+        dive: Dive(
+          id: 'dive-1',
+          dateTime: DateTime(2026),
+          profile: uneven,
+          tanks: const [tank],
+        ),
+        profile: uneven,
+        tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+      );
+
+      expect(results.single.avgDepthDuringUse, closeTo(27, 1e-9));
+    });
+  });
+
+  group('calculateGasSwitchSegments', () {
+    group('time before the first switch', () {
+      const backGas = DiveTank(
+        id: 't1',
+        name: 'Back gas',
+        role: TankRole.backGas,
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      const stage = DiveTank(
+        id: 't2',
+        name: 'Stage',
+        role: TankRole.stage,
+        startPressure: 200,
+        endPressure: 150,
+        gasMix: GasMix(o2: 50, he: 0),
+      );
+
+      GasSwitchWithTank switchTo(DiveTank tank, int timestamp) =>
+          GasSwitchWithTank(
+            gasSwitch: GasSwitch(
+              id: 'gs$timestamp',
+              diveId: 'd1',
+              timestamp: timestamp,
+              tankId: tank.id,
+              createdAt: DateTime.utc(2026),
+            ),
+            tankName: tank.name!,
+            gasMix: tank.gasMix.name,
+            o2Fraction: tank.gasMix.o2 / 100,
+          );
+
+      test('belongs to the starting cylinder', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.map((s) => s.tankId), ['t1', 't2']);
+        expect(segments.first.startTimestamp, 0);
+        expect(segments.first.endTimestamp, 3000);
+        expect(segments.first.tankName, 'Back gas');
+      });
+
+      test('prorates over the starting cylinder\'s own stint', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        // 100 bar over its 50 minutes at 3 ata, not over the 60 minute dive.
+        expect(segments.first.sacRate, closeTo(100 / 50 / 3.0, 0.02));
+      });
+
+      test('stops at the dive end when a switch falls after it', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3700)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.single.tankId, 't1');
+        expect(segments.single.endTimestamp, 3600);
+      });
+
+      test('a later switch past the dive end stops at it too', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000), switchTo(backGas, 3700)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.last.endTimestamp, 3600);
+      });
+
+      test('adds nothing when a switch opens the dive', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(backGas, 0), switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.map((s) => s.startTimestamp), [0, 3000]);
+      });
+    });
+
+    test('a stage tank prorates over its own stint, not the whole dive '
+        '(#110)', () {
+      // 60-minute dive: back gas for 50 minutes, then a deco tank for the
+      // last 10. Neither has a pressure series, so both fall back to
+      // start/end pressures. The deco tank's whole 50 bar drop belongs to
+      // its 10-minute stint -- spreading it across the full dive would
+      // understate its SAC six-fold, and would disagree with
+      // calculateCylinderSac, which prorates over the usage range.
+      const backGas = DiveTank(
+        id: 't1',
+        name: 'Back gas',
+        role: TankRole.backGas,
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      const decoTank = DiveTank(
+        id: 't2',
+        name: 'Deco 50',
+        role: TankRole.deco,
+        startPressure: 200,
+        endPressure: 150,
+        gasMix: GasMix(o2: 50, he: 0),
+      );
+      final profile = flatProfile(60 * 60, 20.0);
+      GasSwitchWithTank sw(String id, int ts, String tankId) =>
+          GasSwitchWithTank(
+            gasSwitch: GasSwitch(
+              id: id,
+              diveId: 'dive-1',
+              timestamp: ts,
+              tankId: tankId,
+              createdAt: DateTime(2026),
+            ),
+            tankName: tankId,
+            gasMix: 'mix',
+            o2Fraction: 0.21,
+          );
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [backGas, decoTank],
+        gasSwitches: [sw('gs1', 0, 't1'), sw('gs2', 50 * 60, 't2')],
+        tankPressures: const {},
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!.length, 2);
+
+      final deco = segments.last;
+      expect(deco.tankId, 't2');
+      // Full 50 bar over the 10-minute stint at 3.0 ata.
+      expect(
+        deco.sacRate,
+        closeTo(50 / 10 / 3.0, 0.02),
+        reason: 'whole-dive proration would charge only 50 * (10/60) bar here',
+      );
+    });
+
+    test('fallback prorates against the whole dive, not the segment '
+        '(#110)', () {
+      // No per-sample pressure series (common on sidemount, where the
+      // attributed tank's series is flat while the diver breathes the
+      // other cylinder): the start/end-pressure fallback applies.
+      const tank = DiveTank(
+        id: 't1',
+        name: 'Sidemount L',
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(30 * 60, 20.0);
+      GasSwitchWithTank sw(String id, int ts) => GasSwitchWithTank(
+        gasSwitch: GasSwitch(
+          id: id,
+          diveId: 'dive-1',
+          timestamp: ts,
+          tankId: 't1',
+          createdAt: DateTime(2026),
+        ),
+        tankName: 'Sidemount L',
+        gasMix: 'Air',
+        o2Fraction: 0.21,
+      );
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [tank],
+        gasSwitches: [sw('gs1', 0), sw('gs2', 600), sw('gs3', 1200)],
+        tankPressures: const {},
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!.length, 3);
+      // Each 10-minute third gets one third of the 100 bar drop:
+      // 33.33 bar / 10 min / 3.0 atm. The old fallback divided the segment
+      // by ITS OWN duration, charging every segment the whole cylinder and
+      // inflating segment SAC by the number of segments.
+      for (final s in segments) {
+        expect(s.sacRate, closeTo(100 / 3 / 10 / 3.0, 0.02));
+      }
+      final totalConsumed = segments.fold<double>(
+        0,
+        (sum, s) => sum + s.gasConsumed,
+      );
+      expect(totalConsumed, closeTo(100, 1.0));
+    });
+
+    test('falls back to whole-dive proration when the gas switches name no '
+        'known cylinder (#110)', () {
+      // Every gas switch points at a tank id absent from the dive's tank list
+      // (stale ids survive a re-import), so each segment resolves to the first
+      // cylinder through the orElse fallback and no switch identifies that
+      // cylinder's usage window. Proration must then widen to the whole dive
+      // instead of collapsing onto the segment.
+      const tank = DiveTank(
+        id: 't1',
+        name: 'Back gas',
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(30 * 60, 20.0);
+      GasSwitchWithTank sw(String id, int ts, String tankId) =>
+          GasSwitchWithTank(
+            gasSwitch: GasSwitch(
+              id: id,
+              diveId: 'dive-1',
+              timestamp: ts,
+              tankId: tankId,
+              createdAt: DateTime(2026),
+            ),
+            tankName: tankId,
+            gasMix: 'Air',
+            o2Fraction: 0.21,
+          );
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [tank],
+        gasSwitches: [sw('gs1', 0, 'orphan-a'), sw('gs2', 15 * 60, 'orphan-b')],
+        tankPressures: const {},
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!.length, 2);
+      // Whole-dive window: each 15-minute half carries half of the 100 bar
+      // drop, i.e. 50 bar / 15 min / 3.0 ata.
+      for (final s in segments) {
+        expect(s.sacRate, closeTo(50 / 15 / 3.0, 0.02));
+      }
+      // The cylinder is charged exactly once across the dive.
+      expect(
+        segments.fold<double>(0, (sum, s) => sum + s.gasConsumed),
+        closeTo(100, 1.0),
+      );
+    });
+
+    test('computes SAC with Z-factor for segments with tank volume', () {
+      const tank = DiveTank(
+        id: 't1',
+        name: 'AL80',
+        volume: 11.1,
+        startPressure: 200,
+        endPressure: 50,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(42 * 60, 20.0);
+      final gasSwitches = [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs1',
+            diveId: 'dive-1',
+            timestamp: 0,
+            tankId: 't1',
+            createdAt: DateTime(2026),
+          ),
+          tankName: 'AL80',
+          gasMix: 'Air',
+          o2Fraction: 0.21,
+        ),
+      ];
+      final tankPressures = {'t1': linearPressure('t1', 200, 50, 42 * 60)};
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [tank],
+        gasSwitches: gasSwitches,
+        tankPressures: tankPressures,
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!, isNotEmpty);
+
+      // Segment SAC is in bar/min at surface (pressure-based)
+      // 150 bar used / 42 min / 3.0 atm = 1.19 bar/min (ideal)
+      // With Z-factor: slightly lower
+      final totalSac = segments.first.sacRate;
+      expect(totalSac, greaterThan(0.9));
+      expect(totalSac, lessThan(1.19));
+    });
+
+    test('uses proportional fallback when no time-series pressure', () {
+      const tank = DiveTank(
+        id: 't1',
+        volume: 12.0,
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 32, he: 0),
+      );
+      final profile = flatProfile(50 * 60, 15.0);
+      final gasSwitches = [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs1',
+            diveId: 'dive-1',
+            timestamp: 0,
+            tankId: 't1',
+            createdAt: DateTime(2026),
+          ),
+          tankName: 'Tank',
+          gasMix: 'EAN32',
+          o2Fraction: 0.32,
+        ),
+      ];
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [tank],
+        gasSwitches: gasSwitches,
+        // No tankPressures - will use proportional fallback
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!, isNotEmpty);
+      // SAC should be positive and reasonable
+      expect(segments.first.sacRate, greaterThan(0));
+      expect(segments.first.sacRate, lessThan(30));
+    });
+
+    test('falls back to simple formula when tank has no volume', () {
+      const tank = DiveTank(
+        id: 't1',
+        // No volume - can't use Z-factor correction
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(50 * 60, 20.0);
+      final gasSwitches = [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs1',
+            diveId: 'dive-1',
+            timestamp: 0,
+            tankId: 't1',
+            createdAt: DateTime(2026),
+          ),
+          tankName: 'Tank',
+          gasMix: 'Air',
+          o2Fraction: 0.21,
+        ),
+      ];
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: [tank],
+        gasSwitches: gasSwitches,
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!, isNotEmpty);
+      // Without volume, falls back to pressureUsed / durationMin / ambientAtm
+      // 100 bar / 50 min / 3.0 atm ≈ 0.667 bar/min
+      expect(segments.first.sacRate, closeTo(0.667, 0.05));
+    });
+  });
+
+  group('calculatePhaseSegments', () {
+    test('computes SAC with Z-factor using time-series data', () {
+      const tank = DiveTank(
+        id: 't1',
+        volume: 11.1,
+        startPressure: 200,
+        endPressure: 80,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      // Profile: descend, bottom at 25m, ascend
+      final profile = <DiveProfilePoint>[];
+      // 2 min descent
+      for (int t = 0; t <= 120; t += 10) {
+        profile.add(DiveProfilePoint(timestamp: t, depth: t / 120 * 25));
+      }
+      // 35 min at 25m
+      for (int t = 130; t <= 2220; t += 10) {
+        profile.add(DiveProfilePoint(timestamp: t, depth: 25.0));
+      }
+      // 5 min ascent
+      for (int t = 2230; t <= 2520; t += 10) {
+        profile.add(
+          DiveProfilePoint(timestamp: t, depth: 25.0 * (1 - (t - 2220) / 300)),
+        );
+      }
+
+      final tankPressures = {'t1': linearPressure('t1', 200, 80, 2520)};
+
+      final segments = service.calculatePhaseSegments(
+        profile: profile,
+        tanks: [tank],
+        tankPressures: tankPressures,
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!, isNotEmpty);
+      // All segment SAC rates should be positive
+      for (final seg in segments) {
+        expect(seg.sacRate, greaterThan(0));
+      }
+    });
+
+    group('a hold in the safety stop band (#4079)', () {
+      const tank = DiveTank(
+        id: 't1',
+        volume: 11.1,
+        startPressure: 200,
+        endPressure: 80,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      // 10 minutes at 30 m, a minute up, then 6 minutes at 5 m from 660 s.
+      final profile = <DiveProfilePoint>[
+        for (var t = 0; t < 600; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 30),
+        for (var t = 600; t < 660; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 30 - 25 * (t - 600) / 60),
+        for (var t = 660; t <= 1020; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 5),
+      ];
+      List<DivePhase?> phases(List<StopWindow> decoStops) => service
+          .calculatePhaseSegments(
+            profile: profile,
+            tanks: const [tank],
+            tankPressures: {'t1': linearPressure('t1', 200, 80, 1020)},
+            decoStops: decoStops,
+          )!
+          .map((s) => s.phase)
+          .toList();
+
+      test('is a safety stop by default', () {
+        expect(phases(const []), contains(DivePhase.safetyStop));
+        expect(phases(const []), isNot(contains(DivePhase.deco)));
+      });
+
+      test('is a deco stop inside a deco stop window', () {
+        final result = phases(const [(start: 660, end: 1020)]);
+
+        expect(result, contains(DivePhase.deco));
+        expect(result, isNot(contains(DivePhase.safetyStop)));
+      });
+
+      test('is a deco stop on a sample the NDL curve reads as in deco', () {
+        // Too short to be a window: a minute at 5 m, sampled every 2 seconds.
+        final short = <DiveProfilePoint>[
+          for (var t = 0; t < 600; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 30),
+          for (var t = 600; t <= 660; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 5),
+          for (var t = 662; t <= 720; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 0),
+        ];
+        List<DivePhase?> shortPhases(List<int> ndlCurve) => service
+            .calculatePhaseSegments(
+              profile: short,
+              tanks: const [tank],
+              tankPressures: {'t1': linearPressure('t1', 200, 80, 720)},
+              ndlCurve: ndlCurve,
+            )!
+            .map((s) => s.phase)
+            .toList();
+
+        expect(shortPhases(const []), contains(DivePhase.safetyStop));
+        expect(
+          shortPhases(List.filled(short.length - 1, -1)),
+          contains(DivePhase.safetyStop),
+          reason: 'a curve of another length is another series',
+        );
+        expect(
+          shortPhases(List.filled(short.length, -1)),
+          isNot(contains(DivePhase.safetyStop)),
+        );
+      });
+
+      test('stays a safety stop inside a safety stop window', () {
+        final result = service
+            .calculatePhaseSegments(
+              profile: profile,
+              tanks: const [tank],
+              tankPressures: {'t1': linearPressure('t1', 200, 80, 1020)},
+              safetyStops: const [(start: 660, end: 1020)],
+              ndlCurve: List.filled(profile.length, -1),
+            )!
+            .map((s) => s.phase);
+
+        expect(result, contains(DivePhase.safetyStop));
+        expect(result, isNot(contains(DivePhase.deco)));
+      });
+
+      test('stays a safety stop outside every window', () {
+        final result = phases(const [(start: 0, end: 300)]);
+
+        expect(result, contains(DivePhase.safetyStop));
+        expect(result, isNot(contains(DivePhase.deco)));
+      });
+    });
+
+    test('falls back to whole-dive proration when no gas switches identify '
+        'the active cylinder (#110)', () {
+      // A sidemount pair with no gas switches logged: neither cylinder is back
+      // gas, so the usage window is indeterminate and every segment must
+      // prorate against the whole dive.
+      const left = DiveTank(
+        id: 't1',
+        name: 'Sidemount L',
+        role: TankRole.sidemountLeft,
+        startPressure: 200,
+        endPressure: 80,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      const right = DiveTank(
+        id: 't2',
+        name: 'Sidemount R',
+        role: TankRole.sidemountRight,
+        startPressure: 200,
+        endPressure: 90,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = <DiveProfilePoint>[];
+      for (int t = 0; t <= 120; t += 10) {
+        profile.add(DiveProfilePoint(timestamp: t, depth: t / 120 * 25));
+      }
+      for (int t = 130; t <= 2220; t += 10) {
+        profile.add(DiveProfilePoint(timestamp: t, depth: 25.0));
+      }
+      for (int t = 2230; t <= 2520; t += 10) {
+        profile.add(
+          DiveProfilePoint(timestamp: t, depth: 25.0 * (1 - (t - 2220) / 300)),
+        );
+      }
+
+      // No gasSwitches: the active-tank lookup falls through to the first
+      // cylinder, which is not back gas, so the usage range is unknowable.
+      final segments = service.calculatePhaseSegments(
+        profile: profile,
+        tanks: [left, right],
+      );
+
+      expect(segments, isNotNull);
+      expect(segments!, isNotEmpty);
+      const diveDurationSec = 2520;
+      for (final seg in segments) {
+        expect(seg.tankId, 't1');
+        expect(seg.sacRate, greaterThan(0));
+        // The 120 bar drop is spread across the whole dive, not the segment,
+        // so each segment's share is strictly proportional to its length.
+        final durationSec = seg.endTimestamp - seg.startTimestamp;
+        expect(
+          seg.gasConsumed,
+          closeTo(120 * durationSec / diveDurationSec, 0.01),
+          reason: 'segment must carry only its whole-dive share of the drop',
+        );
+      }
+    });
+
+    test(
+      'uses transmitter pressure keyed under an orphaned tank id (#510)',
+      () {
+        // Same re-keyed-pressure condition as the per-cylinder path: the tank
+        // carries no start/end pressure, so segment SAC can only come from the
+        // time-series, which is stored under a stale tank id.
+        const tank = DiveTank(
+          id: 'current-tank',
+          volume: 11.1,
+          gasMix: GasMix(o2: 21, he: 0),
+        );
+        final profile = <DiveProfilePoint>[];
+        for (int t = 0; t <= 120; t += 10) {
+          profile.add(DiveProfilePoint(timestamp: t, depth: t / 120 * 25));
+        }
+        for (int t = 130; t <= 2220; t += 10) {
+          profile.add(DiveProfilePoint(timestamp: t, depth: 25.0));
+        }
+        for (int t = 2230; t <= 2520; t += 10) {
+          profile.add(
+            DiveProfilePoint(
+              timestamp: t,
+              depth: 25.0 * (1 - (t - 2220) / 300),
+            ),
+          );
+        }
+
+        final tankPressures = {
+          'stale-uuid': linearPressure('stale-uuid', 200, 80, 2520),
+        };
+
+        final segments = service.calculatePhaseSegments(
+          profile: profile,
+          tanks: [tank],
+          tankPressures: tankPressures,
+        );
+
+        expect(segments, isNotNull);
+        expect(segments!, isNotEmpty);
+        for (final seg in segments) {
+          expect(seg.sacRate, greaterThan(0));
+        }
+      },
+    );
+  });
+
+  group('_calculateSacFromTimeSeries (via calculateCylinderSac)', () {
+    test('uses Z-factor correction with time-series pressure data', () {
+      const tank = DiveTank(
+        id: 't1',
+        volume: 12.0,
+        startPressure: 200,
+        endPressure: 60,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(50 * 60, 20.0);
+      final tankPressures = {'t1': linearPressure('t1', 200, 60, 50 * 60)};
+
+      final dive = Dive(
+        id: 'dive-ts',
+        dateTime: DateTime(2026),
+        runtime: const Duration(minutes: 50),
+        avgDepth: 20.0,
+        tanks: const [tank],
+        profile: profile,
+      );
+
+      final results = service.calculateCylinderSac(
+        dive: dive,
+        profile: profile,
+        tankPressures: tankPressures,
+      );
+
+      expect(results, hasLength(1));
+      expect(results.first.sacRate, isNotNull);
+
+      // Verify Z-factor correction: with Z, SAC should be lower than ideal
+      // Ideal: (200-60) / 50 / 3.0 = 0.933 bar/min
+      // With Z-factor, the effective surface liters used is less,
+      // so SAC in bar/min equivalent should be lower
+      final sacRate = results.first.sacRate!;
+      expect(sacRate, lessThan(0.933));
+      expect(sacRate, greaterThan(0.7));
+
+      // Verify volumetric SAC matches gasVolume() calculation
+      final expectedGasUsed =
+          gasVolume(
+            tankSizeLiters: 12.0,
+            pressureBar: 200,
+            o2Percent: 21,
+            model: GasModel.real,
+          ) -
+          gasVolume(
+            tankSizeLiters: 12.0,
+            pressureBar: 60,
+            o2Percent: 21,
+            model: GasModel.real,
+          );
+      final expectedSacLpm = expectedGasUsed / 50 / 3.0;
+      expect(results.first.rmv, closeTo(expectedSacLpm, 0.1));
+    });
+
+    test('falls back to pressure-based SAC when tank has no volume', () {
+      const tank = DiveTank(
+        id: 't1',
+        // No volume — triggers fallback in _calculateSacFromTimeSeries
+        startPressure: 200,
+        endPressure: 60,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      final profile = flatProfile(50 * 60, 20.0);
+      final tankPressures = {'t1': linearPressure('t1', 200, 60, 50 * 60)};
+
+      final dive = Dive(
+        id: 'dive-no-vol-ts',
+        dateTime: DateTime(2026),
+        runtime: const Duration(minutes: 50),
+        avgDepth: 20.0,
+        tanks: const [tank],
+        profile: profile,
+      );
+
+      final results = service.calculateCylinderSac(
+        dive: dive,
+        profile: profile,
+        tankPressures: tankPressures,
+      );
+
+      expect(results, hasLength(1));
+      expect(results.first.sacRate, isNotNull);
+      // Pressure-based: (200-60) / 50 / 3.0 ≈ 0.933 bar/min
+      expect(results.first.sacRate!, closeTo(0.933, 0.01));
+      // sacVolume should be null (no tank volume)
+      expect(results.first.rmv, isNull);
+    });
+
+    test(
+      'calculateCylinderSac non-time-series branch uses Z-corrected SAC when volume available',
+      () {
+        const tank = DiveTank(
+          id: 't1',
+          volume: 12.0,
+          startPressure: 200,
+          endPressure: 60,
+          gasMix: GasMix(o2: 21, he: 0),
+        );
+        // Minimal profile for avgDepth, but no tankPressures → non-time-series
+        final profile = flatProfile(50 * 60, 20.0);
+
+        final dive = Dive(
+          id: 'dive-no-ts',
+          dateTime: DateTime(2026),
+          runtime: const Duration(minutes: 50),
+          avgDepth: 20.0,
+          tanks: const [tank],
+          profile: profile,
+        );
+
+        final results = service.calculateCylinderSac(
+          dive: dive,
+          profile: profile,
+          // No tankPressures → skips time-series branch
+        );
+
+        expect(results, hasLength(1));
+        expect(results.first.sacRate, isNotNull);
+        // Z-corrected: should be close to but not identical to simple pressure math
+        expect(results.first.sacRate!, closeTo(0.933, 0.05));
+        expect(results.first.rmv, isNotNull);
+      },
+    );
+
+    test(
+      'calculateCylinderSac non-time-series branch falls back to pressure-based when no volume',
+      () {
+        const tank = DiveTank(
+          id: 't1',
+          // No volume
+          startPressure: 200,
+          endPressure: 60,
+          gasMix: GasMix(o2: 21, he: 0),
+        );
+        final profile = flatProfile(50 * 60, 20.0);
+
+        final dive = Dive(
+          id: 'dive-no-ts-no-vol',
+          dateTime: DateTime(2026),
+          runtime: const Duration(minutes: 50),
+          avgDepth: 20.0,
+          tanks: const [tank],
+          profile: profile,
+        );
+
+        final results = service.calculateCylinderSac(
+          dive: dive,
+          profile: profile,
+        );
+
+        expect(results, hasLength(1));
+        expect(results.first.sacRate, isNotNull);
+        // Simple pressure-based: (200-60) / 50 / 3.0 ≈ 0.933 bar/min
+        expect(results.first.sacRate!, closeTo(0.933, 0.01));
+        expect(results.first.rmv, isNull);
+      },
+    );
+
+    test(
+      'calculateCylinderSac returns null sacRate when endPressure >= startPressure (no gas used)',
+      () {
+        const tank = DiveTank(
+          id: 't1',
+          volume: 12.0,
+          startPressure: 100,
+          endPressure: 100, // zero gas used
+          gasMix: GasMix(o2: 21, he: 0),
+        );
+        final profile = flatProfile(50 * 60, 20.0);
+
+        final dive = Dive(
+          id: 'dive-no-gas-used',
+          dateTime: DateTime(2026),
+          runtime: const Duration(minutes: 50),
+          avgDepth: 20.0,
+          tanks: const [tank],
+          profile: profile,
+        );
+
+        final results = service.calculateCylinderSac(
+          dive: dive,
+          profile: profile,
+        );
+
+        expect(results, hasLength(1));
+        expect(results.first.sacRate, isNull);
+      },
+    );
+  });
+}

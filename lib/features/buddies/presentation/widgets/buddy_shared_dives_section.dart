@@ -1,0 +1,206 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_log/presentation/navigation/open_dive_list.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_number_badge.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Card listing the newest dives shared with a buddy, capped at five, with a
+/// "view all" link that hands the buddy's full dive-id set to the dive list
+/// filter (#982: the year is shown alongside the date since the list
+/// routinely spans several years, unlike a bare "Mar 28").
+///
+/// Split out of [BuddyDetailPage] to keep that file under the project's
+/// 800-line guideline.
+class BuddySharedDivesSection extends ConsumerWidget {
+  final String buddyId;
+
+  const BuddySharedDivesSection({super.key, required this.buddyId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final diveIdsAsync = ref.watch(diveIdsForBuddyProvider(buddyId));
+    final divesAsync = ref.watch(divesForBuddyProvider(buddyId));
+    final theme = Theme.of(context);
+    final units = ref.watch(unitFormatterProvider);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  context.l10n.buddies_section_sharedDives,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                diveIdsAsync.when(
+                  data: (ids) => TextButton(
+                    onPressed: ids.isEmpty
+                        ? null
+                        : () {
+                            // Set filter to show only shared dives with this buddy
+                            openDiveList(
+                              context,
+                              ref,
+                              DiveFilterState(diveIds: ids, buddyId: buddyId),
+                            );
+                          },
+                    child: Text(
+                      context.l10n.buddies_action_viewAll(ids.length),
+                    ),
+                  ),
+                  loading: () => const SizedBox.shrink(),
+                  error: (e, st) => const SizedBox.shrink(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            divesAsync.when(
+              data: (dives) {
+                if (dives.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: Text(context.l10n.buddies_detail_noDivesTogether),
+                    ),
+                  );
+                }
+                // The newest dives in the trip Dives tab's row format.
+                final displayDives = dives
+                    .take(buddySharedDivePreviewLimit)
+                    .toList();
+                return Column(
+                  children: displayDives.map((dive) {
+                    final siteName =
+                        dive.site?.name ??
+                        context.l10n.diveLog_listPage_unknownSite;
+                    // Its own node: a lone row would otherwise merge into
+                    // the card's, reading the heading as part of the button.
+                    return Semantics(
+                      container: true,
+                      button: true,
+                      label: switch (dive.diveNumber) {
+                        final number? =>
+                          context.l10n.diveLog_listPage_semanticsDiveAtSite(
+                            number,
+                            siteName,
+                          ),
+                        null => siteName,
+                      },
+                      child: InkWell(
+                        onTap: () => context.push('/dives/${dive.id}'),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 8,
+                            horizontal: 4,
+                          ),
+                          child: Row(
+                            children: [
+                              // The row's label already names the number
+                              // and site, so neither is read twice.
+                              ExcludeSemantics(
+                                child: DiveNumberBadge(
+                                  diveNumber: dive.diveNumber,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              // Dive details
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    ExcludeSemantics(
+                                      child: Text(
+                                        siteName,
+                                        style: theme.textTheme.bodyMedium
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      units.formatDate(dive.dateTime),
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            color: theme
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Stats
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  if (dive.maxDepth != null)
+                                    Text(
+                                      units.formatDepth(dive.maxDepth),
+                                      style: theme.textTheme.bodyMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                    ),
+                                  // Measured runtime, as the trip Dives tab
+                                  // shows it (bottom time is derived and
+                                  // never stands in for runtime).
+                                  if (dive.measuredRuntime case final runtime?)
+                                    Text(
+                                      context.l10n.diveLog_sources_minutes(
+                                        runtime.inMinutes,
+                                      ),
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            color: theme
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                          ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(width: 4),
+                              ExcludeSemantics(
+                                child: Icon(
+                                  Icons.chevron_right,
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
+              loading: () => const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator.adaptive(),
+                ),
+              ),
+              error: (e, st) =>
+                  Text(context.l10n.buddies_error_unableToLoadDives),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

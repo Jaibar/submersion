@@ -1,19 +1,36 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/features/dive_computer/domain/entities/device_model.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/discovery_providers.dart';
+import 'package:submersion/features/dive_computer/presentation/widgets/garmin_watch_usb_entry.dart';
+import 'package:submersion/features/dive_computer/presentation/widgets/usb_manufacturer_group.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Widget for the scan/select step of the discovery wizard.
 ///
-/// Provides tabs for Bluetooth and USB device discovery.
+/// Provides tabs for Bluetooth and USB device discovery, or the Bluetooth scan
+/// alone where the platform has no USB host.
 class ScanStepWidget extends ConsumerStatefulWidget {
   final void Function(DiscoveredDevice device) onDeviceSelected;
 
-  const ScanStepWidget({super.key, required this.onDeviceSelected});
+  /// Called when the Garmin entry in the USB list is picked; with none,
+  /// there is no Garmin entry. The entry is offered on Windows only
+  /// ([GarminWatchUsbEntry.isOffered], issue #4223).
+  final VoidCallback? onGarminWatchSelected;
+
+  const ScanStepWidget({
+    super.key,
+    required this.onDeviceSelected,
+    this.onGarminWatchSelected,
+  });
+
+  /// Whether this platform can download over a USB cable. iOS has no USB
+  /// host, so every model in the USB tab would fail there (issue #2837).
+  static bool get offersUsb => defaultTargetPlatform != TargetPlatform.iOS;
 
   @override
   ConsumerState<ScanStepWidget> createState() => _ScanStepWidgetState();
@@ -21,27 +38,38 @@ class ScanStepWidget extends ConsumerStatefulWidget {
 
 class _ScanStepWidgetState extends ConsumerState<ScanStepWidget>
     with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+  TabController? _tabController;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    if (ScanStepWidget.offersUsb) {
+      _tabController = TabController(length: 2, vsync: this);
+    }
 
-    // Start Bluetooth scanning when widget is shown
+    // Start Bluetooth scanning when widget is shown. Not stopped when this
+    // step goes away: the wizard moves past it with the scan still running,
+    // because the connect needs that on Android (issue #3369), and stops the
+    // scan itself as it closes (issue #4088).
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       ref.read(discoveryNotifierProvider.notifier).startScan();
     });
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    _tabController?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final tabController = _tabController;
+    if (tabController == null) {
+      return _BluetoothScanTab(onDeviceSelected: widget.onDeviceSelected);
+    }
+
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
@@ -55,7 +83,7 @@ class _ScanStepWidgetState extends ConsumerState<ScanStepWidget>
             borderRadius: BorderRadius.circular(12),
           ),
           child: TabBar(
-            controller: _tabController,
+            controller: tabController,
             indicator: BoxDecoration(
               color: colorScheme.primaryContainer,
               borderRadius: BorderRadius.circular(10),
@@ -92,10 +120,13 @@ class _ScanStepWidgetState extends ConsumerState<ScanStepWidget>
         // Tab content
         Expanded(
           child: TabBarView(
-            controller: _tabController,
+            controller: tabController,
             children: [
               _BluetoothScanTab(onDeviceSelected: widget.onDeviceSelected),
-              _UsbDevicesTab(onDeviceSelected: widget.onDeviceSelected),
+              _UsbDevicesTab(
+                onDeviceSelected: widget.onDeviceSelected,
+                onGarminWatchSelected: widget.onGarminWatchSelected,
+              ),
             ],
           ),
         ),
@@ -158,7 +189,9 @@ class _BluetoothScanTab extends ConsumerWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    discoveryState.errorMessage!,
+                    discoveryState.bluetoothUnavailable
+                        ? context.l10n.diveComputer_scan_bluetoothUnavailable
+                        : discoveryState.errorMessage!,
                     style: TextStyle(color: colorScheme.onErrorContainer),
                   ),
                 ),
@@ -214,36 +247,48 @@ class _BluetoothScanTab extends ConsumerWidget {
     );
   }
 
+  /// The empty state fills the space left by the scanning indicator and the
+  /// error banner. It is a scroll view so a short tab (a phone in landscape,
+  /// a small desktop window) scrolls instead of overflowing; with room to
+  /// spare the sliver stretches to the viewport and the content stays
+  /// centred.
   Widget _buildEmptyState(BuildContext context, ColorScheme colorScheme) {
     final theme = Theme.of(context);
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.bluetooth_searching,
-              size: 64,
-              color: colorScheme.primary.withValues(alpha: 0.5),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              context.l10n.diveComputer_scan_lookingForDevicesTitle,
-              style: theme.textTheme.titleLarge,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              context.l10n.diveComputer_scan_emptyStateInstructions,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
+    return CustomScrollView(
+      slivers: [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.bluetooth_searching,
+                    size: 64,
+                    color: colorScheme.primary.withValues(alpha: 0.5),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    context.l10n.diveComputer_scan_lookingForDevicesTitle,
+                    style: theme.textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    context.l10n.diveComputer_scan_emptyStateInstructions,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ),
-              textAlign: TextAlign.center,
             ),
-          ],
+          ),
         ),
-      ),
+      ],
     );
   }
 
@@ -273,17 +318,51 @@ class _BluetoothScanTab extends ConsumerWidget {
 /// Tab for USB device selection.
 class _UsbDevicesTab extends ConsumerStatefulWidget {
   final void Function(DiscoveredDevice device) onDeviceSelected;
+  final VoidCallback? onGarminWatchSelected;
 
-  const _UsbDevicesTab({required this.onDeviceSelected});
+  const _UsbDevicesTab({
+    required this.onDeviceSelected,
+    this.onGarminWatchSelected,
+  });
 
   @override
   ConsumerState<_UsbDevicesTab> createState() => _UsbDevicesTabState();
 }
 
 class _UsbDevicesTabState extends ConsumerState<_UsbDevicesTab> {
-  bool _isSearching = false;
   String _searchQuery = '';
+  String? _selectedManufacturer;
   final _searchController = TextEditingController();
+
+  /// Brands the diver opened while no search or brand filter is on. The
+  /// list starts with every brand folded, so its 350-odd models read as an
+  /// index of brands (issue #4480).
+  Set<String> _openBrands = const {};
+
+  /// Brands the diver folded while a search or brand filter is on. Matches
+  /// show open then, and these folds are dropped whenever the filter
+  /// changes, as on the Equipment list.
+  Set<String> _foldedWhileFiltering = const {};
+
+  bool get _isFiltering =>
+      _searchQuery.isNotEmpty || _selectedManufacturer != null;
+
+  bool _isExpanded(String manufacturer) => _isFiltering
+      ? !_foldedWhileFiltering.contains(manufacturer)
+      : _openBrands.contains(manufacturer);
+
+  void _toggle(String manufacturer) {
+    Set<String> flipped(Set<String> brands) => brands.contains(manufacturer)
+        ? brands.difference({manufacturer})
+        : brands.union({manufacturer});
+    setState(() {
+      if (_isFiltering) {
+        _foldedWhileFiltering = flipped(_foldedWhileFiltering);
+      } else {
+        _openBrands = flipped(_openBrands);
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -295,10 +374,18 @@ class _UsbDevicesTabState extends ConsumerState<_UsbDevicesTab> {
   Map<String, List<DeviceModel>> _filterDevices(
     Map<String, List<DeviceModel>> devices,
   ) {
-    if (_searchQuery.isEmpty) return devices;
     final query = _searchQuery.toLowerCase();
     final result = <String, List<DeviceModel>>{};
     for (final entry in devices.entries) {
+      if (_selectedManufacturer != null && _selectedManufacturer != entry.key) {
+        continue;
+      }
+
+      if (query.isEmpty) {
+        result[entry.key] = entry.value;
+        continue;
+      }
+
       // If manufacturer matches, include all its models.
       if (entry.key.toLowerCase().contains(query)) {
         result[entry.key] = entry.value;
@@ -326,7 +413,15 @@ class _UsbDevicesTabState extends ConsumerState<_UsbDevicesTab> {
           context.l10n.diveComputer_download_errorWithMessage(error.toString()),
         ),
       ),
-      data: (usbDevicesByManufacturer) {
+      data: (libdcDevicesByManufacturer) {
+        final usbDevicesByManufacturer =
+            widget.onGarminWatchSelected != null &&
+                GarminWatchUsbEntry.isOffered
+            ? GarminWatchUsbEntry.addTo(
+                libdcDevicesByManufacturer,
+                label: context.l10n.diveComputer_discovery_garminWatchEntry,
+              )
+            : libdcDevicesByManufacturer;
         if (usbDevicesByManufacturer.isEmpty) {
           return Center(
             child: Text(
@@ -339,50 +434,30 @@ class _UsbDevicesTabState extends ConsumerState<_UsbDevicesTab> {
         final filtered = _filterDevices(usbDevicesByManufacturer);
         final manufacturers = filtered.keys.toList();
 
-        return Column(
-          children: [
-            // Instructions + search
-            Container(
-              margin: const EdgeInsets.all(16),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: _isSearching
-                  ? Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _searchController,
-                            autofocus: true,
-                            decoration: InputDecoration(
-                              hintText: context
-                                  .l10n
-                                  .diveComputer_discovery_usbSearchHint,
-                              border: InputBorder.none,
-                              isDense: true,
-                            ),
-                            onChanged: (value) =>
-                                setState(() => _searchQuery = value),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          tooltip: MaterialLocalizations.of(
-                            context,
-                          ).closeButtonTooltip,
-                          onPressed: () {
-                            _searchController.clear();
-                            setState(() {
-                              _isSearching = false;
-                              _searchQuery = '';
-                            });
-                          },
-                        ),
-                      ],
-                    )
-                  : Row(
+        // One scroll view for the whole tab: the instruction card and the
+        // two filters are a fixed ~270px, which is more than a portrait
+        // phone leaves the tab once the search field raises the keyboard,
+        // and a fixed header above an Expanded list overflows there. As a
+        // box sliver the header scrolls away with the list instead.
+        return CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: Column(
+                children: [
+                  // Instructions + search
+                  Container(
+                    margin: const EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      top: 16,
+                      bottom: 8,
+                    ),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
                       children: [
                         Icon(Icons.info_outline, color: colorScheme.primary),
                         const SizedBox(width: 12),
@@ -394,148 +469,127 @@ class _UsbDevicesTabState extends ConsumerState<_UsbDevicesTab> {
                             ),
                           ),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.search),
-                          tooltip:
-                              context.l10n.diveComputer_discovery_usbSearchHint,
-                          onPressed: () => setState(() => _isSearching = true),
+                      ],
+                    ),
+                  ),
+
+                  // Search and brand filter, stacked so each gets the full
+                  // width. Side by side, the dropdown sizes to its widest
+                  // brand name and starves the search field, overflowing
+                  // under large text.
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextField(
+                          controller: _searchController,
+                          decoration: InputDecoration(
+                            hintText: context
+                                .l10n
+                                .diveComputer_discovery_usbSearchHint,
+                            prefixIcon: const Icon(Icons.search),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            isDense: true,
+                          ),
+                          onChanged: (value) => setState(() {
+                            _searchQuery = value;
+                            _foldedWhileFiltering = const {};
+                          }),
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownMenu<String?>(
+                          expandedInsets: EdgeInsets.zero,
+                          // Match the search field above so the stacked pair
+                          // reads as one control group.
+                          inputDecorationTheme: theme.inputDecorationTheme
+                              .copyWith(
+                                isDense: true,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                          initialSelection: _selectedManufacturer,
+                          label: Text(
+                            context.l10n.diveComputer_detail_labelManufacturer,
+                          ),
+                          hintText: context.l10n.diveLog_filter_allComputers,
+                          dropdownMenuEntries: [
+                            DropdownMenuEntry(
+                              value: null,
+                              label: context.l10n.diveLog_filter_allComputers,
+                            ),
+                            ...usbDevicesByManufacturer.keys.map(
+                              (m) => DropdownMenuEntry(value: m, label: m),
+                            ),
+                          ],
+                          onSelected: (value) {
+                            setState(() {
+                              _selectedManufacturer = value;
+                              _foldedWhileFiltering = const {};
+                            });
+                          },
                         ),
                       ],
                     ),
+                  ),
+                ],
+              ),
             ),
 
             // Device list grouped by manufacturer
-            Expanded(
-              child: filtered.isEmpty
-                  ? Center(
-                      child: Text(
-                        context.l10n.diveComputer_discovery_usbNoResults(
-                          _searchQuery,
-                        ),
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      itemCount: filtered.length,
-                      itemBuilder: (context, index) {
-                        final manufacturer = manufacturers[index];
-                        final devices = filtered[manufacturer]!;
-
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Manufacturer header
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                              child: Text(
-                                manufacturer,
-                                style: theme.textTheme.titleSmall?.copyWith(
-                                  color: colorScheme.primary,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                            // Devices
-                            ...devices.map(
-                              (model) => _UsbDeviceListTile(
-                                model: model,
-                                onTap: () {
-                                  final discoveredDevice = DiscoveredDevice(
-                                    id: model.id,
-                                    name: model.fullName,
-                                    connectionType: DeviceConnectionType.usb,
-                                    address: model.id,
-                                    recognizedModel: model,
-                                    discoveredAt: DateTime.now(),
-                                  );
-                                  widget.onDeviceSelected(discoveredDevice);
-                                },
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                          ],
-                        );
-                      },
+            if (filtered.isEmpty)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(
+                  child: Text(
+                    context.l10n.diveComputer_discovery_usbNoResults(
+                      _searchQuery,
                     ),
-            ),
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              )
+            else
+              SliverList.builder(
+                itemCount: filtered.length,
+                itemBuilder: (context, index) {
+                  final manufacturer = manufacturers[index];
+                  return UsbManufacturerGroup(
+                    key: ValueKey('usb-manufacturer-$manufacturer'),
+                    manufacturer: manufacturer,
+                    models: filtered[manufacturer]!,
+                    isExpanded: _isExpanded(manufacturer),
+                    onToggle: () => _toggle(manufacturer),
+                    onModelSelected: (model) {
+                      // Garmin is imported, never downloaded.
+                      if (GarminWatchUsbEntry.isEntry(model)) {
+                        widget.onGarminWatchSelected?.call();
+                        return;
+                      }
+                      final discoveredDevice = DiscoveredDevice(
+                        id: model.id,
+                        name: model.fullName,
+                        connectionType: DeviceConnectionType.usb,
+                        address: model.id,
+                        recognizedModel: model,
+                        discoveredAt: DateTime.now(),
+                      );
+                      widget.onDeviceSelected(discoveredDevice);
+                    },
+                  );
+                },
+              ),
           ],
         );
       },
-    );
-  }
-}
-
-/// List tile for a USB device model.
-class _UsbDeviceListTile extends StatelessWidget {
-  final DeviceModel model;
-  final VoidCallback onTap;
-
-  const _UsbDeviceListTile({required this.model, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Semantics(
-        button: true,
-        label: context.l10n.diveComputer_scan_usbSemanticLabel(model.model),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                // Icon
-                ExcludeSemantics(
-                  child: Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: colorScheme.primaryContainer,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      Icons.usb,
-                      color: colorScheme.onPrimaryContainer,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                // Info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(model.model, style: theme.textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text(
-                        context.l10n.diveComputer_scan_usbCableLabel,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                // Chevron
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

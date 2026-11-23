@@ -1,67 +1,92 @@
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
 import 'package:submersion/features/dive_centers/data/services/dive_center_api_service.dart';
 import 'package:submersion/features/dive_centers/domain/constants/dive_center_field.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_log/data/repositories/view_config_repository.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 /// Repository provider
 final diveCenterRepositoryProvider = Provider<DiveCenterRepository>((ref) {
   return DiveCenterRepository();
 });
 
-/// All dive centers provider
+/// All dive centers provider.
+///
+/// Self-invalidates whenever the `dive_centers` table changes -- including when
+/// a sync applies remote changes -- so the list refreshes automatically, while
+/// remaining a [FutureProvider] so imperative `ref.read(provider.future)` reads
+/// still resolve.
 final allDiveCentersProvider = FutureProvider<List<DiveCenter>>((ref) async {
   final repository = ref.watch(diveCenterRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
   return repository.getAllDiveCenters(diverId: validatedDiverId);
 });
 
 /// Dive center sort state provider
-final diveCenterSortProvider = StateProvider<SortState<DiveCenterSortField>>(
-  (ref) => const SortState(
-    field: DiveCenterSortField.name,
-    direction: SortDirection.descending,
-  ),
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final diveCenterSortProvider = Provider<SortState<DiveCenterSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(
+          settingsProvider.select((s) => s.listArrangements.diveCenterSort),
+        ),
+        DiveCenterSortField.values,
+      ) ??
+      const SortState(
+        field: DiveCenterSortField.name,
+        direction: SortDirection.descending,
+      ),
 );
 
 /// Apply sorting to a list of dive centers
-/// Note: diveCount sorting defaults to name since it's not in the basic entity
+///
+/// [diveCounts] maps a center id to its dive count; a center missing from it
+/// has none.
 List<DiveCenter> applyDiveCenterSorting(
   List<DiveCenter> centers,
   SortState<DiveCenterSortField> sort,
+  Map<String, int> diveCounts,
 ) {
   final sorted = List<DiveCenter>.from(centers);
 
-  sorted.sort((a, b) {
-    int comparison;
-    // For text fields, invert direction (user expects descending = A→Z)
-    final invertForText = sort.field == DiveCenterSortField.name;
+  int compareNames(DiveCenter a, DiveCenter b) =>
+      compareTextForSort(a.name, b.name);
 
+  final ascending = sort.direction == SortDirection.ascending;
+
+  sorted.sort((a, b) {
     switch (sort.field) {
       case DiveCenterSortField.name:
-        comparison = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        // For text fields, invert direction (user expects descending = A→Z)
+        final comparison = compareNames(a, b);
+        return ascending ? -comparison : comparison;
       case DiveCenterSortField.diveCount:
-        // Dive count not available in basic entity, sort by name as fallback
-        comparison = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        final comparison = (diveCounts[a.id] ?? 0).compareTo(
+          diveCounts[b.id] ?? 0,
+        );
+        // Ties read A to Z whichever way the counts run.
+        if (comparison == 0) return compareNames(a, b);
+        return ascending ? comparison : -comparison;
     }
-
-    if (invertForText) {
-      return sort.direction == SortDirection.ascending
-          ? -comparison
-          : comparison;
-    }
-    return sort.direction == SortDirection.ascending ? comparison : -comparison;
   });
 
   return sorted;
@@ -73,6 +98,7 @@ final diveCenterByIdProvider = FutureProvider.family<DiveCenter?, String>((
   id,
 ) async {
   final repository = ref.watch(diveCenterRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
   return repository.getDiveCenterById(id);
 });
 
@@ -84,6 +110,7 @@ final diveCentersWithCoordinatesProvider = FutureProvider<List<DiveCenter>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
   return repository.getDiveCentersWithCoordinates(diverId: validatedDiverId);
 });
 
@@ -97,6 +124,7 @@ final diveCenterSearchProvider =
         return ref.watch(allDiveCentersProvider).value ?? [];
       }
       final repository = ref.watch(diveCenterRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
       return repository.searchDiveCenters(query, diverId: validatedDiverId);
     });
 
@@ -107,6 +135,7 @@ final diveCentersByCountryProvider =
       final validatedDiverId = await ref.watch(
         validatedCurrentDiverIdProvider.future,
       );
+      ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
       return repository.getDiveCentersByCountry(
         country,
         diverId: validatedDiverId,
@@ -119,16 +148,43 @@ final diveCenterCountriesProvider = FutureProvider<List<String>>((ref) async {
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDiveCentersChanges());
   return repository.getCountries(diverId: validatedDiverId);
 });
 
-/// Dive count for a center
+/// Dive count per center id, shared by every list, table and detail view. A
+/// center with no counted dives is absent from the map.
+final diveCenterDiveCountsProvider = FutureProvider<Map<String, int>>((
+  ref,
+) async {
+  final repository = ref.watch(diveCenterRepositoryProvider);
+  // The counts read the `dives` table, so self-invalidate whenever dives
+  // change (e.g. after a sync) to keep them fresh.
+  ref.invalidateSelfWhen(ref.read(diveRepositoryProvider).watchDivesChanges());
+  return repository.getDiveCountsByCenter();
+});
+
+/// Dive count for a center, picked out of [diveCenterDiveCountsProvider]: it
+/// runs no query of its own, and a dive at another center rebuilds nothing
+/// here.
 final diveCenterDiveCountProvider = FutureProvider.family<int, String>((
   ref,
   centerId,
-) async {
-  final repository = ref.watch(diveCenterRepositoryProvider);
-  return repository.getDiveCountForCenter(centerId);
+) {
+  // Handed back directly once the counts are known: a rebuild that waited
+  // would pass through loading, which `when` and `valueOrNull` show as a
+  // missing count. Only one branch is watched, or the map arriving would
+  // rebuild this mid-wait and strand a read nothing is listening to.
+  if (ref.read(diveCenterDiveCountsProvider).hasValue) {
+    return ref.watch(
+      diveCenterDiveCountsProvider.select(
+        (counts) => counts.value?[centerId] ?? 0,
+      ),
+    );
+  }
+  return ref.watch(
+    diveCenterDiveCountsProvider.selectAsync((counts) => counts[centerId] ?? 0),
+  );
 });
 
 /// Dive center list notifier for mutations
@@ -140,7 +196,11 @@ class DiveCenterListNotifier
 
   DiveCenterListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(
+      _initializeAndLoad(),
+      DiveCenterListNotifier,
+      'initialize and load',
+    );
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -148,9 +208,19 @@ class DiveCenterListNotifier
         state = const AsyncValue.loading();
         _ref.invalidate(validatedCurrentDiverIdProvider);
         _ref.invalidate(allDiveCentersProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          DiveCenterListNotifier,
+          'initialize and load',
+        );
       }
     });
+
+    // Auto-refresh when the `dive_centers` table changes (e.g. after a sync).
+    final centersChangeSub = _repository.watchDiveCentersChanges().listen(
+      (_) => _silentReload(),
+    );
+    _ref.onDispose(centersChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -171,6 +241,30 @@ class DiveCenterListNotifier
       state = AsyncValue.error(e, st);
     }
   }
+
+  /// Silent reload used when the `dive_centers` table changes (e.g. after a
+  /// sync). Mirrors [_loadDiveCenters] but never flips state to loading, so the
+  /// list refreshes in place without flashing a spinner.
+  Future<void> _silentReload() async {
+    try {
+      // Resolve the validated diver id first: a tick can arrive before
+      // _initializeAndLoad() has populated _validatedDiverId, which would
+      // otherwise query with diverId: null and return unscoped centers.
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final centers = await _repository.getAllDiveCenters(
+        diverId: _validatedDiverId,
+      );
+      if (mounted) state = AsyncValue.data(centers);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
+    }
+  }
+
+  /// [_silentReload] for a caller that has just written, so the list stays on
+  /// screen.
+  Future<void> reloadQuietly() => _silentReload();
 
   Future<void> refresh() async {
     // Get fresh validated diver ID before loading

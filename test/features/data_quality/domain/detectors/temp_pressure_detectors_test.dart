@@ -1,0 +1,921 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/data_quality/domain/detectors/pressure_anomaly_detector.dart';
+import 'package:submersion/features/data_quality/domain/detectors/temp_anomaly_detector.dart';
+import 'package:submersion/features/data_quality/domain/entities/dive_quality_context.dart';
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+
+import '../../helpers/quality_test_helpers.dart';
+
+domain.DiveTank tank({
+  String id = 't1',
+  double? volume = 12.0,
+  double? start = 200,
+  double? end = 60,
+  double o2 = 21.0,
+  int order = 0,
+}) => domain.DiveTank(
+  id: id,
+  volume: volume,
+  startPressure: start,
+  endPressure: end,
+  gasMix: domain.GasMix(o2: o2, he: 0),
+  order: order,
+);
+
+void main() {
+  group('TempAnomalyDetector', () {
+    const det = TempAnomalyDetector();
+
+    test('26 C tropical profile is clean', () {
+      final ctx = makeContext(
+        dive: makeTestDive(waterTemp: 26),
+        samples: flatProfile(temp: 26),
+      );
+      expect(det.detect(ctx), isEmpty);
+    });
+
+    test('295 C samples flag range with Fahrenheit-as-Kelvin hint', () {
+      // The Shearwater F-as-K bug reports ~295 for 72F water.
+      final ctx = makeContext(
+        dive: makeTestDive(),
+        samples: flatProfile(temp: 295),
+      );
+      final out = det.detect(ctx);
+      expect(out, hasLength(1));
+      expect(out.single.params['fahrenheitAsKelvinSuspected'], true);
+    });
+
+    test('8 C jump between adjacent samples is flagged', () {
+      final samples = [
+        for (var t = 0; t <= 300; t += 10)
+          QualitySample(t: t, depth: 20, temp: t == 150 ? 12.0 : 20.0),
+      ];
+      // Two jumps (into and out of the bad sample), same 5-min bucket ->
+      // one finding survives the deterministic-id collapse; assert >= 1.
+      final ctx = makeContext(dive: makeTestDive(), samples: samples);
+      final out = det.detect(ctx);
+      expect(out, isNotEmpty);
+      expect(out.first.params['deltaC'], closeTo(8.0, 1e-9));
+    });
+
+    test('scalar waterTemp of 99 C is flagged without samples', () {
+      final ctx = makeContext(dive: makeTestDive(waterTemp: 99));
+      final out = det.detect(ctx);
+      expect(out, hasLength(1));
+      expect(out.single.params['waterTempC'], 99);
+    });
+
+    // The scalar finding carries the same conversion facts the sample-channel
+    // finding does, so `repairOptionsFor` can offer a one-tap fix for a
+    // water temperature that was recorded on the wrong scale.
+    test('scalar waterTemp of 78 reads as Fahrenheit', () {
+      // 78 F is 25.6 C -- plausible water, so the scale is the explanation.
+      final ctx = makeContext(dive: makeTestDive(waterTemp: 78));
+      final params = det.detect(ctx).single.params;
+      expect(params['fahrenheitSuspected'], true);
+      expect(params['fahrenheitAsKelvinSuspected'], false);
+    });
+
+    test('scalar waterTemp of 297 reads as Fahrenheit-as-Kelvin', () {
+      // 297 K is 23.9 C; read as Fahrenheit it would be 147 C.
+      final ctx = makeContext(dive: makeTestDive(waterTemp: 297));
+      final params = det.detect(ctx).single.params;
+      expect(params['fahrenheitAsKelvinSuspected'], true);
+      expect(params['fahrenheitSuspected'], false);
+    });
+
+    test('scalar waterTemp of -50 suspects no scale', () {
+      // No reinterpretation lands in range, so no automatic repair is offered.
+      final ctx = makeContext(dive: makeTestDive(waterTemp: -50));
+      final params = det.detect(ctx).single.params;
+      expect(params['fahrenheitSuspected'], false);
+      expect(params['fahrenheitAsKelvinSuspected'], false);
+    });
+  });
+
+  group('PressureAnomalyDetector', () {
+    const det = PressureAnomalyDetector();
+
+    test('normal 200->60 bar tank with matching series is clean', () {
+      final series = [
+        for (var t = 0; t <= 2400; t += 60)
+          QualityPressureSample(t: t, bar: 200 - t * (140 / 2400)),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank()]),
+        samples: flatProfile(depth: 10),
+        pressures: {'t1': series},
+      );
+      expect(det.detect(ctx), isEmpty);
+    });
+
+    test('end pressure above start pressure flags a swap', () {
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 60, end: 200)]),
+      );
+      final out = det.detect(ctx);
+      expect(out, hasLength(1));
+      expect(out.single.params['startBar'], 60);
+      expect(out.single.params['endBar'], 200);
+    });
+
+    test('series start 15 bar away from recorded start flags mismatch', () {
+      final series = [
+        const QualityPressureSample(t: 0, bar: 215),
+        const QualityPressureSample(t: 2400, bar: 60),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank()]), // recorded start 200
+        pressures: {'t1': series},
+      );
+      final out = det.detect(ctx);
+      expect(out, hasLength(1));
+      expect(out.single.params['recordBar'], 200);
+      expect(out.single.params['seriesBar'], 215);
+    });
+
+    test(
+      'a series that only starts logging long after the dive began is not flagged',
+      () {
+        // A rebreather O2 supply cylinder, logged only on addition: first
+        // sample at t=800s, well past pressureStartLookbackSeconds (#2222).
+        // The reported start pressure (200) comes from the source's own
+        // pairing/power-on metadata and has nothing to do with this sample.
+        final series = [
+          const QualityPressureSample(t: 800, bar: 180),
+          const QualityPressureSample(t: 6830, bar: 76),
+        ];
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 76)]),
+          pressures: {'t1': series},
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params['endpoint'] == 'start'),
+          isEmpty,
+        );
+      },
+    );
+
+    test('a mismatch within the start lookback window is still flagged', () {
+      final series = [
+        const QualityPressureSample(t: 60, bar: 215),
+        const QualityPressureSample(t: 2400, bar: 60),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank()]), // recorded start 200
+        pressures: {'t1': series},
+      );
+      final startMismatch = det
+          .detect(ctx)
+          .singleWhere((f) => f.params['endpoint'] == 'start');
+      expect(startMismatch.params['recordBar'], 200);
+      expect(startMismatch.params['seriesBar'], 215);
+    });
+
+    test('mid-dive rise away from any switch is flagged', () {
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 600, bar: 180),
+        const QualityPressureSample(t: 610, bar: 184),
+        const QualityPressureSample(t: 620, bar: 188),
+        const QualityPressureSample(t: 630, bar: 195),
+        const QualityPressureSample(t: 2400, bar: 150),
+      ];
+      // After the drop to 180, pressure rises monotonically to 195 within
+      // 30 s: one continuous rising run of 15 bar at 30 bar/min, no gas
+      // switches.
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 150)]),
+        pressures: {'t1': series},
+      );
+      final rise = det
+          .detect(ctx)
+          .singleWhere((f) => f.params.containsKey('riseBar'));
+      expect(rise.params['riseBar'], closeTo(15.0, 1e-9));
+      expect(rise.params['durationSeconds'], 30);
+    });
+
+    // A cylinder warming up in the water (e.g. above a thermocline) or a
+    // drifting sensor raises the reading by a few bar over minutes. Real
+    // logbooks show such rises at up to ~6 bar/min, far below the rate of a
+    // genuine jump (#2442).
+    test('a slow rise of a few bar over minutes is not flagged', () {
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 300, bar: 165.3),
+        for (var i = 1; i <= 10; i++)
+          QualityPressureSample(t: 300 + i * 42, bar: 165.3 + i * 0.78),
+        const QualityPressureSample(t: 2400, bar: 100),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 100)]),
+        pressures: {'t1': series},
+      );
+      expect(
+        det.detect(ctx).where((f) => f.params.containsKey('riseBar')),
+        isEmpty,
+      );
+    });
+
+    test('a rise right at the rate threshold is not flagged', () {
+      // 6 bar over 36 s is exactly 10 bar/min: not faster than the gate.
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 600, bar: 180),
+        const QualityPressureSample(t: 636, bar: 186),
+        const QualityPressureSample(t: 2400, bar: 150),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 150)]),
+        pressures: {'t1': series},
+      );
+      expect(
+        det.detect(ctx).where((f) => f.params.containsKey('riseBar')),
+        isEmpty,
+      );
+    });
+
+    test('a sudden jump next to a slow creep is still flagged', () {
+      // Three bar of creep over eight minutes, then a 15 bar jump in one
+      // sample: averaged over the whole run it is ~2 bar/min, but the jump
+      // itself is 90 bar/min.
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 600, bar: 170),
+        for (var i = 1; i <= 30; i++)
+          QualityPressureSample(t: 600 + i * 16, bar: 170 + i * 0.1),
+        const QualityPressureSample(t: 1090, bar: 188),
+        const QualityPressureSample(t: 2400, bar: 150),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 150)]),
+        pressures: {'t1': series},
+      );
+      final rise = det
+          .detect(ctx)
+          .singleWhere((f) => f.params.containsKey('riseBar'));
+      expect(rise.params['riseBar'], closeTo(18.0, 1e-9));
+    });
+
+    test('a large rise is flagged even when sampled too sparsely for a '
+        'rate', () {
+      // One reading every ten minutes: a 25 bar rise between two of them is
+      // only 2.5 bar/min, yet no cylinder warms by 25 bar in the water.
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 600, bar: 170),
+        const QualityPressureSample(t: 1200, bar: 195),
+        const QualityPressureSample(t: 1800, bar: 150),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 150)]),
+        pressures: {'t1': series},
+      );
+      final rise = det
+          .detect(ctx)
+          .singleWhere((f) => f.params.containsKey('riseBar'));
+      expect(rise.params['riseBar'], closeTo(25.0, 1e-9));
+      expect(rise.params['durationSeconds'], 600);
+    });
+
+    test('implausible consumption flags SAC', () {
+      // 150 bar drop x 12 L over 5 min at avg 10 m (2 atm):
+      // 150*12/5/2 = 180 L/min -> flagged.
+      final fast = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 300, bar: 50),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(avgDepth: 10, tanks: [tank(end: 50)]),
+        samples: flatProfile(depth: 10, durationSeconds: 300),
+        pressures: {'t1': fast},
+      );
+      final out = det.detect(ctx);
+      expect(out, hasLength(1));
+      expect(out.single.params['surfaceLpm'], closeTo(180.0, 1e-6));
+    });
+
+    test('series end 20 bar away from recorded end flags mismatch', () {
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 2400, bar: 80),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 60)]),
+        pressures: {'t1': series},
+      );
+      final out = det.detect(ctx);
+      final endMismatch = out.singleWhere((f) => f.params['endpoint'] == 'end');
+      expect(endMismatch.params['recordBar'], 60);
+      expect(endMismatch.params['seriesBar'], 80);
+    });
+
+    // Shared shape for the two tests below: the diver is still underwater
+    // at t=1000 (110 bar), reaches the surface (depth <= 0.75 m) exactly at
+    // t=1200 with 102 bar, then the computer keeps recording for two more
+    // minutes while a rebreather's O2 supply bleeds down through its
+    // orifice, ending at 92 bar -- the exact shape the surfacing-pressure
+    // import fix (#1092) corrects the reported end pressure for.
+    final postSurfacingSamples = [
+      const QualitySample(t: 0, depth: 20),
+      const QualitySample(t: 1000, depth: 20),
+      const QualitySample(t: 1200, depth: 1.0),
+      const QualitySample(t: 1260, depth: 0.3),
+      const QualitySample(t: 1320, depth: 0.2),
+    ];
+    final postSurfacingSeries = [
+      const QualityPressureSample(t: 0, bar: 200),
+      const QualityPressureSample(t: 1000, bar: 110),
+      const QualityPressureSample(t: 1200, bar: 102),
+      const QualityPressureSample(t: 1260, bar: 97),
+      const QualityPressureSample(t: 1320, bar: 92),
+    ];
+
+    test(
+      'post-surfacing bleed-down tail matching the surfacing reading is not flagged',
+      () {
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 102)]),
+          samples: postSurfacingSamples,
+          pressures: {'t1': postSurfacingSeries},
+        );
+        final out = det.detect(ctx);
+        expect(out.where((f) => f.params['endpoint'] == 'end'), isEmpty);
+      },
+    );
+
+    test(
+      'end pressure genuinely off from the surfacing reading is still flagged',
+      () {
+        final ctx = makeContext(
+          // Recorded end pressure matches neither the surfacing reading
+          // (102) nor the tail (92): a real anomaly, unrelated to bleed-down.
+          dive: makeTestDive(tanks: [tank(start: 200, end: 40)]),
+          samples: postSurfacingSamples,
+          pressures: {'t1': postSurfacingSeries},
+        );
+        final out = det.detect(ctx);
+        final endMismatch = out.singleWhere(
+          (f) => f.params['endpoint'] == 'end',
+        );
+        expect(endMismatch.params['recordBar'], 40);
+        expect(endMismatch.params['seriesBar'], 102);
+      },
+    );
+
+    // The end check drops out the same way the start check does: a reported
+    // endpoint is only compared against a sample near the moment it
+    // describes. The three series below carry no such sample, so no
+    // endmismatch may be raised for any of them.
+    test(
+      'a two-point tank series spanning the whole dive corroborates no end pressure',
+      () {
+        // Only a start and an end reading. The end reading sits past
+        // surfacing (t=290), in the tail #1092 exists to distrust, and the
+        // last pre-surfacing reading (t=0) is the whole dive away from the
+        // end. Neither describes the pressure at the surface.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 65)]),
+          samples: flatProfile(depth: 10, durationSeconds: 300),
+          pressures: {
+            't1': const [
+              QualityPressureSample(t: 0, bar: 200),
+              QualityPressureSample(t: 300, bar: 50),
+            ],
+          },
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params['endpoint'] == 'end'),
+          isEmpty,
+        );
+      },
+    );
+
+    test('a series that stops long before surfacing corroborates no end '
+        'pressure', () {
+      // No post-surfacing tail at all: the transmitter dropped out at t=600
+      // and the diver surfaced at t=1190, so the last reading is ten minutes
+      // of breathing away from the pressure the cylinder held at the surface.
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 60)]),
+        samples: flatProfile(depth: 20, durationSeconds: 1200),
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 0, bar: 200),
+            QualityPressureSample(t: 600, bar: 140),
+          ],
+        },
+      );
+      expect(
+        det.detect(ctx).where((f) => f.params['endpoint'] == 'end'),
+        isEmpty,
+      );
+    });
+
+    test(
+      'a series that begins after surfacing corroborates neither endpoint',
+      () {
+        // Every reading lands in the post-surfacing tail, so there is nothing
+        // at or before surfacing to read at all.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 60)]),
+          samples: flatProfile(depth: 10, durationSeconds: 300),
+          pressures: {
+            't1': const [
+              QualityPressureSample(t: 295, bar: 100),
+              QualityPressureSample(t: 400, bar: 90),
+            ],
+          },
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params['endpoint'] != null),
+          isEmpty,
+        );
+      },
+    );
+
+    test(
+      'a reading inside the surfacing lookback is still compared, not the tail',
+      () {
+        // Surfacing is t=290 and the last pre-surfacing reading is t=200,
+        // inside pressureSurfacingLookbackSeconds: close enough to describe
+        // the end of the dive, so a genuine mismatch is still reported
+        // against that reading (70), never the tail (50).
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 40)]),
+          samples: flatProfile(depth: 10, durationSeconds: 300),
+          pressures: {
+            't1': const [
+              QualityPressureSample(t: 0, bar: 200),
+              QualityPressureSample(t: 200, bar: 70),
+              QualityPressureSample(t: 300, bar: 50),
+            ],
+          },
+        );
+        final endMismatch = det
+            .detect(ctx)
+            .singleWhere((f) => f.params['endpoint'] == 'end');
+        expect(endMismatch.params['recordBar'], 40);
+        expect(endMismatch.params['seriesBar'], 70);
+      },
+    );
+
+    test('a mid-dive rise coincident with a gas switch is suppressed', () {
+      final series = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 600, bar: 180),
+        // 10 bar in 20 s: fast enough to flag without the switch.
+        const QualityPressureSample(t: 620, bar: 190),
+        const QualityPressureSample(t: 2400, bar: 175),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(start: 200, end: 175)]),
+        pressures: {'t1': series},
+        gasSwitches: [
+          GasSwitch(
+            id: 'g1',
+            diveId: 'd1',
+            timestamp: 630, // within switchProximitySeconds of the rise
+            tankId: 't1',
+            depth: 20,
+            createdAt: DateTime.utc(2026, 7, 1),
+          ),
+        ],
+      );
+      expect(det.detect(ctx), isEmpty);
+    });
+
+    // A transmitter that loses its signal logs ~0 bar between normal
+    // readings (#2441). Each recovery used to be reported as a mid-dive
+    // rise of well over 100 bar.
+    group('signal dropouts', () {
+      List<QualityPressureSample> draining({
+        Map<int, double> glitches = const {},
+      }) => [
+        for (var i = 0; i <= 240; i++)
+          QualityPressureSample(t: i * 10, bar: glitches[i] ?? 200 - i * 0.5),
+      ];
+
+      test('dropouts are one finding per tank, not a rise each', () {
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 80)]),
+          pressures: {
+            't1': draining(glitches: {50: 0.8, 51: 0.8, 120: 0.5, 200: 0.6}),
+          },
+        );
+        final out = det.detect(ctx);
+        expect(out.where((f) => f.params.containsKey('riseBar')), isEmpty);
+        final dropout = out.singleWhere(
+          (f) => f.params.containsKey('dropoutCount'),
+        );
+        expect(dropout.params['dropoutCount'], 3);
+        expect(dropout.params['tankId'], 't1');
+      });
+
+      test('a clean series raises no dropout finding', () {
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 80)]),
+          pressures: {'t1': draining()},
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params.containsKey('dropoutCount')),
+          isEmpty,
+        );
+      });
+
+      test('the endpoint check reads past a dropout at the end', () {
+        // Recorded end 80 is right; the last in-dive reading is a dropout,
+        // which must not stand in for the end of the series.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 80.5)]),
+          pressures: {
+            't1': draining(glitches: {239: 0.4}),
+          },
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params['endpoint'] == 'end'),
+          isEmpty,
+        );
+      });
+
+      test(
+        'a start recorded from a dropout is a start mismatch, not a swap',
+        () {
+          // The import took the lead-in reading (3.9 bar) as the start
+          // pressure. Swapping start and end would make things worse; the
+          // series says what the start really was.
+          final ctx = makeContext(
+            dive: makeTestDive(tanks: [tank(start: 3.9, end: 80)]),
+            pressures: {
+              't1': draining(glitches: {0: 3.9}),
+            },
+          );
+          final out = det.detect(ctx);
+          expect(out.where((f) => f.params.containsKey('startBar')), isEmpty);
+          final start = out.singleWhere((f) => f.params['endpoint'] == 'start');
+          expect(start.params['recordBar'], 3.9);
+          expect(start.params['seriesBar'], closeTo(199.5, 1e-9));
+        },
+      );
+
+      test('a long lead-in lends no mid-dive reading to the start check', () {
+        // The transmitter paired ten minutes in: its ~0 bar lead-in says
+        // nothing about the start, and neither does the first real reading,
+        // taken well into the dive (#2222).
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 80)]),
+          pressures: {
+            't1': [
+              for (var t = 0; t < 600; t += 10)
+                QualityPressureSample(t: t, bar: 0.4),
+              for (var t = 600; t <= 2400; t += 10)
+                QualityPressureSample(t: t, bar: 170 - (t - 600) / 20),
+            ],
+          },
+        );
+        final out = det.detect(ctx);
+        expect(out.where((f) => f.params['endpoint'] == 'start'), isEmpty);
+        expect(out.where((f) => f.params.containsKey('startBar')), isEmpty);
+      });
+
+      test('a start recorded from the lead-in of a late series is no swap', () {
+        // A stage cylinder whose transmitter logged 11.7 bar before its
+        // valve was opened, 27 minutes in; the record took that as the
+        // start. The series begins too late and ends too early to describe
+        // either end of the dive, but the start plainly came from its
+        // lead-in, so its first real reading stands for the start.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 11.7, end: 98.3)]),
+          samples: flatProfile(depth: 20, durationSeconds: 3000),
+          pressures: {
+            't1': [
+              const QualityPressureSample(t: 1608, bar: 11.7),
+              for (var t = 1778; t <= 2088; t += 10)
+                QualityPressureSample(t: t, bar: 110.6 - (t - 1778) * 0.04),
+            ],
+          },
+        );
+        final out = det.detect(ctx);
+        expect(out.where((f) => f.params.containsKey('startBar')), isEmpty);
+        final start = out.singleWhere((f) => f.params['endpoint'] == 'start');
+        expect(start.params['seriesBar'], closeTo(110.6, 1e-9));
+      });
+
+      test('a mid-dive glitch matching the start says nothing about it', () {
+        // The series began logging late; a dropout mid-dive happens to read
+        // what the record says the start was. That is no evidence the start
+        // came from this series, so no start check is made against it.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 0.5, end: 60)]),
+          samples: flatProfile(depth: 20, durationSeconds: 3000),
+          pressures: {
+            't1': [
+              for (var t = 600; t <= 2400; t += 10)
+                QualityPressureSample(
+                  t: t,
+                  bar: t == 1500 ? 0.5 : 150 - (t - 600) / 20,
+                ),
+            ],
+          },
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params['endpoint'] == 'start'),
+          isEmpty,
+        );
+      });
+
+      test('a swap is still flagged past a post-surfacing bleed-down', () {
+        // A rebreather O2 cylinder: 200 bar at the start, 120 at surfacing,
+        // then the tail bleeds down to 90. The record is entered the wrong
+        // way round; the tail must not hide that (#2220).
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 120, end: 200)]),
+          samples: const [
+            QualitySample(t: 0, depth: 20),
+            QualitySample(t: 1000, depth: 20),
+            QualitySample(t: 1200, depth: 1.0),
+            QualitySample(t: 1320, depth: 0.2),
+          ],
+          pressures: {
+            't1': const [
+              QualityPressureSample(t: 0, bar: 200),
+              QualityPressureSample(t: 1000, bar: 130),
+              QualityPressureSample(t: 1200, bar: 120),
+              QualityPressureSample(t: 1260, bar: 105),
+              QualityPressureSample(t: 1320, bar: 90),
+            ],
+          },
+        );
+        final swap = det
+            .detect(ctx)
+            .singleWhere((f) => f.params.containsKey('startBar'));
+        expect(swap.params['startBar'], 120);
+        expect(swap.params['endBar'], 200);
+      });
+
+      test('a swap the series confirms is still flagged', () {
+        // Start and end really were entered the wrong way round: the
+        // series drains from the recorded end to the recorded start.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 80, end: 200)]),
+          pressures: {'t1': draining()},
+        );
+        final swap = det
+            .detect(ctx)
+            .singleWhere((f) => f.params.containsKey('startBar'));
+        expect(swap.params['startBar'], 80);
+        expect(swap.params['endBar'], 200);
+      });
+    });
+
+    // Schema v182 packed two consolidated file imports' readings of one
+    // cylinder into a single series (#2440). Each alternation read as a
+    // mid-dive rise, and the interleaved lows as dropouts.
+    group('series mixed from two sources', () {
+      final entry = DateTime.utc(2026, 7, 18, 18);
+      DiveDataSource source(String id, {bool primary = false}) =>
+          DiveDataSource(
+            id: id,
+            diveId: 'd1',
+            isPrimary: primary,
+            importedAt: entry,
+            createdAt: entry,
+          );
+      final twoSources = [source('s1', primary: true), source('s2')];
+
+      /// Tank 2 at 162 bar and tank 1 at 109 bar, alternating every 2-8 s.
+      final interleaved = [
+        for (var i = 0; i < 120; i++) ...[
+          QualityPressureSample(t: i * 10, bar: 162 - i * 0.3),
+          QualityPressureSample(t: i * 10 + 2, bar: 109 - i * 0.3),
+        ],
+      ];
+
+      test('is one mixed finding and nothing else for the tank', () {
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 162, end: 126)]),
+          sources: twoSources,
+          pressures: {'t1': interleaved},
+        );
+        final out = det.detect(ctx);
+        expect(out, hasLength(1));
+        expect(out.single.params['mixedSources'], isTrue);
+        expect(out.single.params['tankId'], 't1');
+      });
+
+      test('is not claimed on a dive with a single source', () {
+        // One recording cannot mix with itself; whatever this series is, it
+        // is reported by the other checks.
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 162, end: 126)]),
+          sources: [source('s1', primary: true)],
+          pressures: {'t1': interleaved},
+        );
+        expect(
+          det.detect(ctx).where((f) => f.params.containsKey('mixedSources')),
+          isEmpty,
+        );
+      });
+
+      test('a clean series on a two-source dive is not mixed', () {
+        final ctx = makeContext(
+          dive: makeTestDive(tanks: [tank(start: 200, end: 60)]),
+          sources: twoSources,
+          pressures: {
+            't1': [
+              for (var t = 0; t <= 2400; t += 60)
+                QualityPressureSample(t: t, bar: 200 - t * (140 / 2400)),
+            ],
+          },
+        );
+        expect(det.detect(ctx), isEmpty);
+      });
+    });
+
+    test('implausible consumption flags SAC using mean sample depth', () {
+      // avgDepth is null so the detector falls back to the mean of the samples.
+      final fast = [
+        const QualityPressureSample(t: 0, bar: 200),
+        const QualityPressureSample(t: 300, bar: 50),
+      ];
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(end: 50)]),
+        samples: flatProfile(depth: 10, durationSeconds: 300),
+        pressures: {'t1': fast},
+      );
+      final out = det.detect(ctx);
+      final sac = out.singleWhere((f) => f.params.containsKey('surfaceLpm'));
+      expect(sac.params['surfaceLpm'] as double, greaterThan(100.0));
+    });
+
+    test('the mean sample depth is weighted by elapsed time (#3891)', () {
+      // (60 * 10 + 60 * 20 + 180 * 30) / 300 is 24 m, where a sample average
+      // says 20 m. 150 bar of 12 L over 5 minutes at 3.4 atm.
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(end: 50)]),
+        samples: const [
+          QualitySample(t: 0, depth: 10),
+          QualitySample(t: 60, depth: 10),
+          QualitySample(t: 120, depth: 30),
+          QualitySample(t: 300, depth: 30),
+        ],
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 0, bar: 200),
+            QualityPressureSample(t: 300, bar: 50),
+          ],
+        },
+      );
+
+      final sac = det
+          .detect(ctx)
+          .singleWhere((f) => f.params.containsKey('surfaceLpm'));
+      expect(
+        sac.params['surfaceLpm'] as double,
+        closeTo(150 * 12 / 5 / 3.4, 1e-9),
+      );
+    });
+
+    test('the mean depth reads a window that holds no samples (#3891)', () {
+      // 12 m to 22 m across the window, so 2.7 atm. The whole dive would say
+      // 20 m. 150 bar of 12 L over 5 minutes.
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(end: 50)]),
+        samples: const [
+          QualitySample(t: 0, depth: 10),
+          QualitySample(t: 600, depth: 30),
+        ],
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 60, bar: 200),
+            QualityPressureSample(t: 360, bar: 50),
+          ],
+        },
+      );
+
+      final sac = det
+          .detect(ctx)
+          .singleWhere((f) => f.params.containsKey('surfaceLpm'));
+      expect(
+        sac.params['surfaceLpm'] as double,
+        closeTo(150 * 12 / 5 / 2.7, 1e-9),
+      );
+    });
+
+    // Shared depth shape for the consumption tests below: 10 m (2 atm) until
+    // the diver surfaces at t=420, then two more minutes of recording at the
+    // surface.
+    final surfacedAt420 = [
+      const QualitySample(t: 0, depth: 10),
+      const QualitySample(t: 420, depth: 10),
+      const QualitySample(t: 480, depth: 0.3),
+      const QualitySample(t: 540, depth: 0.2),
+    ];
+
+    Iterable<QualityFinding> sacFindings(List<QualityFinding> out) =>
+        out.where((f) => f.params.containsKey('surfaceLpm'));
+
+    test('a post-surfacing bleed-down tail does not read as implausible '
+        'consumption (#2224)', () {
+      // Underwater the cylinder drops 30 bar in 7 minutes: 30*12/7/2 = 25.7
+      // L/min, an ordinary rate. The 140 bar the tail sheds after surfacing
+      // is not breathing, but counting it (170 bar over 9 minutes) reads as
+      // 170*12/9/2 = 113 L/min, past the 100 L/min ceiling.
+      final ctx = makeContext(
+        dive: makeTestDive(avgDepth: 10, tanks: [tank(end: 170)]),
+        samples: surfacedAt420,
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 0, bar: 200),
+            QualityPressureSample(t: 420, bar: 170),
+            QualityPressureSample(t: 480, bar: 90),
+            QualityPressureSample(t: 540, bar: 30),
+          ],
+        },
+      );
+      expect(sacFindings(det.detect(ctx)), isEmpty);
+    });
+
+    test('genuinely implausible consumption is still measured up to '
+        'surfacing, not through the tail', () {
+      // 140 bar in 7 minutes underwater: 140*12/7/2 = 120 L/min. The finding
+      // reports that underwater drop and rate, never the 170 bar the series
+      // shows once the tail is included.
+      final ctx = makeContext(
+        dive: makeTestDive(avgDepth: 10, tanks: [tank(end: 60)]),
+        samples: surfacedAt420,
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 0, bar: 200),
+            QualityPressureSample(t: 420, bar: 60),
+            QualityPressureSample(t: 540, bar: 30),
+          ],
+        },
+      );
+      final sac = sacFindings(det.detect(ctx)).single;
+      expect(sac.params['dropBar'], closeTo(140.0, 1e-9));
+      expect(sac.params['surfaceLpm'], closeTo(120.0, 1e-6));
+    });
+
+    test('without a reported average depth, ambient pressure comes from the '
+        'same underwater window, not the surface tail', () {
+      // 110 bar in 7 minutes at 10 m: 110*12/7/2 = 94.3 L/min, under the
+      // ceiling. Averaging the depth samples through the tail as well
+      // (10, 10, 0.3, 0.2) gives 5.1 m, and dividing by that shallower
+      // ambient pressure reads 124.7 L/min.
+      final ctx = makeContext(
+        dive: makeTestDive(tanks: [tank(end: 90)]),
+        samples: surfacedAt420,
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 0, bar: 200),
+            QualityPressureSample(t: 420, bar: 90),
+            QualityPressureSample(t: 540, bar: 40),
+          ],
+        },
+      );
+      expect(sacFindings(det.detect(ctx)), isEmpty);
+    });
+
+    test('an underwater stretch shorter than the minimum window is not '
+        'measured, even when the tail makes the series long enough', () {
+      // Only 4 minutes of the series fall underwater, below
+      // sacMinSeriesSeconds, so there is no rate worth judging; the tail
+      // must not pad the window out to the minimum.
+      final ctx = makeContext(
+        dive: makeTestDive(avgDepth: 10, tanks: [tank(end: 60)]),
+        samples: surfacedAt420,
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 180, bar: 200),
+            QualityPressureSample(t: 420, bar: 60),
+            QualityPressureSample(t: 540, bar: 30),
+          ],
+        },
+      );
+      expect(sacFindings(det.detect(ctx)), isEmpty);
+    });
+
+    test('a series recorded entirely after surfacing measures no '
+        'consumption', () {
+      // Every reading is post-surfacing tail: the drop describes the
+      // cylinder bleeding down at the surface, not anyone breathing from it.
+      // Counted as consumption it would read 180*12/6/2 = 180 L/min.
+      final ctx = makeContext(
+        dive: makeTestDive(avgDepth: 10, tanks: [tank(end: 20)]),
+        samples: surfacedAt420,
+        pressures: {
+          't1': const [
+            QualityPressureSample(t: 480, bar: 200),
+            QualityPressureSample(t: 840, bar: 20),
+          ],
+        },
+      );
+      expect(sacFindings(det.detect(ctx)), isEmpty);
+    });
+  });
+}

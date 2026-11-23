@@ -1,19 +1,57 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/nav_track/presentation/widgets/nav_track_handoff_card.dart';
+import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/garmin_import_progress_panel.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/garmin_nothing_new_card.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/suunto_json_handoff_card.dart';
+import 'package:submersion/core/platform/desktop_target_platform.dart';
 
 /// Step 0: File selection with drag-and-drop area and file picker button.
 class FileSelectionStep extends ConsumerWidget {
   const FileSelectionStep({super.key});
+
+  static bool get _isDesktop {
+    if (kIsWeb) return false;
+    return isDesktopTargetPlatform(defaultTargetPlatform);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(universalImportNotifierProvider);
     final theme = Theme.of(context);
 
-    final hasFile = state.fileName != null;
+    final hasFile = state.files.isNotEmpty;
+    // Only offer the Garmin option when a device is actually connected
+    // (mounted, or over MTP on Windows), so the import dialog stays clean for
+    // everyone who doesn't own one.
+    final hasGarminDevice =
+        ref.watch(garminDevicesProvider).valueOrNull?.isNotEmpty ?? false;
+    // A Garmin import says what it is doing in its own panel, so the Select
+    // Files button keeps its own label and spinner for file detection.
+    final garminProgress = state.isLoading ? state.garminProgress : null;
+    final detectingFiles = state.isLoading && garminProgress == null;
+
+    // A hand-off format never advances to Confirm Source: a Seacraft ENC
+    // file is a route, not a dive log, and a Suunto JSON export belongs to
+    // the Suunto importer (#1445). This step shows that flow's card instead.
+    final format = state.detectionResult?.format;
+    final handoffBytes = format != null && format.isHandoff
+        ? state.fileBytes
+        : null;
+    if (handoffBytes != null) {
+      final fileName = state.fileName ?? '';
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: format == ImportFormat.suuntoJson
+            ? SuuntoJsonHandoffCard(bytes: handoffBytes, fileName: fileName)
+            : NavTrackHandoffCard(bytes: handoffBytes, fileName: fileName),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -22,7 +60,7 @@ class FileSelectionStep extends ConsumerWidget {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              icon: state.isLoading
+              icon: detectingFiles
                   ? const SizedBox(
                       width: 16,
                       height: 16,
@@ -30,19 +68,65 @@ class FileSelectionStep extends ConsumerWidget {
                     )
                   : const Icon(Icons.file_open),
               label: Text(
-                state.isLoading
+                detectingFiles
                     ? context.l10n.universalImport_label_detecting
                     : hasFile
                     ? context.l10n.universalImport_action_changeFile
-                    : context.l10n.universalImport_action_selectFile,
+                    : context.l10n.universalImport_action_selectFiles,
               ),
               onPressed: state.isLoading
                   ? null
                   : () => ref
                         .read(universalImportNotifierProvider.notifier)
-                        .pickFile(),
+                        .pickFiles(),
             ),
           ),
+          if (_isDesktop) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.folder_open),
+                label: Text(context.l10n.universalImport_action_chooseFolder),
+                onPressed: state.isLoading
+                    ? null
+                    : () => ref
+                          .read(universalImportNotifierProvider.notifier)
+                          .pickFolder(),
+              ),
+            ),
+            if (hasGarminDevice) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.watch),
+                  label: Text(
+                    context.l10n.universalImport_action_importFromGarmin,
+                  ),
+                  onPressed: state.isLoading
+                      ? null
+                      : () => ref
+                            .read(universalImportNotifierProvider.notifier)
+                            .importFromGarminDevice(),
+                ),
+              ),
+            ],
+          ],
+          if (garminProgress != null) ...[
+            const SizedBox(height: 16),
+            GarminImportProgressPanel(progress: garminProgress),
+          ],
+          // Gone once files are picked by hand: the message is about the
+          // watch, and its button would replace the picked files.
+          if (state.garminNothingNew && !state.isLoading && !hasFile) ...[
+            const SizedBox(height: 16),
+            GarminNothingNewCard(
+              onDownloadAll: () => ref
+                  .read(universalImportNotifierProvider.notifier)
+                  .importAllFromGarminDevice(),
+            ),
+          ],
           if (state.error != null) ...[
             const SizedBox(height: 16),
             _ErrorBanner(message: state.error!),
@@ -61,7 +145,11 @@ class FileSelectionStep extends ConsumerWidget {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        state.fileName!,
+                        state.isBatch
+                            ? context.l10n.universalImport_label_filesSelected(
+                                state.selectedFileCount,
+                              )
+                            : state.fileName ?? '',
                         style: theme.textTheme.bodyMedium,
                         overflow: TextOverflow.ellipsis,
                       ),

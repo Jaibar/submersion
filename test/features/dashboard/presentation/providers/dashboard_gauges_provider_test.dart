@@ -1,0 +1,363 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/domain/entities/backup_type.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_currency_providers.dart';
+import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/courses/domain/entities/course.dart';
+import 'package:submersion/features/courses/domain/entities/course_progress.dart';
+import 'package:submersion/features/courses/domain/entities/course_requirement.dart';
+import 'package:submersion/features/courses/presentation/providers/course_requirement_providers.dart';
+import 'package:submersion/features/dashboard/presentation/providers/dashboard_providers.dart';
+import 'package:submersion/features/dashboard/presentation/providers/gauge_providers.dart';
+import 'package:submersion/features/data_quality/presentation/providers/data_quality_providers.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/media_store/domain/media_transfer_summary.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart';
+import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
+import 'package:submersion/features/safety/domain/services/no_fly_service.dart';
+import 'package:submersion/features/safety/presentation/providers/flight_window_providers.dart';
+import 'package:submersion/features/safety/presentation/providers/no_fly_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/documents/domain/document_expiry.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+
+final _t0 = DateTime(2026, 1, 1);
+
+Trip _trip(String name, DateTime start) => Trip(
+  id: name,
+  name: name,
+  startDate: start,
+  endDate: start.add(const Duration(days: 5)),
+  createdAt: _t0,
+  updatedAt: _t0,
+);
+
+EquipmentClocks _clocks(String name, ServiceClockSeverity severity) => (
+  item: EquipmentItem(id: name, name: name, type: EquipmentType.regulator),
+  statuses: [
+    ServiceClockStatus(
+      schedule: ServiceSchedule(
+        id: 'schedule',
+        equipmentId: 'equipment',
+        serviceKindId: 'kind',
+        createdAt: _t0,
+        updatedAt: _t0,
+      ),
+      kind: ServiceKind(
+        id: 'kind',
+        name: 'Annual service',
+        createdAt: _t0,
+        updatedAt: _t0,
+      ),
+      anchor: _t0,
+      dueDate: DateTime(2026, 8, 1),
+      severity: severity,
+      now: DateTime(2026, 7, 24),
+    ),
+  ],
+);
+
+ActiveCourseProgress _course(String name, int total) => (
+  course: Course(
+    id: 'c1',
+    diverId: 'd1',
+    name: name,
+    agency: CertificationAgency.padi.name,
+    startDate: _t0,
+    createdAt: _t0,
+    updatedAt: _t0,
+  ),
+  progress: CourseProgress(
+    courseId: 'c1',
+    requirements: [
+      for (var i = 0; i < total; i++)
+        CourseRequirementProgress(
+          requirement: CourseRequirement(
+            id: 'r$i',
+            courseId: 'c1',
+            name: 'Requirement $i',
+            kind: RequirementKind.checklist,
+            createdAt: _t0,
+            updatedAt: _t0,
+          ),
+          linkedDives: const [],
+        ),
+    ],
+  ),
+);
+
+/// The backup history the backup chip reads (issue #4204). Fresh per test.
+late SharedPreferences _prefs;
+
+ProviderContainer makeContainer({
+  List<EquipmentClocks> clocks = const [],
+  Diver? diver,
+  NoFlyStatus? noFly,
+  int? daysSinceLastDive,
+  CurrencyAttention certCurrency = CurrencyAttention.none,
+  bool currencyFails = false,
+  List<Trip> trips = const [],
+  PreDiveSession? activeSession,
+  List<ActiveCourseProgress> courses = const [],
+  int uploads = 0,
+  DateTime? lastBackup,
+  bool syncEnabled = false,
+  int syncPending = 0,
+  int findings = 0,
+  FlightWindowStatus? flightWindow,
+  Future<List<(Document, DocumentExpiryStatus)>> Function(Ref ref)?
+  attentionDocuments,
+}) {
+  final container = ProviderContainer(
+    overrides: [
+      activeEquipmentClocksProvider.overrideWith((ref) async => clocks),
+      currentDiverProvider.overrideWith((ref) async => diver),
+      noFlyStatusProvider.overrideWith((ref) async => noFly),
+      daysSinceLastDiveProvider.overrideWith((ref) async => daysSinceLastDive),
+      if (currencyFails) ...[
+        // The real attention provider over inputs that throw: the gauges
+        // must still resolve, with the currency chip empty.
+        certificationMetadataProvider.overrideWith((ref) async => const []),
+        currencyRulesProvider.overrideWith(
+          (ref) async => throw StateError('corrupt catalog'),
+        ),
+      ] else
+        currencyAttentionProvider.overrideWith((ref) async => certCurrency),
+      allTripsProvider.overrideWith((ref) async => trips),
+      preDiveActiveSessionProvider.overrideWith((ref) async => activeSession),
+      activeCoursesProgressProvider.overrideWith((ref) async => courses),
+      mediaTransferSummaryProvider.overrideWith(
+        (ref) => Stream.value(MediaTransferSummary(queued: uploads)),
+      ),
+      lastBackupTimeProvider.overrideWithValue(lastBackup),
+      sharedPreferencesProvider.overrideWithValue(_prefs),
+      isSyncEnabledProvider.overrideWithValue(syncEnabled),
+      pendingChangesCountProvider.overrideWithValue(syncPending),
+      openQualityFindingsCountProvider.overrideWith(
+        (ref) => Stream.value(findings),
+      ),
+      activeTripFlightWindowProvider.overrideWith((ref) async => flightWindow),
+      // The documents chip's input (issue #2613) reaches a database these
+      // tests do not have.
+      attentionDocumentsProvider.overrideWith(
+        attentionDocuments ?? (ref) async => const [],
+      ),
+    ],
+  );
+  addTearDown(container.dispose);
+  return container;
+}
+
+void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _prefs = await SharedPreferences.getInstance();
+  });
+
+  // Issue #4204: the copy taken before an upgrade is a backup the diver can
+  // see in history, so the chip must not call the backup older than it.
+  test('the backup chip counts the copy taken before an upgrade', () async {
+    // On the hour: the stored history keeps milliseconds, not microseconds.
+    final now = DateTime.now();
+    final onTheHour = DateTime(now.year, now.month, now.day, now.hour);
+    final regular = onTheHour.subtract(const Duration(days: 8));
+    final upgrade = onTheHour.subtract(const Duration(hours: 2));
+    await BackupPreferences(_prefs).addRecord(
+      BackupRecord(
+        id: 'pre-migration',
+        filename: 'pre-migration.db',
+        timestamp: upgrade,
+        sizeBytes: 1,
+        location: BackupLocation.local,
+        isAutomatic: true,
+        type: BackupType.preMigration,
+      ),
+    );
+    final container = makeContainer(lastBackup: regular);
+    final gauges = await container.read(dashboardGaugesProvider.future);
+    expect(gauges.lastBackupTime, upgrade);
+  });
+
+  test('a currency failure leaves the strip standing', () async {
+    final container = makeContainer(daysSinceLastDive: 12, currencyFails: true);
+    final gauges = await container.read(dashboardGaugesProvider.future);
+    expect(gauges.daysSinceLastDive, 12);
+    expect(gauges.hasGear, isFalse);
+    expect(gauges.certCurrency.count, 0);
+  });
+
+  group('nextUpcomingTrip', () {
+    final now = DateTime(2026, 7, 24);
+
+    test('picks the soonest future trip', () {
+      final next = nextUpcomingTrip([
+        _trip('Later', DateTime(2026, 10, 1)),
+        _trip('Sooner', DateTime(2026, 8, 5)),
+      ], now);
+      expect(next?.name, 'Sooner');
+    });
+
+    test('ignores trips that already started', () {
+      final next = nextUpcomingTrip([_trip('Past', DateTime(2026, 5, 1))], now);
+      expect(next, isNull);
+    });
+
+    test('empty list yields null', () {
+      expect(nextUpcomingTrip([], now), isNull);
+    });
+  });
+
+  group('dashboardGaugesProvider', () {
+    test('keeps the documents chip while its list reloads', () async {
+      // The attention list refreshes on every document or page change; the
+      // chip must not blink out while the new query runs.
+      final permit = Document(
+        id: 'p1',
+        diverId: 'd1',
+        owner: const DocumentOwner.personal(),
+        type: DocumentType.permit,
+        expiryDate: _t0,
+        createdAt: _t0,
+        updatedAt: _t0,
+      );
+      final due = [
+        (permit, const DocumentExpiryStatus(DocumentExpiryKind.expired, -1)),
+      ];
+      final changes = StreamController<void>.broadcast();
+      addTearDown(changes.close);
+      final gate = Completer<void>();
+      var loads = 0;
+      final container = makeContainer(
+        attentionDocuments: (ref) async {
+          ref.invalidateSelfWhen(changes.stream);
+          if (++loads > 1) await gate.future;
+          return due;
+        },
+      );
+      container.listen(attentionDocumentsProvider, (_, _) {});
+      container.listen(dashboardGaugesProvider, (_, _) {});
+      await container.read(attentionDocumentsProvider.future);
+      expect(
+        (await container.read(
+          dashboardGaugesProvider.future,
+        )).attentionDocuments,
+        hasLength(1),
+      );
+
+      changes.add(null);
+      await Future<void>.delayed(Duration.zero);
+      expect(loads, 2);
+      expect(container.read(attentionDocumentsProvider).isLoading, isTrue);
+      expect(
+        (await container.read(
+          dashboardGaugesProvider.future,
+        )).attentionDocuments,
+        hasLength(1),
+      );
+      gate.complete();
+    });
+
+    test('reports quiet defaults when nothing needs attention', () async {
+      final container = makeContainer();
+      final gauges = await container.read(dashboardGaugesProvider.future);
+
+      expect(gauges.gearOverdue, isNull);
+      expect(gauges.gearDueSoon, isNull);
+      expect(gauges.hasGear, isFalse);
+      expect(gauges.insurance, isNull);
+      expect(gauges.nextTrip, isNull);
+      expect(gauges.activeChecklistId, isNull);
+      expect(gauges.firstCourse, isNull);
+      expect(gauges.uploadsPending, 0);
+      expect(gauges.lastBackupTime, isNull);
+      expect(gauges.syncEnabled, isFalse);
+      expect(gauges.dataQualityFindings, 0);
+    });
+
+    test('surfaces every attention source', () async {
+      final backup = DateTime(2026, 7, 20);
+      final container = makeContainer(
+        clocks: [_clocks('Regulator', ServiceClockSeverity.overdue)],
+        diver: Diver(
+          id: 'd1',
+          name: 'Eric',
+          insurance: DiverInsurance(
+            provider: 'DAN',
+            expiryDate: DateTime(2027, 3, 1),
+          ),
+          createdAt: _t0,
+          updatedAt: _t0,
+        ),
+        daysSinceLastDive: 12,
+        certCurrency: const CurrencyAttention(count: 2),
+        trips: [_trip('Bonaire', DateTime.now().add(const Duration(days: 12)))],
+        courses: [_course('AN/DP', 12)],
+        uploads: 3,
+        lastBackup: backup,
+        syncEnabled: true,
+        syncPending: 5,
+        findings: 4,
+      );
+
+      // The upload and data-quality counts arrive over streams. Hold a
+      // listener (the findings provider is autoDispose) and let the first
+      // events land so the provider recomputes with real values instead of
+      // its loading fallback -- exactly how the live dashboard settles.
+      final sub = container.listen(dashboardGaugesProvider, (_, _) {});
+      addTearDown(sub.close);
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final gauges = await container.read(dashboardGaugesProvider.future);
+
+      expect(gauges.hasGear, isTrue);
+      expect(gauges.gearOverdue?.count, 1);
+      expect(gauges.gearOverdue?.worst.itemName, 'Regulator');
+      expect(gauges.insurance?.provider, 'DAN');
+      expect(gauges.daysSinceLastDive, 12);
+      expect(gauges.certCurrency.count, 2);
+      expect(gauges.nextTrip?.name, 'Bonaire');
+      expect(gauges.firstCourse?.course.name, 'AN/DP');
+      expect(gauges.uploadsPending, 3);
+      expect(gauges.lastBackupTime, backup);
+      expect(gauges.syncEnabled, isTrue);
+      expect(gauges.syncPending, 5);
+      expect(gauges.dataQualityFindings, 4);
+    });
+
+    test('skips courses that have no requirements', () async {
+      final container = makeContainer(courses: [_course('Empty course', 0)]);
+      final gauges = await container.read(dashboardGaugesProvider.future);
+      expect(gauges.firstCourse, isNull);
+    });
+
+    test('gear says nothing when every clock is ok', () async {
+      final container = makeContainer(
+        clocks: [_clocks('Regulator', ServiceClockSeverity.ok)],
+      );
+      final gauges = await container.read(dashboardGaugesProvider.future);
+      expect(gauges.hasGear, isTrue);
+      expect(gauges.gearOverdue, isNull);
+      expect(gauges.gearDueSoon, isNull);
+    });
+  });
+}

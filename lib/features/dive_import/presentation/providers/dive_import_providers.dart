@@ -1,7 +1,11 @@
-import 'dart:io';
-
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/services/dive_altitude_enricher.dart';
+import 'package:submersion/features/equipment/data/services/dive_computer_gear_linker.dart';
+import 'package:submersion/features/equipment/data/services/equipment_set_for_computer_linker.dart';
+import 'package:submersion/features/equipment/data/services/dive_equipment_defaulter.dart';
+import 'package:submersion/features/pre_dive/data/services/checklist_dive_linker.dart';
 import 'package:submersion/features/dive_import/data/services/fit_parser_service.dart';
 import 'package:submersion/features/dive_import/data/services/healthkit_service.dart';
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart';
@@ -9,14 +13,19 @@ import 'package:submersion/features/dive_import/domain/services/dive_matcher.dar
 import 'package:submersion/features/dive_import/domain/services/imported_dive_converter.dart';
 import 'package:submersion/features/dive_import/domain/services/health_import_service.dart';
 import 'package:submersion/features/dive_import/presentation/widgets/imported_dive_card.dart';
+import 'package:submersion/features/equipment/data/services/dive_set_bundle_applier.dart';
 
 // ============================================================================
 // Service Providers
 // ============================================================================
 
-/// Provider for the HealthKit service (Apple platforms only).
+/// Provider for the HealthKit service (iOS only).
+///
+/// Not macOS: the `health` package registers android and ios platforms and
+/// nothing else, so a service built on a Mac could only ever report itself
+/// unsupported.
 final healthKitServiceProvider = Provider<HealthKitService?>((ref) {
-  if (!Platform.isIOS && !Platform.isMacOS) {
+  if (!HostPlatform.isIOS) {
     return null;
   }
   return HealthKitService();
@@ -24,7 +33,7 @@ final healthKitServiceProvider = Provider<HealthKitService?>((ref) {
 
 /// Provider for the active health import service.
 ///
-/// Currently returns HealthKitService on Apple platforms, null elsewhere.
+/// Currently returns HealthKitService on iOS, null elsewhere.
 /// Future: Could include Garmin, Suunto services based on platform/settings.
 final healthImportServiceProvider = Provider<HealthImportService?>((ref) {
   return ref.watch(healthKitServiceProvider);
@@ -51,12 +60,16 @@ final healthImportAvailableProvider = FutureProvider<bool>((ref) async {
   return service.isAvailable();
 });
 
-/// Whether we have HealthKit permissions.
-final healthImportHasPermissionsProvider = FutureProvider<bool>((ref) async {
-  final service = ref.watch(healthImportServiceProvider);
-  if (service == null) return false;
-  return service.hasPermissions();
-});
+/// What the platform will tell us about HealthKit read access.
+///
+/// On iOS this is normally [HealthPermissionStatus.undetermined]: Apple does
+/// not disclose read access. Callers must not read that as a refusal.
+final healthImportPermissionStatusProvider =
+    FutureProvider<HealthPermissionStatus>((ref) async {
+      final service = ref.watch(healthImportServiceProvider);
+      if (service == null) return HealthPermissionStatus.unsupported;
+      return service.permissionStatus();
+    });
 
 // ============================================================================
 // Import State Providers
@@ -345,6 +358,9 @@ class DiveImportNotifier extends StateNotifier<DiveImportState> {
     var skipped = 0;
 
     try {
+      // One instance for the run: its lookup cache collapses a batch of dives
+      // at the same location into a single elevation request.
+      final altitudeEnricher = DiveAltitudeEnricher();
       for (final sourceId in state.selectedDiveIds) {
         final iDive = state.getDiveById(sourceId);
         if (iDive == null) continue;
@@ -379,6 +395,26 @@ class DiveImportNotifier extends StateNotifier<DiveImportState> {
         );
 
         await repository.createDive(dive);
+        final defaultSetId = await DiveEquipmentDefaulter()
+            .applySetForImportedDive(dive);
+        await ChecklistDiveLinker().applyForImportedDive(dive);
+        await altitudeEnricher.applyForImportedDive(dive);
+        // After the defaulter, never before: the defaulter bails on a dive
+        // that already has equipment, so linking first would suppress the
+        // diver's default and geofenced sets.
+        await DiveComputerGearLinker().linkComputerGearForDive(diveId: dive.id);
+        // Apply every equipment set that lists this computer as a member
+        // (issue #1020). Additive, independent of the defaulter above.
+        final computerSetIds = await EquipmentSetForComputerLinker()
+            .linkComputerSets(diveId: dive.id);
+        // What those sets carry besides gear (issue #4525): weights only
+        // where the dive has none, and never a cylinder beside its own.
+        await DiveSetBundleApplier().applyTagged(
+          diveId: dive.id,
+          leadSetId: defaultSetId,
+          alsoSetIds: computerSetIds,
+          retagAbsorbed: true,
+        );
         imported++;
       }
 

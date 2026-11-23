@@ -1,19 +1,32 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/export/shared/file_export_utils.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/share_anchor.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/certifications/presentation/services/certification_card_renderer.dart';
+import 'package:submersion/features/certifications/presentation/services/certification_file_names.dart';
+import 'package:submersion/features/certifications/presentation/certification_title_l10n.dart';
+import 'package:submersion/features/certifications/domain/certification_title.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_context.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 
 /// Bottom sheet for sharing a certification as an image.
 ///
 /// Provides two sharing options:
 /// - Share as Card: Generates a credit card-style certification image
 /// - Share as Certificate: Generates a formal certificate document
-class CertificationShareSheet extends StatefulWidget {
+class CertificationShareSheet extends ConsumerStatefulWidget {
   /// The certification to share.
   final Certification certification;
 
@@ -27,16 +40,20 @@ class CertificationShareSheet extends StatefulWidget {
   });
 
   @override
-  State<CertificationShareSheet> createState() =>
+  ConsumerState<CertificationShareSheet> createState() =>
       _CertificationShareSheetState();
 }
 
-class _CertificationShareSheetState extends State<CertificationShareSheet> {
+class _CertificationShareSheetState
+    extends ConsumerState<CertificationShareSheet> {
   bool _isExporting = false;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // The subtitle titles a custom level through the catalog, which can
+    // arrive after the first frame (issue #690).
+    ref.watch(certificationCatalogSyncProvider);
 
     return SafeArea(
       child: Padding(
@@ -57,7 +74,11 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
 
             // Subtitle with certification name
             Text(
-              widget.certification.name,
+              certificationTitleL10n(
+                widget.certification,
+                context.l10n,
+                catalog: context.certificationCatalog,
+              ),
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -91,7 +112,12 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
     );
   }
 
-  Future<void> _shareAsCard() async {
+  Future<void> _shareAsCard(Rect? anchor) async {
+    if (!demoSealGuard(context, DemoSealedFeature.share)) {
+      return;
+    }
+    // Read before the first await: the context is not used across gaps.
+    final catalog = context.certificationCatalog;
     setState(() => _isExporting = true);
 
     try {
@@ -99,16 +125,27 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
         certification: widget.certification,
         diverName: widget.diverName,
         l10n: context.l10n,
+        catalog: catalog,
       );
       if (bytes == null) {
         throw Exception('Failed to generate card image');
       }
 
+      final filename = certificationImageFileName(
+        certificationTitle(widget.certification, catalog: catalog),
+        CertificationImage.card,
+      );
+
+      // No temp folder or share sheet in a browser: it downloads.
+      if (HostPlatform.isWeb) {
+        if (mounted) Navigator.of(context).pop();
+        await saveAndShareFileBytes(bytes, filename, 'image/png');
+        return;
+      }
+
       // Save to temp file
       final tempDir = await getTemporaryDirectory();
-      final sanitizedName = _sanitizeFilename(widget.certification.name);
-      final filename = 'certification_${sanitizedName}_card.png';
-      final file = File('${tempDir.path}/$filename');
+      final file = File(p.join(tempDir.path, filename));
       await file.writeAsBytes(bytes);
 
       // Pop before sharing to avoid UI issues
@@ -116,7 +153,10 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
 
       // Share the file
       await SharePlus.instance.share(
-        ShareParams(files: [XFile(file.path, mimeType: 'image/png')]),
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'image/png')],
+          sharePositionOrigin: anchor,
+        ),
       );
     } catch (e) {
       if (mounted) {
@@ -126,7 +166,12 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
     }
   }
 
-  Future<void> _shareAsCertificate() async {
+  Future<void> _shareAsCertificate(Rect? anchor) async {
+    if (!demoSealGuard(context, DemoSealedFeature.share)) {
+      return;
+    }
+    // Read before the first await: the context is not used across gaps.
+    final catalog = context.certificationCatalog;
     setState(() => _isExporting = true);
 
     try {
@@ -135,16 +180,28 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
         certification: cert,
         diverName: widget.diverName,
         l10n: context.l10n,
+        dateFormat: ref.read(dateFormatProvider),
+        catalog: catalog,
       );
       if (bytes == null) {
         throw Exception('Failed to generate certificate image');
       }
 
+      final filename = certificationImageFileName(
+        certificationTitle(widget.certification, catalog: catalog),
+        CertificationImage.certificate,
+      );
+
+      // No temp folder or share sheet in a browser: it downloads.
+      if (HostPlatform.isWeb) {
+        if (mounted) Navigator.of(context).pop();
+        await saveAndShareFileBytes(bytes, filename, 'image/png');
+        return;
+      }
+
       // Save to temp file
       final tempDir = await getTemporaryDirectory();
-      final sanitizedName = _sanitizeFilename(widget.certification.name);
-      final filename = 'certification_${sanitizedName}_certificate.png';
-      final file = File('${tempDir.path}/$filename');
+      final file = File(p.join(tempDir.path, filename));
       await file.writeAsBytes(bytes);
 
       // Pop before sharing to avoid UI issues
@@ -152,7 +209,10 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
 
       // Share the file
       await SharePlus.instance.share(
-        ShareParams(files: [XFile(file.path, mimeType: 'image/png')]),
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'image/png')],
+          sharePositionOrigin: anchor,
+        ),
       );
     } catch (e) {
       if (mounted) {
@@ -160,15 +220,6 @@ class _CertificationShareSheetState extends State<CertificationShareSheet> {
         _showError(context.l10n.certifications_share_error_certificate('$e'));
       }
     }
-  }
-
-  /// Sanitizes a string for use in a filename.
-  String _sanitizeFilename(String name) {
-    return name
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\w\s-]'), '')
-        .replaceAll(RegExp(r'\s+'), '_')
-        .replaceAll(RegExp(r'_+'), '_');
   }
 
   void _showError(String message) {
@@ -187,7 +238,11 @@ class _ShareOptionTile extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  final VoidCallback? onTap;
+
+  /// Receives the tile's screen rect, so the iPad share popover can anchor to
+  /// the tapped option. Captured at tap time because this sheet dismisses
+  /// itself before the share sheet opens.
+  final void Function(Rect? anchor)? onTap;
   final bool isLoading;
 
   const _ShareOptionTile({
@@ -208,7 +263,7 @@ class _ShareOptionTile extends StatelessWidget {
       child: Card(
         margin: EdgeInsets.zero,
         child: InkWell(
-          onTap: onTap,
+          onTap: onTap == null ? null : () => onTap!(shareAnchorFrom(context)),
           borderRadius: BorderRadius.circular(12),
           child: Padding(
             padding: const EdgeInsets.all(16),

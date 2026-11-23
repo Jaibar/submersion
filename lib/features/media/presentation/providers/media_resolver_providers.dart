@@ -1,0 +1,355 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/services/storage/cache_location.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/media/data/repositories/manifest_subscription_repository.dart';
+import 'package:submersion/features/media/data/resolvers/http_url_media_resolver.dart';
+import 'package:submersion/features/media/data/resolvers/local_file_resolver.dart';
+import 'package:submersion/features/media/data/resolvers/platform_gallery_resolver.dart';
+import 'package:submersion/features/media/data/resolvers/signature_resolver.dart';
+import 'package:submersion/features/media/data/services/dive_link_matcher.dart';
+import 'package:submersion/features/media/data/services/exif_extractor.dart';
+import 'package:submersion/features/media/data/services/library_search_outcome.dart';
+import 'package:submersion/features/media/data/services/media_item_verifier.dart';
+import 'package:submersion/features/media/data/services/media_verification_sweep.dart';
+import 'package:submersion/features/media/data/services/gallery_thumbnail_cache.dart';
+import 'package:submersion/features/media/data/services/local_bookmark_storage.dart';
+import 'package:submersion/features/media/data/services/local_files_diagnostics_service.dart';
+import 'package:submersion/features/media/data/services/local_media_platform.dart';
+import 'package:submersion/features/media/data/services/local_thumbnail_cache.dart';
+import 'package:submersion/features/media/data/services/manifest_fetch_service.dart';
+import 'package:submersion/features/media/data/services/media_source_resolver_registry.dart';
+import 'package:submersion/features/media/data/services/network_credentials_service.dart';
+import 'package:submersion/features/media/data/services/pdf_thumbnail_service.dart';
+import 'package:submersion/features/media/data/services/subscription_poller.dart';
+import 'package:submersion/features/media/data/services/subscription_poller_scheduler.dart';
+import 'package:submersion/features/media/data/services/video_thumbnail_service.dart';
+import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/domain/services/media_orphan_reconciler.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_data.dart';
+import 'package:submersion/features/media/presentation/providers/media_tile_image_memo.dart';
+import 'package:submersion/features/media/data/resolvers/media_store_source_resolver.dart';
+import 'package:submersion/features/media/data/services/gallery_asset_reader.dart';
+import 'package:submersion/features/media/presentation/providers/lightroom_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
+import 'package:submersion/features/media/presentation/providers/url_tab_providers.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
+
+/// Singleton [PlatformGalleryResolver].
+///
+/// Injects [AssetResolutionService] so the resolver uses the 3-step fallback
+/// (cache → original ID → metadata search) instead of calling
+/// [AssetEntity.fromId] directly. This makes gallery photos visible on synced
+/// second devices where the stored [platformAssetId] is device-specific.
+final platformGalleryResolverProvider = Provider<PlatformGalleryResolver>(
+  (ref) => PlatformGalleryResolver(
+    resolutionService: ref.watch(assetResolutionServiceProvider),
+    thumbnailCache: ref.watch(galleryThumbnailCacheProvider),
+    // A page has no photo library whatever OS the browser reports (#4121).
+    hasPhotoLibrary:
+        ref.watch(deviceCapabilitiesProvider).devicePhotoLibrary &&
+        ref.watch(photoPickerServiceProvider).supportsGalleryBrowsing,
+    assetReader: const PhotoManagerAssetReader(),
+    // read, not watch: a resolver answers per resolution, so the current
+    // map is right there; widgets already on screen watch the live stream.
+    deviceLabel: (id) async =>
+        ref.read(peerDeviceNameStoreProvider).nameFor(id),
+    // Fetched lazily, only when a search fails, and memoized by the
+    // resolver; the provider itself never touches the database.
+    localDeviceId: () => SyncRepository().getDeviceId(),
+  ),
+);
+
+/// Process-wide thumbnail memo + PhotoKit concurrency gate.
+///
+/// Deliberately its own provider rather than a field constructed inside
+/// [platformGalleryResolverProvider]: the cache is only worth having if it
+/// outlives resolver rebuilds, and keeping it separate also lets diagnostics
+/// and gallery-change handlers reach it to [GalleryThumbnailCache.clear] it.
+final galleryThumbnailCacheProvider = Provider<GalleryThumbnailCache>(
+  (ref) => GalleryThumbnailCache(),
+);
+
+/// Singleton [SignatureResolver].
+final signatureResolverProvider = Provider<SignatureResolver>(
+  (ref) => SignatureResolver(),
+);
+
+final localBookmarkStorageProvider = Provider<LocalBookmarkStorage>(
+  (ref) => LocalBookmarkStorage(),
+);
+
+final localMediaPlatformProvider = Provider<LocalMediaPlatform>(
+  (ref) => LocalMediaPlatform(),
+);
+
+final exifExtractorProvider = Provider<ExifExtractor>((ref) => ExifExtractor());
+
+/// Produces and caches OS-generated poster frames for local-file videos so the
+/// media grid shows a real thumbnail instead of the movie-icon placeholder.
+final videoThumbnailServiceProvider = Provider<VideoThumbnailService>(
+  (ref) => VideoThumbnailService(
+    platform: ref.watch(localMediaPlatformProvider),
+    bookmarkStorage: ref.watch(localBookmarkStorageProvider),
+    cacheDir: () async => (await cacheLocation()).videoThumbnails,
+  ),
+);
+
+/// Renders and caches page-1 images of PDF attachments so a document tile
+/// shows the document rather than a generic icon.
+final pdfThumbnailServiceProvider = Provider<PdfThumbnailService>(
+  (ref) => PdfThumbnailService(
+    cacheDir: () async => (await cacheLocation()).pdfThumbnails,
+  ),
+);
+
+/// On-disk thumbnails of photos linked from local files, kept in the media
+/// cache's thumbnail pool so the diver's disk cache size governs them
+/// (issue #3337).
+// no-tick: a service rather than a cached query result.
+final Provider<LocalThumbnailCache> localThumbnailCacheProvider =
+    Provider<LocalThumbnailCache>((ref) {
+      final prefs = mediaCachePrefsOrNull(ref);
+      return LocalThumbnailCache(store: () => openMediaCacheStore(prefs));
+    });
+
+/// Singleton [LocalFileResolver] (Phase 2 — multi-platform).
+// no-tick: builds a resolver SERVICE, not a cached query result. Its one
+// repository call is a write, made inside a callback when a check completes.
+final localFileResolverProvider = Provider<LocalFileResolver>((ref) {
+  final resolver = LocalFileResolver(
+    bookmarkStorage: ref.watch(localBookmarkStorageProvider),
+    platform: ref.watch(localMediaPlatformProvider),
+    videoThumbnails: ref.watch(videoThumbnailServiceProvider),
+    thumbnails: ref.watch(localThumbnailCacheProvider),
+    // A thumbnail served from the cache skips the original, so the tile no
+    // longer learns whether the file is still there. The resolver looks,
+    // once per row and off the tile's path, and this writes down what it
+    // found, by the same rule a tile resolution is held to.
+    onOriginChecked: (item, verdict) async {
+      final desired = orphanFlagForVerdict(
+        currentlyOrphaned: item.isOrphaned,
+        verdict: verdict,
+      );
+      if (desired == null) return;
+      await ref
+          .read(mediaRepositoryProvider)
+          .markVerified(
+            item.id,
+            isOrphaned: desired,
+            verifiedAt: DateTime.now(),
+          );
+    },
+    // The replacement thumbnail lands at the same path, which is the image
+    // cache's key, so the stale decode has to go with the file.
+    onThumbnailDropped: (item) =>
+        ref.read(mediaTileImageMemoProvider).evictItems([item.id]),
+    // Fetched lazily, only when a read fails on a row that names an origin,
+    // and memoized by the resolver; the provider itself never touches the
+    // database.
+    localDeviceId: () => SyncRepository().getDeviceId(),
+    deviceLabel: (id) async =>
+        ref.read(peerDeviceNameStoreProvider).nameFor(id),
+    // A content URI that stopped reading on Android is searched for in the
+    // photo library by metadata before anything is decided (spec 6.3).
+    findInLibrary: (item) async => librarySearchOutcome(
+      await ref.read(assetResolutionServiceProvider).findInLibrary(item),
+      const PhotoManagerAssetReader().originBytes,
+    ),
+  );
+  // The resolver's fetch gate holds timers that outlive the fetch they bound,
+  // so a rebuild or a container teardown with a tile still resolving would
+  // leave them armed against a resolver nothing can reach.
+  ref.onDispose(resolver.dispose);
+  return resolver;
+});
+
+/// Singleton [HttpUrlMediaResolver] for [MediaSourceType.manifestEntry]
+/// items (Phase 3b).
+///
+/// Manifest-entry items are HTTP(S) URLs that arrived via a feed, so the
+/// resolver delegates byte fetch to the Phase 3a HTTP stack
+/// ([NetworkUrlResolver]). The provider for that service is co-located
+/// with the URL tab in `url_tab_providers.dart`. The same
+/// [HttpUrlMediaResolver] class also powers
+/// [networkUrlMediaResolverProvider]; see that provider for the rationale.
+final manifestEntryResolverProvider = Provider<HttpUrlMediaResolver>(
+  (ref) => HttpUrlMediaResolver(
+    sourceType: MediaSourceType.manifestEntry,
+    networkUrlResolver: ref.watch(networkUrlResolverProvider),
+  ),
+);
+
+/// Singleton [HttpUrlMediaResolver] for [MediaSourceType.networkUrl]
+/// items (Phase 3a's URL bulk import).
+///
+/// `networkUrl` items and `manifestEntry` items are functionally
+/// identical to the resolver: both are HTTP(S) URLs, both fetch via
+/// [NetworkUrlResolver], and both return [NetworkData] for
+/// `cached_network_image` to handle the actual byte transport. The only
+/// difference is provenance (which the eager fetch pipeline reads
+/// directly off the [MediaItem]). Registering a separate provider per
+/// source type lets [MediaSourceResolverRegistry] route each kind
+/// without conflating them, while sharing the implementation.
+final networkUrlMediaResolverProvider = Provider<HttpUrlMediaResolver>(
+  (ref) => HttpUrlMediaResolver(
+    sourceType: MediaSourceType.networkUrl,
+    networkUrlResolver: ref.watch(networkUrlResolverProvider),
+  ),
+);
+
+/// The [MediaSourceResolverRegistry] used by the universal display widget
+/// and any other consumer that resolves [MediaItem]s without caring about
+/// their source type.
+final mediaSourceResolverRegistryProvider =
+    Provider<MediaSourceResolverRegistry>((ref) {
+      return MediaSourceResolverRegistry({
+        MediaSourceType.platformGallery: ref.watch(
+          platformGalleryResolverProvider,
+        ),
+        MediaSourceType.signature: ref.watch(signatureResolverProvider),
+        MediaSourceType.localFile: ref.watch(localFileResolverProvider),
+        MediaSourceType.manifestEntry: ref.watch(manifestEntryResolverProvider),
+        MediaSourceType.networkUrl: ref.watch(networkUrlMediaResolverProvider),
+        MediaSourceType.serviceConnector: ref.watch(
+          connectorMediaResolverProvider,
+        ),
+        // read (not watch) inside the closure: store connect/disconnect
+        // takes effect per resolution without rebuilding registry consumers.
+        MediaSourceType.mediaStore: MediaStoreSourceResolver(
+          remote: () => ref.read(mediaStoreResolverProvider)?.tryResolveRemote,
+          // The runtime the remote fetch above comes from, so the stamp is
+          // judged against the same store the bytes would be fetched from.
+          storeId: () => ref.read(mediaStoreRuntimeProvider).value?.storeId,
+        ),
+      });
+    });
+
+/// Verifies media rows of any source type. Backs the Media Sources
+/// "check all media" action, and the local-file subsection's own re-verify.
+///
+/// Builds its own [MediaItemVerifier] rather than reading
+/// `mediaItemVerifierProvider`: that provider lives in
+/// media_provenance_providers.dart, which imports THIS file, so reading it
+/// here would close an import cycle. The verifier is stateless over a
+/// registry and a repository, so a second instance costs nothing.
+///
+/// no-tick: a service rather than a cached query result.
+final mediaVerificationSweepProvider = Provider<MediaVerificationSweep>(
+  (ref) => MediaVerificationSweep(
+    repository: ref.read(mediaRepositoryProvider),
+    verifier: MediaItemVerifier(
+      registry: ref.read(mediaSourceResolverRegistryProvider),
+      repository: ref.read(mediaRepositoryProvider),
+    ),
+  ),
+);
+
+/// Singleton [LocalFilesDiagnosticsService] used by the Settings →
+/// Media Sources → Local files subsection.
+final localFilesDiagnosticsServiceProvider =
+    Provider<LocalFilesDiagnosticsService>(
+      (ref) => LocalFilesDiagnosticsService(
+        repository: ref.read(mediaRepositoryProvider),
+        platform: ref.read(localMediaPlatformProvider),
+      ),
+    );
+
+/// Cached counts of local-file media items (total / available / unavailable).
+/// Invalidate after [LocalFilesDiagnosticsService.reverifyAll] to refresh.
+final localFilesDiagnosticsProvider = FutureProvider<LocalFilesDiagnostics>(
+  (ref) async => ref.read(localFilesDiagnosticsServiceProvider).diagnose(),
+);
+
+/// Number of persistable URI permissions Android currently holds for this
+/// app. Returns 0 on every non-Android platform.
+final androidUriUsageProvider = FutureProvider<int>(
+  (ref) async =>
+      ref.read(localFilesDiagnosticsServiceProvider).androidUriUsage(),
+);
+
+// ---------------------------------------------------------------------------
+// Phase 3b — manifest subscription pipeline
+// ---------------------------------------------------------------------------
+
+/// Singleton [ManifestFetchService] for the manifest subscription poller.
+///
+/// 3a's [NetworkCredentialsService.headersFor] returns
+/// `Future<Map<String, String>?>` (nullable map), but 3b's
+/// [ManifestCredentialsLookup] is the slightly stricter
+/// `Future<Map<String, String>>` (non-nullable). The
+/// [_NetworkCredentialsAdapter] below bridges the two with a single
+/// `?? const {}` so 3b stays loosely coupled to 3a's exact signatures.
+final manifestFetchServiceProvider = Provider<ManifestFetchService>((ref) {
+  return ManifestFetchService(
+    client: ref.watch(httpClientProvider),
+    credentials: _NetworkCredentialsAdapter(
+      ref.watch(networkCredentialsServiceProvider),
+    ),
+  );
+});
+
+/// Singleton [ManifestSubscriptionRepository]. Wraps the synced
+/// `media_subscriptions` table and the per-device
+/// `media_subscription_state` table.
+final manifestSubscriptionRepositoryProvider =
+    Provider<ManifestSubscriptionRepository>(
+      (ref) => ManifestSubscriptionRepository(),
+    );
+
+/// Singleton [SubscriptionPoller]. Composes the subscription repository,
+/// the media repository, the manifest fetch service, the network fetch
+/// pipeline (resolve, then insert already linked) and the dive matcher that
+/// decides which new entries earn a row.
+final subscriptionPollerProvider = Provider<SubscriptionPoller>((ref) {
+  return SubscriptionPoller(
+    subscriptions: ref.watch(manifestSubscriptionRepositoryProvider),
+    mediaRepo: ref.watch(mediaRepositoryProvider),
+    fetchService: ref.watch(manifestFetchServiceProvider),
+    pipeline: ref.watch(networkFetchPipelineProvider),
+    diveLinkMatcher: DiveLinkMatcher(
+      diveRepository: ref.watch(diveRepositoryProvider),
+    ),
+    // Read per poll, not captured: the active diver can change between
+    // cycles, and matching against another diver's dives would hand the
+    // photo to the wrong logbook.
+    activeDiverId: () => ref.read(currentDiverIdProvider),
+  );
+});
+
+/// Singleton [SubscriptionPollerScheduler]. Decides *when*
+/// [SubscriptionPoller.pollAllDue] runs (30 s warm-up, periodic cadence,
+/// and user-triggered "Poll now"). The scheduler is created lazily on first
+/// read; the eventual caller (Settings page in Phase 3c, or the Manifest
+/// mode panel in Tasks 13-14) is responsible for invoking
+/// `startAfterWarmup()` to begin the recurring cycle.
+final subscriptionPollerSchedulerProvider =
+    Provider<SubscriptionPollerScheduler>((ref) {
+      final scheduler = SubscriptionPollerScheduler(
+        poller: ref.watch(subscriptionPollerProvider),
+        subscriptions: ref.watch(manifestSubscriptionRepositoryProvider),
+      );
+      ref.onDispose(scheduler.dispose);
+      return scheduler;
+    });
+
+/// Adapter that turns 3a's nullable-map `NetworkCredentialsService.headersFor`
+/// into 3b's non-nullable `ManifestCredentialsLookup.headersFor`. An empty
+/// map (no auth) is the desired fallback for hosts without saved
+/// credentials.
+class _NetworkCredentialsAdapter implements ManifestCredentialsLookup {
+  _NetworkCredentialsAdapter(this._service);
+
+  final NetworkCredentialsService _service;
+
+  @override
+  Future<Map<String, String>> headersFor(Uri uri) async {
+    return await _service.headersFor(uri) ?? const <String, String>{};
+  }
+}

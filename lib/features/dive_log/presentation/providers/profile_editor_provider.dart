@@ -9,6 +9,20 @@ import 'package:submersion/features/dive_log/domain/entities/profile_waypoint.da
 /// Editor modes for the profile editor.
 enum EditorMode { select, smooth, outlier, draw }
 
+/// Stable tokens persisted in profile revision history for editor operations.
+abstract final class ProfileEditorEditKinds {
+  static const String smoothAll = 'smooth_all';
+  static const String smoothSelection = 'smooth_selection';
+  static const String removeAllOutliers = 'remove_all_outliers';
+  static const String removeSelectedOutliers = 'remove_selected_outliers';
+  static const String shiftDepth = 'shift_depth';
+  static const String shiftTime = 'shift_time';
+  static const String deleteSegment = 'delete_segment';
+  static const String deleteSegmentInterpolated = 'delete_segment_interpolated';
+  static const String generateFromWaypoints = 'generate_from_waypoints';
+  static const String trimEndZeros = 'trim_end_zeros';
+}
+
 /// State for the profile editor session.
 class ProfileEditorState extends Equatable {
   final List<DiveProfilePoint> originalProfile;
@@ -19,6 +33,9 @@ class ProfileEditorState extends Equatable {
   final List<ProfileWaypoint>? waypoints;
   final ({int start, int end})? selectedRange;
   final bool hasChanges;
+  final List<String> editKinds;
+  final List<List<String>> undoEditKindsStack;
+  final List<({int start, int end})?> undoRangeStack;
 
   const ProfileEditorState({
     required this.originalProfile,
@@ -29,6 +46,9 @@ class ProfileEditorState extends Equatable {
     this.waypoints,
     this.selectedRange,
     this.hasChanges = false,
+    this.editKinds = const [],
+    this.undoEditKindsStack = const [],
+    this.undoRangeStack = const [],
   });
 
   ProfileEditorState copyWith({
@@ -40,6 +60,9 @@ class ProfileEditorState extends Equatable {
     List<ProfileWaypoint>? waypoints,
     ({int start, int end})? selectedRange,
     bool? hasChanges,
+    List<String>? editKinds,
+    List<List<String>>? undoEditKindsStack,
+    List<({int start, int end})?>? undoRangeStack,
     bool clearOutliers = false,
     bool clearWaypoints = false,
     bool clearRange = false,
@@ -55,8 +78,18 @@ class ProfileEditorState extends Equatable {
       waypoints: clearWaypoints ? null : (waypoints ?? this.waypoints),
       selectedRange: clearRange ? null : (selectedRange ?? this.selectedRange),
       hasChanges: hasChanges ?? this.hasChanges,
+      editKinds: editKinds ?? this.editKinds,
+      undoEditKindsStack: undoEditKindsStack ?? this.undoEditKindsStack,
+      undoRangeStack: undoRangeStack ?? this.undoRangeStack,
     );
   }
+
+  /// Profile-editor operation token persisted into revision_kind.
+  ///
+  /// Multiple operations are kept in first-seen order and joined with `+`.
+  /// Example: `smooth_selection+trim_end_zeros`.
+  String get revisionEditKindToken =>
+      editKinds.isEmpty ? 'profile_editor' : editKinds.join('+');
 
   @override
   List<Object?> get props => [
@@ -68,6 +101,9 @@ class ProfileEditorState extends Equatable {
     waypoints,
     selectedRange,
     hasChanges,
+    editKinds,
+    undoEditKindsStack,
+    undoRangeStack,
   ];
 }
 
@@ -90,10 +126,20 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
     state = state.copyWith(mode: mode);
   }
 
+  /// Every edit starts here. Detected outliers describe the profile as it
+  /// stands and point at its samples by index, so they do not outlive it.
   void _pushUndo() {
     state = state.copyWith(
       undoStack: [...state.undoStack, state.editedProfile],
+      undoEditKindsStack: [...state.undoEditKindsStack, state.editKinds],
+      undoRangeStack: [...state.undoRangeStack, state.selectedRange],
+      clearOutliers: true,
     );
+  }
+
+  void _recordEditKind(String editKind) {
+    if (state.editKinds.contains(editKind)) return;
+    state = state.copyWith(editKinds: [...state.editKinds, editKind]);
   }
 
   void undo() {
@@ -101,10 +147,26 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
 
     final previous = state.undoStack.last;
     final newStack = state.undoStack.sublist(0, state.undoStack.length - 1);
+    final previousKinds = state.undoEditKindsStack.last;
+    final newKindsStack = state.undoEditKindsStack.sublist(
+      0,
+      state.undoEditKindsStack.length - 1,
+    );
+    final previousRange = state.undoRangeStack.last;
+    final newRangeStack = state.undoRangeStack.sublist(
+      0,
+      state.undoRangeStack.length - 1,
+    );
 
     state = state.copyWith(
       editedProfile: previous,
       undoStack: newStack,
+      editKinds: previousKinds,
+      undoEditKindsStack: newKindsStack,
+      undoRangeStack: newRangeStack,
+      selectedRange: previousRange,
+      clearRange: previousRange == null,
+      clearOutliers: true,
       hasChanges: newStack.isNotEmpty,
     );
   }
@@ -116,16 +178,21 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
       windowSize: windowSize,
     );
     state = state.copyWith(editedProfile: smoothed, hasChanges: true);
+    _recordEditKind(ProfileEditorEditKinds.smoothAll);
   }
 
-  void applySmoothingToRange({int windowSize = 5}) {
+  /// Smooths the selected samples. Returns false, changing nothing, when
+  /// there are fewer than three: smoothing keeps both end points.
+  bool applySmoothingToRange({int windowSize = 5}) {
     final range = state.selectedRange;
-    if (range == null) return;
+    if (range == null) return false;
 
-    _pushUndo();
     final rangePoints = state.editedProfile
         .where((p) => p.timestamp >= range.start && p.timestamp <= range.end)
         .toList();
+    if (rangePoints.length <= 2) return false;
+
+    _pushUndo();
     final smoothed = _service.smoothProfile(
       rangePoints,
       windowSize: windowSize,
@@ -137,6 +204,8 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
     }).toList();
 
     state = state.copyWith(editedProfile: result, hasChanges: true);
+    _recordEditKind(ProfileEditorEditKinds.smoothSelection);
+    return true;
   }
 
   void detectOutliers() {
@@ -150,11 +219,8 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
 
     _pushUndo();
     final cleaned = _service.removeOutliers(state.editedProfile, outliers);
-    state = state.copyWith(
-      editedProfile: cleaned,
-      hasChanges: true,
-      clearOutliers: true,
-    );
+    state = state.copyWith(editedProfile: cleaned, hasChanges: true);
+    _recordEditKind(ProfileEditorEditKinds.removeAllOutliers);
   }
 
   void removeSelectedOutliers(List<OutlierResult> selected) {
@@ -168,6 +234,7 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
       detectedOutliers: remaining,
       hasChanges: true,
     );
+    _recordEditKind(ProfileEditorEditKinds.removeSelectedOutliers);
   }
 
   void shiftSegmentDepth(double depthDelta) {
@@ -182,11 +249,15 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
       depthDelta: depthDelta,
     );
     state = state.copyWith(editedProfile: shifted, hasChanges: true);
+    _recordEditKind(ProfileEditorEditKinds.shiftDepth);
   }
 
-  void shiftSegmentTime(int timeDelta) {
+  /// Moves the selected samples, and the selection with them. Returns false,
+  /// changing nothing, when they would reach a sample outside the selection or
+  /// pass the start of the dive.
+  bool shiftSegmentTime(int timeDelta) {
     final range = state.selectedRange;
-    if (range == null) return;
+    if (range == null) return false;
 
     final shifted = _service.shiftSegmentTime(
       state.editedProfile,
@@ -194,28 +265,47 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
       endTimestamp: range.end,
       timeDelta: timeDelta,
     );
-    if (shifted == null) return; // Overlap detected
+    if (shifted == null) return false; // Overlap detected
 
     _pushUndo();
-    state = state.copyWith(editedProfile: shifted, hasChanges: true);
+    state = state.copyWith(
+      editedProfile: shifted,
+      selectedRange: (
+        start: range.start + timeDelta,
+        end: range.end + timeDelta,
+      ),
+      hasChanges: true,
+    );
+    _recordEditKind(ProfileEditorEditKinds.shiftTime);
+    return true;
   }
 
-  void deleteSegment({bool interpolateGap = false}) {
+  /// Deletes the selected samples. Returns false, changing nothing, when they
+  /// are the whole profile: a dive cannot be saved with no samples.
+  bool deleteSegment({bool interpolateGap = false}) {
     final range = state.selectedRange;
-    if (range == null) return;
+    if (range == null) return false;
 
-    _pushUndo();
     final result = _service.deleteSegment(
       state.editedProfile,
       startTimestamp: range.start,
       endTimestamp: range.end,
       interpolateGap: interpolateGap,
     );
+    if (result.isEmpty) return false;
+
+    _pushUndo();
     state = state.copyWith(
       editedProfile: result,
       hasChanges: true,
       clearRange: true,
     );
+    _recordEditKind(
+      interpolateGap
+          ? ProfileEditorEditKinds.deleteSegmentInterpolated
+          : ProfileEditorEditKinds.deleteSegment,
+    );
+    return true;
   }
 
   void setSelectedRange({required int start, required int end}) {
@@ -270,6 +360,28 @@ class ProfileEditorNotifier extends StateNotifier<ProfileEditorState> {
       waypoints,
       intervalSeconds: intervalSeconds,
     );
-    state = state.copyWith(editedProfile: generated, hasChanges: true);
+    state = state.copyWith(
+      editedProfile: generated,
+      hasChanges: true,
+      clearRange: true,
+    );
+    _recordEditKind(ProfileEditorEditKinds.generateFromWaypoints);
+  }
+
+  /// Trim trailing zero-depth points from the profile, keeping the last one.
+  void trimEndZeros() {
+    final profile = state.editedProfile;
+    if (profile.length < 2) return;
+
+    final trimmed = _service.trimEndZeros(profile);
+    if (trimmed.length == profile.length) return;
+
+    _pushUndo();
+    state = state.copyWith(
+      editedProfile: trimmed,
+      hasChanges: true,
+      clearRange: true,
+    );
+    _recordEditKind(ProfileEditorEditKinds.trimEndZeros);
   }
 }

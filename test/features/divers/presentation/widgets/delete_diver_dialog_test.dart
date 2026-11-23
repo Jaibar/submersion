@@ -124,6 +124,38 @@ void main() {
       expect(deleteButton.onPressed, isNotNull);
     });
 
+    // A Japanese IME in full-width mode types the space as U+3000 (#4833).
+    testWidgets('a full-width space confirms like an ASCII space', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('ja'),
+          child: Builder(
+            builder: (context) {
+              return ElevatedButton(
+                onPressed: () =>
+                    DeleteDiverDialog.show(context, diverName: 'Alice'),
+                child: const Text('Open'),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), '削除\u3000Alice');
+      await tester.pump();
+
+      final deleteButton = tester.widget<FilledButton>(
+        find.byType(FilledButton),
+      );
+      expect(deleteButton.onPressed, isNotNull);
+    });
+
     testWidgets('cancel button closes dialog and returns false', (
       tester,
     ) async {
@@ -284,6 +316,94 @@ void main() {
       // Body text should mention permanent deletion and the diver name.
       expect(find.textContaining('permanently delete'), findsOneWidget);
       expect(find.textContaining('Alice'), findsWidgets);
+    });
+  });
+
+  group('translated dialog (issue #3069)', () {
+    Future<void> openInGerman(WidgetTester tester) async {
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('de'),
+          child: Builder(
+            builder: (context) => ElevatedButton(
+              onPressed: () =>
+                  DeleteDiverDialog.show(context, diverName: 'Alice'),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+    }
+
+    FilledButton deleteButton(WidgetTester tester) =>
+        tester.widget<FilledButton>(find.byType(FilledButton));
+
+    testWidgets('warns and hints in the app language', (tester) async {
+      await openInGerman(tester);
+
+      expect(find.textContaining('dauerhaft gelöscht'), findsOneWidget);
+      expect(find.textContaining('permanently delete'), findsNothing);
+      expect(
+        find.text('Gib "Löschen Alice" zur Bestätigung ein'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('enables Delete for the translated phrase it asks for', (
+      tester,
+    ) async {
+      await openInGerman(tester);
+
+      await tester.enterText(find.byType(TextField), 'Delete Alice');
+      await tester.pump();
+      expect(deleteButton(tester).onPressed, isNull);
+
+      await tester.enterText(find.byType(TextField), 'Löschen Alice');
+      await tester.pump();
+      expect(deleteButton(tester).onPressed, isNotNull);
+    });
+  });
+
+  group('kept gear line (issue #2852)', () {
+    Future<void> open(WidgetTester tester, {int kept = 0}) async {
+      await tester.pumpWidget(
+        testApp(
+          locale: const Locale('en'),
+          child: Builder(
+            builder: (context) => ElevatedButton(
+              onPressed: () => DeleteDiverDialog.show(
+                context,
+                diverName: 'Alice',
+                keptEquipmentCount: kept,
+              ),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('says how much gear is kept for other profiles', (
+      tester,
+    ) async {
+      await open(tester, kept: 5);
+      expect(
+        find.text(
+          '5 pieces of gear in use by other profiles will be kept and '
+          'handed to them.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('says nothing when no gear is kept', (tester) async {
+      await open(tester);
+      expect(find.textContaining('pieces of gear'), findsNothing);
+      expect(find.textContaining('piece of gear'), findsNothing);
     });
   });
 }

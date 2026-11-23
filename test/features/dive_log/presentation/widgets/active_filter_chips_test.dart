@@ -1,0 +1,675 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/active_filter_chips.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+final _otherFilterProvider = StateProvider<DiveFilterState>(
+  (ref) => DiveFilterState(
+    startDate: DateTime(2021),
+    endDate: DateTime(2024, 12, 31),
+    favoritesOnly: true,
+  ),
+);
+
+final rolesOverride = allDiveRolesProvider.overrideWith(
+  (ref) async => [
+    DiveRole(
+      id: 'instructor',
+      name: 'Instructor',
+      isBuiltIn: true,
+      createdAt: DateTime(2020),
+      updatedAt: DateTime(2020),
+    ),
+  ],
+);
+
+void main() {
+  testWidgets('chips edit the provider they are given, not the dive list', (
+    tester,
+  ) async {
+    final overrides = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: overrides,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => Wrap(
+                children: activeDiveFilterChips(
+                  context,
+                  ref,
+                  _otherFilterProvider,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(Chip), findsNWidgets(2));
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(Scaffold)),
+    );
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pump();
+    final after = container.read(_otherFilterProvider);
+    expect(after.startDate, isNull);
+    expect(after.endDate, isNull);
+    expect(after.favoritesOnly, isTrue);
+    expect(container.read(diveFilterProvider).hasActiveFilters, isFalse);
+  });
+
+  group('tank configuration (#3804)', () {
+    Future<StateProvider<DiveFilterState>> pumpChips(
+      WidgetTester tester,
+      DiveFilterState filter,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final provider = StateProvider<DiveFilterState>((ref) => filter);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Wrap(
+                  children: activeDiveFilterChips(context, ref, provider),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      return provider;
+    }
+
+    testWidgets('one value shows its label', (tester) async {
+      await pumpChips(
+        tester,
+        const DiveFilterState(
+          tankConfigurations: [TankBaseConfiguration.singleBackmount],
+          tankExtras: [TankConfigurationExtra.decoGas],
+        ),
+      );
+      expect(find.text('Single backmount'), findsOneWidget);
+      expect(find.text('Deco gas'), findsOneWidget);
+    });
+
+    testWidgets('several values show a count', (tester) async {
+      await pumpChips(
+        tester,
+        const DiveFilterState(
+          tankConfigurations: [
+            TankBaseConfiguration.sidemount,
+            TankBaseConfiguration.rebreather,
+          ],
+          tankExtras: [
+            TankConfigurationExtra.stages,
+            TankConfigurationExtra.multiGas,
+          ],
+        ),
+      );
+      expect(find.text('2 tank configurations'), findsOneWidget);
+      expect(find.text('2 tank extras'), findsOneWidget);
+    });
+
+    testWidgets('removing a chip clears only its axis', (tester) async {
+      final provider = await pumpChips(
+        tester,
+        const DiveFilterState(
+          tankConfigurations: [TankBaseConfiguration.sidemount],
+          tankExtras: [TankConfigurationExtra.stages],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(Scaffold)),
+      );
+      await tester.tap(find.byIcon(Icons.close).first);
+      await tester.pump();
+      final after = container.read(provider);
+      expect(after.tankConfigurations, isEmpty);
+      expect(after.tankExtras, [TankConfigurationExtra.stages]);
+    });
+
+    testWidgets('removing the extras chip leaves the configuration', (
+      tester,
+    ) async {
+      final provider = await pumpChips(
+        tester,
+        const DiveFilterState(
+          tankConfigurations: [TankBaseConfiguration.sidemount],
+          tankExtras: [TankConfigurationExtra.stages],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(Scaffold)),
+      );
+      await tester.tap(find.byIcon(Icons.close).last);
+      await tester.pump();
+      final after = container.read(provider);
+      expect(after.tankExtras, isEmpty);
+      expect(after.tankConfigurations, [TankBaseConfiguration.sidemount]);
+    });
+  });
+
+  group('a list of dives (#3805)', () {
+    Future<ProviderContainer> pumpChips(
+      WidgetTester tester,
+      DiveFilterState filter,
+    ) async {
+      final overrides = await getBaseOverrides();
+      final provider = StateProvider<DiveFilterState>((ref) => filter);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Wrap(
+                  children: activeDiveFilterChips(context, ref, provider),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      return ProviderScope.containerOf(tester.element(find.byType(Scaffold)));
+    }
+
+    testWidgets('a named list shows its label and count', (tester) async {
+      await pumpChips(
+        tester,
+        const DiveFilterState(
+          diveIds: ['a', 'b'],
+          diveIdsLabel: 'Cloud cover: Clear',
+        ),
+      );
+      expect(find.text('Cloud cover: Clear (2)'), findsOneWidget);
+    });
+
+    testWidgets('an unnamed list keeps its chip', (tester) async {
+      await pumpChips(tester, const DiveFilterState(diveIds: ['a', 'b']));
+      expect(find.text('2 dives'), findsOneWidget);
+    });
+  });
+
+  testWidgets('a closed date range reads start first, with its years', (
+    tester,
+  ) async {
+    final overrides = await getBaseOverrides();
+    final range = StateProvider<DiveFilterState>(
+      (ref) => DiveFilterState(
+        startDate: DateTime(2023),
+        endDate: DateTime(2025, 12, 31),
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: overrides,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) =>
+                  Wrap(children: activeDiveFilterChips(context, ref, range)),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final label = tester
+        .widget<Text>(
+          find.descendant(of: find.byType(Chip), matching: find.byType(Text)),
+        )
+        .data!;
+    expect(label.indexOf('2023'), isNonNegative, reason: label);
+    expect(label.indexOf('2025'), greaterThan(label.indexOf('2023')));
+    expect(label.indexOf('Jan'), lessThan(label.indexOf('Dec')));
+  });
+
+  group('every axis renders one chip that clears only that axis', () {
+    final axes = <String, DiveFilterState>{
+      'dates': DiveFilterState(startDate: DateTime(2023)),
+      'until': DiveFilterState(endDate: DateTime(2023, 6, 30)),
+      'range': DiveFilterState(
+        startDate: DateTime(2023),
+        endDate: DateTime(2023, 6, 30),
+      ),
+      'dive type': const DiveFilterState(diveTypeId: 'wreck'),
+      'site': const DiveFilterState(siteId: 's1'),
+      'trip': const DiveFilterState(tripId: 't1'),
+      'dive center': const DiveFilterState(diveCenterId: 'c1'),
+      'one gear item': const DiveFilterState(equipmentIds: ['e1']),
+      'several gear items': const DiveFilterState(equipmentIds: ['e1', 'e2']),
+      'min depth': const DiveFilterState(minDepth: 10),
+      'max depth': const DiveFilterState(maxDepth: 30),
+      'depth range': const DiveFilterState(minDepth: 10, maxDepth: 30),
+      'favourites': const DiveFilterState(favoritesOnly: true),
+      'no buddy': const DiveFilterState(noBuddyOnly: true),
+      'no role': const DiveFilterState(noRoleOnly: true),
+      'my role': const DiveFilterState(diverRoleIds: ['instructor']),
+      'my role or not set': const DiveFilterState(
+        diverRoleIds: ['instructor'],
+        noRoleOnly: true,
+      ),
+      'no entry method': const DiveFilterState(noEntryMethodOnly: true),
+      'tags': const DiveFilterState(tagIds: ['a', 'b']),
+      'buddy name': const DiveFilterState(buddyNameFilter: 'Jane'),
+    };
+    for (final MapEntry(key: name, value: filter) in axes.entries) {
+      testWidgets(name, (tester) async {
+        final provider = StateProvider<DiveFilterState>((ref) => filter);
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              diveTypeProvider.overrideWith((ref, id) async => null),
+              siteProvider.overrideWith((ref, id) async => null),
+              tripByIdProvider.overrideWith((ref, id) async => null),
+              diveCenterByIdProvider.overrideWith((ref, id) async => null),
+              equipmentItemProvider.overrideWith((ref, id) async => null),
+              rolesOverride,
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: Consumer(
+                  builder: (context, ref, _) => Wrap(
+                    children: activeDiveFilterChips(context, ref, provider),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.byType(Chip), findsOneWidget);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(Scaffold)),
+        );
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pump();
+        expect(container.read(provider).hasActiveFilters, isFalse);
+      });
+    }
+  });
+
+  // The diver's own role (#4409): one chip for the axis, naming a single
+  // role in the diver's language and counting several choices.
+  group('my role chip label', () {
+    Future<void> pumpChips(WidgetTester tester, DiveFilterState filter) async {
+      final provider = StateProvider<DiveFilterState>((ref) => filter);
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [...overrides, rolesOverride],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Wrap(
+                  children: activeDiveFilterChips(context, ref, provider),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a single role is named', (tester) async {
+      await pumpChips(
+        tester,
+        const DiveFilterState(diverRoleIds: ['instructor']),
+      );
+      expect(find.text('Instructor'), findsOneWidget);
+    });
+
+    testWidgets('a role and Not set count as two', (tester) async {
+      await pumpChips(
+        tester,
+        const DiveFilterState(diverRoleIds: ['instructor'], noRoleOnly: true),
+      );
+      expect(find.text('2 roles'), findsOneWidget);
+    });
+
+    // A dive_roles write reloads the role map (its dependency moves); the
+    // chip keeps the role's name until the new map lands, not the raw id.
+    testWidgets('a role map reload keeps the name', (tester) async {
+      final trigger = NotifierProvider<_Trigger, int>(_Trigger.new);
+      final instructor = DiveRole(
+        id: 'instructor',
+        name: 'Instructor',
+        isBuiltIn: true,
+        createdAt: DateTime(2020),
+        updatedAt: DateTime(2020),
+      );
+      var next = Completer<Map<String, DiveRole>>()
+        ..complete({'instructor': instructor});
+      final provider = StateProvider<DiveFilterState>(
+        (ref) => const DiveFilterState(diverRoleIds: ['instructor']),
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveRoleMapProvider.overrideWith((ref) {
+              ref.watch(trigger);
+              return next.future;
+            }),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Wrap(
+                  children: activeDiveFilterChips(context, ref, provider),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Instructor'), findsOneWidget);
+
+      next = Completer<Map<String, DiveRole>>();
+      ProviderScope.containerOf(
+        tester.element(find.byType(Scaffold)),
+      ).read(trigger.notifier).bump();
+      await tester.pump();
+      expect(find.text('Instructor'), findsOneWidget);
+      expect(find.text('instructor'), findsNothing);
+      next.complete({'instructor': instructor});
+    });
+  });
+
+  testWidgets('an advanced query shows one chip per part, each removable', (
+    tester,
+  ) async {
+    // The Connections Filter tab shares these chips, and its graph honours
+    // the query, so a query must never be active without a chip.
+    final depth = ConditionNode(
+      FieldPath(['depth']),
+      QueryOp.gt,
+      const NumberValue(30, null),
+    );
+    final noWeights = ConditionNode(
+      FieldPath(['weights']),
+      QueryOp.isEmpty,
+      null,
+    );
+    final queryFilterProvider = StateProvider<DiveFilterState>(
+      (ref) => DiveFilterState(query: AndNode([depth, noWeights])),
+    );
+    final overrides = await getBaseOverrides();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: overrides,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => Wrap(
+                children: activeDiveFilterChips(
+                  context,
+                  ref,
+                  queryFilterProvider,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(Chip), findsNWidgets(2));
+    expect(find.text('weights:none'), findsOneWidget);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(Scaffold)),
+    );
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pump();
+    expect(find.byType(Chip), findsOneWidget);
+    expect(find.text('weights:none'), findsOneWidget);
+    expect(container.read(diveFilterProvider).hasActiveFilters, isFalse);
+  });
+
+  group('a date in the query (#3457)', () {
+    // The month label comes from intl, which reads a process global that
+    // only app.dart sets, so pin it here and put it back.
+    late String? previousLocale;
+
+    setUpAll(() => initializeDateFormatting('en'));
+
+    setUp(() {
+      previousLocale = Intl.defaultLocale;
+      Intl.defaultLocale = 'en';
+    });
+
+    tearDown(() => Intl.defaultLocale = previousLocale);
+
+    final date = ConditionNode(
+      FieldPath(['date']),
+      QueryOp.inList,
+      DateRangeValue(DateTime(2018, 10, 1), DateTime(2018, 10, 31)),
+    );
+
+    Future<void> pumpChips(WidgetTester tester, QueryNode query) async {
+      final provider = StateProvider<DiveFilterState>(
+        (ref) => DiveFilterState(query: query),
+      );
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: overrides,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Wrap(
+                  children: activeDiveFilterChips(context, ref, provider),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('shows in plain words with a calendar icon', (tester) async {
+      await pumpChips(
+        tester,
+        AndNode([
+          TextNode(['ressel']),
+          date,
+        ]),
+      );
+
+      expect(find.text('Oct 2018'), findsOneWidget);
+      expect(find.text('date in 2018-10'), findsNothing);
+      expect(find.byIcon(Icons.calendar_today), findsOneWidget);
+    });
+
+    testWidgets('a word chip has no calendar icon', (tester) async {
+      await pumpChips(tester, TextNode(['ressel']));
+
+      expect(find.text('ressel'), findsOneWidget);
+      expect(find.byIcon(Icons.calendar_today), findsNothing);
+    });
+
+    testWidgets('the date chip is tinted, a word chip is not', (tester) async {
+      await pumpChips(
+        tester,
+        AndNode([
+          TextNode(['ressel']),
+          date,
+        ]),
+      );
+
+      final chips = tester.widgetList<Chip>(find.byType(Chip)).toList();
+      final scheme = Theme.of(tester.element(find.byType(Wrap))).colorScheme;
+      expect(chips.first.backgroundColor, isNull);
+      expect(chips.last.backgroundColor, scheme.primaryContainer);
+      expect(chips.last.side?.color, scheme.primary);
+    });
+
+    testWidgets('removing the date leaves the words', (tester) async {
+      await pumpChips(
+        tester,
+        AndNode([
+          TextNode(['ressel']),
+          date,
+        ]),
+      );
+
+      await tester.tap(find.byIcon(Icons.close).last);
+      await tester.pump();
+
+      expect(find.text('Oct 2018'), findsNothing);
+      expect(find.text('ressel'), findsOneWidget);
+    });
+  });
+
+  testWidgets('suspended axis chips are dimmed and locked (#2773)', (
+    tester,
+  ) async {
+    final overrides = await getBaseOverrides();
+    final suspended = StateProvider<DiveFilterState>(
+      (ref) => DiveFilterState(
+        favoritesOnly: true,
+        query: TextNode(['manta']),
+        axesSuspended: true,
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: overrides,
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => Wrap(
+                children: activeDiveFilterChips(context, ref, suspended),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final axisChip = find.widgetWithText(Chip, 'Favorites');
+    expect(axisChip, findsOneWidget);
+    expect(tester.widget<Chip>(axisChip).onDeleted, isNull);
+    expect(
+      find.ancestor(of: axisChip, matching: find.byType(Opacity)),
+      findsOneWidget,
+    );
+    final queryChip = find.widgetWithText(Chip, 'manta');
+    expect(queryChip, findsOneWidget);
+    expect(tester.widget<Chip>(queryChip).onDeleted, isNotNull);
+  });
+
+  // Copilot review on #2807: handoff axes with no panel control (a buddy's
+  // "View all" sets buddyId and diveIds) each get a removable chip.
+  testWidgets('buddy and dive-set handoffs show removable chips', (
+    tester,
+  ) async {
+    final overrides = await getBaseOverrides();
+    final handoff = StateProvider<DiveFilterState>(
+      (ref) => const DiveFilterState(buddyId: 'b1', diveIds: ['d1', 'd2']),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...overrides,
+          allBuddiesProvider.overrideWith(
+            (ref) async => [
+              Buddy(
+                id: 'b1',
+                name: 'Ana',
+                createdAt: DateTime(2026),
+                updatedAt: DateTime(2026),
+              ),
+            ],
+          ),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) =>
+                  Wrap(children: activeDiveFilterChips(context, ref, handoff)),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(Scaffold)),
+    );
+    final buddy = find.widgetWithText(Chip, 'Ana');
+    final dives = find.widgetWithText(Chip, '2 dives');
+    expect(buddy, findsOneWidget);
+    expect(dives, findsOneWidget);
+    tester.widget<Chip>(buddy).onDeleted!();
+    expect(container.read(handoff).buddyId, isNull);
+    expect(container.read(handoff).diveIds, ['d1', 'd2']);
+    await tester.pump();
+    tester.widget<Chip>(find.widgetWithText(Chip, '2 dives')).onDeleted!();
+    expect(container.read(handoff).hasActiveFilters, isFalse);
+  });
+}
+
+class _Trigger extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void bump() => state = state + 1;
+}

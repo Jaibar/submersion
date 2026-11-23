@@ -1,0 +1,752 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart'
+    hide Trip, ServiceRecord;
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
+import 'package:submersion/features/trips/data/repositories/trip_equipment_repository.dart';
+import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
+import 'package:submersion/features/trips/domain/entities/itinerary_day.dart';
+import 'package:submersion/features/trips/domain/entities/scrubber_margin.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/providers/scrubber_margin_providers.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_database.dart';
+
+/// One margin per active rebreather with an enabled repack clock, computed
+/// as of the trip start from the repack record, the loop dives since it,
+/// and the diver's history.
+void main() {
+  late AppDatabase db;
+  late ProviderContainer container;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    container = ProviderContainer(
+      overrides: [
+        settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+        validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+      ],
+    );
+    addTearDown(container.dispose);
+  });
+  tearDown(tearDownTestDatabase);
+
+  Future<void> ccrDive(
+    String id,
+    DateTime at,
+    String equipmentId, {
+    int runtime = 3600,
+    int? bottomTime,
+    double? scrubber,
+    int summaryStamp = 1,
+  }) async {
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion.insert(
+            id: id,
+            // Stored as the app stores dives: the wall clock, in UTC.
+            diveDateTime: DateTime.utc(
+              at.year,
+              at.month,
+              at.day,
+              at.hour,
+              at.minute,
+            ).millisecondsSinceEpoch,
+            createdAt: 1,
+            updatedAt: 1,
+          ).copyWith(
+            diveMode: const Value('ccr'),
+            runtime: Value(runtime),
+            bottomTime: Value(bottomTime),
+          ),
+        );
+    await db
+        .into(db.diveEquipment)
+        .insert(
+          DiveEquipmentCompanion.insert(diveId: id, equipmentId: equipmentId),
+        );
+    if (scrubber != null) {
+      await db
+          .into(db.diveSensorSummaries)
+          .insert(
+            DiveSensorSummariesCompanion.insert(
+              diveId: id,
+              engineVersion: 1,
+              sourceUpdatedAt: summaryStamp,
+              computedAt: 1,
+            ).copyWith(scrubberConsumedMinutes: Value(scrubber)),
+          );
+    }
+  }
+
+  Future<Trip> unpackedTrip(String name, DateTime start, DateTime end) =>
+      TripRepository().createTrip(
+        Trip(
+          id: '',
+          name: name,
+          startDate: start,
+          endDate: end,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+
+  /// A trip with every unit made so far packed for it: margins cover only
+  /// the rebreathers on the trip (issue #2727).
+  Future<Trip> trip(String name, DateTime start, DateTime end) async {
+    final created = await unpackedTrip(name, start, end);
+    final ids =
+        await (db.selectOnly(db.equipment)..addColumns([db.equipment.id]))
+            .map((r) => r.read(db.equipment.id)!)
+            .get();
+    await TripEquipmentRepository().pack(created.id, ids);
+    return created;
+  }
+
+  test(
+    'reads rating, repack, loop dives and history as of the start',
+    () async {
+      final ccr = await EquipmentRepository().createEquipment(
+        const EquipmentItem(
+          id: '',
+          name: 'CCR',
+          type: EquipmentType.rebreather,
+          attributes: [
+            EquipmentAttribute(
+              id: '',
+              equipmentId: '',
+              key: 'scrubber_duration_h',
+              valueNum: 5,
+            ),
+          ],
+        ),
+      );
+      await ServiceRecordRepository().createRecord(
+        ServiceRecord(
+          id: '',
+          equipmentId: ccr.id,
+          serviceCategory: ServiceCategory.values.first,
+          serviceKindId: 'scrubber-repack',
+          serviceDate: DateTime(2026, 2, 1),
+          currency: 'USD',
+          notes: '',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      await ccrDive('before', DateTime(2026, 1, 15), ccr.id, scrubber: 30);
+      await ccrDive('m1', DateTime(2026, 3, 10), ccr.id, scrubber: 40);
+      await ccrDive('m2', DateTime(2026, 3, 20), ccr.id, runtime: 3000);
+      final june = await trip(
+        'June',
+        DateTime(2026, 6, 1),
+        DateTime(2026, 6, 5),
+      );
+      final march = await trip(
+        'March',
+        DateTime(2026, 3, 1),
+        DateTime(2026, 3, 2),
+      );
+
+      final margins = await container.read(
+        tripScrubberMarginsProvider(june.id).future,
+      );
+      final m = margins.single;
+      expect(m.item.id, ccr.id);
+      expect(m.ratedMinutes, 300);
+      // 40 from the summary plus 50 minutes of runtime; the January dive
+      // predates the repack.
+      expect(m.consumedMinutes, 90);
+      expect(m.remainingBefore, 210);
+      // No earlier trips: 5 calendar days at the default 2 per day.
+      expect(m.expectedDives, 10);
+      expect(m.expectedDivesN, 0);
+      // Summary figures of every rebreather dive before June: 40 and 30.
+      expect(m.minutesPerDive, 35);
+      expect(m.minutesPerDiveN, 2);
+      expect(m.caution, isTrue);
+
+      final past = await container.read(
+        tripScrubberMarginsProvider(march.id).future,
+      );
+      // As of 1 March: nothing consumed since the repack, one history dive.
+      expect(past.single.consumedMinutes, 0);
+      expect(past.single.minutesPerDive, 30);
+      expect(past.single.minutesPerDiveN, 1);
+    },
+  );
+
+  test('a stale summary gives way to the runtime in the consumed '
+      'minutes', () async {
+    // A loop dive edited after its summary was built: the stored scrubber
+    // minutes describe the dive before the edit, so its runtime counts
+    // until the rebuild lands, as the exposure inputs already read it.
+    final ccr = await EquipmentRepository().createEquipment(
+      const EquipmentItem(
+        id: '',
+        name: 'CCR',
+        type: EquipmentType.rebreather,
+        attributes: [
+          EquipmentAttribute(
+            id: '',
+            equipmentId: '',
+            key: 'scrubber_duration_h',
+            valueNum: 5,
+          ),
+        ],
+      ),
+    );
+    await ccrDive(
+      'edited',
+      DateTime(2026, 3, 10),
+      ccr.id,
+      scrubber: 40,
+      summaryStamp: 0,
+    );
+    final june = await trip('June', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+
+    final margins = await container.read(
+      tripScrubberMarginsProvider(june.id).future,
+    );
+    expect(margins.single.consumedMinutes, 60);
+  });
+
+  test('a repack on the trip start date is the anchor', () async {
+    // Service dates come from a date picker, so a repack logged on the
+    // day the trip starts is a real case. Excluding it would charge the
+    // trip for every loop dive before a scrubber that was just packed.
+    final ccr = await EquipmentRepository().createEquipment(
+      const EquipmentItem(
+        id: '',
+        name: 'CCR',
+        type: EquipmentType.rebreather,
+        attributes: [
+          EquipmentAttribute(
+            id: '',
+            equipmentId: '',
+            key: 'scrubber_duration_h',
+            valueNum: 5,
+          ),
+        ],
+      ),
+    );
+    await ServiceRecordRepository().createRecord(
+      ServiceRecord(
+        id: '',
+        equipmentId: ccr.id,
+        serviceCategory: ServiceCategory.values.first,
+        serviceKindId: 'scrubber-repack',
+        serviceDate: DateTime(2026, 2, 1),
+        currency: 'USD',
+        notes: '',
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      ),
+    );
+    await ccrDive('older', DateTime(2026, 1, 15), ccr.id, scrubber: 30);
+    final sameDay = await trip(
+      'SameDay',
+      DateTime(2026, 2, 1),
+      DateTime(2026, 2, 5),
+    );
+
+    final margins = await container.read(
+      tripScrubberMarginsProvider(sameDay.id).future,
+    );
+    // The January dive predates the repack, so nothing is consumed.
+    expect(margins.single.consumedMinutes, 0);
+    expect(margins.single.remainingBefore, 300);
+  });
+
+  Future<EquipmentItem> rebreather() => EquipmentRepository().createEquipment(
+    const EquipmentItem(
+      id: '',
+      name: 'CCR',
+      type: EquipmentType.rebreather,
+      attributes: [
+        EquipmentAttribute(
+          id: '',
+          equipmentId: '',
+          key: 'scrubber_duration_h',
+          valueNum: 5,
+        ),
+      ],
+    ),
+  );
+
+  test('a repack saved with a time of day on the start date is the '
+      'anchor', () async {
+    // A new service record starts at DateTime.now() and saves unchanged
+    // unless the picker is opened, so a repack logged that morning carries
+    // a time after the trip's local midnight. It is still that day's
+    // repack.
+    final ccr = await rebreather();
+    await ServiceRecordRepository().createRecord(
+      ServiceRecord(
+        id: '',
+        equipmentId: ccr.id,
+        serviceCategory: ServiceCategory.values.first,
+        serviceKindId: 'scrubber-repack',
+        serviceDate: DateTime(2026, 2, 1, 10, 37),
+        currency: 'USD',
+        notes: '',
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      ),
+    );
+    await ccrDive('older', DateTime(2026, 1, 15), ccr.id, scrubber: 30);
+    final t = await trip('Feb', DateTime(2026, 2, 1), DateTime(2026, 2, 5));
+    final m = (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single;
+    expect(m.consumedMinutes, 0);
+    expect(m.consumedSince, DateTime(2026, 2, 1, 10, 37));
+  });
+
+  test('a removed repack clock takes its margin off an open trip', () async {
+    // Issue #2606: the margin is the repack clock projected onto the
+    // trip. A diver who removes the clock (to track two scrubbers on
+    // their own clocks, say) has stopped tracking this one, so the rated
+    // duration on the unit alone must not keep the card, or its warning,
+    // alive.
+    final ccr = await rebreather();
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final sub = container.listen(tripScrubberMarginsProvider(t.id), (_, _) {});
+    addTearDown(sub.close);
+    Future<List<ScrubberMargin>> margins() =>
+        container.read(tripScrubberMarginsProvider(t.id).future);
+    expect((await margins()).single.ratedMinutes, 300);
+
+    final schedules = ServiceScheduleRepository();
+    final clock = (await schedules.getSchedulesForEquipment(
+      ccr.id,
+    )).singleWhere((s) => s.serviceKindId == 'scrubber-repack');
+    await schedules.deleteSchedule(clock.id);
+    var now = await margins();
+    for (var i = 0; i < 50 && now.isNotEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      now = await margins();
+    }
+    expect(now, isEmpty);
+  });
+
+  test('a paused repack clock shows no margin', () async {
+    // A paused clock is off for the clocks engine, so the trip neither
+    // rates nor counts the scrubber, even with a rated duration on the
+    // unit.
+    final ccr = await rebreather();
+    Future<List<ScrubberMargin>> margins(bool enabled) async {
+      await db.delete(db.serviceSchedules).go();
+      await ServiceScheduleRepository().createSchedule(
+        ServiceSchedule(
+          id: '',
+          equipmentId: ccr.id,
+          serviceKindId: 'scrubber-repack',
+          anchorDate: DateTime(2026, 3, 1, 9),
+          enabled: enabled,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      final t = await trip(
+        'T$enabled',
+        DateTime(2026, 3, 1),
+        DateTime(2026, 3, 5),
+      );
+      return container.read(tripScrubberMarginsProvider(t.id).future);
+    }
+
+    await ccrDive('jan', DateTime(2026, 1, 10), ccr.id);
+    // An active clock anchored that morning excludes the dive.
+    final active = (await margins(true)).single;
+    expect(active.consumedMinutes, 0);
+    expect(active.consumedSince, DateTime(2026, 3, 1, 9));
+    expect(await margins(false), isEmpty);
+  });
+
+  test('a rebreather with no repack clock shows no margin', () async {
+    // A unit added before clocks auto-attached never had one. With
+    // nothing tracking its repacks the trip has no margin to show; the
+    // diver adds the clock to get one.
+    await rebreather();
+    await db.delete(db.serviceSchedules).go();
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    expect(
+      await container.read(tripScrubberMarginsProvider(t.id).future),
+      isEmpty,
+    );
+  });
+
+  test('pausing the repack clock takes its margin off an open trip', () async {
+    // The clocks card pauses through updateSchedule; the paused state
+    // must reach the trip like a removal does.
+    final ccr = await rebreather();
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final sub = container.listen(tripScrubberMarginsProvider(t.id), (_, _) {});
+    addTearDown(sub.close);
+    Future<List<ScrubberMargin>> margins() =>
+        container.read(tripScrubberMarginsProvider(t.id).future);
+    expect(await margins(), hasLength(1));
+
+    final schedules = ServiceScheduleRepository();
+    final clock = (await schedules.getSchedulesForEquipment(
+      ccr.id,
+    )).singleWhere((s) => s.serviceKindId == 'scrubber-repack');
+    await schedules.updateSchedule(clock.copyWith(enabled: false));
+    var now = await margins();
+    for (var i = 0; i < 50 && now.isNotEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      now = await margins();
+    }
+    expect(now, isEmpty);
+  });
+
+  test('with no rated duration the repack clock\'s hours rate the '
+      'scrubber', () async {
+    // The rating falls back to the clock's own hours interval: its
+    // override, else the repack kind's default.
+    final ccr = await EquipmentRepository().createEquipment(
+      const EquipmentItem(id: '', name: 'CCR', type: EquipmentType.rebreather),
+    );
+    final schedules = ServiceScheduleRepository();
+    final clock = (await schedules.getSchedulesForEquipment(
+      ccr.id,
+    )).singleWhere((s) => s.serviceKindId == 'scrubber-repack');
+    Future<double?> rated(String name) async {
+      final t = await trip(name, DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+      return (await container.read(
+        tripScrubberMarginsProvider(t.id).future,
+      )).single.ratedMinutes;
+    }
+
+    // The built-in kind's default is 3 hours.
+    expect(await rated('default'), 180);
+    await schedules.updateSchedule(clock.copyWith(intervalHours: 4.0));
+    expect(await rated('override'), 240);
+  });
+
+  test('an itinerary with no dive days expects no dives', () async {
+    // A crossing or a port stay is a real itinerary. Only an EMPTY one
+    // falls back to the calendar days; this one says no dives.
+    await rebreather();
+    final t = await trip(
+      'Crossing',
+      DateTime(2026, 6, 1),
+      DateTime(2026, 6, 3),
+    );
+    await ItineraryDayRepository().saveAll([
+      for (var i = 0; i < 3; i++)
+        ItineraryDay(
+          id: '',
+          tripId: t.id,
+          dayNumber: i + 1,
+          date: DateTime(2026, 6, 1 + i),
+          dayType: DayType.seaDay,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+    ]);
+    final m = (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single;
+    expect(m.expectedDives, 0);
+  });
+
+  test('a partial itinerary counts its uncovered days as dive days', () async {
+    // A single planned day (the board's day strip) is not a whole
+    // itinerary: June 1 and 3 have no row and are dive days, June 2 is a
+    // sea day. Two dive days at the default two dives.
+    await rebreather();
+    final t = await trip('Shore', DateTime(2026, 6, 1), DateTime(2026, 6, 3));
+    await ItineraryDayRepository().saveAll([
+      ItineraryDay(
+        id: '',
+        tripId: t.id,
+        dayNumber: 2,
+        date: DateTime(2026, 6, 2),
+        dayType: DayType.seaDay,
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      ),
+    ]);
+    final m = (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single;
+    expect(m.expectedDives, 4);
+  });
+
+  test('a rating edit reaches an open trip', () async {
+    // The rated duration is an attribute; its write reaches
+    // equipment_attributes alone.
+    final ccr = await rebreather();
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final sub = container.listen(tripScrubberMarginsProvider(t.id), (_, _) {});
+    addTearDown(sub.close);
+    Future<double?> rated() async => (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single.ratedMinutes;
+    expect(await rated(), 300);
+    await EquipmentRepository().saveAttributes(ccr.id, [
+      EquipmentAttribute(
+        id: '',
+        equipmentId: ccr.id,
+        key: 'scrubber_duration_h',
+        valueNum: 6,
+      ),
+    ]);
+    var now = await rated();
+    for (var i = 0; i < 50 && now != 360; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      now = await rated();
+    }
+    expect(now, 360);
+  });
+
+  test('a hand-logged zero runtime counts its bottom time', () async {
+    // With no summary, a loop dive's runtime stands in for its scrubber
+    // minutes; a zero runtime beside a real bottom time is no figure.
+    final ccr = await rebreather();
+    await ccrDive(
+      'manual',
+      DateTime(2026, 3, 10),
+      ccr.id,
+      runtime: 0,
+      bottomTime: 2400,
+    );
+    final t = await trip('June', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final m = (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single;
+    expect(m.consumedMinutes, 40);
+  });
+
+  test('a loop dive counts by the trip calendar day, in any zone', () async {
+    // Dives are stored as their wall clock in UTC; the trip start is a
+    // local midnight. Compared as instants, a dive the evening before
+    // drops out east of UTC and an early one on the first day counts
+    // as pre-trip west of it. CI runs in UTC, where both agree; run this
+    // under another TZ to see it discriminate.
+    final ccr = await rebreather();
+    await ccrDive('eve', DateTime.utc(2026, 5, 31, 22), ccr.id);
+    await ccrDive('dawn', DateTime.utc(2026, 6, 1, 1), ccr.id);
+    final t = await trip('June', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final m = (await container.read(
+      tripScrubberMarginsProvider(t.id).future,
+    )).single;
+    expect(m.consumedMinutes, 60);
+  });
+
+  test('the repack clock\'s anchor stands in for a missing record', () async {
+    // The clocks engine anchors a clock on the schedule's anchor date, else
+    // its newest record. With no repack logged, the margin must count from
+    // that anchor too, not charge every loop dive the unit ever made.
+    final ccr = await EquipmentRepository().createEquipment(
+      const EquipmentItem(
+        id: '',
+        name: 'CCR',
+        type: EquipmentType.rebreather,
+        attributes: [
+          EquipmentAttribute(
+            id: '',
+            equipmentId: '',
+            key: 'scrubber_duration_h',
+            valueNum: 5,
+          ),
+        ],
+      ),
+    );
+    await db.delete(db.serviceSchedules).go();
+    await ServiceScheduleRepository().createSchedule(
+      ServiceSchedule(
+        id: '',
+        equipmentId: ccr.id,
+        serviceKindId: 'scrubber-repack',
+        anchorDate: DateTime(2026, 3, 1),
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      ),
+    );
+    await ccrDive('feb', DateTime(2026, 2, 10), ccr.id);
+    await ccrDive('mar', DateTime(2026, 3, 10), ccr.id, runtime: 3000);
+
+    final june = await trip('June', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final m = (await container.read(
+      tripScrubberMarginsProvider(june.id).future,
+    )).single;
+    expect(m.consumedMinutes, 50);
+    expect(m.consumedSince, DateTime(2026, 3, 1));
+
+    // An anchor after the trip start is not a baseline as of that start.
+    final feb = await trip('Feb', DateTime(2026, 2, 20), DateTime(2026, 2, 22));
+    final early = (await container.read(
+      tripScrubberMarginsProvider(feb.id).future,
+    )).single;
+    expect(early.consumedMinutes, 60);
+    expect(early.consumedSince, isNull);
+  });
+
+  test(
+    'the repack clock\'s baseline outranks a repack logged before it',
+    () async {
+      // The clocks engine counts from a baseline date the diver set even when
+      // a repack was already logged (only one logged after the baseline and
+      // dated on or after it takes over). The margin must count from the same
+      // place, or the card and the clock disagree about the scrubber left.
+      final ccr = await rebreather();
+      await ServiceRecordRepository().createRecord(
+        ServiceRecord(
+          id: '',
+          equipmentId: ccr.id,
+          serviceCategory: ServiceCategory.values.first,
+          serviceKindId: 'scrubber-repack',
+          serviceDate: DateTime(2026, 4, 1),
+          currency: 'USD',
+          notes: '',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      await db.delete(db.serviceSchedules).go();
+      await ServiceScheduleRepository().createSchedule(
+        ServiceSchedule(
+          id: '',
+          equipmentId: ccr.id,
+          serviceKindId: 'scrubber-repack',
+          anchorDate: DateTime(2026, 3, 1),
+          // Set after the repack above was written (its created_at is the
+          // real clock at insert), and so also after the June trip started:
+          // "as of the start" is by event date, so a baseline dated before
+          // the trip counts however late it was set (maintainer's decision,
+          // 2026-09-12).
+          anchorSetAt: DateTime.now().add(const Duration(minutes: 1)),
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+      await ccrDive('mar', DateTime(2026, 3, 10), ccr.id, runtime: 3000);
+      await ccrDive('apr', DateTime(2026, 4, 10), ccr.id, runtime: 1200);
+
+      final june = await trip(
+        'June',
+        DateTime(2026, 6, 1),
+        DateTime(2026, 6, 5),
+      );
+      final m = (await container.read(
+        tripScrubberMarginsProvider(june.id).future,
+      )).single;
+      expect(m.consumedSince, DateTime(2026, 3, 1));
+      expect(m.consumedMinutes, 70);
+    },
+  );
+
+  test('with no repack or anchor the purchase date is the baseline', () async {
+    // The clocks engine anchors an unrecorded clock on the purchase date
+    // (then the creation date); the margin must count from the same
+    // point, not charge every loop dive before the unit was bought. No
+    // repack is known, so the card still says so.
+    final ccr = await EquipmentRepository().createEquipment(
+      EquipmentItem(
+        id: '',
+        name: 'CCR',
+        type: EquipmentType.rebreather,
+        purchaseDate: DateTime(2026, 3, 1),
+        attributes: const [
+          EquipmentAttribute(
+            id: '',
+            equipmentId: '',
+            key: 'scrubber_duration_h',
+            valueNum: 5,
+          ),
+        ],
+      ),
+    );
+    await ccrDive('feb', DateTime(2026, 2, 10), ccr.id);
+    await ccrDive('mar', DateTime(2026, 3, 10), ccr.id, runtime: 3000);
+
+    final june = await trip('June', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    final m = (await container.read(
+      tripScrubberMarginsProvider(june.id).future,
+    )).single;
+    expect(m.consumedMinutes, 50);
+    expect(m.consumedSince, isNull);
+  });
+
+  test('a diver with no active rebreather gets an empty list', () async {
+    await EquipmentRepository().createEquipment(
+      const EquipmentItem(id: '', name: 'Reg', type: EquipmentType.regulator),
+    );
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    expect(
+      await container.read(tripScrubberMarginsProvider(t.id).future),
+      isEmpty,
+    );
+  });
+
+  test('a rebreather left at home gets no margin', () async {
+    // Only a unit packed for the trip, or installed in packed gear, goes
+    // diving on it (issue #2727).
+    final going = await rebreather();
+    final t = await trip('T', DateTime(2026, 6, 1), DateTime(2026, 6, 5));
+    await rebreather();
+    expect(
+      (await container.read(
+        tripScrubberMarginsProvider(t.id).future,
+      )).map((m) => m.item.id),
+      [going.id],
+    );
+    final bare = await unpackedTrip(
+      'Bare',
+      DateTime(2026, 7, 1),
+      DateTime(2026, 7, 5),
+    );
+    expect(
+      await container.read(tripScrubberMarginsProvider(bare.id).future),
+      isEmpty,
+    );
+  });
+
+  test('packing a rebreather brings its margin to an open trip', () async {
+    await rebreather();
+    final t = await unpackedTrip(
+      'T',
+      DateTime(2026, 6, 1),
+      DateTime(2026, 6, 5),
+    );
+    final sub = container.listen(tripScrubberMarginsProvider(t.id), (_, _) {});
+    addTearDown(sub.close);
+    expect(
+      await container.read(tripScrubberMarginsProvider(t.id).future),
+      isEmpty,
+    );
+    final ids =
+        await (db.selectOnly(db.equipment)..addColumns([db.equipment.id]))
+            .map((r) => r.read(db.equipment.id)!)
+            .get();
+    await TripEquipmentRepository().pack(t.id, ids);
+    await pumpEventQueue();
+    expect(
+      await container.read(tripScrubberMarginsProvider(t.id).future),
+      hasLength(1),
+    );
+  });
+
+  test('an unknown trip gets an empty list', () async {
+    expect(
+      await container.read(tripScrubberMarginsProvider('nope').future),
+      isEmpty,
+    );
+  });
+}

@@ -1,6 +1,8 @@
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
 
 /// Diving equipment entity
 class EquipmentItem extends Equatable {
@@ -11,7 +13,6 @@ class EquipmentItem extends Equatable {
   final String? brand;
   final String? model;
   final String? serialNumber;
-  final String? size; // S, M, L, XL, or specific size
   final EquipmentStatus status;
   final DateTime? purchaseDate;
   final double? purchasePrice;
@@ -21,9 +22,26 @@ class EquipmentItem extends Equatable {
   final String notes;
   final bool isActive;
 
+  /// Type-specific and user-defined attributes (equipment_attributes rows).
+  /// Hydrated by detail/edit/list reads; empty on partially loaded items.
+  final List<EquipmentAttribute> attributes;
+
   // Notification overrides
   final bool? customReminderEnabled; // NULL = use global
   final List<int>? customReminderDays; // Override reminder days
+
+  /// The item this one is installed in (v202). Null for a standalone item.
+  final String? parentEquipmentId;
+
+  /// The media row chosen to represent this item in the equipment list and
+  /// page header (issue #3355); null shows the type icon. May name a row
+  /// this device does not have. Written only through the cover action, never
+  /// by an item's save.
+  final String? coverMediaId;
+
+  /// Row creation time (null for entities built before persistence); used as
+  /// the last anchor fallback for service clocks.
+  final DateTime? createdAt;
 
   const EquipmentItem({
     required this.id,
@@ -33,7 +51,6 @@ class EquipmentItem extends Equatable {
     this.brand,
     this.model,
     this.serialNumber,
-    this.size,
     this.status = EquipmentStatus.active,
     this.purchaseDate,
     this.purchasePrice,
@@ -42,9 +59,173 @@ class EquipmentItem extends Equatable {
     this.serviceIntervalDays,
     this.notes = '',
     this.isActive = true,
+    this.attributes = const [],
     this.customReminderEnabled,
     this.customReminderDays,
+    this.parentEquipmentId,
+    this.coverMediaId,
+    this.createdAt,
   });
+
+  /// Curated attribute lookup helpers. Legacy field names are preserved as
+  /// getters so existing consumers (weight planner, CSV export, detail page)
+  /// read from the attribute store transparently.
+  EquipmentAttribute? attr(String key) {
+    for (final a in attributes) {
+      if (!a.isCustom && a.key == key) return a;
+    }
+    return null;
+  }
+
+  String? attrText(String key) => attr(key)?.valueText;
+
+  double? attrNum(String key) => attr(key)?.valueNum;
+
+  String? get size => attrText(EquipmentAttrKeys.size);
+  String? get thickness => attrText(EquipmentAttrKeys.thicknessMm);
+  double? get buoyancyKg => attrNum(EquipmentAttrKeys.buoyancyKg);
+  double? get weightKg => attrNum(EquipmentAttrKeys.dryWeightKg);
+
+  /// The O2 cell slot this item sits in, 1 to 6 (the `o2Sensor1` to
+  /// `o2Sensor6` a dive computer reports), or null when unset or out of that
+  /// range. The form takes any number, and a slot no reading can match must
+  /// not be shown as one, claim a trend or a slot finding, or succeed a cell.
+  int? get cellSlot {
+    final slot = attrNum(EquipmentAttrKeys.cellSlot)?.round();
+    return slot != null && slot >= 1 && slot <= 6 ? slot : null;
+  }
+
+  /// When a child item was installed in its parent; the parent's dives on or
+  /// after this date count for the child.
+  DateTime? get installedDate {
+    final ms = attrNum(EquipmentAttrKeys.installedDate);
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms.round());
+  }
+
+  /// From when a child inherits its parent's dives: its install date, or
+  /// its creation when none is set (the design's attribute catalog). Every
+  /// exposure read for a child goes through this, so the clocks, the
+  /// condition engine and the charts all count the same dives.
+  ///
+  /// In the dive-time frame, because the exposure SQL compares it with
+  /// `dive_date_time`, which holds wall-clock time as UTC. The install date
+  /// is a local calendar day (the date picker stores local midnight;
+  /// replacing a child stores the local moment), so it becomes that day's
+  /// midnight in UTC; the creation time is a local instant, so it becomes
+  /// its wall clock in UTC. Comparing the raw instants shifted the boundary
+  /// by the device's UTC offset, counting dives from the evening before east
+  /// of UTC and dropping the install day's early dives west of it.
+  DateTime? get parentDivesFrom {
+    final installed = installedDate;
+    if (installed != null) {
+      return DateTime.utc(installed.year, installed.month, installed.day);
+    }
+    final created = createdAt;
+    if (created == null || created.isUtc) return created;
+    return DateTime.utc(
+      created.year,
+      created.month,
+      created.day,
+      created.hour,
+      created.minute,
+      created.second,
+      created.millisecond,
+      created.microsecond,
+    );
+  }
+
+  /// Still in service: active, and not carrying a terminal status. Older
+  /// rows can be retired or sold with isActive left true, and the
+  /// repository's own active-gear queries treat both statuses as gone.
+  /// Wanted gear (#2025) is not owned yet, so it is never fitted either,
+  /// even on a row whose isActive was left true.
+  bool get isFitted =>
+      isActive &&
+      status != EquipmentStatus.retired &&
+      status != EquipmentStatus.sold &&
+      status != EquipmentStatus.wanted;
+
+  /// On the diver's wishlist rather than in the kit (#2025).
+  bool get isWanted => status == EquipmentStatus.wanted;
+
+  /// Owned once, out of the active list now: retired, sold, or lost and
+  /// marked inactive (`departedStatusOf` names which). Still worth offering
+  /// on a past dive's pickers, since it was really used there (#3210).
+  /// Wishlist gear never joined the kit, so it has not left it.
+  bool get hasLeftKit => !isFitted && !isWanted;
+
+  /// The status the diver reads: the stored one, except a legacy row
+  /// retired by is_active alone, whose stored status still says Active or
+  /// the like, which reads Retired as the repository counts it (#636).
+  /// Agrees with `departedStatusOf` wherever that names a status, so the
+  /// picker filters by the same status it labels (#3210).
+  EquipmentStatus get effectiveStatus =>
+      !isActive && !_ownInactiveStatuses.contains(status)
+      ? EquipmentStatus.retired
+      : status;
+
+  /// The statuses an inactive row keeps rather than reading Retired.
+  static const _ownInactiveStatuses = {
+    EquipmentStatus.retired,
+    EquipmentStatus.sold,
+    EquipmentStatus.lost,
+    EquipmentStatus.wanted,
+  };
+
+  /// Wing/BCD rated lift capacity in kg (curated attribute; see the BCD entry
+  /// in [EquipmentAttributeCatalog]). Feeds the buoyancy twin's peak-lift
+  /// demand comparison; null when unspecified.
+  double? get liftCapacityKg => attrNum(EquipmentAttrKeys.liftCapacityKg);
+
+  /// Cylinder specs (curated tank attributes). Null when unspecified.
+  double? get volumeL => attrNum(EquipmentAttrKeys.volumeL);
+  double? get workingPressureBar =>
+      attrNum(EquipmentAttrKeys.workingPressureBar);
+
+  /// DPV specs (curated attributes; see the DPV entry in
+  /// [EquipmentAttributeCatalog]). Null when unspecified. Burn time is stored
+  /// in hours and the tow factors are dimensionless (issue #2086).
+  double? get dpvSpeedMps => attrNum(EquipmentAttrKeys.dpvSpeedMps);
+  double? get dpvBurnTimeHours => attrNum(EquipmentAttrKeys.dpvBurnTimeH);
+  double? get dpvBatteryCapacityWh =>
+      attrNum(EquipmentAttrKeys.dpvBatteryCapacityWh);
+  double? get dpvTowSpeedFactor => attrNum(EquipmentAttrKeys.towSpeedFactor);
+  double? get dpvTowBurnFactor => attrNum(EquipmentAttrKeys.towBurnFactor);
+
+  /// Whether this cylinder is marked as a drysuit's inflation bottle
+  /// (issue #4243). Unset is breathing gas. A default for the role of a dive
+  /// tank picked or linked from it, never the source of truth: marking a
+  /// bottle rewrites no dive.
+  bool get isSuitInflationCylinder =>
+      attrText(EquipmentAttrKeys.cylinderUse) == 'suit_inflation';
+
+  /// Whether this tank is a pair of manifolded cylinders kept as one item,
+  /// such as a "D12" (issue #4641): Worn as is Twin set. Like
+  /// [isSuitInflationCylinder] it is a default for a dive tank picked from
+  /// it, never the source of truth; the dive tank's role is.
+  bool get isWornAsTwinSet =>
+      type == EquipmentType.tank &&
+      attrText(EquipmentAttrKeys.wornAs) == kWornAsTwinSet;
+
+  /// The catalog stores the choice key ('aluminum', 'steel',
+  /// 'carbon_composite'); the enum name for the last one differs.
+  TankMaterial? get tankMaterial =>
+      switch (attrText(EquipmentAttrKeys.tankMaterial)) {
+        'aluminum' => TankMaterial.aluminum,
+        'steel' => TankMaterial.steel,
+        'carbon_composite' => TankMaterial.carbonFiber,
+        _ => null,
+      };
+
+  /// Purchase record (issue #1517): the manufacturer or retailer SKU, who it
+  /// was bought from, and the product/receipt listing. Null when unrecorded.
+  String? get sku => attrText(EquipmentAttrKeys.sku);
+  String? get retailer => attrText(EquipmentAttrKeys.retailer);
+  String? get productUrl => attrText(EquipmentAttrKeys.productUrl);
+
+  /// The diver's own mark for this item ("P2", "Bill's spare"), shown in
+  /// gear lists to tell identical items apart (issue #1549).
+  String? get identifier => attrText(EquipmentAttrKeys.identifier);
 
   /// Full name including brand and model
   String get fullName {
@@ -88,7 +269,6 @@ class EquipmentItem extends Equatable {
     String? brand,
     String? model,
     String? serialNumber,
-    String? size,
     EquipmentStatus? status,
     DateTime? purchaseDate,
     double? purchasePrice,
@@ -97,8 +277,14 @@ class EquipmentItem extends Equatable {
     int? serviceIntervalDays,
     String? notes,
     bool? isActive,
+    List<EquipmentAttribute>? attributes,
     bool? customReminderEnabled,
     List<int>? customReminderDays,
+    String? parentEquipmentId,
+    bool clearParentEquipmentId = false,
+    String? coverMediaId,
+    bool clearCoverMediaId = false,
+    DateTime? createdAt,
   }) {
     return EquipmentItem(
       id: id ?? this.id,
@@ -108,7 +294,6 @@ class EquipmentItem extends Equatable {
       brand: brand ?? this.brand,
       model: model ?? this.model,
       serialNumber: serialNumber ?? this.serialNumber,
-      size: size ?? this.size,
       status: status ?? this.status,
       purchaseDate: purchaseDate ?? this.purchaseDate,
       purchasePrice: purchasePrice ?? this.purchasePrice,
@@ -117,9 +302,17 @@ class EquipmentItem extends Equatable {
       serviceIntervalDays: serviceIntervalDays ?? this.serviceIntervalDays,
       notes: notes ?? this.notes,
       isActive: isActive ?? this.isActive,
+      attributes: attributes ?? this.attributes,
       customReminderEnabled:
           customReminderEnabled ?? this.customReminderEnabled,
       customReminderDays: customReminderDays ?? this.customReminderDays,
+      parentEquipmentId: clearParentEquipmentId
+          ? null
+          : (parentEquipmentId ?? this.parentEquipmentId),
+      coverMediaId: clearCoverMediaId
+          ? null
+          : (coverMediaId ?? this.coverMediaId),
+      createdAt: createdAt ?? this.createdAt,
     );
   }
 
@@ -132,7 +325,6 @@ class EquipmentItem extends Equatable {
     brand,
     model,
     serialNumber,
-    size,
     status,
     purchaseDate,
     purchasePrice,
@@ -141,7 +333,11 @@ class EquipmentItem extends Equatable {
     serviceIntervalDays,
     notes,
     isActive,
+    attributes,
     customReminderEnabled,
     customReminderDays,
+    parentEquipmentId,
+    coverMediaId,
+    createdAt,
   ];
 }

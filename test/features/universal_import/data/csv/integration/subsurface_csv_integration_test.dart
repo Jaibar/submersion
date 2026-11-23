@@ -91,6 +91,29 @@ void main() {
       );
     });
 
+    test('keeps both cylinders of a dive whose first has no size', () {
+      final bytes = diveListFile.readAsBytesSync();
+      final parsed = pipeline.parse(bytes);
+      final detected = pipeline.detect(parsed);
+      final config = _configFromPreset(detected.matchedPreset!);
+      final payload = pipeline.execute(primaryCsv: parsed, config: config);
+
+      // Dive 10 logs its pressures on cylinder 1, which has no size, and its
+      // size on cylinder 2, which has only an end pressure (#3930).
+      final dive = payload
+          .entitiesOf(ImportEntityType.dives)
+          .singleWhere((d) => d['diveNumber'] == 10);
+      final tanks = (dive['tanks'] as List).cast<Map<String, dynamic>>();
+
+      expect(tanks, hasLength(2));
+      expect(tanks[0]['volume'], isNull);
+      expect(tanks[0]['startPressure'], 148.0);
+      expect(tanks[0]['endPressure'], 143.3);
+      expect(tanks[1]['volume'], 11.094);
+      expect(tanks[1]['startPressure'], isNull);
+      expect(tanks[1]['endPressure'], 141.894);
+    });
+
     test('extracts unique sites with GPS coordinates', () {
       final bytes = diveListFile.readAsBytesSync();
       final parsed = pipeline.parse(bytes);
@@ -156,6 +179,47 @@ void main() {
 
       expect(tagNames, contains('shore'));
       expect(tagNames, contains('student'));
+    });
+
+    test('links each tagged dive to its tags', () {
+      final bytes = diveListFile.readAsBytesSync();
+      final parsed = pipeline.parse(bytes);
+      final detected = pipeline.detect(parsed);
+      final config = _configFromPreset(detected.matchedPreset!);
+      final payload = pipeline.execute(primaryCsv: parsed, config: config);
+
+      final tagIdByName = {
+        for (final tag in payload.entitiesOf(ImportEntityType.tags))
+          tag['name'] as String: tag['id'] as String,
+      };
+      final divesByNumber = {
+        for (final dive in payload.entitiesOf(ImportEntityType.dives))
+          if (dive['diveNumber'] != null) dive['diveNumber'].toString(): dive,
+      };
+
+      // Dives 1-5 are tagged "shore, student"; dive 6 has no tags. Without
+      // tagRefs the importer creates the tags but links them to no dive.
+      expect(divesByNumber['1']?['tagRefs'], [
+        tagIdByName['shore'],
+        tagIdByName['student'],
+      ]);
+      expect(divesByNumber['6']?.containsKey('tagRefs'), isFalse);
+    });
+
+    test('keeps the suit in the dive notes', () {
+      final bytes = diveListFile.readAsBytesSync();
+      final parsed = pipeline.parse(bytes);
+      final detected = pipeline.detect(parsed);
+      final config = _configFromPreset(detected.matchedPreset!);
+      final payload = pipeline.execute(primaryCsv: parsed, config: config);
+
+      final dive = payload
+          .entitiesOf(ImportEntityType.dives)
+          .firstWhere((d) => d['diveNumber']?.toString() == '1');
+
+      // The suit is kept in the notes the way the Subsurface XML import
+      // keeps it, whether or not it also becomes linked gear (#1824).
+      expect(dive['notes'], 'Summary:\nSuit: 3mm Bare wetsuit');
     });
 
     test('all dive times are UTC wall-clock and not shifted '

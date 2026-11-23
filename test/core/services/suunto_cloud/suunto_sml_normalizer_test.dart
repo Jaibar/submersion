@@ -1,0 +1,352 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_api_exception.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_sml_normalizer.dart';
+
+Map<String, dynamic> _cloudFixture({
+  Map<String, dynamic> diveHeaderExtra = const {},
+}) => {
+  'Summary': {
+    'Samples': [
+      {
+        'Attributes': {
+          'suunto/sml': {
+            'Header': {
+              'DateTime': '2024-05-01T10:00:00.000Z',
+              'ActivityType': 51,
+              'Device': {
+                'Name': 'Porvoo',
+                'SerialNumber': 'SN123',
+                'Info': {'SW': '1.2.3'},
+              },
+              'Depth': {'Max': 18.5, 'Avg': 10.2},
+              'DiveTime': 1800,
+              'Temperature': {'Max': 296.0, 'Min': 299.0},
+            },
+          },
+        },
+      },
+      {
+        'Attributes': {
+          'suunto/sml': {
+            'DiveHeader': {
+              'Gases': [
+                {
+                  'Oxygen': 21,
+                  'Helium': 0,
+                  'TankSize': 0.012,
+                  'TankFillPressure': 20000000,
+                  'StartPressure': 20000000,
+                  'EndPressure': 5000000,
+                },
+                // Unused gas (no tank filled) must be dropped.
+                {'Oxygen': 100, 'Helium': 0, 'TankSize': 0},
+              ],
+              'LowGf': 30,
+              'HighGf': 85,
+              ...diveHeaderExtra,
+            },
+          },
+        },
+      },
+    ],
+  },
+  'Data': {
+    'Samples': [
+      {
+        'TimeISO8601': '2024-05-01T10:00:00.000Z',
+        'Attributes': {
+          'suunto/sml': {
+            'Sample': {
+              'DiveEvents': {'DiveStatus': true},
+              'Depth': 0.5,
+            },
+          },
+        },
+      },
+      {
+        'TimeISO8601': '2024-05-01T10:00:10.000Z',
+        'Attributes': {
+          'suunto/sml': {
+            'Sample': {'Depth': 5.0, 'Temperature': 296.5},
+          },
+        },
+      },
+    ],
+  },
+};
+
+void main() {
+  group('SuuntoSmlNormalizer.parse (cloud shape)', () {
+    test('flattens Summary/Data into header/samples', () {
+      final export = SuuntoSmlNormalizer.parse(_cloudFixture());
+
+      expect(export.header['ActivityType'], 51);
+      expect(export.header['DateTime'], '2024-05-01T10:00:00.000Z');
+      expect(export.samples, hasLength(2));
+      expect(export.samples[0]['TimeISO8601'], '2024-05-01T10:00:00.000Z');
+      expect(export.samples[0]['DiveEvents'], {'DiveStatus': true});
+      expect(export.samples[1]['Depth'], 5.0);
+    });
+
+    test('converts gas percentages to fractions and drops unused gases', () {
+      final export = SuuntoSmlNormalizer.parse(_cloudFixture());
+      final gases = export.header['Diving']['Gases'] as List;
+
+      expect(gases, hasLength(1));
+      expect(gases[0]['Oxygen'], 0.21);
+      expect(gases[0]['Helium'], 0.0);
+      expect(gases[0]['TankSize'], 0.012);
+    });
+
+    test('rescales a bare-bar pressure value into Pa', () {
+      final fixture = _cloudFixture();
+      final diveHeader =
+          (((fixture['Summary'] as Map)['Samples'] as List)[1]
+                  as Map)['Attributes']['suunto/sml']['DiveHeader']
+              as Map;
+      (diveHeader['Gases'] as List)[0]['StartPressure'] = 232;
+
+      final export = SuuntoSmlNormalizer.parse(fixture);
+      final gases = export.header['Diving']['Gases'] as List;
+      expect(gases[0]['StartPressure'], 23200000);
+    });
+
+    test('carries gradient factors through when present', () {
+      final export = SuuntoSmlNormalizer.parse(_cloudFixture());
+      expect(export.header['Diving']['GfLow'], 30);
+      expect(export.header['Diving']['GfHigh'], 85);
+    });
+
+    // The dive footer holds the surface GPS pair (entry and exit); it sits in
+    // its own Summary block, so the header has to carry it over for the dive
+    // parser, which only ever sees (header, samples).
+    test('carries the dive footer location onto the header', () {
+      final fixture = _cloudFixture();
+      (fixture['Summary'] as Map)['Samples'].add({
+        'Attributes': {
+          'suunto/sml': {
+            'DiveFooter': {
+              'DiveLocation': {
+                'Start': {'Latitude': 0.6021385919, 'Longitude': 0.6152631256},
+                'Stop': {'Latitude': 0.6021396642, 'Longitude': 0.6152677321},
+              },
+            },
+          },
+        },
+      });
+
+      final export = SuuntoSmlNormalizer.parse(fixture);
+      final location = export.header['DiveLocation'] as Map<String, dynamic>;
+      expect(location['Start']['Latitude'], 0.6021385919);
+      expect(location['Stop']['Longitude'], 0.6152677321);
+    });
+
+    test('leaves DiveLocation absent when the footer has none', () {
+      final export = SuuntoSmlNormalizer.parse(_cloudFixture());
+      expect(export.header.containsKey('DiveLocation'), isFalse);
+    });
+
+    test('omits Diving.Gases when no gas has a filled tank', () {
+      final fixture = _cloudFixture();
+      (((fixture['Summary'] as Map)['Samples'] as List)[1]
+          as Map)['Attributes']['suunto/sml']['DiveHeader'] = {
+        'Gases': [
+          {'Oxygen': 21, 'Helium': 0, 'TankSize': 0},
+        ],
+      };
+
+      final export = SuuntoSmlNormalizer.parse(fixture);
+      expect(export.header.containsKey('Diving'), isFalse);
+    });
+  });
+
+  group('SuuntoSmlNormalizer.parse (app DeviceLog shape)', () {
+    test('reads the flat DeviceLog.Header/Samples shape directly', () {
+      final json = {
+        'DeviceLog': {
+          'Header': {'ActivityType': 51, 'DateTime': '2024-05-01T10:00:00Z'},
+          'Samples': [
+            {'TimeISO8601': '2024-05-01T10:00:00Z', 'Depth': 1.0},
+          ],
+        },
+      };
+
+      final export = SuuntoSmlNormalizer.parse(json);
+      expect(export.header['ActivityType'], 51);
+      expect(export.samples, hasLength(1));
+      expect(export.samples[0]['Depth'], 1.0);
+    });
+  });
+
+  group('SuuntoSmlNormalizer.parse error cases', () {
+    test('throws when neither shape is recognizable', () {
+      expect(
+        () => SuuntoSmlNormalizer.parse({'unrelated': true}),
+        throwsA(isA<SuuntoApiException>()),
+      );
+    });
+
+    test('throws when the activity type is not scuba diving (51)', () {
+      final json = {
+        'DeviceLog': {
+          'Header': {'ActivityType': 3},
+          'Samples': <Map<String, dynamic>>[],
+        },
+      };
+
+      expect(
+        () => SuuntoSmlNormalizer.parse(json),
+        throwsA(
+          isA<SuuntoApiException>().having(
+            (e) => e.message,
+            'message',
+            contains('ActivityType=3'),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('SuuntoSmlNormalizer.parse (cloud shape tissue state)', () {
+    test('hoists StartTissue, EndTissue and Algorithm onto Diving', () {
+      final export = SuuntoSmlNormalizer.parse(
+        _cloudFixture(
+          diveHeaderExtra: {
+            'Algorithm': 'Suunto Fused2 RGBM',
+            'StartTissue': {
+              'Nitrogen': [79000, 79000],
+            },
+            'EndTissue': {
+              'Nitrogen': [89665, 97105],
+              'CNS': 0.132,
+            },
+          },
+        ),
+      );
+
+      final diving = export.header['Diving'] as Map<String, dynamic>;
+      expect(diving['Algorithm'], 'Suunto Fused2 RGBM');
+      expect(diving['StartTissue'], {
+        'Nitrogen': [79000, 79000],
+      });
+      expect(diving['EndTissue'], {
+        'Nitrogen': [89665, 97105],
+        'CNS': 0.132,
+      });
+      // The existing hoists still ride along.
+      expect(diving['GfLow'], 30);
+    });
+
+    test('leaves the tissue keys absent when the DiveHeader has none', () {
+      final export = SuuntoSmlNormalizer.parse(_cloudFixture());
+      final diving = export.header['Diving'] as Map<String, dynamic>;
+      expect(diving.containsKey('StartTissue'), isFalse);
+      expect(diving.containsKey('EndTissue'), isFalse);
+      expect(diving.containsKey('Algorithm'), isFalse);
+    });
+
+    test('keeps the DeviceLog shape Diving block as-is', () {
+      final json = {
+        'DeviceLog': {
+          'Header': {
+            'ActivityType': 51,
+            'DateTime': '2024-05-01T10:00:00Z',
+            'Diving': {
+              'Algorithm': 'Suunto Fused2 RGBM',
+              'StartTissue': {
+                'Nitrogen': [79000],
+              },
+            },
+          },
+          'Samples': <Map<String, dynamic>>[],
+        },
+      };
+
+      final export = SuuntoSmlNormalizer.parse(json);
+      final diving = export.header['Diving'] as Map<String, dynamic>;
+      expect(diving['Algorithm'], 'Suunto Fused2 RGBM');
+      expect(diving['StartTissue'], {
+        'Nitrogen': [79000],
+      });
+    });
+  });
+
+  test('throws SuuntoNotADiveException for a non-dive activity', () {
+    expect(
+      () => SuuntoSmlNormalizer.parse({
+        'DeviceLog': {
+          'Header': {'ActivityType': 3},
+          'Samples': const [],
+        },
+      }),
+      throwsA(isA<SuuntoNotADiveException>()),
+    );
+  });
+
+  // #1445: the route rides inside each cloud Sample, so the flattening
+  // must carry it through untouched.
+  test('passes DiveRoute through from the cloud Sample attribute', () {
+    final export = SuuntoSmlNormalizer.parse({
+      'Summary': {
+        'Samples': [
+          {
+            'Attributes': {
+              'suunto/sml': {
+                'Header': {'ActivityType': 51},
+              },
+            },
+          },
+        ],
+      },
+      'Data': {
+        'Samples': [
+          {
+            'TimeISO8601': '2026-04-19T10:00:00.000Z',
+            'Attributes': {
+              'suunto/sml': {
+                'Sample': {
+                  'DiveRoute': {'X': 1.0, 'Y': 2.0, 'Z': 3.0},
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(export.samples.single['DiveRoute'], {'X': 1.0, 'Y': 2.0, 'Z': 3.0});
+  });
+
+  // #3047: the route quality fields ride in the same cloud Sample.
+  test('passes the route quality fields through from the cloud Sample', () {
+    final export = SuuntoSmlNormalizer.parse({
+      'Summary': {
+        'Samples': [
+          {
+            'Attributes': {
+              'suunto/sml': {
+                'Header': {'ActivityType': 51},
+              },
+            },
+          },
+        ],
+      },
+      'Data': {
+        'Samples': [
+          {
+            'TimeISO8601': '2026-04-19T10:00:00.000Z',
+            'Attributes': {
+              'suunto/sml': {
+                'Sample': {
+                  'DiveRouteQuality': 1,
+                  'QualityFeatures': [16, 0.1],
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(export.samples.single['DiveRouteQuality'], 1);
+    expect(export.samples.single['QualityFeatures'], [16, 0.1]);
+  });
+}

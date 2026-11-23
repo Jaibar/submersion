@@ -1,8 +1,203 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/o2_cell_unit.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+class _StubSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _StubSettingsNotifier([AppSettings? settings])
+    : super(settings ?? const AppSettings());
+
+  @override
+  Future<void> setPerdixOverlayPosition(double x, double y) async {
+    state = state.copyWith(perdixOverlayX: x, perdixOverlayY: y);
+  }
+
+  @override
+  Future<void> setO2CellUnit(O2CellUnit value) async {
+    state = state.copyWith(o2CellUnit: value);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 void main() {
+  group('ProfileLegend survives unrelated settings writes', () {
+    test(
+      'session toggles persist when an unrelated position setting is saved',
+      () async {
+        final stub = _StubSettingsNotifier();
+        final container = ProviderContainer(
+          overrides: [settingsProvider.overrideWith((ref) => stub)],
+        );
+        addTearDown(container.dispose);
+
+        // Keep the autoDispose provider alive, like a mounted chart would.
+        final sub = container.listen(profileLegendProvider, (_, _) {});
+        addTearDown(sub.close);
+
+        final notifier = container.read(profileLegendProvider.notifier);
+        expect(container.read(profileLegendProvider).showSac, isFalse);
+        notifier.toggleSac();
+        expect(container.read(profileLegendProvider).showSac, isTrue);
+
+        // What dragging the Perdix overlay does: an unrelated settings write.
+        await stub.setPerdixOverlayPosition(0.5, 0.5);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          container.read(profileLegendProvider).showSac,
+          isTrue,
+          reason:
+              'session legend toggles must survive settings writes that '
+              'do not touch the legend default fields',
+        );
+      },
+    );
+  });
+
+  group('ProfileLegend survives an O2 cell unit change', () {
+    test(
+      'picking a unit keeps the session toggles and applies the unit',
+      () async {
+        final stub = _StubSettingsNotifier();
+        final container = ProviderContainer(
+          overrides: [settingsProvider.overrideWith((ref) => stub)],
+        );
+        addTearDown(container.dispose);
+        final sub = container.listen(profileLegendProvider, (_, _) {});
+        addTearDown(sub.close);
+
+        final notifier = container.read(profileLegendProvider.notifier);
+        notifier.toggleO2Cells();
+        notifier.toggleSac();
+
+        // What the chart options dialog does when the unit is picked.
+        notifier.setO2CellUnit(O2CellUnit.millivolts);
+        await stub.setO2CellUnit(O2CellUnit.millivolts);
+        await Future<void>.delayed(Duration.zero);
+
+        final state = container.read(profileLegendProvider);
+        expect(state.o2CellUnit, O2CellUnit.millivolts);
+        expect(
+          state.showO2Cells,
+          isTrue,
+          reason: 'persisting the unit must not switch the cell traces off',
+        );
+        expect(state.showSac, isTrue);
+      },
+    );
+
+    test('a unit arriving from settings is applied without a reset', () async {
+      final stub = _StubSettingsNotifier();
+      final container = ProviderContainer(
+        overrides: [settingsProvider.overrideWith((ref) => stub)],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      container.read(profileLegendProvider.notifier).toggleO2Cells();
+
+      // E.g. the device-local preference finishing its asynchronous load
+      // after the legend was first built.
+      await stub.setO2CellUnit(O2CellUnit.millivolts);
+      await Future<void>.delayed(Duration.zero);
+
+      final state = container.read(profileLegendProvider);
+      expect(state.o2CellUnit, O2CellUnit.millivolts);
+      expect(state.showO2Cells, isTrue);
+    });
+
+    test('the unit seeds from settings on first build', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(o2CellUnit: O2CellUnit.millivolts),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(
+        container.read(profileLegendProvider).o2CellUnit,
+        O2CellUnit.millivolts,
+      );
+    });
+  });
+
+  group('metricsFollowViewport', () {
+    ProviderContainer containerWith(AppSettings settings) {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(settings),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+      return container;
+    }
+
+    test('defaults to off, preserving the original zoom behaviour', () {
+      final container = containerWith(const AppSettings());
+
+      expect(
+        container.read(profileLegendProvider).metricsFollowViewport,
+        isFalse,
+      );
+    });
+
+    test('seeds from the global setting', () {
+      final container = containerWith(
+        const AppSettings(profileMetricsFollowViewport: true),
+      );
+
+      expect(
+        container.read(profileLegendProvider).metricsFollowViewport,
+        isTrue,
+      );
+    });
+
+    test('the per-chart toggle overrides the global default per session', () {
+      final container = containerWith(const AppSettings());
+      final notifier = container.read(profileLegendProvider.notifier);
+
+      notifier.toggleMetricsFollowViewport();
+      expect(
+        container.read(profileLegendProvider).metricsFollowViewport,
+        isTrue,
+      );
+
+      notifier.toggleMetricsFollowViewport();
+      expect(
+        container.read(profileLegendProvider).metricsFollowViewport,
+        isFalse,
+      );
+    });
+
+    test('is a render mode, so it never counts as an active overlay', () {
+      // The "More options" badge counts visible series. This toggle draws no
+      // line, so counting it would inflate the badge.
+      final container = containerWith(
+        const AppSettings(profileMetricsFollowViewport: true),
+      );
+
+      final state = container.read(profileLegendProvider);
+      expect(state.metricsFollowViewport, isTrue);
+      expect(
+        state.activeSecondaryCount,
+        const ProfileLegendState().activeSecondaryCount,
+      );
+    });
+  });
+
   group('ProfileLegendState', () {
     group('sectionExpanded', () {
       test('defaults to expected initial values', () {
@@ -36,20 +231,13 @@ void main() {
 
   group('ProfileLegend notifier methods (via state)', () {
     group('explicit source set methods', () {
-      test('setCeilingSource sets to computer', () {
+      // The ceiling line has no source toggle (issue #755); it always uses the
+      // calculated curve, so there is no ceilingSource field or setter to test.
+      test('setNdlSource sets to calculated', () {
         const state = ProfileLegendState();
-        expect(state.ceilingSource, MetricDataSource.calculated);
-        final updated = state.copyWith(
-          ceilingSource: MetricDataSource.computer,
-        );
-        expect(updated.ceilingSource, MetricDataSource.computer);
-      });
-
-      test('setNdlSource sets to computer', () {
-        const state = ProfileLegendState();
-        expect(state.ndlSource, MetricDataSource.calculated);
-        final updated = state.copyWith(ndlSource: MetricDataSource.computer);
-        expect(updated.ndlSource, MetricDataSource.computer);
+        expect(state.ndlSource, MetricDataSource.computer);
+        final updated = state.copyWith(ndlSource: MetricDataSource.calculated);
+        expect(updated.ndlSource, MetricDataSource.calculated);
       });
     });
 
@@ -57,11 +245,14 @@ void main() {
       test('includes showCeiling in count', () {
         const isolatedState = ProfileLegendState(
           showCeiling: true,
+          showDecoStops: false,
           showAscentRateColors: false,
           showEvents: false,
           showMaxDepthMarker: false,
           showPressureMarkers: false,
           showGasSwitchMarkers: false,
+          showLateGasSwitches: false,
+          showPhotoMarkers: false,
         );
         expect(isolatedState.activeSecondaryCount, 1);
       });
@@ -73,7 +264,10 @@ void main() {
           showMaxDepthMarker: false,
           showPressureMarkers: false,
           showGasSwitchMarkers: false,
+          showLateGasSwitches: false,
+          showPhotoMarkers: false,
           showCeiling: false,
+          showDecoStops: false,
         );
         expect(state.activeSecondaryCount, 0);
       });
@@ -98,5 +292,700 @@ void main() {
         expect(updated.sectionExpanded['overlays'], false);
       });
     });
+
+    group('showGas', () {
+      test('defaults to true', () {
+        const state = ProfileLegendState();
+        expect(state.showGas, isTrue);
+      });
+
+      test('copyWith sets showGas to false', () {
+        const state = ProfileLegendState();
+        final updated = state.copyWith(showGas: false);
+        expect(updated.showGas, isFalse);
+      });
+
+      test('copyWith without showGas preserves current value', () {
+        const state = ProfileLegendState(showGas: false);
+        final updated = state.copyWith(showMaxDepthMarker: true);
+        expect(updated.showGas, isFalse);
+      });
+
+      test('equality distinguishes showGas true vs false', () {
+        const stateOn = ProfileLegendState(showGas: true);
+        const stateOff = ProfileLegendState(showGas: false);
+        expect(stateOn, isNot(equals(stateOff)));
+      });
+
+      test('states with same showGas value are equal (other fields equal)', () {
+        const a = ProfileLegendState(showGas: false);
+        const b = ProfileLegendState(showGas: false);
+        expect(a, equals(b));
+      });
+    });
+  });
+
+  group('ProfileLegend.toggleGas', () {
+    ProviderContainer makeContainer() => ProviderContainer(
+      overrides: [
+        settingsProvider.overrideWith(
+          (ref) => _StubSettingsNotifier(
+            const AppSettings(defaultShowGasTimeline: true),
+          ),
+        ),
+      ],
+    );
+
+    test('toggles showGas from true to false', () {
+      final container = makeContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(profileLegendProvider.notifier);
+      expect(container.read(profileLegendProvider).showGas, isTrue);
+      notifier.toggleGas();
+      expect(container.read(profileLegendProvider).showGas, isFalse);
+    });
+
+    test('toggles showGas from false back to true', () {
+      final container = makeContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(profileLegendProvider.notifier);
+      notifier.toggleGas();
+      notifier.toggleGas();
+      expect(container.read(profileLegendProvider).showGas, isTrue);
+    });
+  });
+
+  group('showAscentRateLine', () {
+    test(
+      'defaults to false (seeds from defaultShowAscentRateLine setting)',
+      () {
+        const state = ProfileLegendState();
+        expect(state.showAscentRateLine, isFalse);
+      },
+    );
+
+    test('copyWith sets showAscentRateLine to true', () {
+      const state = ProfileLegendState();
+      final updated = state.copyWith(showAscentRateLine: true);
+      expect(updated.showAscentRateLine, isTrue);
+    });
+
+    test('copyWith without showAscentRateLine preserves current value', () {
+      const state = ProfileLegendState(showAscentRateLine: true);
+      final updated = state.copyWith(showSac: true);
+      expect(updated.showAscentRateLine, isTrue);
+    });
+
+    test('equality distinguishes showAscentRateLine true vs false', () {
+      const on = ProfileLegendState(showAscentRateLine: true);
+      const off = ProfileLegendState(showAscentRateLine: false);
+      expect(on, isNot(equals(off)));
+    });
+
+    test('hashCode includes showAscentRateLine', () {
+      // Empty maps keep the hash deterministic: the state's hashCode spreads
+      // Map.entries, whose MapEntry values hash by identity.
+      const on = ProfileLegendState(
+        showAscentRateLine: true,
+        sectionExpanded: {},
+        showTankPressure: {},
+      );
+      const off = ProfileLegendState(
+        showAscentRateLine: false,
+        sectionExpanded: {},
+        showTankPressure: {},
+      );
+      expect(on.hashCode, isNot(off.hashCode));
+    });
+
+    test('activeSecondaryCount includes showAscentRateLine', () {
+      const state = ProfileLegendState(
+        showAscentRateLine: true,
+        showCeiling: false,
+        showDecoStops: false,
+        showAscentRateColors: false,
+        showMaxDepthMarker: false,
+        showPressureMarkers: false,
+        showGasSwitchMarkers: false,
+        showLateGasSwitches: false,
+        showPhotoMarkers: false,
+      );
+      expect(state.activeSecondaryCount, 1);
+    });
+  });
+
+  group('ProfileLegend.toggleAscentRateLine', () {
+    ProviderContainer makeContainer() => ProviderContainer(
+      overrides: [
+        settingsProvider.overrideWith((ref) => _StubSettingsNotifier()),
+      ],
+    );
+
+    test('toggles showAscentRateLine from false to true', () {
+      final container = makeContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(profileLegendProvider.notifier);
+      expect(container.read(profileLegendProvider).showAscentRateLine, isFalse);
+      notifier.toggleAscentRateLine();
+      expect(container.read(profileLegendProvider).showAscentRateLine, isTrue);
+    });
+
+    test('toggles showAscentRateLine from true back to false', () {
+      final container = makeContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(profileLegendProvider.notifier);
+      notifier.toggleAscentRateLine();
+      notifier.toggleAscentRateLine();
+      expect(container.read(profileLegendProvider).showAscentRateLine, isFalse);
+    });
+  });
+
+  group('ProfileLegend.build gas timeline hydration', () {
+    test('showGas starts true when defaultShowGasTimeline is true', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowGasTimeline: true),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showGas, isTrue);
+    });
+
+    test('showGas starts false when defaultShowGasTimeline is false', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowGasTimeline: false),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showGas, isFalse);
+    });
+  });
+
+  group('ProfileLegend.build ascent rate hydration', () {
+    test('both ascent-rate toggles start off with default settings', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith((ref) => _StubSettingsNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      final state = container.read(profileLegendProvider);
+      expect(state.showAscentRateColors, isFalse);
+      expect(state.showAscentRateLine, isFalse);
+    });
+
+    test('showAscentRateColors starts true when the setting is on', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(showAscentRateColors: true),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(
+        container.read(profileLegendProvider).showAscentRateColors,
+        isTrue,
+      );
+    });
+
+    test('showAscentRateLine seeds from defaultShowAscentRateLine', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowAscentRateLine: true),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showAscentRateLine, isTrue);
+    });
+  });
+
+  group('ProfileLegend.showPhotoMarkers', () {
+    test('showPhotoMarkers seeds from defaultShowPhotoMarkers', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowPhotoMarkers: false),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showPhotoMarkers, isFalse);
+    });
+
+    test('togglePhotoMarkers flips the state', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(const AppSettings()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showPhotoMarkers, isTrue);
+      container.read(profileLegendProvider.notifier).togglePhotoMarkers();
+      expect(container.read(profileLegendProvider).showPhotoMarkers, isFalse);
+    });
+  });
+
+  group('O2 cell millivolts (issue #810)', () {
+    test('default to hidden and copyWith flips them', () {
+      const state = ProfileLegendState();
+      expect(state.showO2Cells, isFalse);
+      expect(state.copyWith(showO2Cells: true).showO2Cells, isTrue);
+    });
+
+    test('showing them counts as an active secondary toggle', () {
+      const off = ProfileLegendState();
+      final on = off.copyWith(showO2Cells: true);
+      expect(on.activeSecondaryCount, off.activeSecondaryCount + 1);
+    });
+
+    test('participate in equality and hashCode', () {
+      const off = ProfileLegendState();
+      final on = off.copyWith(showO2Cells: true);
+      expect(on, isNot(equals(off)));
+      expect(on.hashCode, isNot(equals(off.hashCode)));
+    });
+
+    test('toggleO2Cells flips the state', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(const AppSettings()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showO2Cells, isFalse);
+      container.read(profileLegendProvider.notifier).toggleO2Cells();
+      expect(container.read(profileLegendProvider).showO2Cells, isTrue);
+    });
+
+    test('showO2Cells seeds from defaultShowO2CellMv when true', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowO2CellMv: true),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showO2Cells, isTrue);
+    });
+
+    test('showO2Cells seeds from defaultShowO2CellMv when false', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(defaultShowO2CellMv: false),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(profileLegendProvider).showO2Cells, isFalse);
+    });
+  });
+
+  group('counterdiffusion overlay (issue #4530)', () {
+    ProviderContainer makeContainer(AppSettings settings) {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(settings),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Keep the autoDispose provider alive between reads, like a mounted chart.
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+      return container;
+    }
+
+    test('both fields default to off', () {
+      const state = ProfileLegendState();
+      expect(state.showCounterdiffusion, isFalse);
+      expect(state.counterdiffusionShowAll, isFalse);
+    });
+
+    test('showCounterdiffusion counts as an active overlay', () {
+      const off = ProfileLegendState();
+      expect(
+        off.copyWith(showCounterdiffusion: true).activeSecondaryCount,
+        off.activeSecondaryCount + 1,
+      );
+    });
+
+    test('participate in copyWith, equality and hashCode', () {
+      const off = ProfileLegendState();
+      final on = off.copyWith(
+        showCounterdiffusion: true,
+        counterdiffusionShowAll: true,
+      );
+      expect(on.showCounterdiffusion, isTrue);
+      expect(on.counterdiffusionShowAll, isTrue);
+      expect(on, isNot(equals(off)));
+      expect(on.hashCode, isNot(equals(off.hashCode)));
+      expect(off.copyWith(counterdiffusionShowAll: true), isNot(equals(off)));
+    });
+
+    test('toggleCounterdiffusion flips the state', () {
+      final c = makeContainer(const AppSettings());
+      expect(c.read(profileLegendProvider).showCounterdiffusion, isFalse);
+      c.read(profileLegendProvider.notifier).toggleCounterdiffusion();
+      expect(c.read(profileLegendProvider).showCounterdiffusion, isTrue);
+    });
+
+    test('setCounterdiffusionShowAll updates the legend state', () {
+      final c = makeContainer(const AppSettings());
+      c.read(profileLegendProvider.notifier).setCounterdiffusionShowAll(true);
+      expect(c.read(profileLegendProvider).counterdiffusionShowAll, isTrue);
+    });
+
+    test('showCounterdiffusion seeds from defaultShowCounterdiffusion', () {
+      final on = makeContainer(
+        const AppSettings(defaultShowCounterdiffusion: true),
+      );
+      expect(on.read(profileLegendProvider).showCounterdiffusion, isTrue);
+      final off = makeContainer(const AppSettings());
+      expect(off.read(profileLegendProvider).showCounterdiffusion, isFalse);
+    });
+
+    test('counterdiffusionShowAll seeds from the device-local setting', () {
+      final c = makeContainer(const AppSettings(counterdiffusionShowAll: true));
+      expect(c.read(profileLegendProvider).counterdiffusionShowAll, isTrue);
+    });
+  });
+
+  group('computed events toggle (issue #1523)', () {
+    ProviderContainer makeContainer() {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(const AppSettings()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Keep the autoDispose provider alive between reads, like a mounted chart.
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+      return container;
+    }
+
+    test('defaults to visible', () {
+      final c = makeContainer();
+      expect(c.read(profileLegendProvider).showComputedEvents, isTrue);
+    });
+
+    test('seeds hidden when the dive carries imported events', () {
+      final c = makeContainer();
+      c
+          .read(profileLegendProvider.notifier)
+          .seedComputedEventsVisibility(diveHasImportedEvents: true);
+      expect(c.read(profileLegendProvider).showComputedEvents, isFalse);
+    });
+
+    test('seeds visible when the dive has no imported events', () {
+      final c = makeContainer();
+      c
+          .read(profileLegendProvider.notifier)
+          .seedComputedEventsVisibility(diveHasImportedEvents: false);
+      expect(c.read(profileLegendProvider).showComputedEvents, isTrue);
+    });
+
+    test('a user toggle wins over a later seed', () {
+      final c = makeContainer();
+      final notifier = c.read(profileLegendProvider.notifier);
+      notifier.toggleComputedEvents();
+      expect(c.read(profileLegendProvider).showComputedEvents, isFalse);
+      notifier.seedComputedEventsVisibility(diveHasImportedEvents: false);
+      expect(c.read(profileLegendProvider).showComputedEvents, isFalse);
+    });
+
+    test('computedEventsFollowsDive is true until the user toggles', () {
+      final c = makeContainer();
+      final notifier = c.read(profileLegendProvider.notifier);
+      expect(notifier.computedEventsFollowsDive, isTrue);
+      notifier.seedComputedEventsVisibility(diveHasImportedEvents: true);
+      expect(notifier.computedEventsFollowsDive, isTrue);
+      notifier.toggleComputedEvents();
+      expect(notifier.computedEventsFollowsDive, isFalse);
+    });
+
+    test('toggle flips the value', () {
+      final c = makeContainer();
+      final notifier = c.read(profileLegendProvider.notifier);
+      notifier.toggleComputedEvents();
+      expect(c.read(profileLegendProvider).showComputedEvents, isFalse);
+      notifier.toggleComputedEvents();
+      expect(c.read(profileLegendProvider).showComputedEvents, isTrue);
+    });
+
+    test('copyWith and equality track showComputedEvents', () {
+      const on = ProfileLegendState();
+      final off = on.copyWith(showComputedEvents: false);
+      expect(on.showComputedEvents, isTrue);
+      expect(off.showComputedEvents, isFalse);
+      expect(on, isNot(equals(off)));
+      expect(on.copyWith(showSac: true).showComputedEvents, isTrue);
+    });
+  });
+
+  group('per-tank pressure visibility (issue #1999)', () {
+    ProviderContainer containerWith(AppSettings settings) {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(settings),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    test('an untouched tank follows the Pressure default', () {
+      expect(
+        const ProfileLegendState(
+          showPressure: true,
+        ).isTankPressureVisible('tank-1'),
+        isTrue,
+      );
+      expect(
+        const ProfileLegendState(
+          showPressure: false,
+        ).isTankPressureVisible('tank-1'),
+        isFalse,
+      );
+    });
+
+    test('a per-tank choice overrides the Pressure default', () {
+      const state = ProfileLegendState(
+        showPressure: false,
+        showTankPressure: {'tank-1': true, 'tank-2': false},
+      );
+      expect(state.isTankPressureVisible('tank-1'), isTrue);
+      expect(state.isTankPressureVisible('tank-2'), isFalse);
+    });
+
+    test('tanks start hidden when defaultShowPressure is off', () {
+      final container = containerWith(
+        const AppSettings(defaultShowPressure: false),
+      );
+      expect(
+        container.read(profileLegendProvider).isTankPressureVisible('tank-1'),
+        isFalse,
+      );
+    });
+
+    test('toggling an untouched tank flips it from its default', () {
+      final container = containerWith(
+        const AppSettings(defaultShowPressure: false),
+      );
+      final notifier = container.read(profileLegendProvider.notifier);
+
+      notifier.toggleTankPressure('tank-1', visibleByDefault: false);
+      expect(container.read(profileLegendProvider).showTankPressure, {
+        'tank-1': true,
+      });
+
+      notifier.toggleTankPressure('tank-1', visibleByDefault: false);
+      expect(container.read(profileLegendProvider).showTankPressure, {
+        'tank-1': false,
+      });
+    });
+
+    test('a cylinder toggle defaults to visible regardless of Pressure', () {
+      // The Cylinders section on gas-switch dives governs switch markers,
+      // which the Pressure default does not touch.
+      final container = containerWith(
+        const AppSettings(defaultShowPressure: false),
+      );
+      container
+          .read(profileLegendProvider.notifier)
+          .toggleTankPressure('tank-1');
+      expect(container.read(profileLegendProvider).showTankPressure, {
+        'tank-1': false,
+      });
+    });
+  });
+  group('ProfileLegend.reset', () {
+    // A reset returns to the diver's own settings, not the constructor
+    // defaults: a diver who stored Calculated must not be moved to the
+    // computer default (#1859) by resetting the chart.
+    test('re-seeds every toggle and source from the diver settings', () {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(
+              const AppSettings(
+                defaultShowSac: true,
+                defaultNdlSource: MetricDataSource.calculated,
+                defaultDecoStopSource: MetricDataSource.calculated,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      final notifier = container.read(profileLegendProvider.notifier)
+        ..toggleSac()
+        ..setNdlSource(MetricDataSource.computer)
+        ..setDecoStopSource(MetricDataSource.computer);
+      expect(container.read(profileLegendProvider).showSac, isFalse);
+
+      notifier.reset();
+
+      final state = container.read(profileLegendProvider);
+      expect(state.showSac, isTrue);
+      expect(state.ndlSource, MetricDataSource.calculated);
+      expect(state.decoStopSource, MetricDataSource.calculated);
+    });
+  });
+
+  group('buoyancy line (issue #4593)', () {
+    ProviderContainer makeContainer(AppSettings settings) {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(settings),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Keep the autoDispose provider alive between reads, like a mounted chart.
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+      return container;
+    }
+
+    test('defaults to off', () {
+      expect(const ProfileLegendState().showBuoyancy, isFalse);
+    });
+
+    test('counts as an active overlay', () {
+      const off = ProfileLegendState();
+      expect(
+        off.copyWith(showBuoyancy: true).activeSecondaryCount,
+        off.activeSecondaryCount + 1,
+      );
+    });
+
+    test('participates in copyWith, equality and hashCode', () {
+      const off = ProfileLegendState();
+      final on = off.copyWith(showBuoyancy: true);
+      expect(on.showBuoyancy, isTrue);
+      expect(on, isNot(equals(off)));
+      expect(on.hashCode, isNot(equals(off.hashCode)));
+    });
+
+    test('toggleBuoyancy flips the state', () {
+      final c = makeContainer(const AppSettings());
+      expect(c.read(profileLegendProvider).showBuoyancy, isFalse);
+      c.read(profileLegendProvider.notifier).toggleBuoyancy();
+      expect(c.read(profileLegendProvider).showBuoyancy, isTrue);
+    });
+
+    test('seeds from defaultShowBuoyancy', () {
+      final on = makeContainer(const AppSettings(defaultShowBuoyancy: true));
+      expect(on.read(profileLegendProvider).showBuoyancy, isTrue);
+      final off = makeContainer(const AppSettings());
+      expect(off.read(profileLegendProvider).showBuoyancy, isFalse);
+    });
+  });
+
+  group('Avelo lines (issue #4664)', () {
+    ProviderContainer makeContainer(AppSettings settings) {
+      final container = ProviderContainer(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => _StubSettingsNotifier(settings),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(profileLegendProvider, (_, _) {});
+      addTearDown(sub.close);
+      return container;
+    }
+
+    final lines =
+        <
+          (
+            String,
+            bool Function(ProfileLegendState),
+            ProfileLegendState Function(ProfileLegendState),
+            void Function(ProfileLegend),
+            AppSettings,
+          )
+        >[
+          (
+            'Avelo buoyancy',
+            (s) => s.showAveloBuoyancy,
+            (s) => s.copyWith(showAveloBuoyancy: true),
+            (n) => n.toggleAveloBuoyancy(),
+            const AppSettings(defaultShowAveloBuoyancy: true),
+          ),
+          (
+            'gas remaining',
+            (s) => s.showAveloGasRemaining,
+            (s) => s.copyWith(showAveloGasRemaining: true),
+            (n) => n.toggleAveloGasRemaining(),
+            const AppSettings(defaultShowAveloGasRemaining: true),
+          ),
+          (
+            'computer RMV',
+            (s) => s.showComputerRmv,
+            (s) => s.copyWith(showComputerRmv: true),
+            (n) => n.toggleComputerRmv(),
+            const AppSettings(defaultShowComputerRmv: true),
+          ),
+        ];
+
+    for (final (name, read, turnOn, toggle, seeded) in lines) {
+      test('$name defaults to off and counts as an overlay', () {
+        const off = ProfileLegendState();
+        expect(read(off), isFalse);
+        final on = turnOn(off);
+        expect(read(on), isTrue);
+        expect(on.activeSecondaryCount, off.activeSecondaryCount + 1);
+        expect(on, isNot(equals(off)));
+        expect(on.hashCode, isNot(equals(off.hashCode)));
+      });
+
+      test('$name toggles and seeds from its default', () {
+        final c = makeContainer(const AppSettings());
+        expect(read(c.read(profileLegendProvider)), isFalse);
+        toggle(c.read(profileLegendProvider.notifier));
+        expect(read(c.read(profileLegendProvider)), isTrue);
+        expect(read(makeContainer(seeded).read(profileLegendProvider)), isTrue);
+      });
+    }
   });
 }

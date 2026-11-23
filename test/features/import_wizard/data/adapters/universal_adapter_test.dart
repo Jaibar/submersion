@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -7,10 +8,14 @@ import 'package:flutter_riverpod/legacy.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 // ignore: implementation_imports
 import 'package:riverpod/src/framework.dart' as riverpod show Override;
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/services/export/uddf/uddf_full_export_service.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
@@ -18,23 +23,33 @@ import 'package:submersion/features/certifications/data/repositories/certificati
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
 import 'package:submersion/features/courses/data/repositories/course_repository.dart';
+import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/dive_import/data/repositories/imported_file_repository.dart';
 import 'package:submersion/features/dive_import/data/services/uddf_entity_importer.dart';
+import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_merge_snapshot.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_source_export.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
 import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_file_outcome.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_set_repository_impl.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
@@ -42,10 +57,13 @@ import 'package:submersion/features/equipment/presentation/providers/equipment_p
 import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
 import 'package:submersion/features/import_wizard/data/adapters/universal_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
+import 'package:submersion/features/import_wizard/domain/models/entity_match_result.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart'
     as wizard
     show ImportEntityType;
+import 'package:submersion/features/import_wizard/domain/models/import_notice.dart';
+import 'package:submersion/features/import_wizard/domain/models/unified_import_result.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
@@ -62,7 +80,9 @@ import 'package:submersion/features/universal_import/data/models/import_enums.da
     as ui;
 import 'package:submersion/features/universal_import/data/models/import_options.dart';
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/data/models/picked_import_file.dart';
 import 'package:submersion/features/universal_import/data/parsers/subsurface_xml_parser.dart';
+import 'package:submersion/features/universal_import/data/parsers/uddf_import_parser.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
 
 @GenerateNiceMocks([
@@ -80,8 +100,14 @@ import 'package:submersion/features/universal_import/presentation/providers/univ
   MockSpec<CourseRepository>(),
   MockSpec<TankPresetRepository>(),
   MockSpec<UddfEntityImporter>(),
+  MockSpec<DiveConsolidationService>(),
 ])
+import '../../../../helpers/dive_match_records.dart';
+import '../../../../helpers/test_database.dart';
 import 'universal_adapter_test.mocks.dart';
+import '../../../../helpers/fake_hosts.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 
 typedef Override = riverpod.Override;
 
@@ -91,6 +117,28 @@ typedef Override = riverpod.Override;
 
 final _now = DateTime.now();
 
+/// Minimal snapshot for a stubbed [DiveConsolidationService.apply]. The fold
+/// is exercised for real by dive_consolidation_service_test and the download
+/// adapter's consolidate integration test; here we only assert the adapter's
+/// wiring (that it delegates to apply and adjusts its counts).
+const _emptySnapshot = DiveMergeSnapshot(
+  mergedDiveId: 'target-dive',
+  diveRows: [],
+  tankRows: [],
+  weightRows: [],
+  customFieldRows: [],
+  equipmentRows: [],
+  diveTypeRows: [],
+  tagRows: [],
+  buddyRows: [],
+  sightingRows: [],
+  eventRows: [],
+  gasSwitchRows: [],
+  dataSourceRows: [],
+  tideRows: [],
+  mediaDiveIds: {},
+);
+
 Diver _testDiver() =>
     Diver(id: 'diver-1', name: 'Test Diver', createdAt: _now, updatedAt: _now);
 
@@ -98,7 +146,7 @@ Diver _testDiver() =>
 /// tests: extends `StateNotifier<AppSettings>` and implements SettingsNotifier.
 class _TestSettingsNotifier extends StateNotifier<AppSettings>
     implements SettingsNotifier {
-  _TestSettingsNotifier() : super(const AppSettings());
+  _TestSettingsNotifier([super.state = const AppSettings()]);
 
   @override
   Future<void> setMapStyle(MapStyle style) async =>
@@ -106,6 +154,22 @@ class _TestSettingsNotifier extends StateNotifier<AppSettings>
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Fake `path_provider` platform, so the batch test's picked files can live
+/// in a temp directory. Windows' `path_provider_windows` resolves the
+/// documents path via a native win32 call rather than a `MethodChannel`, so
+/// mocking the channel does not intercept it; overriding
+/// [PathProviderPlatform.instance] directly (this codebase's existing idiom
+/// -- see media_cache_root_test.dart) does.
+class _FakePathProviderPlatform extends PathProviderPlatform
+    with MockPlatformInterfaceMixin {
+  _FakePathProviderPlatform(this.documentsPath);
+
+  final String documentsPath;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => documentsPath;
 }
 
 /// A testable version of the notifier that allows setting state directly.
@@ -121,7 +185,30 @@ class _TestableImportNotifier extends UniversalImportNotifier {
   }
 
   void setFileName(String name) {
-    state = state.copyWith(fileName: name);
+    setFiles([name]);
+  }
+
+  void setFiles(List<String> names) {
+    state = state.copyWith(
+      files: [
+        for (final name in names)
+          PickedImportFile(
+            name: name,
+            bytes: Uint8List(0),
+            detection: const DetectionResult(
+              format: ui.ImportFormat.unknown,
+              confidence: 0,
+            ),
+            status: ImportFileStatus.pending,
+          ),
+      ],
+    );
+  }
+
+  /// Batch files as the wizard really holds them: path-backed, each with its
+  /// own detected format and no bytes in memory.
+  void setPickedFiles(List<PickedImportFile> files) {
+    state = state.copyWith(files: files);
   }
 
   void setDetectedCsvPreset(CsvPreset? preset) {
@@ -197,6 +284,9 @@ List<Override> _fullOverrides({
   required ImportPayload payload,
   ImportOptions? options,
   Diver? diver,
+  List<String> fileNames = const [],
+  List<PickedImportFile> pickedFiles = const [],
+  DetectionResult? detectionResult,
   List<Dive> existingDives = const [],
   List<DiveSite> existingSites = const [],
   List<Trip> existingTrips = const [],
@@ -219,9 +309,17 @@ List<Override> _fullOverrides({
   MockTankPressureRepository? mockTankPressureRepo,
   MockCourseRepository? mockCourseRepo,
   MockTankPresetRepository? mockTankPresetRepo,
+  AppSettings settings = const AppSettings(),
 }) {
   final diveRepo = mockDiveRepo ?? MockDiveRepository();
   final siteRepo = mockSiteRepo ?? MockSiteRepository();
+  if (mockSiteRepo == null) {
+    // The importer reads a created site's id (#3513), so the default mock
+    // hands back the site it was given rather than an unstubbed fake.
+    when(siteRepo.createSite(any)).thenAnswer(
+      (invocation) async => invocation.positionalArguments[0] as DiveSite,
+    );
+  }
   final tripRepo = mockTripRepo ?? MockTripRepository();
   final equipmentRepo = mockEquipmentRepo ?? MockEquipmentRepository();
   final equipmentSetRepo = mockEquipmentSetRepo ?? MockEquipmentSetRepository();
@@ -235,21 +333,25 @@ List<Override> _fullOverrides({
   final courseRepo = mockCourseRepo ?? MockCourseRepository();
   final tankPresetRepo = mockTankPresetRepo ?? MockTankPresetRepository();
 
-  // Set up default mock return values for getAllDives. Production code
-  // calls it with a diverId filter, so stub both variants.
-  when(diveRepo.getAllDives()).thenAnswer((_) async => existingDives);
+  // Set up default mock return values for getDiveMatchRecords. Production
+  // code calls it with a diverId filter, so stub both variants.
+  final matchRecords = existingDives.map(diveMatchRecordOf).toList();
+  when(diveRepo.getDiveMatchRecords()).thenAnswer((_) async => matchRecords);
   when(
-    diveRepo.getAllDives(diverId: anyNamed('diverId')),
-  ).thenAnswer((_) async => existingDives);
+    diveRepo.getDiveMatchRecords(diverId: anyNamed('diverId')),
+  ).thenAnswer((_) async => matchRecords);
 
   return [
     universalImportNotifierProvider.overrideWith((ref) {
       final notifier = _TestableImportNotifier(ref);
       notifier.setPayload(payload);
       if (options != null) notifier.setOptions(options);
+      if (fileNames.isNotEmpty) notifier.setFiles(fileNames);
+      if (pickedFiles.isNotEmpty) notifier.setPickedFiles(pickedFiles);
+      if (detectionResult != null) notifier.setDetectionResult(detectionResult);
       return notifier;
     }),
-    settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+    settingsProvider.overrideWith((ref) => _TestSettingsNotifier(settings)),
     currentDiverProvider.overrideWith((ref) async => diver),
     diveRepositoryProvider.overrideWithValue(diveRepo),
     siteRepositoryProvider.overrideWithValue(siteRepo),
@@ -266,11 +368,15 @@ List<Override> _fullOverrides({
     tankPresetRepositoryProvider.overrideWithValue(tankPresetRepo),
     // Override the async list providers used by checkDuplicates.
     allTripsProvider.overrideWith((ref) async => existingTrips),
+    // Custom certification agencies the duplicate check names (#690).
+    allCustomCertificationsCatalogProvider.overrideWith(
+      (ref) async => CertificationCatalog.builtInOnly,
+    ),
     sitesProvider.overrideWith((ref) async => existingSites),
     allEquipmentProvider.overrideWith((ref) async => existingEquipment),
     allBuddiesProvider.overrideWith((ref) async => existingBuddies),
     allDiveCentersProvider.overrideWith((ref) async => existingDiveCenters),
-    allCertificationsProvider.overrideWith(
+    certificationMetadataProvider.overrideWith(
       (ref) async => existingCertifications,
     ),
     tagsProvider.overrideWith((ref) async => existingTags),
@@ -283,6 +389,12 @@ List<Override> _fullOverrides({
 // ---------------------------------------------------------------------------
 
 void main() {
+  // The code under test calls Open-Meteo; it answers as offline, as it
+  // would on a device without a network.
+  setUp(() {
+    serveFakeHost('api.open-meteo.com');
+  });
+
   // -------------------------------------------------------------------------
   // Adapter metadata
   // -------------------------------------------------------------------------
@@ -319,31 +431,100 @@ void main() {
       );
     });
 
-    testWidgets('supportedDuplicateActions contains skip and importAsNew', (
+    testWidgets('supportedDuplicateActions includes skip, importAsNew, and '
+        'consolidate', (tester) async {
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(),
+        callback: (adapter) async {
+          expect(
+            adapter.supportedDuplicateActions,
+            containsAll([
+              DuplicateAction.skip,
+              DuplicateAction.importAsNew,
+              DuplicateAction.consolidate,
+            ]),
+          );
+        },
+      );
+    });
+
+    testWidgets('duplicateActionsFor offers replaceSource on sites only', (
       tester,
     ) async {
       await _runWithAdapter(
         tester,
         overrides: _buildBundleOverrides(),
         callback: (adapter) async {
+          // Overwrite-in-place is implemented for sites (via siteOverrides).
           expect(
-            adapter.supportedDuplicateActions,
-            containsAll([DuplicateAction.skip, DuplicateAction.importAsNew]),
+            adapter.duplicateActionsFor(wizard.ImportEntityType.sites),
+            contains(DuplicateAction.replaceSource),
           );
-          expect(
-            adapter.supportedDuplicateActions,
-            isNot(contains(DuplicateAction.consolidate)),
-          );
+
+          // Every other tab must NOT offer it: the importer has no override
+          // channel for those types, so a "decided" row would be dropped.
+          for (final type in wizard.ImportEntityType.values) {
+            if (type == wizard.ImportEntityType.sites) continue;
+            expect(
+              adapter.duplicateActionsFor(type),
+              isNot(contains(DuplicateAction.replaceSource)),
+              reason: '$type must not offer replaceSource',
+            );
+          }
         },
       );
     });
 
-    testWidgets('acquisitionSteps has three steps', (tester) async {
+    testWidgets('duplicateActionsFor keeps the shared actions on every type', (
+      tester,
+    ) async {
       await _runWithAdapter(
         tester,
         overrides: _buildBundleOverrides(),
         callback: (adapter) async {
-          expect(adapter.acquisitionSteps, hasLength(3));
+          for (final type in wizard.ImportEntityType.values) {
+            // Fills offer skip alone; see the next test.
+            if (type == wizard.ImportEntityType.fills) continue;
+            expect(
+              adapter.duplicateActionsFor(type),
+              containsAll([
+                DuplicateAction.skip,
+                DuplicateAction.importAsNew,
+                DuplicateAction.consolidate,
+              ]),
+              reason: '$type lost a base action',
+            );
+          }
+        },
+      );
+    });
+
+    testWidgets('a fill already here can only be skipped (cylinder passports '
+        'phase 5)', (tester) async {
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(),
+        callback: (adapter) async {
+          // The fill id is the identity and the importer never stores a fill
+          // twice, so import-as-new or consolidate would be dropped silently.
+          expect(adapter.duplicateActionsFor(wizard.ImportEntityType.fills), {
+            DuplicateAction.skip,
+          });
+        },
+      );
+    });
+
+    testWidgets('acquisitionSteps has five steps', (tester) async {
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(),
+        callback: (adapter) async {
+          // Select File, Confirm Source, Map Fields, Divers, Photos. Divers
+          // auto-advances away for a logbook with one diver, Photos when the
+          // payload references no photos.
+          expect(adapter.acquisitionSteps, hasLength(5));
+          expect(adapter.acquisitionSteps.last.label, 'Photos');
         },
       );
     });
@@ -420,6 +601,259 @@ void main() {
             adapter.defaultTagName,
             matches(RegExp(r'^dive_log\.csv Import \d{4}-\d{2}-\d{2}$')),
           );
+        },
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // performImport -- consolidate
+  // -------------------------------------------------------------------------
+
+  group('performImport() - consolidate', () {
+    testWidgets('folds a consolidate-flagged dive into its matched dive and '
+        'reports it as consolidated, not imported', (tester) async {
+      final mockConsolidation = MockDiveConsolidationService();
+      when(
+        mockConsolidation.apply(
+          targetDiveId: anyNamed('targetDiveId'),
+          secondaryDiveIds: anyNamed('secondaryDiveIds'),
+        ),
+      ).thenAnswer(
+        (invocation) async => DiveConsolidationOutcome(
+          targetDiveId: invocation.namedArguments[#targetDiveId] as String,
+          snapshot: _emptySnapshot,
+        ),
+      );
+
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 7, 1, 9, 0),
+              'maxDepth': 24.5,
+              'runtime': const Duration(minutes: 40),
+            },
+          ],
+        },
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: [
+          ..._fullOverrides(payload: payload, diver: _testDiver()),
+          diveConsolidationServiceProvider.overrideWithValue(mockConsolidation),
+        ],
+        callback: (adapter) async {
+          final base = await adapter.buildBundle();
+          // Flag the single incoming dive as a duplicate of an existing dive
+          // and mark it for consolidation, mirroring what the review step
+          // hands to performImport.
+          final bundle = ImportBundle(
+            source: base.source,
+            groups: {
+              wizard.ImportEntityType.dives: EntityGroup(
+                items: base.groups[wizard.ImportEntityType.dives]!.items,
+                duplicateIndices: const {0},
+                matchResults: const {
+                  0: DiveMatchResult(
+                    diveId: 'target-dive',
+                    score: 0.9,
+                    timeDifferenceMs: 0,
+                  ),
+                },
+              ),
+            },
+          );
+
+          final result = await adapter.performImport(
+            bundle,
+            {
+              wizard.ImportEntityType.dives: {0},
+            },
+            {
+              wizard.ImportEntityType.dives: {0: DuplicateAction.consolidate},
+            },
+          );
+
+          expect(result.consolidatedCount, equals(1));
+          // The folded dive was imported as a standalone then tombstoned by the
+          // fold, so it must NOT also be counted as a new imported dive.
+          expect(
+            result.importedCounts[wizard.ImportEntityType.dives] ?? 0,
+            equals(0),
+          );
+          verify(
+            mockConsolidation.apply(
+              targetDiveId: 'target-dive',
+              secondaryDiveIds: anyNamed('secondaryDiveIds'),
+            ),
+          ).called(1);
+        },
+      );
+    });
+
+    testWidgets('reports a stranded dive as imported when both the fold and '
+        'its cleanup fail (does not hide it)', (tester) async {
+      final mockConsolidation = MockDiveConsolidationService();
+      when(
+        mockConsolidation.apply(
+          targetDiveId: anyNamed('targetDiveId'),
+          secondaryDiveIds: anyNamed('secondaryDiveIds'),
+        ),
+      ).thenThrow(ArgumentError('fold failed'));
+
+      // The compensating delete also fails, so the standalone dive cannot be
+      // removed and is left stranded in the DB.
+      final mockDiveRepo = MockDiveRepository();
+      when(mockDiveRepo.bulkDeleteDives(any)).thenThrow(Exception('delete'));
+
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 7, 1, 9, 0),
+              'maxDepth': 24.5,
+              'runtime': const Duration(minutes: 40),
+            },
+          ],
+        },
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: [
+          ..._fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockDiveRepo: mockDiveRepo,
+          ),
+          diveConsolidationServiceProvider.overrideWithValue(mockConsolidation),
+        ],
+        callback: (adapter) async {
+          final base = await adapter.buildBundle();
+          final bundle = ImportBundle(
+            source: base.source,
+            groups: {
+              wizard.ImportEntityType.dives: EntityGroup(
+                items: base.groups[wizard.ImportEntityType.dives]!.items,
+                duplicateIndices: const {0},
+                matchResults: const {
+                  0: DiveMatchResult(
+                    diveId: 'target-dive',
+                    score: 0.9,
+                    timeDifferenceMs: 0,
+                  ),
+                },
+              ),
+            },
+          );
+
+          final result = await adapter.performImport(
+            bundle,
+            {
+              wizard.ImportEntityType.dives: {0},
+            },
+            {
+              wizard.ImportEntityType.dives: {0: DuplicateAction.consolidate},
+            },
+          );
+
+          // The fold failed AND the standalone could not be deleted, so the
+          // dive is still present -- it must be reported as imported, not
+          // silently hidden.
+          expect(result.consolidatedCount, equals(0));
+          expect(
+            result.importedCounts[wizard.ImportEntityType.dives] ?? 0,
+            equals(1),
+          );
+        },
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // performImport -- per-file outcomes (bulk import)
+  // -------------------------------------------------------------------------
+
+  group('performImport() - per-file outcomes', () {
+    testWidgets('attributes imported dives to files by _sourceFileId', (
+      tester,
+    ) async {
+      // Two files, one dive each, attributed by the collision-free id.
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 5, 1, 9, 0),
+              'maxDepth': 20.0,
+              'runtime': const Duration(minutes: 30),
+              '_sourceFile': 'jan.fit',
+              '_sourceFileId': 'f0',
+            },
+            {
+              'dateTime': DateTime(2026, 6, 1, 9, 0),
+              'maxDepth': 18.0,
+              'runtime': const Duration(minutes: 35),
+              '_sourceFile': 'feb.uddf',
+              '_sourceFileId': 'f1',
+            },
+          ],
+        },
+        metadata: const {'batchFileCount': 2},
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          fileNames: ['jan.fit', 'feb.uddf'],
+        ),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final result = await adapter.performImport(bundle, {
+            wizard.ImportEntityType.dives: {0, 1},
+          }, const {});
+
+          expect(result.fileOutcomes, hasLength(2));
+          final byName = {for (final o in result.fileOutcomes) o.fileName: o};
+          expect(byName['jan.fit']!.status, ImportFileOutcomeStatus.imported);
+          expect(byName['jan.fit']!.importedDives, 1);
+          expect(byName['feb.uddf']!.importedDives, 1);
+        },
+      );
+    });
+
+    testWidgets('single-file import produces no per-file outcomes', (
+      tester,
+    ) async {
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 5, 1, 9, 0),
+              'maxDepth': 20.0,
+              'runtime': const Duration(minutes: 30),
+            },
+          ],
+        },
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          fileNames: ['solo.uddf'],
+        ),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final result = await adapter.performImport(bundle, {
+            wizard.ImportEntityType.dives: {0},
+          }, const {});
+
+          expect(result.fileOutcomes, isEmpty);
         },
       );
     });
@@ -557,6 +991,32 @@ void main() {
       );
     });
 
+    testWidgets('dive subtitle includes source file for batch imports', (
+      tester,
+    ) async {
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 3, 15, 10, 0),
+              'maxDepth': 20.0,
+              '_sourceFile': 'january.fit',
+            },
+          ],
+        },
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(payload: payload),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final item = bundle.groups[ImportEntityType.dives]!.items.first;
+          expect(item.subtitle, contains('january.fit'));
+        },
+      );
+    });
+
     testWidgets('dive subtitle is empty when no optional fields are set', (
       tester,
     ) async {
@@ -638,8 +1098,10 @@ void main() {
           final item = bundle.groups[ImportEntityType.sites]!.items.first;
 
           expect(item.title, equals('Blue Hole'));
-          expect(item.subtitle, contains('17.3155'));
-          expect(item.subtitle, contains('-87.5347'));
+          // Rendered in the diver's coordinate notation: hemisphere letters
+          // rather than a leading minus, at a fixed six decimal places.
+          expect(item.subtitle, contains('17.315500° N'));
+          expect(item.subtitle, contains('87.534700° W'));
         },
       );
     });
@@ -664,6 +1126,38 @@ void main() {
 
           expect(item.title, equals('Reef Site'));
           expect(item.subtitle, equals('Cozumel, Mexico'));
+        },
+      );
+    });
+
+    testWidgets('same-name sites read apart by their place (#4015)', (
+      tester,
+    ) async {
+      const payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.sites: [
+            {
+              'name': 'Blue Hole',
+              'city': 'Dahab',
+              'region': 'South Sinai',
+              'country': 'Egypt',
+            },
+            {'name': 'Blue Hole', 'country': 'Belize'},
+          ],
+        },
+      );
+
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(payload: payload),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final items = bundle.groups[ImportEntityType.sites]!.items;
+
+          expect(items.map((item) => item.subtitle), [
+            'Dahab · South Sinai, Egypt',
+            'Belize',
+          ]);
         },
       );
     });
@@ -1472,6 +1966,39 @@ void main() {
       );
     });
 
+    testWidgets('a file of sites reads no dives or source keys', (
+      tester,
+    ) async {
+      const payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.sites: [
+            {'name': 'Blue Hole'},
+          ],
+        },
+      );
+
+      final diveRepo = MockDiveRepository();
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          mockDiveRepo: diveRepo,
+        ),
+        callback: (adapter) async {
+          await adapter.checkDuplicates(await adapter.buildBundle());
+
+          verifyNever(
+            diveRepo.getDiveMatchRecords(diverId: anyNamed('diverId')),
+          );
+          verifyNever(
+            diveRepo.getSourceUuidByDiveId(diverId: anyNamed('diverId')),
+          );
+        },
+      );
+    });
+
     testWidgets('marks duplicate tags in duplicateIndices', (tester) async {
       const payload = ImportPayload(
         entities: {
@@ -1531,10 +2058,10 @@ void main() {
         maxDepth: 30.0,
         runtime: const Duration(minutes: 45),
         notes: '',
-        diveTypeId: '',
+        diveTypeIds: [''],
         tanks: const [],
         profile: const [],
-        equipment: const [],
+        gear: looseGear(const []),
         photoIds: const [],
         sightings: const [],
       );
@@ -1688,7 +2215,6 @@ void main() {
       );
 
       final mockDiveRepo = MockDiveRepository();
-      when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
       final mockTankPresetRepo = MockTankPresetRepository();
       when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
@@ -1719,6 +2245,52 @@ void main() {
       );
     });
 
+    testWidgets('resolves the default tank preset among the active diver\'s '
+        'own presets (#3343)', (tester) async {
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 3, 15, 10, 0),
+              'maxDepth': 20.0,
+              'runtime': const Duration(minutes: 30),
+            },
+          ],
+        },
+      );
+
+      final mockTankPresetRepo = MockTankPresetRepository();
+      when(
+        mockTankPresetRepo.getPresetByName(any, diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => null);
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          mockTankPresetRepo: mockTankPresetRepo,
+          settings: const AppSettings(defaultTankPreset: 'dubbel_7'),
+        ),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          await adapter.performImport(
+            bundle,
+            {
+              wizard.ImportEntityType.dives: {0},
+            },
+            {
+              wizard.ImportEntityType.dives: {0: DuplicateAction.skip},
+            },
+          );
+
+          verify(
+            mockTankPresetRepo.getPresetByName('dubbel_7', diverId: 'diver-1'),
+          ).called(1);
+        },
+      );
+    });
+
     testWidgets('importAsNew action adds item even if not in base selection', (
       tester,
     ) async {
@@ -1735,7 +2307,6 @@ void main() {
       );
 
       final mockDiveRepo = MockDiveRepository();
-      when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
       final mockTankPresetRepo = MockTankPresetRepository();
       when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
@@ -1764,6 +2335,87 @@ void main() {
         },
       );
     });
+
+    testWidgets(
+      'replaceSource on a site overwrites the match without also creating a '
+      'twin',
+      (tester) async {
+        // ImportWizardNotifier.setDuplicateAction adds every non-skip index
+        // to the base selection set, so a replaceSource site arrives here in
+        // BOTH the selections and the duplicate-actions map. It must resolve
+        // to an overwrite only -- never an overwrite plus a fresh row.
+        const existingSite = DiveSite(
+          id: 'existing-site-1',
+          name: 'Blue Hole',
+          diverId: 'test-diver',
+        );
+
+        final mockSiteRepo = MockSiteRepository();
+        when(
+          mockSiteRepo.getAllSites(diverId: anyNamed('diverId')),
+        ).thenAnswer((_) async => [existingSite]);
+        when(
+          mockSiteRepo.updateSiteWithImportedMetadata(any, any),
+        ).thenAnswer((_) async {});
+        when(mockSiteRepo.createSite(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as DiveSite,
+        );
+
+        const payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.sites: [
+              {'name': 'Blue Hole', 'uddfId': 'site-1'},
+            ],
+          },
+        );
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockSiteRepo: mockSiteRepo,
+          ),
+          callback: (adapter) async {
+            final base = await adapter.buildBundle();
+            final bundle = ImportBundle(
+              source: base.source,
+              groups: {
+                wizard.ImportEntityType.sites: EntityGroup(
+                  items: base.groups[wizard.ImportEntityType.sites]!.items,
+                  duplicateIndices: const {0},
+                  entityMatches: const {
+                    0: EntityMatchResult(
+                      existingId: 'existing-site-1',
+                      existingName: 'Blue Hole',
+                      existingFields: {'Name': 'Blue Hole'},
+                      incomingFields: {'Name': 'Blue Hole'},
+                    ),
+                  },
+                ),
+              },
+            );
+
+            await adapter.performImport(
+              bundle,
+              {
+                wizard.ImportEntityType.sites: {0},
+              },
+              {
+                wizard.ImportEntityType.sites: {
+                  0: DuplicateAction.replaceSource,
+                },
+              },
+            );
+
+            verify(
+              mockSiteRepo.updateSiteWithImportedMetadata(any, any),
+            ).called(1);
+            verifyNever(mockSiteRepo.createSite(any));
+          },
+        );
+      },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -1798,7 +2450,6 @@ void main() {
       );
 
       final mockDiveRepo = MockDiveRepository();
-      when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
       final mockTankPresetRepo = MockTankPresetRepository();
       when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
@@ -1849,7 +2500,6 @@ void main() {
       const payload = ImportPayload(entities: {});
 
       final mockDiveRepo = MockDiveRepository();
-      when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
       final mockTankPresetRepo = MockTankPresetRepository();
       when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
@@ -1869,6 +2519,105 @@ void main() {
           // No data to import, so counts should be empty.
           expect(result.importedCounts, isEmpty);
           expect(result.consolidatedCount, equals(0));
+        },
+      );
+    });
+  });
+
+  group('performImport() - retained dive number clashes (issue #1832)', () {
+    const payload = ImportPayload(
+      entities: {
+        ui.ImportEntityType.dives: [
+          {'diveNumber': 7, 'maxDepth': 20.0},
+        ],
+      },
+    );
+
+    Future<void> runImport(
+      WidgetTester tester, {
+      required bool retain,
+      required MockDiveRepository diveRepo,
+      required void Function(UnifiedImportResult result) check,
+    }) async {
+      final mockTankPresetRepo = MockTankPresetRepository();
+      when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          mockDiveRepo: diveRepo,
+          mockTankPresetRepo: mockTankPresetRepo,
+        ),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final result = await adapter.performImport(
+            bundle,
+            {
+              wizard.ImportEntityType.dives: {0},
+            },
+            {},
+            retainSourceDiveNumbers: retain,
+          );
+          check(result);
+        },
+      );
+    }
+
+    testWidgets('reports a retained number another dive already uses', (
+      tester,
+    ) async {
+      final diveRepo = MockDiveRepository();
+      when(
+        diveRepo.countDivesSharingDiveNumber(any),
+      ).thenAnswer((_) async => 1);
+
+      await runImport(
+        tester,
+        retain: true,
+        diveRepo: diveRepo,
+        check: (result) {
+          final notice = result.notices.singleWhere(
+            (n) => n.kind == ImportNoticeKind.diveNumberConflict,
+          );
+          expect(notice.count, 1);
+        },
+      );
+    });
+
+    testWidgets('does not look for clashes when auto-numbering', (
+      tester,
+    ) async {
+      final diveRepo = MockDiveRepository();
+
+      await runImport(
+        tester,
+        retain: false,
+        diveRepo: diveRepo,
+        check: (result) {
+          expect(
+            result.notices.where(
+              (n) => n.kind == ImportNoticeKind.diveNumberConflict,
+            ),
+            isEmpty,
+          );
+        },
+      );
+      verifyNever(diveRepo.countDivesSharingDiveNumber(any));
+    });
+
+    testWidgets('the review item carries the number the file recorded', (
+      tester,
+    ) async {
+      await _runWithAdapter(
+        tester,
+        overrides: _buildBundleOverrides(payload: payload),
+        callback: (adapter) async {
+          final bundle = await adapter.buildBundle();
+          final item =
+              bundle.groups[wizard.ImportEntityType.dives]!.items.single;
+          expect(item.diveData?.diveNumber, 7);
         },
       );
     });
@@ -1896,7 +2645,6 @@ void main() {
       );
 
       final mockDiveRepo = MockDiveRepository();
-      when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
       final mockTankPresetRepo = MockTankPresetRepository();
       when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
@@ -1920,6 +2668,64 @@ void main() {
           expect(result.errorMessage, isNull);
         },
       );
+    });
+
+    testWidgets('custom dive roles in the metadata are restored', (
+      tester,
+    ) async {
+      // Issue #1737: a restored dive links people by custom role id, so
+      // the role definitions the file carried have to land as well.
+      await setUpTestDatabase();
+      addTearDown(tearDownTestDatabase);
+      await tester.runAsync(() => DiverRepository().createDiver(_testDiver()));
+
+      final payload = ImportPayload(
+        entities: {
+          ui.ImportEntityType.dives: [
+            {
+              'dateTime': DateTime(2026, 3, 15, 10, 0),
+              'maxDepth': 20.0,
+              'runtime': const Duration(minutes: 30),
+            },
+          ],
+        },
+        metadata: {
+          ImportPayload.customDiveRolesKey: [
+            {
+              'id': 'custom-uuid',
+              'name': 'Photographer',
+              'sortOrder': 10,
+              'isBuiltIn': false,
+            },
+          ],
+        },
+      );
+
+      final mockTankPresetRepo = MockTankPresetRepository();
+      when(mockTankPresetRepo.getPresetById(any)).thenAnswer((_) async => null);
+
+      await _runWithAdapter(
+        tester,
+        overrides: _fullOverrides(
+          payload: payload,
+          diver: _testDiver(),
+          mockTankPresetRepo: mockTankPresetRepo,
+        ),
+        callback: (adapter) async {
+          await tester.runAsync(() async {
+            final bundle = await adapter.buildBundle();
+            final result = await adapter.performImport(bundle, {
+              wizard.ImportEntityType.dives: {0},
+            }, {});
+            expect(result.errorMessage, isNull);
+          });
+        },
+      );
+
+      final role = await tester.runAsync(
+        () => DiveRoleRepository().getDiveRoleById('custom-uuid'),
+      );
+      expect(role?.name, 'Photographer');
     });
 
     testWidgets(
@@ -1955,7 +2761,6 @@ void main() {
         );
 
         final mockDiveRepo = MockDiveRepository();
-        when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
         final mockTankPresetRepo = MockTankPresetRepository();
         when(
@@ -1980,6 +2785,376 @@ void main() {
             expect(result.importedCounts[ImportEntityType.dives], 1);
           },
         );
+      },
+    );
+
+    testWidgets(
+      'a backup whose GPS lives on its <source> records restores it (#1735)',
+      (tester) async {
+        // The wizard rebuilds UddfImportResult from entity lists, so the
+        // per-dive source entries have to survive on the dive maps. Every
+        // backup written before #1735 kept GPS only on those entries.
+        await setUpTestDatabase();
+        addTearDown(tearDownTestDatabase);
+
+        final payload = (await tester.runAsync(() async {
+          final stamp = DateTime(2025, 10, 13, 18);
+          final xml = await UddfFullExportService().generateAllDataXmlForTest(
+            dives: [
+              Dive(
+                id: 'dive-gps',
+                diveNumber: 1,
+                dateTime: DateTime(2025, 10, 13, 11, 24),
+                bottomTime: const Duration(minutes: 45),
+                maxDepth: 24.0,
+              ),
+            ],
+            dataSources: [
+              DiveSourceExport(
+                id: 'src-primary',
+                diveId: 'dive-gps',
+                ordinal: 0,
+                isPrimary: true,
+                importedAt: stamp,
+                createdAt: stamp,
+                entryLatitude: 29.5,
+                entryLongitude: 34.9,
+              ),
+              DiveSourceExport(
+                id: 'src-secondary',
+                diveId: 'dive-gps',
+                ordinal: 1,
+                isPrimary: false,
+                importedAt: stamp,
+                createdAt: stamp,
+              ),
+            ],
+          );
+          return UddfImportParser().parse(Uint8List.fromList(utf8.encode(xml)));
+        }))!;
+
+        final mockDiveRepo = MockDiveRepository();
+        when(
+          mockDiveRepo.createDive(any),
+        ).thenAnswer((inv) async => inv.positionalArguments[0] as Dive);
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockDiveRepo: mockDiveRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            await tester.runAsync(() async {
+              final bundle = await adapter.buildBundle();
+              final result = await adapter.performImport(bundle, {
+                wizard.ImportEntityType.dives: {0},
+              }, {});
+              expect(result.errorMessage, isNull);
+            });
+          },
+        );
+
+        final dive =
+            verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+        expect(dive.entryLocation, const GeoPoint(29.5, 34.9));
+        // Both exported sources are restored rather than one synthesised
+        // row, which is the same entries reaching the importer.
+        final readings =
+            verify(
+                  mockDiveRepo.saveComputerReadings(captureAny),
+                ).captured.single
+                as List;
+        expect(readings, hasLength(2));
+        verifyNever(mockDiveRepo.saveComputerReading(any));
+      },
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // performImport -- wires the source file through to DiveDataSources
+  // (issue #478 -- see task-3-report.md for the bug this regression-tests)
+  // -------------------------------------------------------------------------
+
+  group('performImport() - stores the source file (issue #478)', () {
+    testWidgets(
+      'a single-file resyncable import threads fileName/fileBytes/format '
+      'from notifierState through to the persisted DiveDataSource',
+      (tester) async {
+        // UddfEntityImporter's default ImportedFileRepository writes to the
+        // database, so the group needs one; the dive repository itself is
+        // still a mock, which is what the captured companion comes from.
+        final db = await setUpTestDatabase();
+        addTearDown(tearDownTestDatabase);
+
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+              },
+            ],
+          },
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockDiveRepo: mockDiveRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+            fileNames: const ['dive.uddf'],
+            detectionResult: const DetectionResult(
+              format: ui.ImportFormat.uddf,
+              confidence: 1.0,
+            ),
+          ),
+          callback: (adapter) async {
+            await tester.runAsync(() async {
+              final bundle = await adapter.buildBundle();
+              final result = await adapter.performImport(bundle, {
+                wizard.ImportEntityType.dives: {0},
+              }, {});
+
+              expect(result.errorMessage, isNull);
+            });
+          },
+        );
+
+        // This is the regression this test exists for: before the fix,
+        // performImport() never passed sourceFileName to the importer (the
+        // plan's brief wrongly assumed it already flowed through), so the
+        // store() guard (sourceFileBytes/sourceFileName/sourceFormat all
+        // non-null) was always false in production and no file was ever
+        // stored, even for a qualifying single-file UDDF import.
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final reading = capturedReadings.single;
+        expect(reading.sourceFileName.value, 'dive.uddf');
+        expect(reading.sourceFileFormat.value, 'uddf');
+        final storedId = reading.importedFileId.value as String?;
+        expect(storedId, isNotNull);
+        // The picked file the test notifier holds carries no bytes, so this
+        // asserts the row landed; the batch test below is where byte fidelity
+        // is pinned.
+        expect(
+          await ImportedFileRepository(database: () => db).exists(storedId!),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'the diver format override, not the auto-detection, is what gets '
+      'persisted and stored',
+      (tester) async {
+        // Source Confirmation lets the diver correct a wrong auto-detection,
+        // and the parse already runs on the override. Persisting the detected
+        // format instead would hand resync the wrong parser later.
+        await setUpTestDatabase();
+        addTearDown(tearDownTestDatabase);
+
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+              },
+            ],
+          },
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockDiveRepo: mockDiveRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+            fileNames: const ['logbook.xml'],
+            detectionResult: const DetectionResult(
+              format: ui.ImportFormat.macdiveXml,
+              confidence: 0.5,
+            ),
+            options: const ImportOptions(
+              sourceApp: ui.SourceApp.subsurface,
+              format: ui.ImportFormat.subsurfaceXml,
+              fileName: 'logbook.xml',
+            ),
+          ),
+          callback: (adapter) async {
+            await tester.runAsync(() async {
+              final bundle = await adapter.buildBundle();
+              final result = await adapter.performImport(bundle, {
+                wizard.ImportEntityType.dives: {0},
+              }, {});
+
+              expect(result.errorMessage, isNull);
+            });
+          },
+        );
+
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        final reading = capturedReadings.single;
+        expect(reading.sourceFileFormat.value, 'subsurfaceXml');
+      },
+    );
+
+    testWidgets(
+      'a batch import stores one copy per file and points each dive at the '
+      'copy of the file it came from',
+      (tester) async {
+        // The bug this regression-tests: notifierState.fileBytes/fileName are
+        // the SINGLE selected file, so a multi-file pick stored nothing at all
+        // and no dive ever got a resync path.
+        final db = await setUpTestDatabase();
+        addTearDown(tearDownTestDatabase);
+        final previousPathProvider = PathProviderPlatform.instance;
+        final tempDir = (await tester.runAsync(
+          () => Directory.systemTemp.createTemp('universal_adapter_batch_'),
+        ))!;
+        PathProviderPlatform.instance = _FakePathProviderPlatform(tempDir.path);
+        addTearDown(() async {
+          PathProviderPlatform.instance = previousPathProvider;
+          await tester.runAsync(() async {
+            if (await tempDir.exists()) await tempDir.delete(recursive: true);
+          });
+        });
+
+        // Genuinely different content, so a mixed-up attribution cannot pass.
+        final januaryBytes = utf8.encode('<uddf>january</uddf>');
+        final februaryBytes = utf8.encode('<divelog>february</divelog>');
+        final januaryFile = File(p.join(tempDir.path, 'january.uddf'));
+        final februaryFile = File(p.join(tempDir.path, 'february.ssrf'));
+        await tester.runAsync(() async {
+          await januaryFile.writeAsBytes(januaryBytes);
+          await februaryFile.writeAsBytes(februaryBytes);
+        });
+
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 1, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                '_sourceFile': 'january.uddf',
+                '_sourceFileId': 'f0',
+              },
+              {
+                'dateTime': DateTime(2026, 2, 15, 10, 0),
+                'maxDepth': 18.0,
+                'runtime': const Duration(minutes: 35),
+                '_sourceFile': 'february.ssrf',
+                '_sourceFileId': 'f1',
+              },
+            ],
+          },
+          metadata: const {'batchFileCount': 2},
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            mockDiveRepo: mockDiveRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+            pickedFiles: [
+              PickedImportFile(
+                name: 'january.uddf',
+                path: januaryFile.path,
+                detection: const DetectionResult(
+                  format: ui.ImportFormat.uddf,
+                  confidence: 1.0,
+                ),
+                status: ImportFileStatus.parsed,
+              ),
+              PickedImportFile(
+                name: 'february.ssrf',
+                path: februaryFile.path,
+                detection: const DetectionResult(
+                  format: ui.ImportFormat.subsurfaceXml,
+                  confidence: 1.0,
+                ),
+                status: ImportFileStatus.parsed,
+              ),
+            ],
+            detectionResult: const DetectionResult(
+              format: ui.ImportFormat.uddf,
+              confidence: 1.0,
+            ),
+          ),
+          callback: (adapter) async {
+            await tester.runAsync(() async {
+              final bundle = await adapter.buildBundle();
+              final result = await adapter.performImport(bundle, {
+                wizard.ImportEntityType.dives: {0, 1},
+              }, {});
+
+              expect(result.errorMessage, isNull);
+            });
+          },
+        );
+
+        final capturedReadings = verify(
+          mockDiveRepo.saveComputerReading(captureAny),
+        ).captured;
+        expect(capturedReadings, hasLength(2));
+        final byName = {
+          for (final reading in capturedReadings)
+            reading.sourceFileName.value as String?: reading,
+        };
+
+        final january = byName['january.uddf'];
+        final february = byName['february.ssrf'];
+        expect(january, isNotNull);
+        expect(february, isNotNull);
+        expect(january!.sourceFileFormat.value, 'uddf');
+        expect(february!.sourceFileFormat.value, 'subsurfaceXml');
+
+        final januaryId = january.importedFileId.value as String?;
+        final februaryId = february.importedFileId.value as String?;
+        expect(januaryId, isNotNull);
+        expect(februaryId, isNotNull);
+        expect(januaryId, isNot(februaryId));
+
+        // Each stored row holds the bytes of the file its dive came from.
+        final importedFiles = ImportedFileRepository(database: () => db);
+        expect(await importedFiles.read(januaryId!), januaryBytes);
+        expect(await importedFiles.read(februaryId!), februaryBytes);
       },
     );
   });
@@ -2213,7 +3388,7 @@ void main() {
       final existingCert = Certification(
         id: 'cert-1',
         name: 'Open Water',
-        agency: CertificationAgency.padi,
+        agency: CertificationAgency.padi.name,
         createdAt: _now,
         updatedAt: _now,
       );
@@ -2987,6 +4162,572 @@ void main() {
 
   group('performImport() - _resolveSelections edge cases', () {
     testWidgets(
+      'consolidate on a base-selected buddy links instead of importing a twin '
+      '(#756)',
+      (tester) async {
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.buddies: [
+              {'name': 'Jane Doe', 'uddfId': 'Jane Doe'},
+            ],
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                'buddyRefs': ['Jane Doe'],
+              },
+            ],
+          },
+        );
+
+        final existingBuddy = Buddy(
+          id: 'buddy-1',
+          name: 'Jane Doe',
+          createdAt: _now,
+          updatedAt: _now,
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final mockBuddyRepo = MockBuddyRepository();
+        when(
+          mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
+        ).thenAnswer((_) async {});
+
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            existingBuddies: [existingBuddy],
+            mockDiveRepo: mockDiveRepo,
+            mockBuddyRepo: mockBuddyRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            final bundle = await adapter.buildBundle();
+            // performImport needs the duplicate-checked bundle: that is what
+            // carries entityMatches (and what the wizard passes in).
+            final checked = await adapter.checkDuplicates(bundle);
+            await adapter.performImport(
+              checked,
+              {
+                // The duplicate index is ALSO in the base selection set --
+                // the shape that used to leak past the consolidate action.
+                wizard.ImportEntityType.buddies: {0},
+                wizard.ImportEntityType.dives: {0},
+              },
+              {
+                wizard.ImportEntityType.buddies: {
+                  0: DuplicateAction.consolidate,
+                },
+              },
+            );
+
+            verifyNever(mockBuddyRepo.createBuddy(any));
+            verify(
+              mockBuddyRepo.addBuddyToDiveWithRoles(any, 'buddy-1', any),
+            ).called(1);
+          },
+        );
+      },
+    );
+
+    testWidgets(
+      'a skipped duplicate gear item links the dive to the existing item '
+      '(#756)',
+      (tester) async {
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.equipment: [
+              {'name': 'Hog Wing', 'type': 'bcd', 'uddfId': '|Hog Wing|'},
+            ],
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                'equipmentRefs': ['|Hog Wing|'],
+              },
+            ],
+          },
+        );
+
+        const existingItem = EquipmentItem(
+          id: 'eq-1',
+          name: 'Hog Wing',
+          type: EquipmentType.bcd,
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final mockEquipmentRepo = MockEquipmentRepository();
+        when(
+          mockEquipmentRepo.getEquipmentById('eq-1'),
+        ).thenAnswer((_) async => existingItem);
+
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            existingEquipment: [existingItem],
+            mockDiveRepo: mockDiveRepo,
+            mockEquipmentRepo: mockEquipmentRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            final bundle = await adapter.buildBundle();
+            final checked = await adapter.checkDuplicates(bundle);
+            expect(
+              checked.groups[wizard.ImportEntityType.equipment]!.entityMatches,
+              contains(0),
+              reason: 'the gear must be flagged for the link to apply',
+            );
+            await adapter.performImport(
+              checked,
+              {
+                wizard.ImportEntityType.dives: {0},
+              },
+              {
+                wizard.ImportEntityType.equipment: {0: DuplicateAction.skip},
+              },
+            );
+
+            verifyNever(mockEquipmentRepo.createEquipment(any));
+            final dive =
+                verify(mockDiveRepo.createDive(captureAny)).captured.single
+                    as Dive;
+            expect(dive.gear.map((g) => g.item.id), ['eq-1']);
+          },
+        );
+      },
+    );
+
+    testWidgets(
+      'a skipped dive type matched by name links the dive to the existing '
+      'type (#1834)',
+      (tester) async {
+        // The incoming slug differs from the existing type's id, which
+        // carries a collision suffix, so only the name matches.
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.diveTypes: [
+              {
+                'id': 'search_recovery',
+                'uddfId': 'search_recovery',
+                'name': 'Search & Recovery',
+              },
+            ],
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                'diveTypeIds': ['search_recovery'],
+              },
+            ],
+          },
+        );
+
+        final existingType = DiveTypeEntity(
+          id: 'search_recovery_1a2b3c4d',
+          diverId: 'diver-1',
+          name: 'Search & Recovery',
+          createdAt: _now,
+          updatedAt: _now,
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final mockDiveTypeRepo = MockDiveTypeRepository();
+        when(
+          mockDiveTypeRepo.getDiveTypeById(any),
+        ).thenAnswer((_) async => null);
+
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            existingDiveTypes: [existingType],
+            mockDiveRepo: mockDiveRepo,
+            mockDiveTypeRepo: mockDiveTypeRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            final checked = await adapter.checkDuplicates(
+              await adapter.buildBundle(),
+            );
+            await adapter.performImport(
+              checked,
+              {
+                wizard.ImportEntityType.diveTypes: {0},
+                wizard.ImportEntityType.dives: {0},
+              },
+              {
+                wizard.ImportEntityType.diveTypes: {0: DuplicateAction.skip},
+              },
+            );
+
+            verifyNever(mockDiveTypeRepo.createDiveType(any));
+            final dive =
+                verify(mockDiveRepo.createDive(captureAny)).captured.single
+                    as Dive;
+            expect(dive.diveTypeIds, ['search_recovery_1a2b3c4d']);
+          },
+        );
+      },
+    );
+
+    for (final action in [DuplicateAction.consolidate, DuplicateAction.skip]) {
+      testWidgets(
+        '${action.name} on a duplicate dive center links the dive to the '
+        'existing center (#3852)',
+        (tester) async {
+          // The shape UddfOperatorCenters.harvest leaves for a dive that only
+          // names an operator: a generated uddfId, not the center's own name.
+          final payload = ImportPayload(
+            entities: {
+              ui.ImportEntityType.diveCenters: [
+                {'name': 'Reef Divers', 'uddfId': 'diveoperator:reef divers'},
+              ],
+              ui.ImportEntityType.dives: [
+                {
+                  'dateTime': DateTime(2026, 3, 15, 10, 0),
+                  'maxDepth': 20.0,
+                  'runtime': const Duration(minutes: 30),
+                  'diveOperator': 'Reef Divers',
+                  'diveCenterRef': 'diveoperator:reef divers',
+                },
+              ],
+            },
+          );
+
+          final existingCenter = DiveCenter(
+            id: 'dc-1',
+            name: 'Reef Divers',
+            createdAt: _now,
+            updatedAt: _now,
+          );
+
+          final mockDiveRepo = MockDiveRepository();
+          when(mockDiveRepo.createDive(any)).thenAnswer(
+            (invocation) async => invocation.positionalArguments[0] as Dive,
+          );
+
+          final mockDiveCenterRepo = MockDiveCenterRepository();
+          when(
+            mockDiveCenterRepo.getDiveCenterById('dc-1'),
+          ).thenAnswer((_) async => existingCenter);
+
+          final mockTankPresetRepo = MockTankPresetRepository();
+          when(
+            mockTankPresetRepo.getPresetById(any),
+          ).thenAnswer((_) async => null);
+
+          await _runWithAdapter(
+            tester,
+            overrides: _fullOverrides(
+              payload: payload,
+              diver: _testDiver(),
+              existingDiveCenters: [existingCenter],
+              mockDiveRepo: mockDiveRepo,
+              mockDiveCenterRepo: mockDiveCenterRepo,
+              mockTankPresetRepo: mockTankPresetRepo,
+            ),
+            callback: (adapter) async {
+              final checked = await adapter.checkDuplicates(
+                await adapter.buildBundle(),
+              );
+              await adapter.performImport(
+                checked,
+                {
+                  wizard.ImportEntityType.diveCenters: {0},
+                  wizard.ImportEntityType.dives: {0},
+                },
+                {
+                  wizard.ImportEntityType.diveCenters: {0: action},
+                },
+              );
+
+              verifyNever(mockDiveCenterRepo.createDiveCenter(any));
+              final dive =
+                  verify(mockDiveRepo.createDive(captureAny)).captured.single
+                      as Dive;
+              expect(dive.diveCenter?.id, 'dc-1');
+            },
+          );
+        },
+      );
+
+      // The dive falls outside the existing trip's dates, so only an explicit
+      // link can put it there; a skipped trip of that name may be another
+      // year's (#2618).
+      final linksTrip = action == DuplicateAction.consolidate;
+      testWidgets('${action.name} on a duplicate trip at other dates '
+          '${linksTrip ? 'links the dive to it' : 'leaves the dive out'} '
+          '(#3852)', (tester) async {
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.trips: [
+              {'name': 'Belize Trip', 'uddfId': 'trip-1'},
+            ],
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                'tripRef': 'trip-1',
+              },
+            ],
+          },
+        );
+
+        final existingTrip = Trip(
+          id: 'existing-trip',
+          name: 'Belize Trip',
+          startDate: DateTime(2026, 3, 1),
+          endDate: DateTime(2026, 3, 7),
+          createdAt: _now,
+          updatedAt: _now,
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final mockTripRepo = MockTripRepository();
+
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            existingTrips: [existingTrip],
+            mockDiveRepo: mockDiveRepo,
+            mockTripRepo: mockTripRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            final checked = await adapter.checkDuplicates(
+              await adapter.buildBundle(),
+            );
+            await adapter.performImport(
+              checked,
+              {
+                wizard.ImportEntityType.trips: {0},
+                wizard.ImportEntityType.dives: {0},
+              },
+              {
+                wizard.ImportEntityType.trips: {0: action},
+              },
+            );
+
+            verifyNever(mockTripRepo.createTrip(any));
+            final dive =
+                verify(mockDiveRepo.createDive(captureAny)).captured.single
+                    as Dive;
+            expect(dive.tripId, linksTrip ? 'existing-trip' : isNull);
+          },
+        );
+      });
+
+      testWidgets(
+        '${action.name} on a duplicate certification links the course to the '
+        'existing certification (#3852)',
+        (tester) async {
+          const payload = ImportPayload(
+            entities: {
+              ui.ImportEntityType.certifications: [
+                {
+                  'name': 'Open Water',
+                  'agency': CertificationAgency.padi,
+                  'uddfId': 'cert-1',
+                },
+              ],
+              ui.ImportEntityType.courses: [
+                {
+                  'name': 'Open Water Course',
+                  'uddfId': 'course-1',
+                  'certificationRefs': ['cert-1'],
+                },
+              ],
+            },
+          );
+
+          final existingCert = Certification(
+            id: 'existing-cert',
+            name: 'Open Water',
+            agency: CertificationAgency.padi.name,
+            createdAt: _now,
+            updatedAt: _now,
+          );
+
+          final mockCertificationRepo = MockCertificationRepository();
+          when(
+            mockCertificationRepo.getCertificationById('existing-cert'),
+          ).thenAnswer((_) async => existingCert);
+
+          final mockCourseRepo = MockCourseRepository();
+          when(mockCourseRepo.createCourse(any)).thenAnswer(
+            (invocation) async => invocation.positionalArguments[0] as Course,
+          );
+          when(
+            mockCourseRepo.setCourseCertifications(any, any),
+          ).thenAnswer((_) async {});
+
+          await _runWithAdapter(
+            tester,
+            overrides: _fullOverrides(
+              payload: payload,
+              diver: _testDiver(),
+              existingCertifications: [existingCert],
+              mockCertificationRepo: mockCertificationRepo,
+              mockCourseRepo: mockCourseRepo,
+            ),
+            callback: (adapter) async {
+              final checked = await adapter.checkDuplicates(
+                await adapter.buildBundle(),
+              );
+              await adapter.performImport(
+                checked,
+                {
+                  wizard.ImportEntityType.certifications: {0},
+                  wizard.ImportEntityType.courses: {0},
+                },
+                {
+                  wizard.ImportEntityType.certifications: {0: action},
+                },
+              );
+
+              verifyNever(mockCertificationRepo.createCertification(any));
+              verify(
+                mockCourseRepo.setCourseCertifications(any, ['existing-cert']),
+              ).called(1);
+            },
+          );
+        },
+      );
+    }
+
+    testWidgets(
+      'import as new on a duplicate dive center links the dive to the new '
+      'center, not the matched one (#3852)',
+      (tester) async {
+        final payload = ImportPayload(
+          entities: {
+            ui.ImportEntityType.diveCenters: [
+              {'name': 'Reef Divers', 'uddfId': 'dc-file-1'},
+            ],
+            ui.ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 3, 15, 10, 0),
+                'maxDepth': 20.0,
+                'runtime': const Duration(minutes: 30),
+                'diveCenterRef': 'dc-file-1',
+              },
+            ],
+          },
+        );
+
+        final existingCenter = DiveCenter(
+          id: 'dc-1',
+          name: 'Reef Divers',
+          createdAt: _now,
+          updatedAt: _now,
+        );
+
+        final mockDiveRepo = MockDiveRepository();
+        when(mockDiveRepo.createDive(any)).thenAnswer(
+          (invocation) async => invocation.positionalArguments[0] as Dive,
+        );
+
+        final created = <String, DiveCenter>{};
+        final mockDiveCenterRepo = MockDiveCenterRepository();
+        when(mockDiveCenterRepo.createDiveCenter(any)).thenAnswer((invocation) {
+          final center = invocation.positionalArguments[0] as DiveCenter;
+          created[center.id] = center;
+          return Future.value(center);
+        });
+        when(mockDiveCenterRepo.getDiveCenterById(any)).thenAnswer(
+          (invocation) async => created[invocation.positionalArguments[0]],
+        );
+
+        final mockTankPresetRepo = MockTankPresetRepository();
+        when(
+          mockTankPresetRepo.getPresetById(any),
+        ).thenAnswer((_) async => null);
+
+        await _runWithAdapter(
+          tester,
+          overrides: _fullOverrides(
+            payload: payload,
+            diver: _testDiver(),
+            existingDiveCenters: [existingCenter],
+            mockDiveRepo: mockDiveRepo,
+            mockDiveCenterRepo: mockDiveCenterRepo,
+            mockTankPresetRepo: mockTankPresetRepo,
+          ),
+          callback: (adapter) async {
+            final checked = await adapter.checkDuplicates(
+              await adapter.buildBundle(),
+            );
+            await adapter.performImport(
+              checked,
+              {
+                wizard.ImportEntityType.diveCenters: {0},
+                wizard.ImportEntityType.dives: {0},
+              },
+              {
+                wizard.ImportEntityType.diveCenters: {
+                  0: DuplicateAction.importAsNew,
+                },
+              },
+            );
+
+            final dive =
+                verify(mockDiveRepo.createDive(captureAny)).captured.single
+                    as Dive;
+            expect(dive.diveCenter?.id, created.keys.single);
+            expect(dive.diveCenter?.id, isNot('dc-1'));
+          },
+        );
+      },
+    );
+
+    testWidgets(
       'items with no duplicate action are included from base selection',
       (tester) async {
         final payload = ImportPayload(
@@ -3007,7 +4748,6 @@ void main() {
         );
 
         final mockDiveRepo = MockDiveRepository();
-        when(mockDiveRepo.getAllDives()).thenAnswer((_) async => <Dive>[]);
 
         final mockTankPresetRepo = MockTankPresetRepository();
         when(

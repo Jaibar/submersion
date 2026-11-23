@@ -1,16 +1,89 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/gas_consumption_display.dart';
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/entities/deco_status.dart';
+import 'package:submersion/core/deco/entities/tissue_compartment.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_3d/application/tissue_providers.dart';
+import 'package:submersion/features/dive_3d/presentation/pages/dive_3d_page.dart';
+import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/safety_finding.dart';
+import 'package:submersion/features/dive_log/presentation/providers/safety_review_providers.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_observation_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/observation_status_chip.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/collapsible_section.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_deco_status_card.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_tissue_loading_card.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_loading_withheld_card.dart';
+import 'package:submersion/features/dive_log/domain/entities/source_profile.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/source_bar.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_type_badge.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
+import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/field_attribution_badge.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/o2_toxicity_card.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/unlock_for_operation.dart';
+
+// ---------------------------------------------------------------------------
+// Helpers shared by gas-segment tests
+// ---------------------------------------------------------------------------
+
+Widget _buildDetailPage(Dive dive, List<Override> overrides) {
+  return ProviderScope(
+    overrides: [
+      ...overrides,
+      diveProvider(dive.id).overrideWith((ref) async => dive),
+      diveDataSourcesProvider(
+        dive.id,
+      ).overrideWith((ref) async => <DiveDataSource>[]),
+    ],
+    child: MaterialApp(
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: DiveDetailPage(diveId: dive.id, embedded: true),
+    ),
+  );
+}
+
+Future<void> _pumpDetailPage(WidgetTester tester, Dive dive) async {
+  final overrides = await getBaseOverrides();
+  // Restore via addTearDown so a throwing pump cannot leak the filtered
+  // handler into later tests; the immediate restore below keeps the filter
+  // scoped to the pump itself on the happy path.
+  final originalOnError = FlutterError.onError;
+  addTearDown(() => FlutterError.onError = originalOnError);
+  FlutterError.onError = (d) {
+    if (d.exceptionAsString().contains('overflowed')) return;
+    originalOnError?.call(d);
+  };
+  await tester.pumpWidget(_buildDetailPage(dive, overrides));
+  await tester.pump();
+  await tester.pump(const Duration(seconds: 1));
+  FlutterError.onError = originalOnError;
+}
 
 void main() {
   group('DiveDetailPage bottomTime coverage', () {
@@ -68,6 +141,33 @@ void main() {
       expect(find.text('50 min'), findsOneWidget);
     });
 
+    testWidgets('shows a long surface interval in days', (tester) async {
+      final dive = createTestDiveWithBottomTime().copyWith(
+        surfaceInterval: const Duration(hours: 157, minutes: 42),
+      );
+      final overrides = await getBaseOverrides();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveProvider(dive.id).overrideWith((ref) async => dive),
+            diveDataSourcesProvider(
+              dive.id,
+            ).overrideWith((ref) async => <DiveDataSource>[]),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('6d 13h'), findsOneWidget);
+    });
+
     testWidgets('handles null bottomTime', (tester) async {
       final dive = createTestDiveWithBottomTime(bottomTime: null);
       final overrides = await getBaseOverrides();
@@ -114,7 +214,7 @@ void main() {
           const DiveProfilePoint(timestamp: 2400, depth: 18),
           const DiveProfilePoint(timestamp: 2700, depth: 0),
         ],
-        equipment: const [],
+        gear: looseGear(const []),
         notes: '',
         photoIds: const [],
         sightings: const [],
@@ -193,6 +293,1862 @@ void main() {
 
       // Should render with attribution badges
       expect(find.byType(DiveDetailPage), findsOneWidget);
+    });
+  });
+
+  // =========================================================================
+  // Multi-source sources bar — real names, true primary, and localized
+  // fallbacks. The bar is built from sourceProfilesProvider (per-source
+  // profile points, keyed by data-source id) joined against
+  // diveDataSourcesProvider (names + the real isPrimary flag).
+  // =========================================================================
+
+  group('DiveDetailPage multi-source profile chart', () {
+    Dive diveWithProfile() {
+      return createTestDiveWithBottomTime().copyWith(
+        profile: List.generate(
+          6,
+          (i) => DiveProfilePoint(
+            timestamp: i * 60,
+            depth: (i < 3 ? i * 8.0 : (5 - i) * 8.0),
+          ),
+        ),
+      );
+    }
+
+    DiveDataSource dataSource({
+      required String id,
+      required String computerId,
+      required bool isPrimary,
+      required String computerModel,
+    }) {
+      final now = DateTime(2026, 3, 28);
+      return DiveDataSource(
+        id: id,
+        diveId: 'test-dive-1',
+        computerId: computerId,
+        isPrimary: isPrimary,
+        computerModel: computerModel,
+        importedAt: now,
+        createdAt: now,
+      );
+    }
+
+    List<Override> multiComputerOverrides(
+      Dive dive,
+      List<DiveDataSource> sources,
+    ) => [
+      diveProvider(dive.id).overrideWith((ref) async => dive),
+      diveDataSourcesProvider(dive.id).overrideWith((ref) async => sources),
+      gasSwitchesProvider(
+        dive.id,
+      ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+      tankPressuresProvider(
+        dive.id,
+      ).overrideWith((ref) async => <String, List<TankPressurePoint>>{}),
+      sourceProfilesProvider(dive.id).overrideWith(
+        (ref) async => <String, SourceProfile>{
+          for (final s in sources)
+            s.id: SourceProfile(
+              sourceId: s.id,
+              computerId: s.computerId,
+              isEdited: false,
+              points: dive.profile,
+            ),
+        },
+      ),
+    ];
+
+    // The Data Sources section also renders each source's model name (in a
+    // DataTable column header), so a bare find.text(...) is ambiguous.
+    // Scope matches to the sources bar specifically.
+    Finder sourceBarText(String text) =>
+        find.descendant(of: find.byType(SourceBar), matching: find.text(text));
+
+    testWidgets('source chip labels show real computer model names, not raw '
+        'computer IDs', (tester) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      final sources = [
+        dataSource(
+          id: 'src-1',
+          computerId: 'comp-uuid-1',
+          isPrimary: true,
+          computerModel: 'Perdix 2',
+        ),
+        dataSource(
+          id: 'src-2',
+          computerId: 'comp-uuid-2',
+          isPrimary: false,
+          computerModel: 'Suunto D5',
+        ),
+      ];
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [...base, ...multiComputerOverrides(dive, sources)],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // The raw computer IDs must never leak into the UI as labels.
+      expect(sourceBarText('comp-uuid-1'), findsNothing);
+      expect(sourceBarText('comp-uuid-2'), findsNothing);
+      // Real model names resolved from the data sources instead.
+      expect(sourceBarText('Perdix 2'), findsOneWidget);
+      expect(sourceBarText('Suunto D5'), findsOneWidget);
+    });
+
+    testWidgets('the primary star marks the data source flagged primary, '
+        'not list order', (tester) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      // 'src-1' is first in list order but 'src-2' is the real primary
+      // per the data sources.
+      final sources = [
+        dataSource(
+          id: 'src-1',
+          computerId: 'comp-uuid-1',
+          isPrimary: false,
+          computerModel: 'Suunto D5',
+        ),
+        dataSource(
+          id: 'src-2',
+          computerId: 'comp-uuid-2',
+          isPrimary: true,
+          computerModel: 'Perdix 2',
+        ),
+      ];
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [...base, ...multiComputerOverrides(dive, sources)],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Exactly one primary star, and it sits inside the same chip body
+      // (InkWell) as the REAL primary's label.
+      final starFinder = find.descendant(
+        of: find.byType(SourceBar),
+        matching: find.byIcon(Icons.star),
+      );
+      expect(starFinder, findsOneWidget);
+      final primaryChipBody = find.ancestor(
+        of: sourceBarText('Perdix 2'),
+        matching: find.byType(InkWell),
+      );
+      expect(
+        find.descendant(of: primaryChipBody, matching: find.byIcon(Icons.star)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'unknown computer names fall back to the localized "Unknown Computer" label',
+      (tester) async {
+        final dive = diveWithProfile();
+        final base = await getBaseOverrides();
+        final sources = [
+          // computerModel and computerSerial both null.
+          DiveDataSource(
+            id: 'src-1',
+            diveId: dive.id,
+            computerId: 'comp-uuid-1',
+            isPrimary: true,
+            importedAt: DateTime(2026, 3, 28),
+            createdAt: DateTime(2026, 3, 28),
+          ),
+          dataSource(
+            id: 'src-2',
+            computerId: 'comp-uuid-2',
+            isPrimary: false,
+            computerModel: 'Suunto D5',
+          ),
+        ];
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [...base, ...multiComputerOverrides(dive, sources)],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(DiveDetailPage)),
+        );
+        expect(
+          sourceBarText(l10n.diveLog_sources_unknownComputer),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('every computer-attributed tank shows a source badge on a '
+        'multi-source dive; manual tanks stay unbadged', (tester) async {
+      final dive = createTestDiveWithBottomTime().copyWith(
+        tanks: const [
+          // Attributed to the primary computer -- no badge expected.
+          DiveTank(id: 'tank-primary', computerId: 'comp-uuid-1'),
+          // Attributed to the secondary computer -- badge expected.
+          DiveTank(id: 'tank-secondary', computerId: 'comp-uuid-2'),
+          // Unattributed (e.g. manually added) -- no badge expected.
+          DiveTank(id: 'tank-manual'),
+        ],
+      );
+      final base = await getBaseOverrides();
+      final sources = [
+        dataSource(
+          id: 'src-1',
+          computerId: 'comp-uuid-1',
+          isPrimary: true,
+          computerModel: 'Perdix 2',
+        ),
+        dataSource(
+          id: 'src-2',
+          computerId: 'comp-uuid-2',
+          isPrimary: false,
+          computerModel: 'Suunto D5',
+        ),
+      ];
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            diveProvider(dive.id).overrideWith((ref) async => dive),
+            diveDataSourcesProvider(
+              dive.id,
+            ).overrideWith((ref) async => sources),
+            gasSwitchesProvider(
+              dive.id,
+            ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+            tankPressuresProvider(
+              dive.id,
+            ).overrideWith((ref) async => <String, List<TankPressurePoint>>{}),
+            // No multi-computer profile data -- keeps this scoped to the
+            // tanks section badge and out of the chart's toggle bar.
+            sourceProfilesProvider(
+              dive.id,
+            ).overrideWith((ref) async => <String, SourceProfile>{}),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Both attributed tanks are badged (the primary's included);
+      // the manual tank is not, so exactly two badges render. Scoped to
+      // FieldAttributionBadge since the Data Sources section separately
+      // renders both model names too.
+      expect(
+        find.descendant(
+          of: find.byType(FieldAttributionBadge),
+          matching: find.text('Suunto D5'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(FieldAttributionBadge),
+          matching: find.text('Perdix 2'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(FieldAttributionBadge), findsNWidgets(2));
+    });
+
+    testWidgets(
+      'no tank badges appear on a single-source dive even with a computerId',
+      (tester) async {
+        final dive = createTestDiveWithBottomTime().copyWith(
+          tanks: const [DiveTank(id: 'tank-1', computerId: 'comp-uuid-1')],
+        );
+        final base = await getBaseOverrides();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...base,
+              diveProvider(dive.id).overrideWith((ref) async => dive),
+              diveDataSourcesProvider(dive.id).overrideWith(
+                (ref) async => <DiveDataSource>[
+                  dataSource(
+                    id: 'src-1',
+                    computerId: 'comp-uuid-1',
+                    isPrimary: true,
+                    computerModel: 'Perdix 2',
+                  ),
+                ],
+              ),
+              gasSwitchesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+              tankPressuresProvider(dive.id).overrideWith(
+                (ref) async => <String, List<TankPressurePoint>>{},
+              ),
+              sourceProfilesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <String, SourceProfile>{}),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(find.byType(FieldAttributionBadge), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'tankSourceColors is wired through to the chart, and an overlaid '
+      "source carries its own computed analysis, not the active source's",
+      (tester) async {
+        final dive = diveWithProfile().copyWith(
+          tanks: const [
+            DiveTank(id: 'tank-a', computerId: 'comp-uuid-1'),
+            DiveTank(id: 'tank-b', computerId: 'comp-uuid-2'),
+          ],
+        );
+        final base = await getBaseOverrides();
+        final sources = [
+          dataSource(
+            id: 'src-1',
+            computerId: 'comp-uuid-1',
+            isPrimary: true,
+            computerModel: 'Perdix 2',
+          ),
+          dataSource(
+            id: 'src-2',
+            computerId: 'comp-uuid-2',
+            isPrimary: false,
+            computerModel: 'Suunto D5',
+          ),
+        ];
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...base,
+              ...multiComputerOverrides(dive, sources),
+              // 'src-1' stays active (the primary); overlaying 'src-2' is
+              // what builds the ChartSourceOverlay list this test inspects.
+              overlaySourcesProvider(dive.id).overrideWith((ref) => {'src-2'}),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        final chart = tester.widget<DiveProfileChart>(
+          find.byType(DiveProfileChart),
+        );
+
+        // Every computer-attributed tank gets its owning computer's colour.
+        expect(chart.tankSourceColors, isNotNull);
+        expect(chart.tankSourceColors!.keys, containsAll(['tank-a', 'tank-b']));
+        expect(
+          chart.tankSourceColors!['tank-a'],
+          isNot(chart.tankSourceColors!['tank-b']),
+        );
+
+        // The overlay carries an analysis field wired to
+        // sourceProfileAnalysisProvider (unresolved here, since no
+        // repository backs this dive id -- the coverage win is that the
+        // field is wired through the provider watch at all).
+        expect(chart.overlays, isNotNull);
+        final overlay = chart.overlays!.singleWhere(
+          (o) => o.sourceId == 'src-2',
+        );
+        expect(overlay.analysis, isNull);
+      },
+    );
+  });
+
+  // =========================================================================
+  // Gas segments wiring: exercises the buildGasUsageSegments call in
+  // DiveProfileChartHost.
+  // =========================================================================
+
+  group('DiveDetailPage - gas segments wiring', () {
+    Dive makeDiveWithTanksAndProfile() {
+      return Dive(
+        id: 'dive-gas-tanks',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 5, 4, 10, 0),
+        entryTime: DateTime(2026, 5, 4, 10, 5),
+        exitTime: DateTime(2026, 5, 4, 10, 55),
+        bottomTime: const Duration(minutes: 45),
+        runtime: const Duration(minutes: 50),
+        maxDepth: 25.0,
+        avgDepth: 18.0,
+        waterTemp: 22.0,
+        tanks: [
+          const DiveTank(
+            id: 'tank-1',
+            startPressure: 200,
+            endPressure: 80,
+            gasMix: GasMix(o2: 21),
+          ),
+        ],
+        profile: [
+          const DiveProfilePoint(timestamp: 0, depth: 0),
+          const DiveProfilePoint(timestamp: 300, depth: 15),
+          const DiveProfilePoint(timestamp: 2700, depth: 20),
+          const DiveProfilePoint(timestamp: 3000, depth: 0),
+        ],
+        gear: looseGear(const []),
+        notes: '',
+        photoIds: const [],
+        sightings: const [],
+        weights: const [],
+        tags: const [],
+      );
+    }
+
+    testWidgets('profile header ends with fullscreen, after the 3D actions', (
+      tester,
+    ) async {
+      final dive = makeDiveWithTanksAndProfile();
+      await _pumpDetailPage(tester, dive);
+
+      double x(IconData icon) => tester.getCenter(find.byIcon(icon).first).dx;
+
+      // Fullscreen is the last action in the row: it is the one that takes
+      // over the screen, so it reads as the end of the escalation.
+      expect(x(Icons.fullscreen), greaterThan(x(Icons.terrain)));
+      expect(x(Icons.fullscreen), greaterThan(x(Icons.view_in_ar)));
+      expect(x(Icons.fullscreen), greaterThan(x(Icons.straighten)));
+    });
+
+    testWidgets('range analysis is an icon toggle, not a labelled pill', (
+      tester,
+    ) async {
+      final dive = makeDiveWithTanksAndProfile();
+      await _pumpDetailPage(tester, dive);
+
+      // It sits in the icon row rather than shouldering it aside with a pill.
+      expect(find.byIcon(Icons.straighten), findsOneWidget);
+      expect(find.widgetWithIcon(FilledButton, Icons.straighten), findsNothing);
+      expect(
+        find.widgetWithIcon(OutlinedButton, Icons.straighten),
+        findsNothing,
+      );
+
+      // And it leads the row, before the 3D preview.
+      expect(
+        tester.getCenter(find.byIcon(Icons.straighten).first).dx,
+        lessThan(tester.getCenter(find.byIcon(Icons.view_in_ar).first).dx),
+      );
+    });
+
+    testWidgets('the profile image export is not in the header row', (
+      tester,
+    ) async {
+      final dive = makeDiveWithTanksAndProfile();
+      await _pumpDetailPage(tester, dive);
+
+      // Like replan above, exporting the chart is offered from the overflow
+      // menu's Export sheet rather than crowding the chart's own actions.
+      expect(find.byTooltip('Export profile as image'), findsNothing);
+    });
+
+    testWidgets('replan lives in the overflow menu, not the profile header', (
+      tester,
+    ) async {
+      final dive = makeDiveWithTanksAndProfile();
+      await _pumpDetailPage(tester, dive);
+
+      // The header row stays focused on the chart itself; Compare is a
+      // whole-dive action, so it is offered only from the overflow menu.
+      expect(find.byIcon(Icons.alt_route), findsNothing);
+      expect(find.byTooltip('Compare…'), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Compare…'), findsOneWidget);
+    });
+
+    testWidgets('Plan repetitive dive follows Compare in the menu', (
+      tester,
+    ) async {
+      await _pumpDetailPage(tester, makeDiveWithTanksAndProfile());
+
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Plan repetitive dive'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Plan repetitive dive')).dy,
+        greaterThan(tester.getTopLeft(find.text('Compare…')).dy),
+      );
+    });
+
+    testWidgets('Plan repetitive dive asks before replacing unsaved work', (
+      tester,
+    ) async {
+      await _pumpDetailPage(tester, makeDiveWithTanksAndProfile());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      final editor = container.read(divePlanNotifierProvider.notifier);
+      editor.loadPlan(
+        container.read(divePlanNotifierProvider).copyWith(isDirty: true),
+      );
+      final plan = container.read(divePlanNotifierProvider);
+
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Plan repetitive dive'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Are you sure you want to reset the plan?'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(divePlanNotifierProvider).id, plan.id);
+    });
+
+    testWidgets('a planned dive offers no repetitive dive to plan', (
+      tester,
+    ) async {
+      await _pumpDetailPage(
+        tester,
+        makeDiveWithTanksAndProfile().copyWith(isPlanned: true),
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Plan repetitive dive'), findsNothing);
+    });
+
+    testWidgets('renders without crash when dive has tanks and a profile', (
+      tester,
+    ) async {
+      final dive = makeDiveWithTanksAndProfile();
+      await _pumpDetailPage(tester, dive);
+      expect(find.byType(DiveDetailPage), findsOneWidget);
+    });
+
+    testWidgets(
+      'renders without crash when dive has no tanks (null gas path)',
+      (tester) async {
+        final dive = createTestDiveWithBottomTime();
+        await _pumpDetailPage(tester, dive);
+        expect(find.byType(DiveDetailPage), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'renders without crash when dive has tanks but empty profile (null diveDurationSeconds path)',
+      (tester) async {
+        final dive = Dive(
+          id: 'dive-notanks-noprofile',
+          diveNumber: 2,
+          dateTime: DateTime(2026, 5, 4, 11, 0),
+          entryTime: null,
+          exitTime: null,
+          bottomTime: const Duration(minutes: 30),
+          runtime: const Duration(minutes: 35),
+          maxDepth: 20.0,
+          avgDepth: 15.0,
+          waterTemp: null,
+          tanks: [
+            const DiveTank(
+              id: 'tank-1',
+              startPressure: 200,
+              endPressure: 80,
+              gasMix: GasMix(o2: 21),
+            ),
+          ],
+          profile: const [],
+          gear: looseGear(const []),
+          notes: '',
+          photoIds: const [],
+          sightings: const [],
+          weights: const [],
+          tags: const [],
+        );
+        await _pumpDetailPage(tester, dive);
+        expect(find.byType(DiveDetailPage), findsOneWidget);
+      },
+    );
+  });
+
+  group('DiveDetailPage CCR O2 sensor wiring', () {
+    Dive diveWithProfile() {
+      return createTestDiveWithBottomTime().copyWith(
+        profile: List.generate(
+          6,
+          (i) => DiveProfilePoint(
+            timestamp: i * 60,
+            depth: (i < 3 ? i * 8.0 : (5 - i) * 8.0),
+          ),
+        ),
+      );
+    }
+
+    testWidgets(
+      'forwards o2SensorCurves and ppO2FromSensorAverage from analysis to chart',
+      (tester) async {
+        final dive = diveWithProfile();
+        final sensors = <List<double?>>[
+          List.generate(6, (i) => 0.95),
+          List.generate(6, (i) => 0.97),
+        ];
+        final analysis = ProfileAnalysis.empty().copyWith(
+          ppO2Curve: List.generate(6, (i) => 0.96),
+          o2SensorCurves: sensors,
+          ppO2FromSensorAverage: true,
+          computerStopsWithCalculatedCeiling: true,
+        );
+
+        final overrides = await getBaseOverrides();
+        final originalOnError = FlutterError.onError;
+        FlutterError.onError = (d) {
+          if (d.toString().contains('overflowed')) return;
+          originalOnError?.call(d);
+        };
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              diveProvider(dive.id).overrideWith((ref) async => dive),
+              diveDataSourcesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <DiveDataSource>[]),
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysis),
+              gasSwitchesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+              tankPressuresProvider(dive.id).overrideWith(
+                (ref) async => <String, List<TankPressurePoint>>{},
+              ),
+              sourceProfilesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <String, SourceProfile>{}),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        FlutterError.onError = originalOnError;
+
+        final charts = tester.widgetList<DiveProfileChart>(
+          find.byType(DiveProfileChart),
+        );
+        expect(charts, isNotEmpty);
+        final chart = charts.firstWhere((c) => c.o2SensorCurves != null);
+        expect(chart.o2SensorCurves, sensors);
+        expect(chart.ppO2FromSensorAverage, isTrue);
+        expect(chart.labelCeilingAsCalculated, isTrue);
+      },
+    );
+
+    testWidgets(
+      'ppO2FromSensorAverage defaults to false when analysis omits it',
+      (tester) async {
+        final dive = diveWithProfile();
+        // Analysis with a ppO2 curve but no sensor data (computer-supplied ppO2).
+        final analysis = ProfileAnalysis.empty().copyWith(
+          ppO2Curve: List.generate(6, (i) => 1.2),
+        );
+
+        final overrides = await getBaseOverrides();
+        final originalOnError = FlutterError.onError;
+        FlutterError.onError = (d) {
+          if (d.toString().contains('overflowed')) return;
+          originalOnError?.call(d);
+        };
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...overrides,
+              diveProvider(dive.id).overrideWith((ref) async => dive),
+              diveDataSourcesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <DiveDataSource>[]),
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysis),
+              gasSwitchesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+              tankPressuresProvider(dive.id).overrideWith(
+                (ref) async => <String, List<TankPressurePoint>>{},
+              ),
+              sourceProfilesProvider(
+                dive.id,
+              ).overrideWith((ref) async => <String, SourceProfile>{}),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        FlutterError.onError = originalOnError;
+
+        final charts = tester.widgetList<DiveProfileChart>(
+          find.byType(DiveProfileChart),
+        );
+        expect(charts, isNotEmpty);
+        for (final chart in charts) {
+          expect(chart.o2SensorCurves, isNull);
+          expect(chart.ppO2FromSensorAverage, isFalse);
+        }
+      },
+    );
+  });
+
+  group('DiveDetailPage deco/O2 panel last-good retention', () {
+    Dive diveWithProfile() {
+      return createTestDiveWithBottomTime().copyWith(
+        profile: List.generate(
+          6,
+          (i) => DiveProfilePoint(
+            timestamp: i * 60,
+            depth: (i < 3 ? i * 8.0 : (5 - i) * 8.0),
+          ),
+        ),
+      );
+    }
+
+    // A ProfileAnalysis carrying one fully-populated DecoStatus so the
+    // deco/tissue/O2 cards actually render (the panel hides on empty
+    // decoStatuses).
+    ProfileAnalysis analysisWithDeco() {
+      final compartments = List.generate(
+        zhl16CompartmentCount,
+        (i) => TissueCompartment(
+          compartmentNumber: i + 1,
+          halfTimeN2: zhl16cN2HalfTimes[i],
+          halfTimeHe: zhl16cHeHalfTimes[i],
+          mValueAN2: zhl16cN2A[i],
+          mValueBN2: zhl16cN2B[i],
+          mValueAHe: zhl16cHeA[i],
+          mValueBHe: zhl16cHeB[i],
+          currentPN2: inspiredSurfaceN2Bar,
+          currentPHe: 0.0,
+        ),
+      );
+      final status = DecoStatus(
+        compartments: compartments,
+        ndlSeconds: 999 * 60,
+        ceilingMeters: 0,
+        ttsSeconds: 0,
+        gfLow: 0.3,
+        gfHigh: 0.7,
+        decoStops: const [],
+        currentDepthMeters: 0,
+        ambientPressureBar: 1.0,
+      );
+      return ProfileAnalysis.empty().copyWith(
+        decoStatuses: [status],
+        sampleTimestamps: const [0],
+        ppO2Curve: const [0.21],
+      );
+    }
+
+    List<Override> panelOverrides(Dive dive, Override analysisOverride) {
+      return [
+        diveProvider(dive.id).overrideWith((ref) async => dive),
+        diveDataSourcesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <DiveDataSource>[]),
+        analysisOverride,
+        gasSwitchesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+        tankPressuresProvider(
+          dive.id,
+        ).overrideWith((ref) async => <String, List<TankPressurePoint>>{}),
+        sourceProfilesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <String, SourceProfile>{}),
+        weeklyOtuProvider(dive.id).overrideWith((ref) async => 0.0),
+      ];
+    }
+
+    testWidgets('shows nothing for a dive that never produced an analysis', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      // Guaranteed restore even if the test throws before the end, so the
+      // global handler never leaks into later tests.
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => null),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Genuine null: the last-good cache must not fabricate a panel for a dive
+      // that has no analysis.
+      expect(find.byType(CompactDecoStatusCard), findsNothing);
+      expect(find.byType(CompactTissueLoadingCard), findsNothing);
+      expect(find.byType(CompactO2ToxicityPanel), findsNothing);
+    });
+
+    testWidgets('keeps the cards on a transient null instead of collapsing', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final analysis = analysisWithDeco();
+      // Controllable analysis: starts good, then flips to null to mimic a
+      // mid-sync empty-profile read that makes profileAnalysisProvider emit
+      // AsyncData(null).
+      final controllable = StateProvider<ProfileAnalysis?>((ref) => analysis);
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      // Guaranteed restore even if the test throws before the end, so the
+      // global handler never leaks into later tests.
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => ref.watch(controllable)),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Good analysis -> all three cards render.
+      expect(find.byType(CompactDecoStatusCard), findsOneWidget);
+      expect(find.byType(CompactTissueLoadingCard), findsOneWidget);
+      expect(find.byType(CompactO2ToxicityPanel), findsOneWidget);
+
+      // Flip to a transient null (the storm symptom, post-debounce edge case).
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      container.read(controllable.notifier).state = null;
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // The provider has genuinely settled to AsyncData(null) -- so the cards
+      // below survive only because of the last-good fallback, not a loading
+      // window that still exposes the previous value via valueOrNull.
+      final settled = container.read(profileAnalysisProvider(dive.id));
+      expect(settled.isLoading, isFalse);
+      expect(settled.valueOrNull, isNull);
+
+      // Hardening: the cards must remain (last-good), not blink out.
+      expect(
+        find.byType(CompactDecoStatusCard),
+        findsOneWidget,
+        reason:
+            'a transient null analysis must not collapse the deco card; the '
+            'panel should fall back to the last usable analysis',
+      );
+      expect(find.byType(CompactTissueLoadingCard), findsOneWidget);
+      expect(find.byType(CompactO2ToxicityPanel), findsOneWidget);
+    });
+
+    testWidgets('reads a cursor time before the dive\'s zero point with its '
+        'own seconds', (tester) async {
+      // A computer that started 2:50 before the dive's zero point.
+      final dive = createTestDiveWithBottomTime().copyWith(
+        profile: const [
+          DiveProfilePoint(timestamp: -170, depth: 0),
+          DiveProfilePoint(timestamp: 60, depth: 10),
+        ],
+      );
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysisWithDeco()),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      ).read(profileTrackingIndexProvider(dive.id).notifier).state = 0;
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      final card = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      expect(card.subtitle, contains('-2:50'));
+    });
+
+    testWidgets('hands the tissue card the profile times for its heat map '
+        '(issue #4503)', (tester) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysisWithDeco()),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      final card = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      // The analysis's own times, the ones its deco statuses were computed
+      // at, so a retained analysis is never paired with a newer profile.
+      expect(card.profileTimestamps, const [0]);
+
+      // Moving the cursor rebuilds the panel; the times are not copied again.
+      ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      ).read(profileTrackingIndexProvider(dive.id).notifier).state = 2;
+      await tester.pump();
+      final moved = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      expect(moved.subtitle, isNotNull);
+      expect(
+        identical(moved.profileTimestamps, card.profileTimestamps),
+        isTrue,
+      );
+    });
+
+    testWidgets(
+      'says why tissue loading is missing on a loop it could not model',
+      (tester) async {
+        // Issue #2593: a CCR dive with no setpoint or loop ppO2 gets no tissue
+        // loading. The diver is told why instead of the panel vanishing, and
+        // the O2 exposure card, which does not depend on it, stays.
+        final dive = diveWithProfile().copyWith(diveMode: DiveMode.ccr);
+        final analysis = ProfileAnalysis.empty().copyWith(
+          tissueLoadingWithheld: true,
+          ppO2Curve: List.filled(dive.profile.length, 0.0),
+        );
+        final base = await getBaseOverrides();
+        final originalOnError = FlutterError.onError;
+        addTearDown(() => FlutterError.onError = originalOnError);
+        FlutterError.onError = (d) {
+          if (d.toString().contains('overflowed')) return;
+          originalOnError?.call(d);
+        };
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...base,
+              ...panelOverrides(
+                dive,
+                profileAnalysisProvider(
+                  dive.id,
+                ).overrideWith((ref) async => analysis),
+              ),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(DiveDetailPage)),
+        );
+        expect(find.byType(CompactDecoStatusCard), findsNothing);
+        expect(find.byType(CompactTissueLoadingCard), findsNothing);
+        expect(find.byType(TissueLoadingWithheldCard), findsNWidgets(2));
+        expect(find.text(l10n.diveLog_deco_withheld_ccr), findsNWidgets(2));
+        expect(find.byType(CompactO2ToxicityPanel), findsOneWidget);
+      },
+    );
+
+    testWidgets('tissue card 3D button opens the 3D view in tissue mode', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      // The 3D button is scrolled to the top and tapped, where the pinned
+      // profile strip (#4423) would sit over it.
+      final base = await getBaseOverrides(
+        settingsNotifier: MockSettingsNotifier(
+          const AppSettings(pinProfileOnScroll: false),
+        ),
+      );
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysisWithDeco()),
+            ),
+            // The pushed page only has to build, not render a surface: a null
+            // surface parks it on its loading indicator, so this test stays
+            // about the navigation wiring.
+            tissueSurfaceProvider(dive.id).overrideWith((ref) async => null),
+            tissueDecoStatusesProvider(
+              dive.id,
+            ).overrideWith((ref) async => <DecoStatus>[]),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Scoped to the tissue card: the profile section has a 3D button of its
+      // own, and that one must still open the dive scene.
+      final button = find.descendant(
+        of: find.byType(CompactTissueLoadingCard),
+        matching: find.byIcon(Icons.view_in_ar),
+      );
+      expect(button, findsOneWidget);
+
+      // The card sits below the fold on the 800x600 test surface.
+      await tester.ensureVisible(button);
+      await tester.pump();
+      await tester.tap(button);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      final page = tester.widget<Dive3dPage>(find.byType(Dive3dPage));
+      expect(page.diveId, dive.id);
+      expect(page.initialMode, SceneKind.tissue);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 1));
+    });
+  });
+
+  group('DiveDetailPage SAC-by-segment last-good retention', () {
+    Dive diveWithProfile() {
+      return createTestDiveWithBottomTime().copyWith(
+        profile: List.generate(
+          6,
+          (i) => DiveProfilePoint(
+            timestamp: i * 60,
+            depth: (i < 3 ? i * 8.0 : (5 - i) * 8.0),
+          ),
+        ),
+      );
+    }
+
+    // A ProfileAnalysis carrying one time-interval SAC segment so the
+    // "SAC Rate by Segment" card actually renders (the section hides on a
+    // null/empty sacSegments). decoStatuses stays empty so the sibling
+    // deco/O2 panel renders nothing and this stays scoped to the SAC card.
+    ProfileAnalysis analysisWithSacSegments() {
+      return ProfileAnalysis.empty().copyWith(
+        sacSegments: const [
+          SacSegment(
+            startTimestamp: 0,
+            endTimestamp: 300,
+            avgDepth: 18.0,
+            minDepth: 0.0,
+            maxDepth: 24.0,
+            sacRate: 0.8,
+            gasConsumed: 4.0,
+            segmentationType: SacSegmentationType.timeInterval,
+          ),
+        ],
+      );
+    }
+
+    // The time breakdown reads the segments straight off
+    // profileAnalysisProvider, so the card is driven by the single
+    // controllable analysis.
+    List<Override> sacOverrides(Dive dive, Override analysisOverride) {
+      return [
+        diveProvider(dive.id).overrideWith((ref) async => dive),
+        diveDataSourcesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <DiveDataSource>[]),
+        analysisOverride,
+        gasSwitchesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <GasSwitchWithTank>[]),
+        tankPressuresProvider(
+          dive.id,
+        ).overrideWith((ref) async => <String, List<TankPressurePoint>>{}),
+        sourceProfilesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <String, SourceProfile>{}),
+        weeklyOtuProvider(dive.id).overrideWith((ref) async => 0.0),
+      ];
+    }
+
+    // The SAC-by-segment card is a CollapsibleCardSection titled with the
+    // localized "SAC Rate by Segment" string; matching that title scopes the
+    // finder precisely to this card.
+    Finder sacCardFinder(WidgetTester tester) {
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      return find.widgetWithText(
+        CollapsibleCardSection,
+        l10n.diveLog_detail_section_sacRateBySegment,
+      );
+    }
+
+    testWidgets('shows nothing for a dive that never produced segments', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      // Guaranteed restore even if the test throws before the end, so the
+      // global handler never leaks into later tests.
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...sacOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => null),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Genuine null: the last-good cache must not fabricate a card for a dive
+      // that has no segment analysis.
+      expect(sacCardFinder(tester), findsNothing);
+    });
+
+    testWidgets('keeps the card on a transient null instead of collapsing', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final analysis = analysisWithSacSegments();
+      // Controllable analysis: starts good, then flips to null to mimic a
+      // mid-sync empty-profile read that makes profileAnalysisProvider emit
+      // AsyncData(null).
+      final controllable = StateProvider<ProfileAnalysis?>((ref) => analysis);
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      // Guaranteed restore even if the test throws before the end, so the
+      // global handler never leaks into later tests.
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...sacOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => ref.watch(controllable)),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Good analysis -> the SAC-by-segment card renders.
+      expect(sacCardFinder(tester), findsOneWidget);
+
+      // Flip to a transient null (the storm symptom, post-debounce edge case).
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      container.read(controllable.notifier).state = null;
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // The provider has genuinely settled to AsyncData(null) -- so the card
+      // below survives only because of the last-good fallback, not a loading
+      // window that still exposes the previous value via valueOrNull.
+      final settled = container.read(profileAnalysisProvider(dive.id));
+      expect(settled.isLoading, isFalse);
+      expect(settled.valueOrNull, isNull);
+
+      // Hardening: the card must remain (last-good), not blink out.
+      expect(
+        sacCardFinder(tester),
+        findsOneWidget,
+        reason:
+            'a transient null analysis must not collapse the SAC-by-segment '
+            'card; the section should fall back to the last usable analysis',
+      );
+    });
+
+    testWidgets(
+      'keeps cached segments when analysis flips to non-null empty sacSegments',
+      (tester) async {
+        final dive = diveWithProfile();
+        final analysis = analysisWithSacSegments();
+        // Flip from a good analysis to a NON-NULL analysis whose sacSegments is
+        // an empty (not null) list. Only the cached analysis can still fill
+        // the time chart, so without the last-good fallback the card would
+        // lose its breakdown even though a usable segment is known.
+        final controllable = StateProvider<ProfileAnalysis?>((ref) => analysis);
+        final base = await getBaseOverrides();
+        final originalOnError = FlutterError.onError;
+        addTearDown(() => FlutterError.onError = originalOnError);
+        FlutterError.onError = (d) {
+          if (d.toString().contains('overflowed')) return;
+          originalOnError?.call(d);
+        };
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              ...base,
+              ...sacOverrides(
+                dive,
+                profileAnalysisProvider(
+                  dive.id,
+                ).overrideWith((ref) async => ref.watch(controllable)),
+              ),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        // Good analysis -> the single time segment is read out.
+        expect(find.textContaining('at 0-5 min'), findsOneWidget);
+
+        // Flip to a non-null analysis carrying an EMPTY segment list.
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(DiveDetailPage)),
+        );
+        container.read(controllable.notifier).state = ProfileAnalysis.empty()
+            .copyWith(sacSegments: const <SacSegment>[]);
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        // The live analysis is non-null with empty sacSegments. The card must
+        // still render the cached segment rather than nothing.
+        expect(
+          sacCardFinder(tester),
+          findsOneWidget,
+          reason: 'card stays visible on a non-null empty-segments analysis',
+        );
+        expect(
+          find.textContaining('at 0-5 min'),
+          findsOneWidget,
+          reason:
+              'an empty (non-null) segment list must fall back to the cached '
+              'analysis segments, not render an empty card',
+        );
+      },
+    );
+
+    testWidgets('converts each segment with its own cylinder volume (#110)', (
+      tester,
+    ) async {
+      // Sidemount: two cylinders of different sizes. Both segments carry the
+      // same bar/min rate, so any difference between the rendered L/min values
+      // can only come from the per-segment volume lookup. Before #110 every
+      // segment reused the first tank with a volume, printing 8.8 L/min twice.
+      final semantics = tester.ensureSemantics();
+      final dive = diveWithProfile().copyWith(
+        tanks: const [
+          // No start/end pressures: dive.sac stays null, so the SAC
+          // normalization factor is exactly 1.0 and the expected value is just
+          // sacRate * volume.
+          DiveTank(id: 'tank-a', name: 'Left', volume: 11.0),
+          DiveTank(id: 'tank-b', name: 'Right', volume: 7.0),
+        ],
+      );
+      final analysis = ProfileAnalysis.empty().copyWith(
+        sacSegments: const [
+          SacSegment(
+            startTimestamp: 0,
+            endTimestamp: 300,
+            avgDepth: 18.0,
+            minDepth: 0.0,
+            maxDepth: 24.0,
+            sacRate: 0.8,
+            gasConsumed: 4.0,
+            tankId: 'tank-a',
+            segmentationType: SacSegmentationType.timeInterval,
+          ),
+          SacSegment(
+            startTimestamp: 300,
+            endTimestamp: 600,
+            avgDepth: 18.0,
+            minDepth: 0.0,
+            maxDepth: 24.0,
+            sacRate: 0.8,
+            gasConsumed: 4.0,
+            tankId: 'tank-b',
+            segmentationType: SacSegmentationType.timeInterval,
+          ),
+        ],
+      );
+
+      // The L/min display is what exercises the volume conversion at all; the
+      // default pressurePerMin renders bar/min and ignores tank volume.
+      final settings = MockSettingsNotifier();
+      await settings.setGasConsumptionDisplay(GasConsumptionDisplay.rmv);
+      final base = await getBaseOverrides(settingsNotifier: settings);
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...sacOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysis),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.bySemanticsLabel(RegExp(r'^0-5 min, 8\.8 L/min')),
+        findsOneWidget,
+        reason: '0.8 bar/min converted on the 11.0 L cylinder',
+      );
+      expect(
+        find.bySemanticsLabel(RegExp(r'^5-10 min, 5\.6 L/min')),
+        findsOneWidget,
+        reason:
+            '0.8 bar/min converted on the 7.0 L cylinder; a single shared '
+            'volume would print 8.8 L/min here too',
+      );
+      semantics.dispose();
+    });
+  });
+
+  group('safety finding highlight wiring', () {
+    Dive diveWithProfile() => Dive(
+      id: 'dive-highlight',
+      dateTime: DateTime(2026, 1, 1, 10),
+      profile: List.generate(
+        20,
+        (i) => DiveProfilePoint(timestamp: i * 60, depth: 15),
+      ),
+    );
+
+    SafetyFinding laneFinding(String diveId, {DateTime? dismissedAt}) =>
+        SafetyFinding(
+          id: 'f-lane',
+          diveId: diveId,
+          ruleId: SafetyRuleId.rapidAscent,
+          severity: SafetySeverity.caution,
+          startTimestamp: 300,
+          endTimestamp: 420,
+          value: 14.0,
+          engineVersion: 1,
+          dismissedAt: dismissedAt,
+          createdAt: DateTime.utc(2026, 8, 9),
+        );
+
+    Future<void> pumpWithReview(
+      WidgetTester tester,
+      Dive dive,
+      SafetyFinding finding,
+    ) async {
+      final overrides = await getBaseOverrides();
+      overrides.add(
+        safetyReviewProvider(dive.id).overrideWith(
+          (ref) async => SafetyReview(
+            diveId: dive.id,
+            engineVersion: 1,
+            reviewedAt: DateTime.utc(2026, 8, 9),
+            findings: [finding],
+          ),
+        ),
+      );
+      // Restore via addTearDown so a throwing pump cannot leak the filtered
+      // handler into later tests; the immediate restore below keeps the
+      // filter scoped to the pump itself on the happy path.
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.exceptionAsString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+      await tester.pumpWidget(_buildDetailPage(dive, overrides));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      FlutterError.onError = originalOnError;
+    }
+
+    testWidgets('selected finding reaches the chart as a highlight range', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final finding = laneFinding(dive.id);
+      await pumpWithReview(tester, dive, finding);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      container.read(selectedSafetyFindingProvider(dive.id).notifier).state =
+          finding;
+      await tester.pump();
+
+      final chart = tester.widget<DiveProfileChart>(
+        find.byType(DiveProfileChart),
+      );
+      expect(chart.highlightRange, isNotNull);
+      expect(chart.highlightRange!.startTimestamp, 300);
+      expect(chart.highlightRange!.endTimestamp, 420);
+    });
+
+    testWidgets('no selection means no highlight range', (tester) async {
+      final dive = diveWithProfile();
+      await _pumpDetailPage(tester, dive);
+
+      final chart = tester.widget<DiveProfileChart>(
+        find.byType(DiveProfileChart),
+      );
+      expect(chart.highlightRange, isNull);
+    });
+
+    testWidgets('a selection outside the gated lane renders no highlight', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      // The stored review's only finding is dismissed, so the lane (and the
+      // section tile) hide it; the highlight must be gated off with it.
+      final dismissed = laneFinding(
+        dive.id,
+        dismissedAt: DateTime.utc(2026, 8, 9),
+      );
+      await pumpWithReview(tester, dive, dismissed);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+      container.read(selectedSafetyFindingProvider(dive.id).notifier).state =
+          dismissed;
+      await tester.pump();
+
+      final chart = tester.widget<DiveProfileChart>(
+        find.byType(DiveProfileChart),
+      );
+      expect(chart.highlightRange, isNull);
+      expect(chart.selectedSafetyFindingId, isNull);
+    });
+
+    testWidgets('active findings reach the chart as lane findings', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      await pumpWithReview(tester, dive, laneFinding(dive.id));
+
+      final chart = tester.widget<DiveProfileChart>(
+        find.byType(DiveProfileChart),
+      );
+      expect(chart.safetyFindings, isNotNull);
+      expect(chart.safetyFindings!.map((f) => f.id), ['f-lane']);
+      expect(chart.onSafetyFindingTap, isNotNull);
+      // A locked page dismisses nothing: that is held in the open Safety
+      // review card (issue #4527).
+      expect(chart.onSafetyFindingDismiss, isNull);
+      expect(chart.onSafetyFindingDetails, isNotNull);
+    });
+
+    testWidgets('chart tap callback toggles the selection provider', (
+      tester,
+    ) async {
+      final dive = diveWithProfile();
+      final finding = laneFinding(dive.id);
+      await pumpWithReview(tester, dive, finding);
+
+      final chart = tester.widget<DiveProfileChart>(
+        find.byType(DiveProfileChart),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      );
+
+      chart.onSafetyFindingTap!(finding);
+      expect(
+        container.read(selectedSafetyFindingProvider(dive.id))?.id,
+        'f-lane',
+      );
+
+      chart.onSafetyFindingTap!(finding);
+      expect(container.read(selectedSafetyFindingProvider(dive.id)), isNull);
+    });
+  });
+
+  group('DiveDetailPage dive mode badge', () {
+    testWidgets('shows the short code for a CCR dive', (tester) async {
+      final dive = createTestDiveWithBottomTime().copyWith(
+        diveMode: DiveMode.ccr,
+      );
+      await _pumpDetailPage(tester, dive);
+
+      expect(find.text('CCR'), findsOneWidget);
+    });
+
+    testWidgets('shows OC for the default open-circuit dive', (tester) async {
+      final dive = createTestDiveWithBottomTime();
+      await _pumpDetailPage(tester, dive);
+
+      expect(find.text('OC'), findsOneWidget);
+    });
+  });
+
+  group('DiveDetailPage dive type badges', () {
+    testWidgets('shows a badge for each of the dive\'s types', (tester) async {
+      final dive = createTestDiveWithBottomTime().copyWith(
+        diveTypeIds: ['wreck', 'night'],
+      );
+      await _pumpDetailPage(tester, dive);
+
+      expect(find.text('Wreck'), findsOneWidget);
+      expect(find.text('Night'), findsOneWidget);
+    });
+
+    testWidgets('shows no badges for a dive with no types', (tester) async {
+      final dive = createTestDiveWithBottomTime().copyWith(diveTypeIds: []);
+      await _pumpDetailPage(tester, dive);
+
+      expect(find.byType(DiveTypeBadge), findsNothing);
+    });
+
+    testWidgets(
+      'spells out more badges instead of collapsing when the header is wide',
+      (tester) async {
+        // The cap scales with the header's own width (issue #1269 follow-up)
+        // rather than a flat constant, so a comfortably wide header should
+        // show several real labels, not immediately fall back to "+N".
+        final dive = createTestDiveWithBottomTime().copyWith(
+          diveTypeIds: ['wreck', 'night', 'drift', 'cave'],
+        );
+        await _pumpDetailPage(tester, dive);
+
+        expect(find.text('Wreck'), findsOneWidget);
+        expect(find.text('Night'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'hides a type whose showInDetailHeader is false, keeps the rest',
+      (tester) async {
+        final dive = createTestDiveWithBottomTime().copyWith(
+          diveTypeIds: ['wreck', 'night'],
+        );
+        final hiddenWreck = DiveTypeEntity(
+          id: 'wreck',
+          name: 'Wreck',
+          isBuiltIn: true,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+          showInDetailHeader: false,
+        );
+        final overrides = await getBaseOverrides();
+        await tester.pumpWidget(
+          _buildDetailPage(dive, [
+            ...overrides,
+            diveTypesProvider.overrideWith((ref) async => [hiddenWreck]),
+          ]),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Wreck'), findsNothing);
+        expect(find.text('Night'), findsOneWidget);
+      },
+    );
+  });
+
+  group('gear check-in chips (condition phase 3a)', () {
+    final reg = EquipmentItem(
+      id: 'reg',
+      name: 'Apeks XTX',
+      type: EquipmentType.regulator,
+      createdAt: DateTime(2026),
+    );
+    final cylinder = EquipmentItem(
+      id: 'al80',
+      name: 'AL80 #4',
+      type: EquipmentType.tank,
+      createdAt: DateTime(2026),
+    );
+    final dive = Dive(
+      id: 'chip-dive',
+      diveNumber: 7,
+      dateTime: DateTime(2026, 3, 28, 10),
+      maxDepth: 20.0,
+      bottomTime: const Duration(minutes: 40),
+      gear: [GearLink(item: reg)],
+      tanks: const [
+        DiveTank(
+          id: 't1',
+          equipmentId: 'al80',
+          startPressure: 200,
+          endPressure: 80,
+        ),
+      ],
+    );
+
+    Future<void> pumpChips(WidgetTester tester) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            diveProvider(dive.id).overrideWith((ref) async => dive),
+            diveDataSourcesProvider(
+              dive.id,
+            ).overrideWith((ref) async => <DiveDataSource>[]),
+            observationsForDiveProvider(
+              dive.id,
+            ).overrideWith((ref) async => const []),
+            equipmentItemProvider('al80').overrideWith((ref) async => cylinder),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            // In a Scaffold, as the list pane is (the unlocked strip needs one).
+            home: Scaffold(
+              body: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the gear row and the linked cylinder row each carry a chip', (
+      tester,
+    ) async {
+      await pumpChips(tester);
+      expect(find.byType(ObservationStatusChip), findsNWidgets(2));
+    });
+
+    testWidgets('tapping the gear row chip opens the check-in sheet', (
+      tester,
+    ) async {
+      await pumpChips(tester);
+      // A check-in is a whole-record operation (issue #4527).
+      await unlockForOperation(tester);
+      await tester.ensureVisible(find.byType(ObservationStatusChip).first);
+      await tester.tap(find.byType(ObservationStatusChip).first);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Check-in: '), findsOneWidget);
+    });
+  });
+
+  group('DiveDetailPage notes', () {
+    Future<void> scrollToNotes(WidgetTester tester) async {
+      await tester.scrollUntilVisible(
+        find.text('Notes'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+    }
+
+    testWidgets('notes can be selected without entering edit mode (#3472)', (
+      tester,
+    ) async {
+      const notes = 'Saw a turtle at the drop-off.';
+      final dive = createTestDiveWithBottomTime().copyWith(notes: notes);
+      await _pumpDetailPage(tester, dive);
+      await scrollToNotes(tester);
+
+      // Drawn as Markdown (#3683) inside a SelectionArea, so still
+      // selectable without edit mode.
+      expect(
+        find.ancestor(
+          of: find.text(notes),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an empty note shows the placeholder as plain text', (
+      tester,
+    ) async {
+      await _pumpDetailPage(tester, createTestDiveWithBottomTime());
+      await scrollToNotes(tester);
+
+      expect(find.text('No notes for this dive.'), findsOneWidget);
+      expect(find.byType(SelectableText), findsNothing);
     });
   });
 }

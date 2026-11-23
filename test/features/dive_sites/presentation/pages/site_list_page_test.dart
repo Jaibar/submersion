@@ -8,13 +8,13 @@ import 'package:submersion/features/dive_sites/data/repositories/site_repository
 import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
-import 'package:submersion/features/dive_sites/presentation/pages/site_edit_page.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_list_page.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
@@ -22,6 +22,7 @@ import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.d
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/select_items_menu.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,19 +88,20 @@ Widget _buildTestWidget({
 
 Future<List<Override>> _buildOverrides({
   ListViewMode viewMode = ListViewMode.detailed,
+  List<SiteWithDiveCount> sites = const [],
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
 
   return [
     sharedPreferencesProvider.overrideWithValue(prefs),
-    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
-    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
-    sortedSitesWithCountsProvider.overrideWith(
-      (ref) => const AsyncValue.data(<SiteWithDiveCount>[]),
+    // The view mode is read from the diver's saved settings (#3748).
+    settingsProvider.overrideWith(
+      (ref) => MockSettingsNotifier(AppSettings(siteListViewMode: viewMode)),
     ),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    sortedSitesWithCountsProvider.overrideWith((ref) => AsyncValue.data(sites)),
     siteListNotifierProvider.overrideWith((ref) => _MockSiteListNotifier()),
-    siteListViewModeProvider.overrideWith((ref) => viewMode),
     siteTableConfigProvider.overrideWith(
       (ref) => _TestSiteTableConfigNotifier(),
     ),
@@ -111,6 +113,67 @@ Future<List<Override>> _buildOverrides({
 // ---------------------------------------------------------------------------
 
 void main() {
+  // Returning to Sites reopens the site last opened, while the list still
+  // shows it (#3301).
+  group('SiteListPage remembered site', () {
+    const site = SiteWithDiveCount(
+      site: DiveSite(id: 's1', name: 'Reef'),
+      diveCount: 1,
+    );
+
+    Future<AsyncValue<String?>?> rememberedOn(
+      WidgetTester tester, {
+      required String? highlighted,
+      ListViewMode viewMode = ListViewMode.detailed,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1400, 900);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final overrides = [
+        ...await _buildOverrides(viewMode: viewMode, sites: const [site]),
+        highlightedSiteIdProvider.overrideWith((ref) => highlighted),
+        tableDetailsPaneProvider('sites').overrideWith((ref) => true),
+      ];
+      await tester.pumpWidget(
+        _buildTestWidget(child: const SiteListPage(), overrides: overrides),
+      );
+      // Read before the scaffold's post-frame restore opens the site.
+      return tester
+          .widget<MasterDetailScaffold>(find.byType(MasterDetailScaffold))
+          .rememberedSelectedId;
+    }
+
+    testWidgets('hands a listed site to the scaffold', (tester) async {
+      expect(
+        await rememberedOn(tester, highlighted: 's1'),
+        const AsyncData<String?>('s1'),
+      );
+    });
+
+    testWidgets('hands nothing for a site the list does not show', (
+      tester,
+    ) async {
+      expect(
+        await rememberedOn(tester, highlighted: 'deleted'),
+        const AsyncData<String?>(null),
+      );
+    });
+
+    testWidgets('table mode hands it on too', (tester) async {
+      expect(
+        await rememberedOn(
+          tester,
+          highlighted: 's1',
+          viewMode: ListViewMode.table,
+        ),
+        const AsyncData<String?>('s1'),
+      );
+    });
+  });
+
   group('SiteListPage layout branches', () {
     testWidgets('mobile mode renders SiteListContent', (tester) async {
       tester.view.devicePixelRatio = 1.0;
@@ -146,6 +209,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TableModeLayout), findsOneWidget);
+      // Table mode titles the list with its entry count (#2669).
+      expect(
+        tester
+            .widget<TableModeLayout>(find.byType(TableModeLayout))
+            .appBarSubtitle,
+        isNotNull,
+      );
     });
 
     testWidgets('desktop mode renders MasterDetailScaffold', (tester) async {
@@ -278,7 +348,7 @@ void main() {
       await tester.tap(find.byIcon(Icons.search));
       await tester.pumpAndSettle();
 
-      // The search delegate should open, showing a search bar
+      // The search row opens under the app bar
       expect(find.byType(TextField), findsOneWidget);
     });
 
@@ -326,6 +396,93 @@ void main() {
       expect(find.text('Detailed'), findsOneWidget);
       expect(find.text('Compact'), findsOneWidget);
       expect(find.text('Table'), findsOneWidget);
+    });
+
+    // Table mode has no app bar inside the list, so "Select items" lives in
+    // the page header's overflow menu and drives the list through the
+    // controller the page hands it (issue #2775).
+    group('table mode "Select items"', () {
+      Future<void> pumpTablePage(WidgetTester tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final overrides = await _buildOverrides(viewMode: ListViewMode.table);
+        await tester.pumpWidget(
+          _buildTestWidget(child: const SiteListPage(), overrides: overrides),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shows no separate Select strip above the table', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+        expect(find.byIcon(Icons.checklist), findsNothing);
+      });
+
+      testWidgets('is the first overflow entry and enters selection', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+
+        await tester.tap(find.byIcon(Icons.more_vert));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(find.byKey(selectItemsMenuKey)).dy,
+          lessThan(tester.getTopLeft(find.text('Detailed')).dy),
+        );
+
+        await tester.tap(find.byKey(selectItemsMenuKey));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+        expect(find.text('0 selected'), findsOneWidget);
+      });
+
+      testWidgets('leaves the entry out while selecting', (tester) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+
+        // The header's overflow, not the selection bar's.
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byIcon(Icons.more_vert),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Detailed'), findsOneWidget);
+        expect(find.byKey(selectItemsMenuKey), findsNothing);
+      });
+
+      testWidgets('selection does not outlive leaving table mode', (
+        tester,
+      ) async {
+        await pumpTablePage(tester);
+        await enterSelectionViaMenu(tester);
+        expect(find.byKey(const ValueKey('selection_exit')), findsOneWidget);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SiteListPage)),
+        );
+        container
+            .read(settingsProvider.notifier)
+            .setSiteListViewMode(ListViewMode.detailed);
+        await tester.pumpAndSettle();
+        container
+            .read(settingsProvider.notifier)
+            .setSiteListViewMode(ListViewMode.table);
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+      });
     });
 
     testWidgets('table mode popup menu changes view mode', (tester) async {
@@ -505,7 +662,8 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(SiteEditPage), findsOneWidget);
+      final page = tester.widget<SiteDetailPage>(find.byType(SiteDetailPage));
+      expect(page.newSite, isNotNull);
     });
 
     testWidgets('table mode edit builder invoked via edit query param', (
@@ -535,8 +693,79 @@ void main() {
       await tester.pump();
       tester.takeException();
 
-      expect(find.byType(SiteEditPage), findsOneWidget);
+      final page = tester.widget<SiteDetailPage>(find.byType(SiteDetailPage));
+      expect(page.siteId, 'test-site-id');
+      expect(page.openUnlocked, isTrue);
     });
+
+    /// Pumps the page on [initialLocation] with 'test-site-id' highlighted,
+    /// runs [onDeleted] from the pane [pane] builds, and returns the
+    /// highlighted id left behind.
+    Future<String?> highlightAfterDelete<T extends Widget>(
+      WidgetTester tester, {
+      required ListViewMode viewMode,
+      required String initialLocation,
+      required VoidCallback? Function(T pane) onDeleted,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await _buildOverrides(viewMode: viewMode);
+      await tester.pumpWidget(
+        _buildTestWidget(
+          child: const SiteListPage(),
+          overrides: [
+            ...overrides,
+            tableDetailsPaneProvider('sites').overrideWith((ref) => true),
+            highlightedSiteIdProvider.overrideWith((ref) => 'test-site-id'),
+          ],
+          initialLocation: initialLocation,
+        ),
+      );
+      await tester.pump();
+      tester.takeException();
+      await tester.pump();
+      tester.takeException();
+
+      onDeleted(tester.widget<T>(find.byType(T)))!();
+      await tester.pump();
+      tester.takeException();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SiteListPage)),
+      );
+      return container.read(highlightedSiteIdProvider);
+    }
+
+    for (final viewMode in [ListViewMode.table, ListViewMode.detailed]) {
+      testWidgets('${viewMode.name} mode: deleting from the edit pane clears '
+          'the highlighted site', (tester) async {
+        final highlighted = await highlightAfterDelete<SiteDetailPage>(
+          tester,
+          viewMode: viewMode,
+          initialLocation: '/sites?selected=test-site-id&mode=edit',
+          onDeleted: (pane) => pane.onDeleted,
+        );
+
+        expect(highlighted, isNull);
+      });
+
+      testWidgets('${viewMode.name} mode: deleting from the detail pane '
+          'clears the highlighted site', (tester) async {
+        final highlighted = await highlightAfterDelete<SiteDetailPage>(
+          tester,
+          viewMode: viewMode,
+          initialLocation: '/sites?selected=test-site-id',
+          onDeleted: (pane) => pane.onDeleted,
+        );
+
+        expect(highlighted, isNull);
+      });
+    }
 
     testWidgets('table mode filter button opens filter sheet', (tester) async {
       tester.view.devicePixelRatio = 1.0;

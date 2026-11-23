@@ -1,0 +1,300 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/data/services/plan_slate_pdf_service.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
+import 'package:submersion/features/planner/domain/services/bailout_solver.dart';
+import 'package:submersion/features/planner/domain/services/contingency_service.dart';
+import 'package:submersion/features/planner/domain/services/plan_engine.dart';
+import 'package:submersion/features/planner/domain/services/range_table_service.dart';
+import 'package:submersion/features/planner/domain/services/schedule_lines.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import '../../helpers/fake_hosts.dart';
+
+const _air = GasMix(o2: 21);
+const _ean50 = GasMix(o2: 50);
+const _airTank = DiveTank(
+  id: 'tank-1',
+  volume: 11.1,
+  startPressure: 207.0,
+  gasMix: _air,
+  // Diluent is now an explicit per-tank choice on a loop plan, honoured by
+  // TankRoleResolver and never inferred from being breathed -- needed for
+  // the CCR bailout-slate case below.
+  role: TankRole.diluent,
+);
+const _decoTank = DiveTank(
+  id: 'tank-2',
+  volume: 7.0,
+  startPressure: 200.0,
+  gasMix: _ean50,
+  role: TankRole.deco,
+);
+const _bailoutTank = DiveTank(
+  id: 'tank-3',
+  volume: 11.1,
+  startPressure: 232.0,
+  gasMix: _air,
+  role: TankRole.bailout,
+);
+
+final _labels = PlanSlateLabels(
+  runtimeTable: 'Deco schedule',
+  gasPlan: 'Gas plan',
+  contingencies: 'Contingencies',
+  lostGasLabel: (gas) => 'Lost $gas',
+  rangeTable: 'Range table',
+  bailout: 'Bailout',
+  duration: 'Duration',
+  depth: 'Depth',
+  runtime: 'RT',
+  gas: 'Gas',
+  turnAt: 'Turn',
+  minGas: 'Min gas',
+  problemSolving: 'Problem solving',
+  noTurnRule: 'No rule',
+  noStartPressure: 'No start pressure',
+  noVolume: 'No size',
+  base: 'Base',
+  minutes: (value) => '$value min',
+  maxPrefix: 'max',
+  noEligibleBailoutGas: (depth, deepestMod) => 'No gas: $depth, $deepestMod',
+);
+
+domain.DivePlan _plan({domain.PlanMode mode = domain.PlanMode.oc}) {
+  return domain.DivePlan(
+    id: 'plan-1',
+    name: 'Slate test',
+    gfLow: 40,
+    gfHigh: 80,
+    mode: mode,
+    turnPressureRule: domain.TurnPressureRule.thirds,
+    segments: [
+      PlanSegment.travel(
+        id: 'seg-1',
+        fromDepth: 0,
+        targetDepth: 45.0,
+        tankId: 'tank-1',
+        gasMix: _air,
+        order: 0,
+        ratePerMinute: 18.0,
+      ),
+      PlanSegment.hold(
+        id: 'seg-2',
+        depth: 45.0,
+        durationMinutes: 25,
+        tankId: 'tank-1',
+        gasMix: _air,
+        order: 1,
+      ),
+    ],
+    tanks: const [_airTank, _decoTank, _bailoutTank],
+    createdAt: DateTime(2026, 7, 5),
+    updatedAt: DateTime(2026, 7, 5),
+  );
+}
+
+Future<List<int>> _build(domain.DivePlan plan) {
+  const engine = PlanEngine();
+  const contingency = ContingencyService();
+  const rangeService = RangeTableService();
+  final outcome = engine.compute(plan);
+  return const PlanSlatePdfService().buildSlate(
+    plan: plan,
+    outcome: outcome,
+    deviations: contingency.deviations(plan),
+    lostGas: contingency.lostGas(plan),
+    rangeTable: rangeService.compute(plan),
+    bailout: const BailoutSolver().solve(plan),
+    units: const UnitFormatter(AppSettings()),
+    labels: _labels,
+    deviationDepthDelta: plan.deviationDepthDelta ?? 5.0,
+    deviationTimeMinutes: plan.deviationTimeMinutes ?? 5,
+    gfLow: plan.gfLow ?? 50,
+    gfHigh: plan.gfHigh ?? 85,
+  );
+}
+
+void main() {
+  // PdfFonts downloads Roboto on first use. The font host answers as
+  // offline, so the PDF falls back to Helvetica, as it would on a device
+  // without a network, and its text stays readable for the assertions.
+  setUp(() {
+    serveFakeHost('fonts.gstatic.com');
+  });
+
+  test('OC slate renders a parseable PDF with all sections', () async {
+    final bytes = await _build(_plan());
+    expect(bytes, isNotEmpty);
+    expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+  });
+
+  test('CCR slate (bailout section) renders without throwing', () async {
+    final bytes = await _build(_plan(mode: domain.PlanMode.ccr));
+    expect(bytes, isNotEmpty);
+    expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+  });
+
+  test('a bailout gas gap renders through the slate (#3961)', () async {
+    final plan = _plan(
+      mode: domain.PlanMode.ccr,
+    ).copyWith(tanks: const [_airTank, _decoTank]);
+    expect(const BailoutSolver().solve(plan)!.gasGap, isNotNull);
+
+    final bytes = await _build(plan);
+
+    expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+  });
+
+  // The header used to hand-assemble an ISO date, ignoring the diver's
+  // DateFormatPreference like the rest of the PDF exports did (#964). Asserted
+  // on the header string rather than on the saved PDF because the slate embeds
+  // a subset font, whose glyph-indexed text pdfVisibleText cannot read back.
+  test('the header dates the plan the way the diver reads it', () {
+    const engine = PlanEngine();
+    final plan = _plan();
+    final line = planSlateHeaderLine(
+      plan,
+      engine.compute(plan),
+      const UnitFormatter(
+        AppSettings(dateFormat: DateFormatPreference.ddmmyyyy),
+      ),
+      _labels,
+      gfLow: plan.gfLow!,
+      gfHigh: plan.gfHigh!,
+    );
+
+    expect(line, startsWith('05/07/2026'));
+    expect(line, isNot(contains('2026-07-05')));
+  });
+
+  test('the header prints minutes and max in the app language (#2252)', () {
+    const engine = PlanEngine();
+    final plan = _plan();
+    final line = planSlateHeaderLine(
+      plan,
+      engine.compute(plan),
+      const UnitFormatter(AppSettings()),
+      PlanSlateLabels(
+        runtimeTable: '',
+        gasPlan: '',
+        contingencies: '',
+        lostGasLabel: (gas) => gas,
+        rangeTable: '',
+        bailout: '',
+        duration: '',
+        depth: '',
+        runtime: '',
+        gas: '',
+        turnAt: '',
+        minGas: '',
+        problemSolving: '',
+        noTurnRule: '',
+        noStartPressure: '',
+        noVolume: '',
+        base: '',
+        minutes: (value) => '$value Min.',
+        maxPrefix: 'max.',
+        noEligibleBailoutGas: (depth, deepestMod) => '',
+      ),
+      gfLow: plan.gfLow!,
+      gfHigh: plan.gfHigh!,
+    );
+
+    expect(line, contains(' Min.'));
+    expect(line, contains('max. '));
+    expect(line, isNot(contains(' min ')));
+  });
+
+  group('runtime table cells', () {
+    const units = UnitFormatter(AppSettings());
+    List<String> cells({int airBreakSeconds = 0}) => planSlateRuntimeCells(
+      scheduleLines([
+        PlanScheduleRow(
+          kind: PlanScheduleRowKind.stop,
+          depthMeters: 6,
+          durationSeconds: 1440,
+          runtimeSeconds: 1440,
+          gasFO2: 1,
+          gasFHe: 0,
+          airBreakSeconds: airBreakSeconds,
+        ),
+      ]).single,
+      units,
+    );
+
+    test('a stop prints its depth, minutes, runtime and gas', () {
+      expect(cells(), ['- 6m', '24', '24', 'O2']);
+    });
+
+    test('a stop with an air break prints the break minutes (#3928)', () {
+      expect(cells(airBreakSeconds: 360)[1], '24 (+6)');
+    });
+  });
+
+  group('turn and min gas cells (#3603)', () {
+    const units = UnitFormatter(AppSettings());
+
+    test('a computed figure prints as a pressure', () {
+      expect(planSlateGasLimitCell(120.4, null, units, _labels), '120 bar');
+    });
+
+    test('a missing turn rule is named instead of a bare dash', () {
+      expect(
+        planSlateGasLimitCell(null, PlanGasLimitGap.noTurnRule, units, _labels),
+        'No rule',
+      );
+    });
+
+    test('a missing start pressure is named instead of a bare dash', () {
+      expect(
+        planSlateGasLimitCell(
+          null,
+          PlanGasLimitGap.noStartPressure,
+          units,
+          _labels,
+        ),
+        'No start pressure',
+      );
+    });
+
+    test('a missing cylinder size is named instead of a bare dash', () {
+      expect(
+        planSlateGasLimitCell(null, PlanGasLimitGap.noVolume, units, _labels),
+        'No size',
+      );
+    });
+
+    test('a cylinder the figure does not apply to keeps the dash', () {
+      expect(planSlateGasLimitCell(null, null, units, _labels), '--');
+    });
+  });
+
+  group('problem-solving cell (#4475)', () {
+    test('the gas held back prints in the diver\'s volume unit', () {
+      expect(
+        planSlateProblemSolvingCell(240.4, const UnitFormatter(AppSettings())),
+        '240',
+      );
+      expect(
+        planSlateProblemSolvingCell(
+          283.17,
+          const UnitFormatter(AppSettings(volumeUnit: VolumeUnit.cubicFeet)),
+        ),
+        '10',
+      );
+    });
+
+    test('a cylinder holding none keeps the dash', () {
+      expect(
+        planSlateProblemSolvingCell(0, const UnitFormatter(AppSettings())),
+        '--',
+      );
+    });
+  });
+}

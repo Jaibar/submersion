@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/features/dive_log/presentation/providers/profile_editor_provider.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Mode selector toolbar for the profile editor.
 ///
 /// Displays a segmented button with four editing modes:
-/// Select, Smooth, Outlier, and Draw.
+/// Select, Smooth, Cleanup, and Draw.
 class EditorToolbar extends StatelessWidget {
   final EditorMode mode;
   final void Function(EditorMode) onModeChanged;
@@ -21,26 +22,26 @@ class EditorToolbar extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: SegmentedButton<EditorMode>(
-        segments: const [
+        segments: [
           ButtonSegment(
             value: EditorMode.select,
-            icon: Icon(Icons.touch_app),
-            label: Text('Select'),
+            icon: const Icon(Icons.touch_app),
+            label: Text(context.l10n.diveLog_profileEditor_mode_select),
           ),
           ButtonSegment(
             value: EditorMode.smooth,
-            icon: Icon(Icons.auto_fix_high),
-            label: Text('Smooth'),
+            icon: const Icon(Icons.auto_fix_high),
+            label: Text(context.l10n.diveLog_profileEditor_mode_smooth),
           ),
           ButtonSegment(
             value: EditorMode.outlier,
-            icon: Icon(Icons.warning_amber),
-            label: Text('Outlier'),
+            icon: const Icon(Icons.cleaning_services),
+            label: Text(context.l10n.diveLog_profileEditor_mode_cleanup),
           ),
           ButtonSegment(
             value: EditorMode.draw,
-            icon: Icon(Icons.draw),
-            label: Text('Draw'),
+            icon: const Icon(Icons.draw),
+            label: Text(context.l10n.diveLog_profileEditor_mode_draw),
           ),
         ],
         selected: {mode},

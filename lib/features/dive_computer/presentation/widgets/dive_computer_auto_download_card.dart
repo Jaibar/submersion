@@ -1,0 +1,61 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/features/dive_computer/presentation/editing/dive_computer_settings_sitting.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Per-computer opt-out from the passive auto-connect scan (issue #3361):
+/// excludes this one computer from auto-download even while the global
+/// switch on the Transfer tab's Dive Computers section is on. Synced like
+/// the rest of the computer record, unlike the clock sync override above it
+/// on this page, which lives in SharedPreferences.
+class DiveComputerAutoDownloadCard extends ConsumerWidget {
+  const DiveComputerAutoDownloadCard({
+    super.key,
+    required this.computer,
+    this.control,
+  });
+
+  final DiveComputer computer;
+
+  /// On the computer's gear item page (issue #4527, phase 3): the value its
+  /// sitting holds, changed only while its card is open.
+  final DiveComputerSettingsControl? control;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+
+    return Card(
+      child: SwitchListTile(
+        key: const ValueKey('dive_computer_auto_download_disabled'),
+        title: Text(
+          l10n.diveComputer_autoDownload_disableTitle,
+          style: theme.textTheme.titleMedium,
+        ),
+        subtitle: Text(l10n.diveComputer_autoDownload_disableSubtitle),
+        // Same polarity: the switch reads as "skip this computer" and the
+        // field stores "is disabled", so neither side negates.
+        value:
+            control?.shown.autoDownloadDisabled ??
+            computer.autoDownloadDisabled,
+        onChanged: switch (control) {
+          null =>
+            (value) => ref
+                .read(diveComputerNotifierProvider.notifier)
+                .setAutoDownloadDisabled(computer.id, value),
+          DiveComputerSettingsControl(:final shown, :final hold?) =>
+            (value) => hold((
+              favourite: shown.favourite,
+              autoDownloadDisabled: value,
+              clockSync: shown.clockSync,
+            )),
+          _ => null,
+        },
+      ),
+    );
+  }
+}

@@ -1,0 +1,397 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/schedule_policy.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/data/services/plan_file_codec.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/services/plan_engine.dart';
+
+domain.DivePlan _plan() {
+  const air = GasMix(o2: 21, he: 0);
+  const trimix = GasMix(o2: 18, he: 45);
+  return domain.DivePlan(
+    id: 'plan-1',
+    name: 'Codec test',
+    notes: 'Some notes',
+    mode: domain.PlanMode.ccr,
+    altitude: 1200.0,
+    waterType: WaterType.fresh,
+    salinityPpt: 12.0,
+    gfLow: 35,
+    gfHigh: 75,
+    descentRate: 20.0,
+    ascentRate: 10.0,
+    lastStopDepth: 6.0,
+    gasSwitchStopSeconds: 60,
+    airBreaks: const AirBreakPolicy(o2Seconds: 900, breakSeconds: 300),
+    sacBottom: 16.0,
+    sacDeco: 13.0,
+    reservePressure: 60.0,
+    setpointLow: 0.7,
+    setpointHigh: 1.4,
+    setpointSwitchDepth: 12.0,
+    deviationDepthDelta: 6.0,
+    deviationTimeMinutes: 10,
+    turnPressureRule: domain.TurnPressureRule.thirds,
+    tanks: const [
+      DiveTank(
+        id: 'tank-1',
+        name: 'Diluent',
+        volume: 3.0,
+        startPressure: 200.0,
+        gasMix: trimix,
+        role: TankRole.diluent,
+        isTravelGas: true,
+      ),
+      DiveTank(
+        id: 'tank-2',
+        volume: 11.1,
+        startPressure: 207.0,
+        gasMix: air,
+        role: TankRole.bailout,
+        order: 1,
+      ),
+    ],
+    segments: [
+      PlanSegment.travel(
+        id: 'seg-1',
+        fromDepth: 0,
+        targetDepth: 50.0,
+        tankId: 'tank-1',
+        gasMix: trimix,
+        order: 0,
+        ratePerMinute: 18.0,
+      ),
+      PlanSegment.hold(
+        id: 'seg-2',
+        depth: 50.0,
+        durationMinutes: 30,
+        tankId: 'tank-1',
+        gasMix: trimix,
+        order: 1,
+      ),
+    ],
+    createdAt: DateTime(2026, 7, 1),
+    updatedAt: DateTime(2026, 7, 5),
+  );
+}
+
+void main() {
+  test('round-trip preserves every engine-relevant field', () {
+    final original = _plan();
+    final restored = subplanFromJson(planToSubplanJson(original));
+
+    // Fresh identity...
+    expect(restored.id, isNot(original.id));
+    // ...same inputs.
+    expect(restored.name, original.name);
+    expect(restored.notes, original.notes);
+    expect(restored.mode, original.mode);
+    expect(restored.altitude, original.altitude);
+    expect(restored.waterType, original.waterType);
+    expect(restored.salinityPpt, original.salinityPpt);
+    expect(restored.gfLow, original.gfLow);
+    expect(restored.gfHigh, original.gfHigh);
+    expect(restored.descentRate, original.descentRate);
+    expect(restored.ascentRate, original.ascentRate);
+    expect(restored.lastStopDepth, original.lastStopDepth);
+    expect(restored.gasSwitchStopSeconds, original.gasSwitchStopSeconds);
+    expect(restored.airBreaks?.o2Seconds, original.airBreaks?.o2Seconds);
+    expect(restored.sacBottom, original.sacBottom);
+    expect(restored.sacDeco, original.sacDeco);
+    expect(restored.reservePressure, original.reservePressure);
+    expect(restored.setpointHigh, original.setpointHigh);
+    expect(restored.setpointSwitchDepth, original.setpointSwitchDepth);
+    expect(restored.deviationDepthDelta, original.deviationDepthDelta);
+    expect(restored.deviationTimeMinutes, original.deviationTimeMinutes);
+    expect(restored.turnPressureRule, original.turnPressureRule);
+
+    expect(restored.tanks, hasLength(2));
+    expect(restored.tanks.first.gasMix, original.tanks.first.gasMix);
+    expect(restored.tanks.first.role, TankRole.diluent);
+    expect(restored.tanks.first.isTravelGas, isTrue);
+    expect(restored.tanks[1].role, TankRole.bailout);
+    expect(restored.tanks[1].isTravelGas, isFalse);
+
+    expect(restored.segments, hasLength(2));
+    expect(restored.segments[1].targetDepth, original.segments[1].targetDepth);
+    expect(restored.segments[1].durationSeconds, 30 * 60);
+    // Segment tank references remap onto the regenerated tank ids.
+    expect(restored.segments.first.tankId, restored.tanks.first.id);
+
+    // The engine computes the same schedule for both.
+    const engine = PlanEngine();
+    final a = engine.compute(original);
+    final b = engine.compute(restored);
+    expect(b.ttsAtBottom, a.ttsAtBottom);
+    expect(b.stops.length, a.stops.length);
+  });
+
+  test('round-trip preserves the per-plan deco ppO2 layers (#3580) and '
+      'hypercapnia phase (#3743)', () {
+    final original = _plan().copyWith(
+      ppO2DecoBand1: 1.4,
+      ppO2DecoBand2: 1.5,
+      ppO2DecoBand3: 1.6,
+      maxO2DepthMeters: 4.5,
+      maxO2DepthExplicitlyOff: true,
+      hypercapniaAmv: 70.0,
+      hypercapniaMinutes: 4,
+      hypercapniaExplicitlyOff: true,
+    );
+    final restored = subplanFromJson(planToSubplanJson(original));
+
+    expect(restored.ppO2DecoBand1, 1.4);
+    expect(restored.ppO2DecoBand2, 1.5);
+    expect(restored.ppO2DecoBand3, 1.6);
+    expect(restored.ppO2DecoBandsExplicitlyOff, isFalse);
+    expect(restored.maxO2DepthMeters, 4.5);
+    expect(restored.maxO2DepthExplicitlyOff, isTrue);
+    expect(restored.hypercapniaAmv, 70.0);
+    expect(restored.hypercapniaMinutes, 4);
+    expect(restored.hypercapniaExplicitlyOff, isTrue);
+
+    // A file from before these fields existed imports as "follow Settings".
+    final legacy = subplanFromJson(planToSubplanJson(_plan()));
+    expect(legacy.ppO2DecoBand1, isNull);
+    expect(legacy.maxO2DepthMeters, isNull);
+    expect(legacy.hypercapniaAmv, isNull);
+    expect(legacy.ppO2DecoBandsExplicitlyOff, isFalse);
+  });
+
+  // Issue #3552: an unset field means "follow Settings". Importing a file
+  // that never wrote a field (or wrote it as JSON null) must keep it unset
+  // rather than coerce it to the old hardcoded planner constants - that
+  // would silently create a per-plan override on import.
+  test('unset fields stay unset on round-trip instead of coercing to the '
+      'old hardcoded defaults', () {
+    final original = _plan().copyWith(
+      clearDescentRate: true,
+      clearAscentRate: true,
+      clearIntermediateAscentRate: true,
+      clearShallowAscentRate: true,
+      clearFinalAscentRate: true,
+      clearLastStopDepth: true,
+      clearGasSwitchStopSeconds: true,
+      clearSacBottom: true,
+      clearReservePressure: true,
+      clearDeviationDepthDelta: true,
+      clearDeviationTimeMinutes: true,
+    );
+    final restored = subplanFromJson(planToSubplanJson(original));
+
+    expect(restored.descentRate, isNull);
+    expect(restored.ascentRate, isNull);
+    expect(restored.intermediateAscentRate, isNull);
+    expect(restored.shallowAscentRate, isNull);
+    expect(restored.finalAscentRate, isNull);
+    expect(restored.lastStopDepth, isNull);
+    expect(restored.gasSwitchStopSeconds, isNull);
+    expect(restored.sacBottom, isNull);
+    expect(restored.reservePressure, isNull);
+    expect(restored.deviationDepthDelta, isNull);
+    expect(restored.deviationTimeMinutes, isNull);
+  });
+
+  group('start time', () {
+    test('travels as its clock digits and comes back the same', () {
+      final start = DateTime.utc(2026, 11, 3, 9, 30);
+      final json = planToSubplanJson(_plan().copyWith(startDateTime: start));
+
+      expect(
+        ((jsonDecode(json) as Map)['plan'] as Map)['startDateTime'],
+        '2026-11-03T09:30:00.000',
+      );
+      expect(subplanFromJson(json).startDateTime, start);
+      // Still the single-plan versions: an older install opens it.
+      expect((jsonDecode(json) as Map)['version'], lessThan(4));
+    });
+
+    test('a plan without one writes none and reads none', () {
+      final json = planToSubplanJson(_plan());
+
+      expect(
+        (jsonDecode(json) as Map)['plan'],
+        isNot(contains('startDateTime')),
+      );
+      expect(subplanFromJson(json).startDateTime, isNull);
+    });
+
+    test('an unreadable start is dropped, not a failed import', () {
+      final file = jsonDecode(planToSubplanJson(_plan())) as Map;
+      (file['plan'] as Map)['startDateTime'] = 'soon';
+
+      expect(subplanFromJson(jsonEncode(file)).startDateTime, isNull);
+    });
+  });
+
+  test('foreign or future files are rejected', () {
+    expect(() => subplanFromJson('not json'), throwsFormatException);
+    expect(
+      () => subplanFromJson(jsonEncode({'format': 'other', 'version': 1})),
+      throwsFormatException,
+    );
+    expect(
+      () => subplanFromJson(
+        jsonEncode({
+          'format': subplanFormat,
+          'version': subplanVersion + 1,
+          'plan': {},
+        }),
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test('malformed plan bodies raise FormatException, not TypeError', () {
+    // gfLow required but missing / wrong type -> cast failure becomes a
+    // FormatException instead of escaping as a raw TypeError.
+    expect(
+      () => subplanFromJson(
+        jsonEncode({
+          'format': subplanFormat,
+          'version': subplanVersion,
+          'plan': {'name': 'x', 'gfLow': 'not-a-number', 'gfHigh': 80},
+        }),
+      ),
+      throwsFormatException,
+    );
+    // Tanks is not a list.
+    expect(
+      () => subplanFromJson(
+        jsonEncode({
+          'format': subplanFormat,
+          'version': subplanVersion,
+          'plan': {'name': 'x', 'gfLow': 40, 'gfHigh': 80, 'tanks': 'nope'},
+        }),
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test('a segment referencing an unknown tank is rejected', () {
+    expect(
+      () => subplanFromJson(
+        jsonEncode({
+          'format': subplanFormat,
+          'version': subplanVersion,
+          'plan': {
+            'name': 'x',
+            'gfLow': 40,
+            'gfHigh': 80,
+            'tanks': [
+              {'key': 'back', 'o2': 21, 'he': 0, 'role': 'backGas', 'order': 0},
+            ],
+            'segments': [
+              {
+                'type': 'bottom',
+                'startDepth': 30,
+                'endDepth': 30,
+                'durationSeconds': 1200,
+                'tankKey': 'ghost',
+                'o2': 21,
+                'he': 0,
+                'order': 0,
+              },
+            ],
+          },
+        }),
+      ),
+      throwsFormatException,
+    );
+  });
+
+  group('segment diveModeOverride decoding', () {
+    /// A minimal v2 file with one segment; [override] is written verbatim as
+    /// the segment's `diveModeOverride` (omitted when null).
+    String fileWithOverride(Object? override) => jsonEncode({
+      'format': subplanFormat,
+      'version': subplanVersion,
+      'plan': {
+        'name': 'x',
+        'mode': 'ccr',
+        'gfLow': 40,
+        'gfHigh': 80,
+        'tanks': [
+          {'key': 'back', 'o2': 21, 'he': 0, 'role': 'backGas', 'order': 0},
+        ],
+        'segments': [
+          {
+            'targetDepth': 30,
+            'durationSeconds': 1200,
+            'tankKey': 'back',
+            'o2': 21,
+            'he': 0,
+            'order': 0,
+            'diveModeOverride': ?override,
+          },
+        ],
+      },
+    });
+
+    test('a known PlanMode name is mapped onto the enum', () {
+      final plan = subplanFromJson(fileWithOverride('ccr'));
+
+      expect(plan.segments.single.diveModeOverride, domain.PlanMode.ccr);
+    });
+
+    test('an OC bailout segment inside a CCR plan keeps its override', () {
+      final plan = subplanFromJson(fileWithOverride('oc'));
+
+      expect(plan.mode, domain.PlanMode.ccr);
+      expect(plan.segments.single.diveModeOverride, domain.PlanMode.oc);
+    });
+
+    test('an unknown mode name decodes to null', () {
+      final plan = subplanFromJson(fileWithOverride('rebreather'));
+
+      expect(plan.segments.single.diveModeOverride, isNull);
+    });
+
+    test('a non-string value decodes to null', () {
+      final plan = subplanFromJson(fileWithOverride(1));
+
+      expect(plan.segments.single.diveModeOverride, isNull);
+    });
+
+    test('an absent override decodes to null', () {
+      final plan = subplanFromJson(fileWithOverride(null));
+
+      expect(plan.segments.single.diveModeOverride, isNull);
+    });
+  });
+
+  test('a suit inflation bottle in a file is left out (#4243)', () {
+    final base = _plan();
+    final original = base.copyWith(
+      tanks: [
+        const DiveTank(
+          id: 'suit',
+          volume: 0.85,
+          gasMix: GasMix(o2: 21),
+          role: TankRole.suitInflation,
+          order: 2,
+        ),
+        ...base.tanks,
+      ],
+      segments: [
+        base.segments.first.copyWith(tankId: 'suit'),
+        ...base.segments.skip(1),
+      ],
+    );
+
+    final restored = subplanFromJson(planToSubplanJson(original));
+
+    expect(restored.tanks, hasLength(base.tanks.length));
+    expect(
+      restored.tanks.map((t) => t.role),
+      isNot(contains(TankRole.suitInflation)),
+    );
+    final tankIds = {for (final t in restored.tanks) t.id};
+    expect(restored.segments.every((s) => tankIds.contains(s.tankId)), isTrue);
+  });
+}

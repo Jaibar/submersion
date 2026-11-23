@@ -1,0 +1,367 @@
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import 'package:submersion/core/buoyancy/body_composition.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/environment_enum_display.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/equipment_picker_sheet.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/equipment_set_picker_sheet.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_set.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_status_indicator.dart';
+import 'package:submersion/features/tank_presets/domain/entities/tank_preset_entity.dart';
+import 'package:submersion/features/tank_presets/domain/services/tank_preset_visibility.dart';
+import 'package:submersion/features/tank_presets/presentation/providers/tank_preset_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/forms/number_field.dart';
+
+/// The rig inputs for a weight prediction: gear chips (with set/item
+/// pickers), tank preset rows, water type, body weight, and optional height
+/// (centimetres, or feet and inches under imperial depth units). Shared by
+/// the Weight Planner tool; the plan editor derives tanks/water from the plan.
+class RigComposer extends ConsumerWidget {
+  final List<EquipmentItem> gear;
+  final List<TankPresetEntity> tanks;
+  final WaterType waterType;
+  final TextEditingController bodyWeightController;
+  final TextEditingController heightCmController;
+  final TextEditingController heightFeetController;
+  final TextEditingController heightInchesController;
+  final TextEditingController bodyFatController;
+
+  /// The body fat the prediction assumes when the field is left blank, as
+  /// a whole percentage; null hides the readout (the profile lacks the sex
+  /// or birth year that makes it worth showing).
+  final int? bodyFatEstimate;
+
+  /// BMI derived from the entered weight and height; null hides the readout.
+  final double? bmi;
+  final UnitFormatter units;
+  final bool showSaveBodyWeight;
+  final ValueChanged<EquipmentItem> onGearAdded;
+  final void Function(EquipmentSet set, List<EquipmentItem> items)
+  onGearSetAdded;
+  final ValueChanged<EquipmentItem> onGearRemoved;
+
+  /// Ids in [gear] that are parts of an assembly also in [gear]; they show
+  /// inside the assembly's chip as a count rather than as chips of their
+  /// own (issue #1487).
+  final Set<String> partIds;
+
+  /// Number of parts under each assembly id, for the chip label.
+  final Map<String, int> partCounts;
+  final ValueChanged<TankPresetEntity> onTankAdded;
+  final ValueChanged<int> onTankRemoved;
+  final void Function(int index, TankPresetEntity preset) onTankChanged;
+  final ValueChanged<WaterType> onWaterChanged;
+  final VoidCallback onSaveBodyWeight;
+  final VoidCallback onChanged;
+
+  const RigComposer({
+    super.key,
+    required this.gear,
+    required this.tanks,
+    required this.waterType,
+    required this.bodyWeightController,
+    required this.heightCmController,
+    required this.heightFeetController,
+    required this.heightInchesController,
+    required this.bodyFatController,
+    this.bodyFatEstimate,
+    this.bmi,
+    required this.units,
+    required this.showSaveBodyWeight,
+    required this.onGearAdded,
+    required this.onGearSetAdded,
+    required this.onGearRemoved,
+    this.partIds = const {},
+    this.partCounts = const {},
+    required this.onTankAdded,
+    required this.onTankRemoved,
+    required this.onTankChanged,
+    required this.onWaterChanged,
+    required this.onSaveBodyWeight,
+    required this.onChanged,
+  });
+
+  void _showGearPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => EquipmentPickerSheet(
+          scrollController: scrollController,
+          selectedEquipmentIds: gear.map((e) => e.id).toSet(),
+          hideSpare: true,
+          hideAssemblyParts: true,
+          onEquipmentSelected: (equipment) {
+            onGearAdded(equipment);
+            Navigator.of(context).pop();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _showSetPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => EquipmentSetPickerSheet(
+          scrollController: scrollController,
+          requireGear: true,
+          onSetSelected: (set, items) {
+            onGearSetAdded(set, items);
+            Navigator.of(context).pop();
+          },
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    // `value`, not `valueOrNull`: hiding a preset reloads tankPresetsProvider
+    // through its settings dependency, and only `value` keeps the previous
+    // list until the filtered one lands (see async_value_reload_test.dart).
+    final visiblePresets = ref.watch(tankPresetsProvider).value ?? const [];
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Wrap, not Row: the two action labels are unconstrained and in
+            // longer locales ("Set verwenden", "Ausrüstung hinzufügen") they
+            // squeeze the title to nothing and overflow the row. Wrapping keeps
+            // every label readable and drops the actions to a second line only
+            // when they genuinely do not fit.
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              children: [
+                Text(
+                  context.l10n.equipment_appBar_title,
+                  style: theme.textTheme.titleMedium,
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.inventory_2, size: 18),
+                  label: Text(context.l10n.tools_weight_useSet),
+                  onPressed: () => _showSetPicker(context),
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 18),
+                  label: Text(context.l10n.tools_weight_addGear),
+                  onPressed: () => _showGearPicker(context),
+                ),
+              ],
+            ),
+            if (gear.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  context.l10n.tools_weight_noGear,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final item in gear)
+                    if (!partIds.contains(item.id))
+                      InputChip(
+                        avatar: ServiceStatusIndicatorFor(
+                          equipmentId: item.id,
+                          density: ServiceIndicatorDensity.dot,
+                        ),
+                        label: Text(switch (partCounts[item.id]) {
+                          final n? when n > 0 =>
+                            context.l10n.equipment_assemblyChip_label(
+                              n,
+                              item.name,
+                            ),
+                          _ => item.name,
+                        }),
+                        onDeleted: () => onGearRemoved(item),
+                      ),
+                ],
+              ),
+            const SizedBox(height: 12),
+            // Same overflow shape as the equipment header above.
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              children: [
+                Text(
+                  context.l10n.tools_weight_tanks,
+                  style: theme.textTheme.titleMedium,
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 18),
+                  label: Text(context.l10n.tools_weight_addTank),
+                  onPressed: visiblePresets.isEmpty
+                      ? null
+                      : () => onTankAdded(visiblePresets.first),
+                ),
+              ],
+            ),
+            // Each tank keeps its own preset in its dropdown even after the
+            // diver hides it (issue #2305), without offering it to the
+            // other tanks; adding a tank offers visible presets only.
+            for (final (i, presets) in [
+              for (var i = 0; i < tanks.length; i++)
+                (i, withKeptTankPresets(visiblePresets, [tanks[i].name])),
+            ])
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<TankPresetEntity>(
+                      initialValue: presets
+                          .where((p) => p.name == tanks[i].name)
+                          .firstOrNull,
+                      items: [
+                        for (final preset in presets)
+                          DropdownMenuItem(
+                            value: preset,
+                            child: Text(preset.displayName),
+                          ),
+                      ],
+                      onChanged: (preset) {
+                        if (preset != null) onTankChanged(i, preset);
+                      },
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: tanks.length > 1 ? () => onTankRemoved(i) : null,
+                  ),
+                ],
+              ),
+            const SizedBox(height: 12),
+            Text(
+              context.l10n.tools_weight_waterType,
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            SegmentedButton<WaterType>(
+              segments: [
+                for (final type in WaterType.values)
+                  ButtonSegment(
+                    value: type,
+                    label: Text(type.localizedName(context.l10n)),
+                  ),
+              ],
+              selected: {waterType},
+              onSelectionChanged: (selection) =>
+                  onWaterChanged(selection.first),
+            ),
+            const SizedBox(height: 12),
+            NumberField(
+              controller: bodyWeightController,
+              decoration: InputDecoration(
+                labelText: context.l10n.tools_weight_bodyWeightOptional,
+                suffixText: units.weightSymbol,
+                suffixIcon: showSaveBodyWeight
+                    ? IconButton(
+                        icon: const Icon(Icons.save_outlined),
+                        tooltip: context.l10n.tools_weight_saveToProfile,
+                        onPressed: onSaveBodyWeight,
+                      )
+                    : null,
+              ),
+              onChanged: (_) => onChanged(),
+            ),
+            const SizedBox(height: 12),
+            _heightFields(context),
+            const SizedBox(height: 12),
+            NumberField(
+              controller: bodyFatController,
+              decoration: InputDecoration(
+                labelText: context.l10n.bodyWeight_bodyFatLabel,
+                helperText: bodyFatEstimate == null
+                    ? null
+                    : context.l10n.bodyWeight_bodyFatEstimate(bodyFatEstimate!),
+              ),
+              check: (value) => BodyComposition.isPlausibleBodyFat(value)
+                  ? null
+                  : context.l10n.bodyWeight_bodyFatRange,
+              onChanged: (_) => onChanged(),
+            ),
+            if (bmi != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  context.l10n.tools_weight_bmiHelper(
+                    NumberFormat.decimalPatternDigits(
+                      locale: Localizations.localeOf(context).toString(),
+                      decimalDigits: 1,
+                    ).format(bmi),
+                  ),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Height entry in the diver's units. Mirrors the body-weight history
+  /// dialog: one centimetre field, or feet and inches side by side.
+  Widget _heightFields(BuildContext context) {
+    if (units.heightIsMetric) {
+      return NumberField(
+        controller: heightCmController,
+        decoration: InputDecoration(
+          labelText: context.l10n.tools_weight_heightOptional,
+          suffixText: 'cm',
+        ),
+        onChanged: (_) => onChanged(),
+      );
+    }
+    return Row(
+      children: [
+        Expanded(
+          child: NumberField(
+            controller: heightFeetController,
+            decoration: InputDecoration(
+              labelText: context.l10n.bodyWeight_heightFeetLabel,
+            ),
+            onChanged: (_) => onChanged(),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: NumberField(
+            controller: heightInchesController,
+            decoration: InputDecoration(
+              labelText: context.l10n.bodyWeight_heightInchesLabel,
+            ),
+            onChanged: (_) => onChanged(),
+          ),
+        ),
+      ],
+    );
+  }
+}

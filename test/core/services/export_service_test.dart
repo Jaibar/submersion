@@ -5,6 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/services/export/export_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank_pressure_export.dart';
+
+import '../../helpers/mock_channels.dart';
+import '../../helpers/tank_pressure_export_fixtures.dart';
 
 void main() {
   late ExportService exportService;
@@ -21,7 +25,10 @@ void main() {
         .setMockMethodCallHandler(
           const MethodChannel('plugins.flutter.io/path_provider'),
           (MethodCall methodCall) async {
-            if (methodCall.method == 'getApplicationDocumentsDirectory') {
+            // The documents directory exports land in, and the temp space
+            // the full backup is built in (issue #4249).
+            if (methodCall.method == 'getApplicationDocumentsDirectory' ||
+                methodCall.method == 'getTemporaryDirectory') {
               return testDir.path;
             }
             return null;
@@ -38,6 +45,7 @@ void main() {
           },
         );
   });
+  tearDownAll(clearPathAndShareChannelMocks);
 
   tearDownAll(() async {
     // Clean up the temp directory
@@ -56,6 +64,27 @@ void main() {
   }
 
   group('CSV Injection Prevention', () {
+    test(
+      'exportTripsToCsv writes Markdown notes as plain words (#3683)',
+      () async {
+        final now = DateTime.now();
+        final trip = Trip(
+          id: 'test-md',
+          name: 'Bonaire',
+          startDate: DateTime(2024, 1, 1),
+          endDate: DateTime(2024, 1, 7),
+          notes: '# Plan\n**Bring torch**',
+          createdAt: now,
+          updatedAt: now,
+        );
+        final csvOutput = await readCsvFromPath(
+          await exportService.exportTripsToCsv([trip]),
+        );
+        expect(csvOutput, contains('Plan Bring torch'));
+        expect(csvOutput, isNot(contains('**')));
+      },
+    );
+
     test('exportTripsToCsv sanitizes formula injection in trip name', () async {
       // Create a trip with a malicious name starting with '='
       final now = DateTime.now();
@@ -252,23 +281,20 @@ void main() {
         ],
       );
 
-      final tankPressures = <String, Map<String, List<TankPressurePoint>>>{
-        'dive-1': {
+      final tankPressures = <String, DiveTankPressureExport>{
+        'dive-1': testPressureExport({
           'tank-a': [
             const TankPressurePoint(
-              id: 'tp1',
               tankId: 'tank-a',
               timestamp: 0,
               pressure: 200.0,
             ),
             const TankPressurePoint(
-              id: 'tp2',
               tankId: 'tank-a',
               timestamp: 120,
               pressure: 175.0,
             ),
             const TankPressurePoint(
-              id: 'tp3',
               tankId: 'tank-a',
               timestamp: 240,
               pressure: 150.0,
@@ -276,25 +302,22 @@ void main() {
           ],
           'tank-b': [
             const TankPressurePoint(
-              id: 'tp4',
               tankId: 'tank-b',
               timestamp: 0,
               pressure: 190.0,
             ),
             const TankPressurePoint(
-              id: 'tp5',
               tankId: 'tank-b',
               timestamp: 120,
               pressure: 165.0,
             ),
             const TankPressurePoint(
-              id: 'tp6',
               tankId: 'tank-b',
               timestamp: 240,
               pressure: 140.0,
             ),
           ],
-        },
+        }),
       };
 
       final path = await exportService.exportDivesToUddf([
@@ -306,9 +329,12 @@ void main() {
       expect(await uddfFile.exists(), isTrue);
       final xml = await uddfFile.readAsString();
 
-      // Should contain tankpressure elements (simple export omits ref
-      // since it doesn't export <tankdata> elements with matching ids)
+      // Each tankpressure names the <tankdata> the export declares for its
+      // cylinder (issue #1874).
       expect(xml, contains('tankpressure'));
+      expect(xml, contains('id="tank_tank-a"'));
+      expect(xml, contains('ref="tank_tank-a"'));
+      expect(xml, contains('ref="tank_tank-b"'));
 
       // Pressure values should be in Pascal (bar * 100000)
       expect(xml, contains('20000000')); // 200.0 bar
@@ -333,23 +359,21 @@ void main() {
         ],
       );
 
-      final tankPressures = <String, Map<String, List<TankPressurePoint>>>{
-        'dive-full': {
+      final tankPressures = <String, DiveTankPressureExport>{
+        'dive-full': testPressureExport({
           'tank-full': [
             const TankPressurePoint(
-              id: 'tp-f1',
               tankId: 'tank-full',
               timestamp: 0,
               pressure: 200.0,
             ),
             const TankPressurePoint(
-              id: 'tp-f2',
               tankId: 'tank-full',
               timestamp: 120,
               pressure: 150.0,
             ),
           ],
-        },
+        }),
       };
 
       final path = await exportService.exportAllDataToUddf(

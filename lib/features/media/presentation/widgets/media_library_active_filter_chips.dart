@@ -1,0 +1,254 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/features/marine_life/presentation/species_display.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/media_library_filter.dart';
+import 'package:submersion/features/media/presentation/helpers/media_attachment_labels.dart';
+import 'package:submersion/features/media/presentation/helpers/media_source_labels.dart';
+import 'package:submersion/features/media/presentation/providers/media_library_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_smart_album_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/media_library_filter_labels.dart';
+import 'package:submersion/features/media/presentation/widgets/media_smart_album_name_dialog.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// The strip of removable chips below the library toolbar. Renders nothing
+/// while the filter is empty, so the section is uncluttered at rest and
+/// self-explanatory the moment anything is filtered.
+class MediaLibraryActiveFilterChips extends ConsumerWidget {
+  const MediaLibraryActiveFilterChips({super.key});
+
+  void _update(
+    WidgetRef ref,
+    MediaLibraryFilter Function(MediaLibraryFilter) change,
+  ) {
+    final notifier = ref.read(mediaLibraryFilterProvider.notifier);
+    notifier.state = change(notifier.state);
+  }
+
+  Future<void> _saveAlbum(BuildContext context, WidgetRef ref) async {
+    final name = await showMediaSmartAlbumNameDialog(context);
+    if (name == null) return;
+    await ref
+        .read(mediaSmartAlbumRepositoryProvider)
+        .create(name: name, filter: ref.read(mediaLibraryFilterProvider));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.media_smartAlbum_saved)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final filter = ref.watch(mediaLibraryFilterProvider);
+    if (filter.isEmpty) return const SizedBox.shrink();
+
+    final sites = ref.watch(sitesProvider).value ?? const [];
+    final trips = ref.watch(allTripsProvider).value ?? const [];
+    final species = ref.watch(allSpeciesProvider).value ?? const [];
+    final tags = ref.watch(tagsProvider).value ?? const <Tag>[];
+    final units = ref.watch(unitFormatterProvider);
+
+    Widget chip(String label, VoidCallback onClear) {
+      return InputChip(
+        label: Text(label),
+        deleteIcon: const Icon(Icons.clear, size: 18),
+        onDeleted: onClear,
+      );
+    }
+
+    final chips = <Widget>[];
+
+    final type = filter.mediaType;
+    if (type != null) {
+      chips.add(
+        chip(
+          type == MediaType.photo
+              ? l10n.media_library_filter_photos
+              : l10n.media_library_filter_videos,
+          () => _update(ref, (f) => f.copyWith(mediaType: null)),
+        ),
+      );
+    }
+
+    // One chip for the whole facet (issue #4224), kinds in sheet order.
+    final attachedTo = filter.attachedTo;
+    if (attachedTo.isNotEmpty) {
+      final kinds = [
+        for (final kind in MediaAttachmentKind.values)
+          if (attachedTo.contains(kind)) mediaAttachmentKindLabel(l10n, kind),
+      ].join(l10n.media_library_filter_listSeparator);
+      chips.add(
+        chip(
+          l10n.media_library_filter_attachedToChip(kinds),
+          () => _update(ref, (f) => f.copyWith(attachedTo: const {})),
+        ),
+      );
+    }
+
+    final siteId = filter.siteId;
+    if (siteId != null) {
+      final name =
+          sites.where((s) => s.id == siteId).firstOrNull?.name ??
+          l10n.media_library_filter_site;
+      chips.add(
+        chip(name, () => _update(ref, (f) => f.copyWith(siteId: null))),
+      );
+    }
+
+    final tripId = filter.tripId;
+    if (tripId != null) {
+      final name =
+          trips.where((t) => t.id == tripId).firstOrNull?.name ??
+          l10n.media_library_filter_trip;
+      chips.add(
+        chip(name, () => _update(ref, (f) => f.copyWith(tripId: null))),
+      );
+    }
+
+    final speciesId = filter.speciesId;
+    if (speciesId != null) {
+      final name =
+          species
+              .where((s) => s.id == speciesId)
+              .firstOrNull
+              ?.localizedCommonName(l10n) ??
+          l10n.media_library_filter_species;
+      chips.add(
+        chip(name, () => _update(ref, (f) => f.copyWith(speciesId: null))),
+      );
+    }
+
+    // One chip per selected tag (issue #1970), each clearing only itself.
+    for (final tagId in filter.tagIds) {
+      final name =
+          tags.where((t) => t.id == tagId).firstOrNull?.name ??
+          l10n.media_library_filter_tags;
+      chips.add(
+        chip(
+          name,
+          () => _update(
+            ref,
+            (f) =>
+                f.copyWith(tagIds: f.tagIds.where((id) => id != tagId).toSet()),
+          ),
+        ),
+      );
+    }
+
+    // No one tagged (issue #4148), which the sheet keeps apart from people.
+    if (filter.noPeople) {
+      chips.add(
+        chip(
+          l10n.media_library_filter_noPeople,
+          () => _update(ref, (f) => f.copyWith(noPeople: false)),
+        ),
+      );
+    }
+
+    // People (issue #1745): Me, then one chip per selected buddy.
+    if (filter.includeMe) {
+      chips.add(
+        chip(
+          l10n.media_people_me,
+          () => _update(ref, (f) => f.copyWith(includeMe: false)),
+        ),
+      );
+    }
+    // Buddy chips wait for the buddy list: drawn before it loads, every
+    // selected buddy would read as removed and then change its label.
+    final buddies = ref.watch(allBuddiesProvider).value;
+    for (final buddyId
+        in buddies == null ? const <String>[] : filter.buddyIds) {
+      final name =
+          buddies!.where((b) => b.id == buddyId).firstOrNull?.name ??
+          l10n.media_people_removedBuddy;
+      chips.add(
+        chip(
+          name,
+          () => _update(
+            ref,
+            (f) => f.copyWith(
+              buddyIds: f.buddyIds.where((id) => id != buddyId).toSet(),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (filter.fromDate != null || filter.toDate != null) {
+      chips.add(
+        chip(
+          formatFilterDateRange(units, filter.fromDate, filter.toDate),
+          () => _update(ref, (f) => f.copyWith(fromDate: null, toDate: null)),
+        ),
+      );
+    }
+
+    // Set by the Sources section's "browse this source" as well as by the
+    // filter sheet's Source row. Labelled through the same helper the Sources
+    // list uses, so the chip names the source the way the row the user just
+    // tapped did.
+    final sourceType = filter.sourceType;
+    if (sourceType != null) {
+      chips.add(
+        chip(
+          mediaSourceLabel(context, sourceType),
+          () => _update(ref, (f) => f.copyWith(sourceType: null)),
+        ),
+      );
+    }
+
+    if (filter.health == MediaHealthFilter.missing) {
+      chips.add(
+        chip(
+          l10n.media_library_filter_missing,
+          () => _update(ref, (f) => f.copyWith(health: null)),
+        ),
+      );
+    }
+
+    if (filter.notPlacedInDive) {
+      chips.add(
+        chip(
+          l10n.media_library_filter_notPlacedInDive,
+          () => _update(ref, (f) => f.copyWith(notPlacedInDive: false)),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          ...chips,
+          ActionChip(
+            label: Text(l10n.media_library_filter_clear),
+            onPressed: () =>
+                ref.read(mediaLibraryFilterProvider.notifier).state =
+                    MediaLibraryFilter.none,
+          ),
+          // Saving "everything" as an album would name nothing, so this only
+          // appears once the filter says something. The whole strip is
+          // already gated on that.
+          ActionChip(
+            avatar: const Icon(Icons.bookmark_add_outlined, size: 18),
+            label: Text(l10n.media_smartAlbum_save),
+            onPressed: () => _saveAlbum(context, ref),
+          ),
+        ],
+      ),
+    );
+  }
+}

@@ -4,7 +4,35 @@ import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy_with_dive_count.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_agency.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_level.dart';
+
+final _customCatalog = CertificationCatalog(
+  agencies: [
+    CustomCertificationAgency(
+      id: 'club-x',
+      diverId: 'a',
+      name: 'Club X',
+      colorArgb: 0xFF3B82F6,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    ),
+  ],
+  levels: [
+    CustomCertificationLevel(
+      id: 'ice-diver',
+      diverId: 'a',
+      agencyId: 'padi',
+      name: 'Ice Diver',
+      isProgression: false,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    ),
+  ],
+);
 
 void main() {
   // A UnitFormatter backed by metric default settings.
@@ -16,13 +44,13 @@ void main() {
     name: 'John Doe',
     email: 'john@example.com',
     phone: '+1234567890',
-    certificationLevel: CertificationLevel.advancedOpenWater,
-    certificationAgency: CertificationAgency.padi,
+    certificationLevel: CertificationLevel.advancedOpenWater.name,
+    certificationAgency: CertificationAgency.padi.name,
     notes: 'Great dive buddy',
     createdAt: DateTime(2024, 1, 1),
     updatedAt: DateTime(2024, 1, 1),
   );
-  final testEntity = (buddy: testBuddy, diveCount: 15);
+  final testEntity = BuddyWithDiveCount(buddy: testBuddy, diveCount: 15);
 
   group('BuddyFieldAdapter.allFields', () {
     test('has expected count matching BuddyField.values', () {
@@ -107,14 +135,14 @@ void main() {
     test('returns certification level', () {
       expect(
         adapter.extractValue(BuddyField.certificationLevel, testEntity),
-        equals(CertificationLevel.advancedOpenWater),
+        equals(CertificationLevel.advancedOpenWater.name),
       );
     });
 
     test('returns certification agency', () {
       expect(
         adapter.extractValue(BuddyField.certificationAgency, testEntity),
-        equals(CertificationAgency.padi),
+        equals(CertificationAgency.padi.name),
       );
     });
 
@@ -122,6 +150,17 @@ void main() {
       expect(
         adapter.extractValue(BuddyField.diveCount, testEntity),
         equals(15),
+      );
+    });
+
+    test('returns Markdown notes as plain words', () {
+      final entity = BuddyWithDiveCount(
+        buddy: testBuddy.copyWith(notes: '# Plan\n**Bring torch**'),
+        diveCount: 1,
+      );
+      expect(
+        adapter.extractValue(BuddyField.notes, entity),
+        'Plan\nBring torch',
       );
     });
 
@@ -140,7 +179,7 @@ void main() {
         createdAt: DateTime(2024, 1, 1),
         updatedAt: DateTime(2024, 1, 1),
       );
-      final entity = (buddy: buddy, diveCount: 0);
+      final entity = BuddyWithDiveCount(buddy: buddy, diveCount: 0);
       expect(adapter.extractValue(BuddyField.email, entity), isNull);
     });
 
@@ -151,7 +190,7 @@ void main() {
         createdAt: DateTime(2024, 1, 1),
         updatedAt: DateTime(2024, 1, 1),
       );
-      final entity = (buddy: buddy, diveCount: 0);
+      final entity = BuddyWithDiveCount(buddy: buddy, diveCount: 0);
       expect(adapter.extractValue(BuddyField.phone, entity), isNull);
     });
 
@@ -162,7 +201,7 @@ void main() {
         createdAt: DateTime(2024, 1, 1),
         updatedAt: DateTime(2024, 1, 1),
       );
-      final entity = (buddy: buddy, diveCount: 0);
+      final entity = BuddyWithDiveCount(buddy: buddy, diveCount: 0);
       expect(
         adapter.extractValue(BuddyField.certificationLevel, entity),
         isNull,
@@ -176,7 +215,7 @@ void main() {
         createdAt: DateTime(2024, 1, 1),
         updatedAt: DateTime(2024, 1, 1),
       );
-      final entity = (buddy: buddy, diveCount: 0);
+      final entity = BuddyWithDiveCount(buddy: buddy, diveCount: 0);
       expect(
         adapter.extractValue(BuddyField.certificationAgency, entity),
         isNull,
@@ -190,7 +229,7 @@ void main() {
         createdAt: DateTime(2024, 1, 1),
         updatedAt: DateTime(2024, 1, 1),
       );
-      final entity = (buddy: buddy, diveCount: 0);
+      final entity = BuddyWithDiveCount(buddy: buddy, diveCount: 0);
       expect(adapter.extractValue(BuddyField.notes, entity), equals(''));
     });
   });
@@ -226,25 +265,25 @@ void main() {
       );
     });
 
-    test('formats certification level using enum name', () {
+    test('formats certification level using its display name', () {
       expect(
         adapter.formatValue(
           BuddyField.certificationLevel,
-          CertificationLevel.advancedOpenWater,
+          CertificationLevel.advancedOpenWater.name,
           units,
         ),
-        equals('advancedOpenWater'),
+        equals('Advanced Open Water'),
       );
     });
 
-    test('formats certification agency using enum name', () {
+    test('formats certification agency using its display name', () {
       expect(
         adapter.formatValue(
           BuddyField.certificationAgency,
-          CertificationAgency.padi,
+          CertificationAgency.padi.name,
           units,
         ),
-        equals('padi'),
+        equals('PADI'),
       );
     });
 
@@ -426,5 +465,76 @@ void main() {
         }
       }
     });
+  });
+
+  group('lastDive and display names', () {
+    test('lastDive reads the aggregate and formats as a date', () {
+      final entry = BuddyWithDiveCount(
+        buddy: testBuddy,
+        diveCount: 15,
+        lastDiveAt: DateTime(2024, 3, 5),
+      );
+      final value = BuddyFieldAdapter.instance.extractValue(
+        BuddyField.lastDive,
+        entry,
+      );
+      expect(value, DateTime(2024, 3, 5));
+      expect(
+        BuddyFieldAdapter.instance.formatValue(
+          BuddyField.lastDive,
+          value,
+          units,
+        ),
+        units.formatDate(DateTime(2024, 3, 5)),
+      );
+      expect(BuddyField.lastDive.categoryName, 'statistics');
+      expect(BuddyField.lastDive.sortable, isTrue);
+      expect(BuddyField.lastDive.icon, Icons.history);
+    });
+
+    test('certification level and agency format as display names', () {
+      expect(
+        BuddyFieldAdapter.instance.formatValue(
+          BuddyField.certificationLevel,
+          CertificationLevel.advancedOpenWater.name,
+          units,
+        ),
+        'Advanced Open Water',
+      );
+      expect(
+        BuddyFieldAdapter.instance.formatValue(
+          BuddyField.certificationAgency,
+          CertificationAgency.padi.name,
+          units,
+        ),
+        'PADI',
+      );
+    });
+  });
+
+  test('formats custom agencies and levels by name (issue #690)', () {
+    final adapter = BuddyFieldAdapter.withCatalog(_customCatalog);
+    const units = UnitFormatter(AppSettings());
+    expect(
+      adapter.formatValue(BuddyField.certificationAgency, 'club-x', units),
+      'Club X',
+    );
+    expect(
+      adapter.formatValue(BuddyField.certificationLevel, 'ice-diver', units),
+      'Ice Diver',
+    );
+    expect(
+      adapter.formatValue(BuddyField.certificationAgency, 'padi', units),
+      'PADI',
+    );
+    // The shared instance knows built-ins only.
+    expect(
+      BuddyFieldAdapter.instance.formatValue(
+        BuddyField.certificationAgency,
+        'club-x',
+        units,
+      ),
+      'Unknown agency',
+    );
   });
 }

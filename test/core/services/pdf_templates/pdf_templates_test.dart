@@ -1,11 +1,26 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/pdf_templates.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_detailed.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_naui.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_padi.dart';
-import 'package:submersion/core/services/pdf_templates/pdf_template_professional.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_simple.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+/// Existing coverage pins the historical ISO rendering; #964 preference
+/// coverage lives in pdf_date_preference_test.dart.
+/// Metric formatter: these tests predate unit support and assert on the
+/// metric output they always produced.
+const testUnits = UnitFormatter(AppSettings());
+
+final isoDates = PdfDateFormatter(
+  dateFormat: DateFormatPreference.yyyymmdd,
+  timeFormat: TimeFormat.twentyFourHour,
+);
 
 void main() {
   final dives = [
@@ -20,7 +35,7 @@ void main() {
       waterTemp: 22.0,
       tanks: const [],
       profile: const [],
-      equipment: const [],
+      gear: looseGear(const []),
       notes: 'Great dive!',
       photoIds: const [],
       sightings: const [],
@@ -36,7 +51,7 @@ void main() {
       waterTemp: 24.0,
       tanks: const [],
       profile: const [],
-      equipment: const [],
+      gear: looseGear(const []),
       notes: '',
       photoIds: const [],
       sightings: const [],
@@ -66,7 +81,7 @@ void main() {
         ),
       ],
       profile: const [],
-      equipment: const [],
+      gear: looseGear(const []),
       notes: 'Dive with tank data',
       photoIds: const [],
       sightings: const [],
@@ -81,6 +96,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: divesWithTanks,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -90,6 +107,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: divesWithTanks,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -99,6 +118,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: divesWithTanks,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -110,6 +131,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: dives,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -119,15 +142,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: dives,
         pageSize: PdfPageSize.a4,
-      );
-      expect(bytes, isNotEmpty);
-    });
-
-    test('PdfTemplateProfessional generates PDF with bottomTime', () async {
-      final template = PdfTemplateProfessional();
-      final bytes = await template.buildPdf(
-        dives: dives,
-        pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -137,6 +153,8 @@ void main() {
       final bytes = await template.buildPdf(
         dives: dives,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
     });
@@ -146,8 +164,20 @@ void main() {
       final bytes = await template.buildPdf(
         dives: dives,
         pageSize: PdfPageSize.a4,
+        dates: isoDates,
+        units: testUnits,
       );
       expect(bytes, isNotEmpty);
+    });
+  });
+
+  group('template roster', () {
+    test('the professional template is gone', () {
+      expect(
+        PdfTemplate.values.map((t) => t.name),
+        isNot(contains('professional')),
+      );
+      expect(PdfTemplate.values, hasLength(4));
     });
   });
 }

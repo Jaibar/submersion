@@ -70,7 +70,7 @@ class CsvImportParser implements ImportParser {
     final resolvedMapping = customMappingOverride ?? customMapping;
 
     // Stage 3: Build ImportConfiguration.
-    final config = _buildConfiguration(
+    final (config, mappingWarnings) = _buildConfiguration(
       parsedCsv: parsedCsv,
       detection: detection,
       resolvedMapping: resolvedMapping,
@@ -90,10 +90,16 @@ class CsvImportParser implements ImportParser {
     }
 
     // Stages 4-5: Transform + Correlate.
-    return _pipeline.execute(
+    final payload = _pipeline.execute(
       primaryCsv: parsedCsv,
       profileCsv: profileCsv,
       config: config,
+    );
+    if (mappingWarnings.isEmpty) return payload;
+    return ImportPayload(
+      entities: payload.entities,
+      warnings: [...mappingWarnings, ...payload.warnings],
+      metadata: payload.metadata,
     );
   }
 
@@ -101,13 +107,58 @@ class CsvImportParser implements ImportParser {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  /// Build an [ImportConfiguration] from the resolved mapping source.
+  /// Entity types imported when neither a preset nor the mapping asks for more.
+  static const _defaultEntityTypes = {
+    ImportEntityType.dives,
+    ImportEntityType.sites,
+  };
+
+  /// Target fields whose values only become linked records when the
+  /// correlator extracts the matching entity type. Without it a mapped site
+  /// column is dropped, a mapped buddy column stays free text (#1830), a
+  /// mapped tags column is dropped, and a dive type the mapper did not
+  /// recognise becomes a junction row pointing at no dive type (#2203).
+  /// 'site' is the legacy alias the correlator normalizes to 'siteName'.
+  /// 'gps' names a site on its own when the file has no site name column, so
+  /// it needs sites too; the dive keeps the pair either way (#2212).
+  /// MySSI's combined people column holds buddies and a dive centre (#3629).
+  static const _entityTypesForTargetField = {
+    'siteName': {ImportEntityType.sites},
+    'site': {ImportEntityType.sites},
+    'gps': {ImportEntityType.sites},
+    'buddy': {ImportEntityType.buddies},
+    'instructor': {ImportEntityType.buddies},
+    'diveCenter': {ImportEntityType.diveCenters},
+    'buddyInstructorCenter': {
+      ImportEntityType.buddies,
+      ImportEntityType.diveCenters,
+    },
+    'tags': {ImportEntityType.tags},
+    'diveType': {ImportEntityType.diveTypes},
+  };
+
+  /// [entityTypes] plus every type a column in [mappings] needs, so a
+  /// preset's or saved mapping's entity set cannot drift from its columns.
+  static Set<ImportEntityType> _withMappedEntityTypes(
+    Set<ImportEntityType> entityTypes,
+    Iterable<FieldMapping> mappings,
+  ) => {
+    ...entityTypes,
+    for (final mapping in mappings)
+      for (final column in mapping.columns)
+        ...?_entityTypesForTargetField[column.targetField],
+  };
+
+  /// Build an [ImportConfiguration] from the resolved mapping source, with
+  /// any warnings the mapping itself raised.
   ///
   /// Priority order:
   /// 1. Explicit custom mapping (user-provided).
   /// 2. Detected preset from pipeline Detect stage.
   /// 3. Auto-mapped from CSV headers using keyword matching.
-  ImportConfiguration _buildConfiguration({
+  ///
+  /// In every case the entity types are widened by [_withMappedEntityTypes].
+  (ImportConfiguration, List<ImportWarning>) _buildConfiguration({
     required ParsedCsv parsedCsv,
     required DetectionResult detection,
     required FieldMapping? resolvedMapping,
@@ -119,62 +170,96 @@ class CsvImportParser implements ImportParser {
     // Preserve entity types from the detected preset so buddies, tags, etc.
     // are still extracted even when the user customizes column mappings.
     if (resolvedMapping != null) {
-      return ImportConfiguration(
+      final config = ImportConfiguration(
         mappings: {'primary': resolvedMapping},
-        entityTypesToImport:
-            detection.matchedPreset?.supportedEntities ??
-            const {ImportEntityType.dives, ImportEntityType.sites},
+        entityTypesToImport: _withMappedEntityTypes(
+          detection.matchedPreset?.supportedEntities ?? _defaultEntityTypes,
+          [resolvedMapping],
+        ),
         timeInterpretation: timeInterpretation,
         specificUtcOffset: specificUtcOffset,
         sourceApp: options?.sourceApp,
       );
+      return (config, const []);
     }
 
     // Case 2: Pipeline detected a known preset.
     if (detection.isDetected && detection.matchedPreset != null) {
       final preset = detection.matchedPreset!;
-      return ImportConfiguration(
+      final config = ImportConfiguration(
         mappings: preset.mappings,
-        entityTypesToImport: preset.supportedEntities,
+        entityTypesToImport: _withMappedEntityTypes(
+          preset.supportedEntities,
+          preset.mappings.values,
+        ),
         sourceApp: preset.sourceApp ?? options?.sourceApp,
         preset: preset,
         timeInterpretation: timeInterpretation,
         specificUtcOffset: specificUtcOffset,
       );
+      return (config, const []);
     }
 
     // Case 3: No preset detected. Auto-map from headers using keywords.
-    final autoMapping = _autoMapFromHeaders(parsedCsv.headers);
-    return ImportConfiguration(
+    final (autoMapping, warnings) = _autoMapFromHeaders(parsedCsv.headers);
+    final config = ImportConfiguration(
       mappings: {'primary': autoMapping},
+      entityTypesToImport: _withMappedEntityTypes(_defaultEntityTypes, [
+        autoMapping,
+      ]),
       timeInterpretation: timeInterpretation,
       specificUtcOffset: specificUtcOffset,
       sourceApp: options?.sourceApp,
     );
+    return (config, warnings);
   }
 
   /// Build a [FieldMapping] from CSV headers using keyword matching.
   ///
   /// Scans each header for known patterns and maps it to the corresponding
-  /// Submersion target field.
-  FieldMapping _autoMapFromHeaders(List<String> headers) {
+  /// Submersion target field. The first column to claim a field keeps it: a
+  /// later column matching the same field would overwrite it row by row
+  /// (#1814), so it is left unmapped and reported in the returned warnings.
+  (FieldMapping, List<ImportWarning>) _autoMapFromHeaders(
+    List<String> headers,
+  ) {
     final columns = <ColumnMapping>[];
+    final warnings = <ImportWarning>[];
+    final columnByTarget = <String, String>{};
     for (final header in headers) {
-      final lower = header.toLowerCase().trim();
-      final target = _guessTargetField(lower);
-      if (target != null) {
-        columns.add(ColumnMapping(sourceColumn: header, targetField: target));
+      final target = _guessTargetField(header.toLowerCase().trim());
+      if (target == null) continue;
+
+      final claimedBy = columnByTarget[target];
+      if (claimedBy != null) {
+        warnings.add(
+          ImportWarning(
+            severity: ImportWarningSeverity.warning,
+            code: ImportWarningCode.columnsNotImported,
+            message:
+                'Column "$header" was not imported: column "$claimedBy" '
+                'already fills $target',
+            field: target,
+            names: [header],
+          ),
+        );
+        continue;
       }
+      columnByTarget[target] = header;
+      columns.add(ColumnMapping(sourceColumn: header, targetField: target));
     }
-    return FieldMapping(
+    final mapping = FieldMapping(
       name: 'Auto-detected',
       sourceApp: SourceApp.generic,
       columns: columns,
     );
+    return (mapping, warnings);
   }
 
   /// Match a lowercase header to a target field using keyword patterns.
   String? _guessTargetField(String header) {
+    // Dive name. Exact headers only: a bare "name" could be a site or buddy.
+    if (header == 'dive name' || header == 'title') return 'name';
     // Dive number.
     if (header.contains('dive') &&
         (header.contains('number') || header.contains('no'))) {
@@ -189,6 +274,8 @@ class CsvImportParser implements ImportParser {
     // Depth fields.
     if (header.contains('max') && header.contains('depth')) return 'maxDepth';
     if (header.contains('avg') && header.contains('depth')) return 'avgDepth';
+    // Runtime (total dive time), kept apart from the bottom time.
+    if (_isRuntime(header)) return 'runtime';
     // Duration.
     if (_isDuration(header)) return 'duration';
     // Temperature.
@@ -204,12 +291,25 @@ class CsvImportParser implements ImportParser {
       return 'diveMaster';
     }
     if (header == 'divemaster') return 'diveMaster';
+    // Visibility, ahead of rating so "Visibility Rating" cannot claim the
+    // rating field from a later "Rating" column. A distance in metres is the
+    // measured value; any other visibility header is the bucket label.
+    // A range end (issue #3226) must not be auto-mapped onto the
+    // measurement, and is taken only in metres: the value is stored as is,
+    // so a range in feet stays unmapped rather than landing 3.28x too large.
+    final isRangeMin = header.contains('visibility') && header.contains('min');
+    final isRangeMax = header.contains('visibility') && header.contains('max');
+    if (isRangeMin || isRangeMax) {
+      if (!_metresUnit.hasMatch(header)) return null;
+      return isRangeMin ? 'visibilityMinMeters' : 'visibilityMaxMeters';
+    }
+    if (header.contains('visibility')) {
+      return _metresUnit.hasMatch(header) ? 'visibilityMeters' : 'visibility';
+    }
     // Rating.
     if (header.contains('rating')) return 'rating';
     // Notes.
     if (header.contains('note')) return 'notes';
-    // Visibility.
-    if (header.contains('visibility')) return 'visibility';
     // Pressure.
     if (header.contains('start') && header.contains('pressure')) {
       return 'startPressure';
@@ -221,12 +321,16 @@ class CsvImportParser implements ImportParser {
     if (header.contains('tank') && header.contains('volume')) {
       return 'tankVolume';
     }
-    // Gas.
+    // Gas. Helium is matched whole, and a bracket must name a percentage:
+    // "weather" holds the letters, and "He Cost" and "He (bar)" are no gas
+    // fraction.
+    if (_heliumHeader.hasMatch(header)) return 'hePercent';
     if (header.contains('o2') || header.contains('oxygen')) return 'o2Percent';
-    // Computer info.
-    if (header.contains('computer')) return 'computer';
-    if (header.contains('serial')) return 'serialNumber';
-    if (header.contains('firmware')) return 'firmware';
+    // Computer info. Serial and firmware first: "Computer Serial" is not a
+    // model, and a model registers a dive computer on import.
+    if (header.contains('serial')) return 'diveComputerSerial';
+    if (header.contains('firmware')) return 'diveComputerFirmware';
+    if (header.contains('computer')) return 'diveComputerModel';
     // Gear.
     if (header.contains('suit')) return 'suit';
     if (header.contains('weight')) return 'weight';
@@ -235,7 +339,11 @@ class CsvImportParser implements ImportParser {
     // GPS.
     if (header.contains('gps')) return 'gps';
     // Weather.
-    if (header.contains('wind') && header.contains('speed')) return 'windSpeed';
+    if (header.contains('wind') && header.contains('speed')) {
+      // Stored in m/s, and no header unit converts to it, so a speed in any
+      // other unit would be saved wrong. Leave it for the diver to map.
+      return _namesNonMetricSpeedUnit(header) ? null : 'windSpeed';
+    }
     if (header.contains('wind') && header.contains('dir')) {
       return 'windDirection';
     }
@@ -260,8 +368,16 @@ class CsvImportParser implements ImportParser {
           !h.contains('surface') &&
           !h.contains('run'));
 
+  bool _isRuntime(String h) => h.contains('runtime') || h.contains('run time');
+
+  static final _nonMetricSpeedUnit = RegExp(r'km|kph|kt|knot|mph');
+
+  static final _metresUnit = RegExp(r'\(m\)|\[m\]|\bmet(er|re)s?\b');
+
+  static final _heliumHeader = RegExp(r'^(he|helium)\s*(%|percent|$|[(\[].*%)');
+
+  bool _namesNonMetricSpeedUnit(String h) => _nonMetricSpeedUnit.hasMatch(h);
+
   bool _isDuration(String h) =>
-      (h.contains('bottom') && h.contains('time')) ||
-      h.contains('duration') ||
-      h.contains('runtime');
+      (h.contains('bottom') && h.contains('time')) || h.contains('duration');
 }

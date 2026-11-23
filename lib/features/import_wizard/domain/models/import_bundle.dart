@@ -2,6 +2,10 @@ import 'package:flutter/widgets.dart';
 import 'package:submersion/core/domain/models/incoming_dive_data.dart';
 import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/import_wizard/domain/models/entity_match_result.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_source_details.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_target_choice.dart';
+
+export 'package:submersion/features/import_wizard/domain/models/import_source_details.dart';
 
 /// The source system that produced an [ImportBundle].
 enum ImportSourceType {
@@ -19,6 +23,30 @@ enum ImportSourceType {
 
   /// A dive computer download.
   diveComputer,
+
+  /// A Suunto cloud (app.suunto.com) import.
+  suuntoCloud,
+
+  /// A Suunto app JSON export file import.
+  suuntoFile,
+
+  /// A Garmin Connect cloud import.
+  garminCloud,
+
+  /// A divelogs.de logbook import.
+  divelogs;
+
+  /// Whether a dive from this source can arrive with gear of its own (a
+  /// file's equipment links), so a set tagged on it may be the diver's own
+  /// choice rather than one the app applied. Downloads bring none.
+  bool get mayBringGear => switch (this) {
+    uddf || fit || universal || divelogs => true,
+    healthKit ||
+    diveComputer ||
+    suuntoCloud ||
+    suuntoFile ||
+    garminCloud => false,
+  };
 }
 
 /// The kind of entity represented by an [EntityGroup].
@@ -55,6 +83,12 @@ enum ImportEntityType {
 
   /// Courses.
   courses,
+
+  /// Photos referenced by an imported logbook.
+  media,
+
+  /// Cylinder fills from the Submersion fills CSV (passports phase 5).
+  fills,
 }
 
 /// Metadata about the source of an [ImportBundle].
@@ -68,10 +102,42 @@ class ImportSourceInfo {
   /// Optional metadata about the source (e.g. device info, file headers).
   final Map<String, dynamic>? metadata;
 
+  /// The id of the dive computer this session is downloading from, when
+  /// [type] is [ImportSourceType.diveComputer].
+  ///
+  /// Used to distinguish a cross-computer duplicate match (auto-suggested
+  /// for consolidation) from a same-computer duplicate match (a plain
+  /// re-download, never auto-suggested for consolidation).
+  final String? currentComputerId;
+
+  /// What the Review step shows about this source (issue #161).
+  final ImportSourceDetails details;
+
   const ImportSourceInfo({
     required this.type,
     required this.displayName,
     this.metadata,
+    this.currentComputerId,
+    this.details = const ImportSourceDetails(),
+  });
+}
+
+/// The diver profile an item will be imported into (issue #1893). Shown on
+/// review rows when one import writes to more than one profile.
+class ImportTarget {
+  /// The item's `_targetKey` (`diver:<id>` or `new:<source key>`).
+  final String key;
+
+  /// The profile's name, or the source diver's name for a new profile.
+  final String name;
+
+  /// Whether the import will create this profile.
+  final bool isNew;
+
+  const ImportTarget({
+    required this.key,
+    required this.name,
+    required this.isNew,
   });
 }
 
@@ -92,12 +158,53 @@ class EntityItem {
   /// Only set for [ImportEntityType.dives] items. Null for other entity types.
   final IncomingDiveData? diveData;
 
+  /// The profile this item goes to, when the import writes to several.
+  final ImportTarget? target;
+
+  /// The source's reference for a trip, so the review can show the trip a
+  /// dive will join (issue #3022). On a dive, the ref of the trip its source
+  /// put it in; on a trip, its own ref. Null when there is none.
+  final String? tripRef;
+
+  /// On a dive of a merged multi-file batch, whether its own file had trips
+  /// (`PayloadMerger.sourceHasTripsKey`); null otherwise, when the trip rows
+  /// of the dive's profile say whether its source had trips. Such a source
+  /// leaves a dive outside its trips on purpose, so only a dive whose own
+  /// trip is not imported is placed by date (see `placesImportedDiveByDate`).
+  final bool? sourceHasTrips;
+
+  /// On a dive, false when its source reported no start time: its time is a
+  /// stand-in, so the download places it in no trip.
+  final bool hasSourceTime;
+
+  /// On a trip, the trip the importer would create from it: its name and
+  /// dates as given (a missing one is the import moment). Null when the
+  /// importer creates none, as for a trip with no name.
+  final ({String name, DateTime? start, DateTime? end})? sourceTrip;
+
   const EntityItem({
     required this.title,
     required this.subtitle,
     this.icon,
     this.diveData,
+    this.target,
+    this.tripRef,
+    this.sourceHasTrips,
+    this.hasSourceTime = true,
+    this.sourceTrip,
   });
+
+  EntityItem copyWith({ImportTarget? target}) => EntityItem(
+    title: title,
+    subtitle: subtitle,
+    icon: icon,
+    diveData: diveData,
+    target: target ?? this.target,
+    tripRef: tripRef,
+    sourceHasTrips: sourceHasTrips,
+    hasSourceTime: hasSourceTime,
+    sourceTrip: sourceTrip,
+  );
 }
 
 /// A group of [EntityItem]s of the same [ImportEntityType].
@@ -120,12 +227,34 @@ class EntityGroup {
   /// Null when no entity duplicate matching has been performed.
   final Map<int, EntityMatchResult>? entityMatches;
 
+  /// Indices within [items] that default to a skip action because they fall
+  /// at or before the diver's first-sync cutoff (tier-1 filter).
+  ///
+  /// Null when no cutoff was in effect or no downloaded item qualified.
+  final Set<int>? autoSkipIndices;
+
   const EntityGroup({
     required this.items,
     this.duplicateIndices = const {},
     this.matchResults,
     this.entityMatches,
+    this.autoSkipIndices,
   });
+
+  /// The same group with its duplicate set or match results replaced; the
+  /// wizard uses it to repoint a planned-fill row (issue #2002).
+  EntityGroup copyWith({
+    Set<int>? duplicateIndices,
+    Map<int, DiveMatchResult>? matchResults,
+  }) {
+    return EntityGroup(
+      items: items,
+      duplicateIndices: duplicateIndices ?? this.duplicateIndices,
+      matchResults: matchResults ?? this.matchResults,
+      entityMatches: entityMatches,
+      autoSkipIndices: autoSkipIndices,
+    );
+  }
 }
 
 /// Data contract between import source adapters and the shared wizard UI.
@@ -140,11 +269,45 @@ class ImportBundle {
   /// All entity groups contained in this bundle, keyed by entity type.
   final Map<ImportEntityType, EntityGroup> groups;
 
-  const ImportBundle({required this.source, required this.groups});
+  /// The next dive number of each target profile, keyed by target key
+  /// (issue #1893). Empty for an import into the active profile alone.
+  final Map<String, int> nextDiveNumberByTarget;
+
+  /// Which profile a dive computer download goes to, set only when the
+  /// computer belongs to a profile other than the active one (issue #2050).
+  final ImportTargetChoice? targetChoice;
+
+  const ImportBundle({
+    required this.source,
+    required this.groups,
+    this.nextDiveNumberByTarget = const {},
+    this.targetChoice,
+  });
+
+  /// A copy with the given fields replaced. Rewrites of a bundle go through
+  /// this so a field added later, such as [targetChoice], is never dropped.
+  ImportBundle copyWith({Map<ImportEntityType, EntityGroup>? groups}) =>
+      ImportBundle(
+        source: source,
+        groups: groups ?? this.groups,
+        nextDiveNumberByTarget: nextDiveNumberByTarget,
+        targetChoice: targetChoice,
+      );
 
   /// Returns the [ImportEntityType]s that have at least one group in this bundle.
   List<ImportEntityType> get availableTypes => List.unmodifiable(groups.keys);
 
   /// Returns true if this bundle contains a group of the given [type].
   bool hasType(ImportEntityType type) => groups.containsKey(type);
+
+  /// Whether any dive in this bundle carries a number from its source.
+  ///
+  /// When none does, "Retain source dive numbers" has nothing to retain, so
+  /// the review step disables it and says why rather than letting it silently
+  /// do nothing (issue #1832).
+  bool get hasSourceDiveNumbers =>
+      groups[ImportEntityType.dives]?.items.any(
+        (item) => item.diveData?.diveNumber != null,
+      ) ??
+      false;
 }

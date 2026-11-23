@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
@@ -68,8 +68,8 @@ class _TripPickerState extends ConsumerState<TripPicker> {
   }
 
   String _formatTripDates(Trip trip) {
-    final dateFormat = DateFormat.yMMMd();
-    return '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}';
+    final units = ref.watch(unitFormatterProvider);
+    return '${units.formatDate(trip.startDate)} - ${units.formatDate(trip.endDate)}';
   }
 
   Widget _buildSuggestedTrip() {
@@ -83,7 +83,9 @@ class _TripPickerState extends ConsumerState<TripPicker> {
           padding: const EdgeInsetsDirectional.only(start: 56, top: 4),
           child: Semantics(
             button: true,
-            label: 'Suggested trip: ${suggestedTrip.name}. Tap to use',
+            label: context.l10n.trips_picker_suggestedSemantics(
+              suggestedTrip.name,
+            ),
             child: InkWell(
               onTap: () => widget.onTripSelected(suggestedTrip),
               child: Row(
@@ -123,6 +125,7 @@ class _TripPickerState extends ConsumerState<TripPicker> {
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -161,12 +164,18 @@ class TripPickerSheet extends ConsumerWidget {
   final ValueChanged<Trip> onTripSelected;
   final VoidCallback onCreateNewTrip;
 
+  /// Trips the item being assigned is already packed for (issue #2654). Each
+  /// is marked "Already packed" and cannot be picked, since packing it again
+  /// would change nothing.
+  final Set<String> packedTripIds;
+
   const TripPickerSheet({
     super.key,
     required this.scrollController,
     required this.selectedTrip,
     required this.onTripSelected,
     required this.onCreateNewTrip,
+    this.packedTripIds = const {},
   });
 
   @override
@@ -246,10 +255,28 @@ class TripPickerSheet extends ConsumerWidget {
                 itemBuilder: (context, index) {
                   final trip = trips[index];
                   final isSelected = selectedTrip?.id == trip.id;
-                  final dateFormat = DateFormat.yMMMd();
+                  final isPacked = packedTripIds.contains(trip.id);
+                  final units = ref.watch(unitFormatterProvider);
+                  final start = units.formatDate(trip.startDate);
+                  final end = units.formatDate(trip.endDate);
 
-                  final tripLabel =
-                      '${trip.name}, ${dateFormat.format(trip.startDate)} to ${dateFormat.format(trip.endDate)}${isSelected ? ', selected' : ''}';
+                  final tripLabel = isPacked
+                      ? context.l10n.trips_picker_tileSemanticsPacked(
+                          trip.name,
+                          start,
+                          end,
+                        )
+                      : isSelected
+                      ? context.l10n.trips_picker_tileSemanticsSelected(
+                          trip.name,
+                          start,
+                          end,
+                        )
+                      : context.l10n.trips_picker_tileSemantics(
+                          trip.name,
+                          start,
+                          end,
+                        );
 
                   return Semantics(
                     label: tripLabel,
@@ -270,10 +297,23 @@ class TripPickerSheet extends ConsumerWidget {
                         ),
                       ),
                       title: Text(trip.name),
-                      subtitle: Text(
-                        '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}',
-                      ),
-                      trailing: isSelected
+                      subtitle: isPacked
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text('$start - $end'),
+                                Text(context.l10n.trips_picker_alreadyPacked),
+                              ],
+                            )
+                          : Text('$start - $end'),
+                      isThreeLine: isPacked,
+                      // A disabled tile greys itself from the theme and
+                      // ignores taps.
+                      enabled: !isPacked,
+                      trailing: isPacked
+                          ? const Icon(Icons.luggage_outlined)
+                          : isSelected
                           ? Icon(
                               Icons.check_circle,
                               color: Theme.of(context).colorScheme.primary,
@@ -286,8 +326,9 @@ class TripPickerSheet extends ConsumerWidget {
               );
             },
             loading: () => const Center(child: CircularProgressIndicator()),
-            error: (error, _) =>
-                Center(child: Text(context.l10n.trips_picker_error('$error'))),
+            // The repository logs the failure; the diver gets a plain line.
+            error: (_, _) =>
+                Center(child: Text(context.l10n.trips_picker_error)),
           ),
         ),
       ],

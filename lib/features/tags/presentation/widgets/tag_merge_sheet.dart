@@ -4,8 +4,10 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
+import 'package:submersion/features/tags/presentation/tag_usage_messages.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_color_picker.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 class TagMergeSheet extends ConsumerStatefulWidget {
   final List<TagStatistic> selectedStats;
@@ -18,15 +20,30 @@ class TagMergeSheet extends ConsumerStatefulWidget {
 
 class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
   late final TextEditingController _nameController;
-  late String _selectedColor;
+
+  /// The kept tag's stored colour until the diver picks another; null for a
+  /// tag with no colour, which the merge then keeps without one (#4384).
+  late String? _selectedColor;
   late String _selectedNameFromTag;
-  int? _totalAffectedDives;
+
+  /// The items the merge rewrites per scope, counted as a union; null until
+  /// loaded.
+  Map<TagScope, int>? _affected;
   bool _isMerging = false;
 
+  /// Most used first, in the Manage Tags list's order: dives, then sites,
+  /// then equipment (#1942). The first one seeds the name and the color, so
+  /// a merge of equipment-only tags starts from the one on the most items.
   List<TagStatistic> get _sortedStats {
-    final sorted = [...widget.selectedStats];
-    sorted.sort((a, b) => b.diveCount.compareTo(a.diveCount));
-    return sorted;
+    int byUse(TagStatistic a, TagStatistic b) {
+      for (final scope in TagScope.values) {
+        final order = b.count(scope).compareTo(a.count(scope));
+        if (order != 0) return order;
+      }
+      return 0;
+    }
+
+    return [...widget.selectedStats]..sort(byUse);
   }
 
   @override
@@ -37,20 +54,26 @@ class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
     final mostUsed = sorted.first;
 
     _nameController = TextEditingController(text: mostUsed.tag.name);
-    _selectedColor = mostUsed.tag.colorHex ?? TagColors.predefined.first;
+    _selectedColor = mostUsed.tag.colorHex;
     _selectedNameFromTag = mostUsed.tag.id;
 
-    _loadAffectedDives();
+    logFailure(
+      _loadAffected(),
+      _TagMergeSheetState,
+      'load affected dives and sites',
+    );
   }
 
-  Future<void> _loadAffectedDives() async {
+  /// mergeTags relinks every junction of the tag scope registry, so the
+  /// preview counts each scope (#1902, #1942).
+  Future<void> _loadAffected() async {
     final repository = ref.read(tagRepositoryProvider);
     final tagIds = widget.selectedStats.map((s) => s.tag.id).toList();
-    final count = await repository.getMergedDiveCount(tagIds);
+    final usage = await repository.getMergedUsage(tagIds);
 
     if (mounted) {
       setState(() {
-        _totalAffectedDives = count;
+        _affected = usage;
       });
     }
   }
@@ -148,8 +171,7 @@ class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
                 setState(() {
                   _selectedNameFromTag = value;
                   _nameController.text = stat.tag.name;
-                  _selectedColor =
-                      stat.tag.colorHex ?? TagColors.predefined.first;
+                  _selectedColor = stat.tag.colorHex;
                 });
               },
               child: Column(
@@ -159,7 +181,11 @@ class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
                         value: stat.tag.id,
                         title: Text(stat.tag.name),
                         subtitle: Text(
-                          context.l10n.tags_manage_diveCount(stat.diveCount),
+                          tagUsageCounts(
+                            context.l10n,
+                            stat.counts,
+                            offered: stat.tag.scopes,
+                          ),
                         ),
                         secondary: CircleAvatar(
                           radius: 12,
@@ -180,6 +206,9 @@ class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
             const SizedBox(height: 8),
             TagColorPicker(
               selectedColor: _selectedColor,
+              // The merged tag's own name, so the swatches preview the tag
+              // this sheet is about to produce.
+              nameController: _nameController,
               onColorSelected: (color) {
                 setState(() {
                   _selectedColor = color;
@@ -188,14 +217,12 @@ class _TagMergeSheetState extends ConsumerState<TagMergeSheet> {
             ),
             const SizedBox(height: 16),
 
-            // Affected dives summary
-            if (_totalAffectedDives != null)
+            // Affected dives and sites summary
+            if (_affected case final affected?)
               Padding(
                 padding: const EdgeInsets.only(bottom: 16),
                 child: Text(
-                  context.l10n.tags_manage_mergeAffectedDives(
-                    _totalAffectedDives!,
-                  ),
+                  tagsMergeAffectedMessage(context.l10n, affected),
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),

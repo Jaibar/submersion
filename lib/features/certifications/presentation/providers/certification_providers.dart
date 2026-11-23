@@ -1,17 +1,23 @@
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
 
-import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
+import 'package:submersion/features/certifications/presentation/certification_title_l10n.dart';
 import 'package:submersion/features/certifications/domain/constants/certification_field.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 /// Repository provider
 final certificationRepositoryProvider = Provider<CertificationRepository>((
@@ -20,7 +26,13 @@ final certificationRepositoryProvider = Provider<CertificationRepository>((
   return CertificationRepository();
 });
 
-/// All certifications provider
+/// All certifications with their card images, for what renders or exports
+/// them. Anything else reads [certificationMetadataProvider].
+///
+/// Self-invalidates whenever the `certifications` table changes -- including
+/// when a sync applies remote changes -- so the list refreshes automatically,
+/// while remaining a [FutureProvider] so imperative
+/// `ref.read(provider.future)` reads still resolve.
 final allCertificationsProvider = FutureProvider<List<Certification>>((
   ref,
 ) async {
@@ -28,24 +40,118 @@ final allCertificationsProvider = FutureProvider<List<Certification>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchCertificationsChanges());
   return repository.getAllCertifications(diverId: validatedDiverId);
 });
 
+/// Loads every certification of a given diver, with card images, whichever
+/// profile is active: a dive's PDF export carries its owner's cards, and a
+/// sibling dive from another profile (#2002) is not the active diver's
+/// (#4458).
+///
+/// A loader rather than a cached family: an export reads it once, and a
+/// family entry would keep that diver's card scans in memory for the rest of
+/// the session.
+typedef DiverCertificationsLoader =
+    Future<List<Certification>> Function(String diverId);
+
+// no-tick: the value is a CLOSURE, not a query result; each call reads fresh.
+final diverCertificationsLoaderProvider = Provider<DiverCertificationsLoader>((
+  ref,
+) {
+  final repository = ref.watch(certificationRepositoryProvider);
+  return (diverId) => repository.getAllCertifications(diverId: diverId);
+});
+
+/// All certifications without their card images, so what depends on credential
+/// data never waits on or holds the scans (issue #3848). Refreshes when a row
+/// changes, and only then: a card's pages are not part of it.
+final certificationMetadataProvider = FutureProvider<List<Certification>>((
+  ref,
+) async {
+  final repository = ref.watch(certificationRepositoryProvider);
+  final validatedDiverId = await ref.watch(
+    validatedCurrentDiverIdProvider.future,
+  );
+  ref.invalidateSelfWhen(repository.watchCertificationRowChanges());
+  return repository.getCertificationMetadata(diverId: validatedDiverId);
+});
+
+/// The certifications the wallet draws, card images included. Auto-disposed
+/// so the scans leave memory with the page (issue #3848).
+final walletCertificationsProvider =
+    FutureProvider.autoDispose<List<Certification>>((ref) async {
+      final repository = ref.watch(certificationRepositoryProvider);
+      // Before the await: leaving the page disposes this ref mid-build.
+      ref.invalidateSelfWhen(repository.watchCertificationsChanges());
+      final validatedDiverId = await ref.watch(
+        validatedCurrentDiverIdProvider.future,
+      );
+      return repository.getAllCertifications(diverId: validatedDiverId);
+    });
+
+/// Certifications owned by a specific buddy (issue #553), without their card
+/// images. Self-invalidates on any certifications-table change, including
+/// sync.
+final buddyCertificationsProvider =
+    FutureProvider.family<List<Certification>, String>((ref, buddyId) async {
+      final repository = ref.watch(certificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCertificationRowChanges());
+      return repository.getCertificationMetadataByBuddy(buddyId);
+    });
+
+/// Certifications for every buddy, keyed by buddy id — the picker-annotation
+/// replacement for the removed allBuddyRolesProvider. Single batched query
+/// (no N+1); self-invalidates on any certifications change (local or sync).
+final allBuddyCertificationsProvider =
+    FutureProvider<Map<String, List<Certification>>>((ref) async {
+      final repository = ref.watch(certificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCertificationRowChanges());
+      final buddies = await ref.watch(allBuddiesProvider.future);
+      return repository.getCertificationsForBuddies(
+        buddies.map((b) => b.id).toList(),
+      );
+    });
+
 /// Certification sort state provider
-final certificationSortProvider =
-    StateProvider<SortState<CertificationSortField>>(
-      (ref) => const SortState(
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final certificationSortProvider = Provider<SortState<CertificationSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(
+          settingsProvider.select((s) => s.listArrangements.certificationSort),
+        ),
+        CertificationSortField.values,
+      ) ??
+      const SortState(
         field: CertificationSortField.dateIssued,
         direction: SortDirection.descending,
       ),
-    );
+);
 
 /// Apply sorting to a list of certifications
 List<Certification> applyCertificationSorting(
   List<Certification> certifications,
-  SortState<CertificationSortField> sort,
-) {
+  SortState<CertificationSortField> sort, {
+  required AppLocalizations l10n,
+  CertificationCatalog? catalog,
+}) {
+  final cat = catalog ?? CertificationCatalog.builtInOnly;
   final sorted = List<Certification>.from(certifications);
+  // The title sort orders by what the list shows (the localized title), not
+  // the raw stored name, which is blank for a certification saved without a
+  // custom title and "PADI : ..." for legacy rows. Computed once per
+  // certification rather than on every comparison, in an identity map:
+  // Certification's value hashCode walks its photo bytes.
+  final titles = Map<Certification, String>.identity();
+  if (sort.field == CertificationSortField.name) {
+    for (final c in certifications) {
+      titles[c] = certificationTitleL10n(c, l10n, catalog: cat).toLowerCase();
+    }
+  }
 
   sorted.sort((a, b) {
     int comparison;
@@ -56,13 +162,16 @@ List<Certification> applyCertificationSorting(
 
     switch (sort.field) {
       case CertificationSortField.name:
-        comparison = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        comparison = titles[a]!.compareTo(titles[b]!);
       case CertificationSortField.dateIssued:
         comparison = (a.issueDate ?? DateTime(1900)).compareTo(
           b.issueDate ?? DateTime(1900),
         );
       case CertificationSortField.agency:
-        comparison = a.agency.displayName.compareTo(b.agency.displayName);
+        comparison = cat
+            .agency(a.agency)
+            .interchangeName
+            .compareTo(cat.agency(b.agency).interchangeName);
     }
 
     if (invertForText) {
@@ -80,6 +189,7 @@ List<Certification> applyCertificationSorting(
 final certificationByIdProvider = FutureProvider.family<Certification?, String>(
   (ref, id) async {
     final repository = ref.watch(certificationRepositoryProvider);
+    ref.invalidateSelfWhen(repository.watchCertificationsChanges());
     return repository.getCertificationById(id);
   },
 );
@@ -91,9 +201,10 @@ final certificationSearchProvider =
         validatedCurrentDiverIdProvider.future,
       );
       if (query.isEmpty) {
-        return ref.watch(allCertificationsProvider).value ?? [];
+        return ref.watch(certificationMetadataProvider).value ?? [];
       }
       final repository = ref.watch(certificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCertificationRowChanges());
       return repository.searchCertifications(query, diverId: validatedDiverId);
     });
 
@@ -104,6 +215,7 @@ final expiringCertificationsProvider =
       final validatedDiverId = await ref.watch(
         validatedCurrentDiverIdProvider.future,
       );
+      ref.invalidateSelfWhen(repository.watchCertificationsChanges());
       return repository.getExpiringCertifications(
         days,
         diverId: validatedDiverId,
@@ -118,20 +230,21 @@ final expiredCertificationsProvider = FutureProvider<List<Certification>>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchCertificationsChanges());
   return repository.getExpiredCertifications(diverId: validatedDiverId);
 });
 
-/// Certifications by agency provider
+/// Certifications by agency id (built-in enum name or custom id) provider
 final certificationsByAgencyProvider =
-    FutureProvider.family<List<Certification>, CertificationAgency>((
-      ref,
-      agency,
-    ) async {
+    FutureProvider.family<List<Certification>, String>((ref, agency) async {
       final repository = ref.watch(certificationRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCertificationsChanges());
       return repository.getCertificationsByAgency(agency);
     });
 
-/// Certification list notifier for mutations
+/// Certification list notifier for mutations. Its list carries no card
+/// images: the list, table, pickers and home screen read it, and none of them
+/// draw a card (issue #3848).
 class CertificationListNotifier
     extends StateNotifier<AsyncValue<List<Certification>>> {
   final CertificationRepository _repository;
@@ -140,7 +253,11 @@ class CertificationListNotifier
 
   CertificationListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(
+      _initializeAndLoad(),
+      CertificationListNotifier,
+      'initialize and load',
+    );
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -148,9 +265,21 @@ class CertificationListNotifier
         state = const AsyncValue.loading();
         _ref.invalidate(validatedCurrentDiverIdProvider);
         _ref.invalidate(allCertificationsProvider);
-        _initializeAndLoad();
+        _ref.invalidate(certificationMetadataProvider);
+        logFailure(
+          _initializeAndLoad(),
+          CertificationListNotifier,
+          'initialize and load',
+        );
       }
     });
+
+    // Refresh when the certifications table changes (e.g. a sync writes rows
+    // directly).
+    final tableChangeSub = _repository.watchCertificationRowChanges().listen(
+      (_) => _silentReloadCertifications(),
+    );
+    _ref.onDispose(tableChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -163,12 +292,30 @@ class CertificationListNotifier
   Future<void> _loadCertifications() async {
     state = const AsyncValue.loading();
     try {
-      final certifications = await _repository.getAllCertifications(
+      final certifications = await _repository.getCertificationMetadata(
         diverId: _validatedDiverId,
       );
       state = AsyncValue.data(certifications);
     } catch (e, st) {
       state = AsyncValue.error(e, st);
+    }
+  }
+
+  /// Reload without flipping to a loading state, so table-driven refreshes
+  /// (e.g. after a sync write) do not flash a spinner over existing data.
+  /// Resolves the validated diver id first so a tick arriving before
+  /// initialization completes still scopes the query correctly.
+  Future<void> _silentReloadCertifications() async {
+    try {
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final certifications = await _repository.getCertificationMetadata(
+        diverId: _validatedDiverId,
+      );
+      if (mounted) state = AsyncValue.data(certifications);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
     }
   }
 
@@ -178,21 +325,9 @@ class CertificationListNotifier
     _validatedDiverId = validatedId;
     await _loadCertifications();
     _ref.invalidate(allCertificationsProvider);
+    _ref.invalidate(certificationMetadataProvider);
     _ref.invalidate(expiringCertificationsProvider(90));
     _ref.invalidate(expiredCertificationsProvider);
-  }
-
-  Future<Certification> addCertification(Certification cert) async {
-    // Get fresh validated diver ID before creating
-    final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
-
-    // Always set diverId to the current validated diver for new items
-    final certWithDiver = validatedId != null
-        ? cert.copyWith(diverId: validatedId)
-        : cert;
-    final newCert = await _repository.createCertification(certWithDiver);
-    await refresh();
-    return newCert;
   }
 
   Future<void> updateCertification(Certification cert) async {
@@ -216,21 +351,14 @@ final certificationListNotifierProvider =
       return CertificationListNotifier(repository, ref);
     });
 
-/// Count of expiring certifications (for badges/warnings)
-final expiringCertificationCountProvider = FutureProvider<int>((ref) async {
-  final expiring = await ref.watch(expiringCertificationsProvider(90).future);
-  final expired = await ref.watch(expiredCertificationsProvider.future);
-  return expiring.length + expired.length;
-});
-
 // ============================================================================
 // Certification List View Mode
 // ============================================================================
 
-/// In-memory view mode for the certification list. Defaults to detailed.
-/// Not persisted in AppSettings — resets to detailed on app restart.
-final certificationListViewModeProvider = StateProvider<ListViewMode>((ref) {
-  return ListViewMode.detailed;
+/// The certification list's view mode, as the diver left it (issue #3748);
+/// same contract as [diveListViewModeProvider].
+final certificationListViewModeProvider = Provider<ListViewMode>((ref) {
+  return ref.watch(settingsProvider.select((s) => s.certificationListViewMode));
 });
 
 // ============================================================================

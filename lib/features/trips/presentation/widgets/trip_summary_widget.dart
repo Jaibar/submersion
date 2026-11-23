@@ -1,18 +1,36 @@
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
+import 'package:submersion/core/router/section_navigation.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/services/side_trips.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_list_count_provider.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/shared/widgets/filtered_summary_banner.dart';
 
 /// Summary widget shown when no trip is selected.
+///
+/// It summarizes the trips the list beside it shows. Under a trip list
+/// filter (an equipment item's Trips row opens one) that is the filtered
+/// trips alone, with a banner saying so, never every trip (issue #4414).
+///
+/// It reads exactly what the list reads, so while a new filter's trips load
+/// it shows a spinner as the list does. It keeps no earlier trips to show
+/// meanwhile: they would sit under the new filter's banner as tappable rows
+/// the list does not show.
 class TripSummaryWidget extends ConsumerWidget {
   const TripSummaryWidget({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tripsAsync = ref.watch(tripListNotifierProvider);
+    final isFiltered = ref.watch(tripFilterProvider).hasActiveFilters;
+    final tripsAsync = ref.watch(filteredTripsProvider);
+    final units = ref.watch(unitFormatterProvider);
+    final trips = tripsAsync.value;
 
     return Scaffold(
       body: SingleChildScrollView(
@@ -21,13 +39,19 @@ class TripSummaryWidget extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildHeader(context),
+            if (isFiltered) ...[
+              const SizedBox(height: 16),
+              const _TripSummaryFilterBanner(),
+            ],
             const SizedBox(height: 24),
-            tripsAsync.when(
-              data: (trips) => _buildOverview(context, trips),
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) =>
-                  Center(child: Text('${context.l10n.common_label_error}: $e')),
-            ),
+            if (tripsAsync.hasError)
+              // The repository logs the failure; the diver gets a plain
+              // line.
+              Center(child: Text(context.l10n.trips_list_error_loading))
+            else if (trips == null)
+              const Center(child: CircularProgressIndicator())
+            else
+              _buildOverview(context, units, trips, isFiltered: isFiltered),
             const SizedBox(height: 24),
             _buildQuickActions(context),
             const SizedBox(height: 32),
@@ -68,26 +92,35 @@ class TripSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildOverview(BuildContext context, List trips) {
+  Widget _buildOverview(
+    BuildContext context,
+    UnitFormatter units,
+    List<TripWithStats> trips, {
+    required bool isFiltered,
+  }) {
     // Calculate stats
-    num totalDives = 0;
-    num totalDays = 0;
-    int liveaboardCount = 0;
-    double? maxDepth;
+    var totalDives = 0;
+    var totalDays = 0;
+    var liveaboardCount = 0;
 
+    // A larger trip's figures already include its side trips' dives, and
+    // its dates span theirs, so a side trip adds neither (issue #3658).
+    final tripsById = <String, Trip>{for (final t in trips) t.trip.id: t.trip};
     for (final tripWithStats in trips) {
-      totalDives += tripWithStats.diveCount as num;
-      totalDays += tripWithStats.trip.durationDays as num;
-      if (tripWithStats.trip.isLiveaboard) liveaboardCount++;
-      if (tripWithStats.maxDepth != null) {
-        if (maxDepth == null || tripWithStats.maxDepth > maxDepth) {
-          maxDepth = tripWithStats.maxDepth;
-        }
+      final trip = tripWithStats.trip;
+      final parentId = effectiveParentId(trip, tripsById);
+      if (parentId == null) {
+        totalDives += tripWithStats.diveCount;
+        totalDays += trip.durationDays;
+      } else {
+        // Only the side trip's days that fall outside its larger trip.
+        totalDays += _daysOutside(trip, tripsById[parentId]!);
       }
+      if (trip.isLiveaboard) liveaboardCount++;
     }
 
     // Find upcoming trips
-    final now = DateTime.now();
+    final now = clock.now();
     final upcomingTrips =
         trips.where((t) => t.trip.startDate.isAfter(now)).toList()
           ..sort((a, b) => a.trip.startDate.compareTo(b.trip.startDate));
@@ -117,7 +150,12 @@ class TripSummaryWidget extends ConsumerWidget {
               context,
               icon: Icons.scuba_diving,
               value: '$totalDives',
-              label: context.l10n.trips_summary_stat_totalDives,
+              // Every dive on the trips shown. Under an equipment filter the
+              // item may have been on fewer of them, so the label says
+              // whose dives these are (issue #4414).
+              label: isFiltered
+                  ? context.l10n.trips_summary_stat_filteredDives
+                  : context.l10n.trips_summary_stat_totalDives,
               color: Colors.teal,
             ),
             _buildStatCard(
@@ -139,11 +177,11 @@ class TripSummaryWidget extends ConsumerWidget {
         ),
         if (trips.isNotEmpty) ...[
           const SizedBox(height: 24),
-          _buildTripListPreview(context, trips),
+          _buildTripListPreview(context, units, trips),
         ],
         if (upcomingTrips.isNotEmpty) ...[
           const SizedBox(height: 24),
-          _buildUpcomingTrips(context, upcomingTrips),
+          _buildUpcomingTrips(context, units, upcomingTrips),
         ],
       ],
     );
@@ -198,12 +236,15 @@ class TripSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildTripListPreview(BuildContext context, List trips) {
+  Widget _buildTripListPreview(
+    BuildContext context,
+    UnitFormatter units,
+    List<TripWithStats> trips,
+  ) {
     // Sort by start date descending and take recent 3
-    final sortedTrips = List.from(trips)
+    final sortedTrips = List<TripWithStats>.from(trips)
       ..sort((a, b) => b.trip.startDate.compareTo(a.trip.startDate));
     final previewTrips = sortedTrips.take(3).toList();
-    final dateFormat = DateFormat.yMMMd();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -230,14 +271,19 @@ class TripSummaryWidget extends ConsumerWidget {
                   ),
                 ),
                 title: Text(trip.name),
+                // The separator belongs to the translation, as in the
+                // Upcoming card's subtitle: fr joins with a hyphen.
                 subtitle: Text(
-                  '${dateFormat.format(trip.startDate)} • ${tripWithStats.diveCount} dives',
+                  context.l10n.trips_summary_recentSubtitle(
+                    units.formatDate(trip.startDate),
+                    tripWithStats.diveCount,
+                  ),
                 ),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
                   final state = GoRouterState.of(context);
                   final currentPath = state.uri.path;
-                  context.go('$currentPath?selected=${trip.id}');
+                  context.goInPlace('$currentPath?selected=${trip.id}');
                 },
               );
             }).toList(),
@@ -247,10 +293,17 @@ class TripSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildUpcomingTrips(BuildContext context, List upcomingTrips) {
-    final dateFormat = DateFormat.yMMMd();
+  Widget _buildUpcomingTrips(
+    BuildContext context,
+    UnitFormatter units,
+    List<TripWithStats> upcomingTrips,
+  ) {
     final nextTrip = upcomingTrips.first;
-    final daysUntil = nextTrip.trip.startDate.difference(DateTime.now()).inDays;
+    // Whole calendar days to the start date. Subtracting the current instant
+    // instead would floor away the rest of today (a trip four calendar days
+    // out reads "In 3 days" at any hour past midnight), and would lose a
+    // further day whenever a spring-forward falls inside the window.
+    final daysUntil = nextTrip.trip.daysUntilStart;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -282,7 +335,17 @@ class TripSummaryWidget extends ConsumerWidget {
               ),
             ),
             subtitle: Text(
-              '${dateFormat.format(nextTrip.trip.startDate)} • In $daysUntil days',
+              // The separator belongs to the translation: fr joins the two
+              // parts with a hyphen where every other locale uses the bullet.
+              // The date leads in every locale. Where the numeral sits is a
+              // property of the countdown clause, not of this template, and
+              // so belongs to trips_list_countdown: hu and zh lead that
+              // clause with the numeral, en and de trail it after "In".
+              // One more reason not to restate that wording here.
+              context.l10n.trips_summary_upcomingSubtitle(
+                units.formatDate(nextTrip.trip.startDate),
+                context.l10n.trips_list_countdown(daysUntil),
+              ),
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onPrimaryContainer,
               ),
@@ -294,7 +357,7 @@ class TripSummaryWidget extends ConsumerWidget {
             onTap: () {
               final state = GoRouterState.of(context);
               final currentPath = state.uri.path;
-              context.go('$currentPath?selected=${nextTrip.trip.id}');
+              context.goInPlace('$currentPath?selected=${nextTrip.trip.id}');
             },
           ),
         ),
@@ -321,7 +384,7 @@ class TripSummaryWidget extends ConsumerWidget {
               onPressed: () {
                 final state = GoRouterState.of(context);
                 final currentPath = state.uri.path;
-                context.go('$currentPath?mode=new');
+                context.goInPlace('$currentPath?mode=new');
               },
               icon: const Icon(Icons.add),
               label: Text(context.l10n.trips_summary_quickActions_add),
@@ -331,4 +394,38 @@ class TripSummaryWidget extends ConsumerWidget {
       ],
     );
   }
+}
+
+/// The Trips overview's [FilteredSummaryBanner], shown while the trip list
+/// is filtered. Its own widget, so a count change rebuilds the banner alone
+/// rather than the whole overview, and the count is only watched while a
+/// filter is active.
+class _TripSummaryFilterBanner extends ConsumerWidget {
+  const _TripSummaryFilterBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The list's own entry count, so the banner and the list's "3 of 12
+    // trips" subtitle can never disagree.
+    final count = ref.watch(tripListCountProvider);
+    return FilteredSummaryBanner(
+      // Counts not known yet (loading) or at all (the filter's query
+      // failed) still say the overview is filtered, so the bar is never a
+      // blank strip with only its button.
+      message: count == null
+          ? context.l10n.trips_summary_filteredBannerPending
+          : context.l10n.trips_summary_filteredBanner(count.shown, count.total),
+      clearLabel: context.l10n.trips_list_filters_clearAll,
+      onClear: () => clearTripFilter(ref),
+    );
+  }
+}
+
+/// The calendar days of [side] that [larger] does not cover.
+int _daysOutside(Trip side, Trip larger) {
+  final before = calendarDaysBetween(side.startDate, larger.startDate);
+  final after = calendarDaysBetween(larger.endDate, side.endDate);
+  final total = side.durationDays;
+  final outside = (before > 0 ? before : 0) + (after > 0 ? after : 0);
+  return outside > total ? total : outside;
 }

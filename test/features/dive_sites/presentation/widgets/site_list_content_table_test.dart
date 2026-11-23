@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +16,8 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
 
 import '../../../../helpers/mock_providers.dart';
 import '../../../../helpers/test_app.dart';
@@ -300,6 +304,178 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(pushedPath, '/sites/s1');
+    });
+
+    // Table mode owns no app bar -- TableModeLayout does -- so "Select items"
+    // sits in the page header's overflow and reaches the rows through the
+    // controller the page passes in (issue #2775). The list draws no Select
+    // strip of its own, and the contextual bar opens above the table.
+    testWidgets('draws no Select strip and opens the contextual bar when the '
+        "page's controller enters selection", (tester) async {
+      final controller = SelectionController();
+      addTearDown(controller.dispose);
+      final overrides = await _buildOverrides(
+        sites: [_makeSite(id: 's1', name: 'Blue Hole')],
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: overrides,
+          child: SiteListContent(
+            showAppBar: true,
+            selectionController: controller,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final exitButton = find.byKey(const ValueKey('selection_exit'));
+
+      expect(find.byKey(selectItemsMenuKey), findsNothing);
+      expect(find.byIcon(Icons.checklist), findsNothing);
+      expect(exitButton, findsNothing);
+
+      controller.enterExplicit();
+      await tester.pumpAndSettle();
+
+      expect(exitButton, findsOneWidget);
+      expect(find.text('0 selected'), findsOneWidget);
+    });
+
+    // Table mode used to ignore both modifiers, so the only way into a
+    // multi-row selection was long-press then tap. These drive the real
+    // gesture sequence: a plain tap highlights the row, then a modified tap
+    // on a later row builds the selection from it.
+    group('modifier clicks', () {
+      // Cmd on macOS, Control elsewhere -- mirrors
+      // SelectableListScope.isModifierPressed so this passes on the macOS dev
+      // machine and the Linux CI runner alike.
+      final modifierKey = defaultTargetPlatform == TargetPlatform.macOS
+          ? LogicalKeyboardKey.metaLeft
+          : LogicalKeyboardKey.controlLeft;
+
+      Future<void> pumpFourSites(WidgetTester tester) async {
+        final overrides = await _buildOverrides(
+          sites: [
+            _makeSite(id: 's1', name: 'Blue Hole'),
+            _makeSite(id: 's2', name: 'Coral Garden'),
+            _makeSite(id: 's3', name: 'Shark Point'),
+            _makeSite(id: 's4', name: 'Turtle Bay'),
+          ],
+        );
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: true),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Plain tap highlights the row without checking it. Settle past the
+        // double-tap window so the next tap is not read as a double-tap.
+        await tester.tap(find.text('Blue Hole'));
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pumpAndSettle();
+      }
+
+      // Table rows carry an onDoubleTap, so onTap only resolves once the
+      // double-tap timer expires. The modifier has to stay held across that
+      // wait, because the handler reads the keyboard when the tap fires.
+      Future<void> tapRowWithKey(
+        WidgetTester tester,
+        String rowText,
+        LogicalKeyboardKey key,
+      ) async {
+        await tester.sendKeyDownEvent(key);
+        await tester.tap(find.text(rowText));
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.sendKeyUpEvent(key);
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('shift-tap selects the span from the highlighted row', (
+        tester,
+      ) async {
+        await pumpFourSites(tester);
+
+        await tapRowWithKey(
+          tester,
+          'Shark Point',
+          LogicalKeyboardKey.shiftLeft,
+        );
+
+        expect(find.text('3 selected'), findsOneWidget);
+      });
+
+      testWidgets('modifier-tap checks the highlighted row too', (
+        tester,
+      ) async {
+        await pumpFourSites(tester);
+
+        await tapRowWithKey(tester, 'Shark Point', modifierKey);
+
+        expect(find.text('2 selected'), findsOneWidget);
+      });
+    });
+
+    // Table mode used to return before the SelectableListScope wrapper, so it
+    // had no keyboard handling at all: the only way out of selection mode was
+    // the bar's close button.
+    group('keyboard handling', () {
+      final selectAllKey = defaultTargetPlatform == TargetPlatform.macOS
+          ? LogicalKeyboardKey.metaLeft
+          : LogicalKeyboardKey.controlLeft;
+
+      Future<void> pumpThreeSitesInSelection(WidgetTester tester) async {
+        final overrides = await _buildOverrides(
+          sites: [
+            _makeSite(id: 's1', name: 'Blue Hole'),
+            _makeSite(id: 's2', name: 'Coral Garden'),
+            _makeSite(id: 's3', name: 'Shark Point'),
+          ],
+        );
+        final controller = SelectionController();
+        addTearDown(controller.dispose);
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: SiteListContent(
+              showAppBar: true,
+              selectionController: controller,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        controller.enterExplicit();
+        await tester.pumpAndSettle();
+
+        // Table rows carry an onDoubleTap, so the tap only resolves once the
+        // double-tap timer expires.
+        await tester.tap(find.text('Blue Hole'));
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pumpAndSettle();
+        expect(find.text('1 selected'), findsOneWidget);
+      }
+
+      testWidgets('Escape exits selection mode', (tester) async {
+        await pumpThreeSitesInSelection(tester);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+
+        expect(find.text('1 selected'), findsNothing);
+      });
+
+      testWidgets('Ctrl/Cmd-A checks every visible row', (tester) async {
+        await pumpThreeSitesInSelection(tester);
+
+        await tester.sendKeyDownEvent(selectAllKey);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+        await tester.sendKeyUpEvent(selectAllKey);
+        await tester.pumpAndSettle();
+
+        expect(find.text('3 selected'), findsOneWidget);
+      });
     });
   });
 }

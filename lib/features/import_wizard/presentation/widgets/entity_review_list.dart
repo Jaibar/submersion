@@ -1,11 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'package:submersion/core/domain/models/incoming_dive_data.dart';
+import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/core/presentation/widgets/dive_sparkline.dart';
+import 'package:submersion/core/theme/foreground_on.dart';
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/entity_match_result.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart'
+    show DiveReviewSortField;
 import 'package:submersion/features/import_wizard/presentation/widgets/duplicate_action_card.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_target_chip.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/import_trip_line.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/needs_decision_pill.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// A scrollable review list for a single entity type.
@@ -16,7 +25,8 @@ import 'package:submersion/l10n/l10n_extension.dart';
 /// Order: likely duplicates (score >= 0.7), then possible duplicates
 /// (score >= 0.5), then non-duplicates. Duplicates appear first so rows
 /// needing a user decision aren't buried beneath clean imports.
-class EntityReviewList extends StatelessWidget {
+
+class EntityReviewList extends StatefulWidget {
   /// The entity group containing items, duplicate indices, and match results.
   final EntityGroup group;
 
@@ -43,6 +53,9 @@ class EntityReviewList extends StatelessWidget {
   final void Function(int index, DuplicateAction action)
   onDuplicateActionChanged;
 
+  /// Called when the user Shift-clicks to select a range.
+  final void Function(Set<int> indices, bool select)? onSetSelections;
+
   /// Called when the user taps a bulk action button.
   final void Function(DuplicateAction action) onBulkAction;
 
@@ -61,6 +74,30 @@ class EntityReviewList extends StatelessWidget {
   /// that will be assigned on import. Only meaningful for dive entity lists.
   final Map<int, int>? projectedDiveNumbers;
 
+  /// Which field to sort the non-duplicate rows by, and a callback to change
+  /// it. Both null (the default) hides the sort control entirely and leaves
+  /// non-duplicate rows in their original order — used for non-dive tabs,
+  /// where date/depth/duration don't apply.
+  final DiveReviewSortField? sortField;
+
+  /// Sort direction for [sortField]. Ignored when [sortField] is null.
+  final bool sortAscending;
+
+  /// Called when the user picks a sort field from the sort menu, including
+  /// re-picking the active field to flip its direction.
+  final ValueChanged<DiveReviewSortField>? onSortFieldChanged;
+
+  /// Label of the planned dive a fill row targets (issue #2002); null for
+  /// other rows or when the caller does not resolve labels.
+  final String? Function(int index)? plannedDiveLabelForIndex;
+
+  /// Opens the planned-dive picker for a fill row.
+  final void Function(int index)? onChangeFillTarget;
+
+  /// Name of the trip a dive row will be saved in (issue #3022); null for a
+  /// row that joins none or when the caller does not resolve trips.
+  final String? Function(int index)? tripNameForIndex;
+
   const EntityReviewList({
     super.key,
     required this.group,
@@ -70,88 +107,129 @@ class EntityReviewList extends StatelessWidget {
     this.pendingIndices = const {},
     required this.onToggleSelection,
     required this.onDuplicateActionChanged,
+    this.onSetSelections,
     this.onBulkAction = _noopBulkAction,
     required this.onSelectAll,
     required this.onDeselectAll,
     required this.existingDiveIdForIndex,
     this.projectedDiveNumbers,
+    this.sortField,
+    this.sortAscending = false,
+    this.onSortFieldChanged,
+    this.plannedDiveLabelForIndex,
+    this.onChangeFillTarget,
+    this.tripNameForIndex,
   });
 
   static void _noopBulkAction(DuplicateAction _) {}
 
   @override
+  State<EntityReviewList> createState() => _EntityReviewListState();
+}
+
+class _EntityReviewListState extends State<EntityReviewList> {
+  int? _lastToggledIndex;
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final l10n = context.l10n;
 
-    final nonDuplicateIndices = _nonDuplicateIndices();
-    final likelyDuplicateIndices = _sortedDuplicateIndices(minScore: 0.7);
+    final autoSkipIndices = widget.group.autoSkipIndices ?? const <int>{};
+
+    final nonDuplicateIndices = _applySort(
+      _nonDuplicateIndices().where((i) => !autoSkipIndices.contains(i)),
+    );
+    final likelyDuplicateIndices = _sortedDuplicateIndices(
+      minScore: 0.7,
+    ).where((i) => !autoSkipIndices.contains(i)).toList();
     final possibleDuplicateIndices = _sortedDuplicateIndices(
       minScore: 0.5,
       maxScore: 0.7,
-    );
+    ).where((i) => !autoSkipIndices.contains(i)).toList();
+    final unscoredDuplicateIndices = _unscoredDuplicateIndices()
+        .where((i) => !autoSkipIndices.contains(i))
+        .toList();
 
-    final totalItems = group.items.length;
-    final duplicateCount = group.duplicateIndices.length;
+    final totalItems = widget.group.items.length;
+    final duplicateCount = widget.group.duplicateIndices.length;
     final nonDuplicateCount = totalItems - duplicateCount;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Header row
+        // Header row. A Wrap, not a Row: on a phone the buttons left the
+        // count a sliver a few letters wide, so they move to a line of their
+        // own when the two do not fit side by side, and wrap among themselves
+        // at large text sizes (#3110).
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 4,
             children: [
-              Expanded(
-                child: Text(
-                  _itemCountText(
-                    nonDuplicateCount,
-                    duplicateCount,
-                    selectedIndices.length,
-                  ),
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+              Text(
+                _itemCountText(
+                  l10n,
+                  nonDuplicateCount,
+                  duplicateCount,
+                  widget.selectedIndices.length,
+                ),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
                 ),
               ),
-              TextButton(
-                onPressed: onSelectAll,
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: const Text('Select All'),
-              ),
-              TextButton(
-                onPressed: onDeselectAll,
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: const Text('Deselect All'),
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (widget.sortField != null &&
+                      widget.onSortFieldChanged != null)
+                    _SortMenuButton(
+                      sortField: widget.sortField!,
+                      sortAscending: widget.sortAscending,
+                      onSortFieldChanged: widget.onSortFieldChanged!,
+                    ),
+                  TextButton(
+                    onPressed: widget.onSelectAll,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(l10n.universalImport_action_selectAll),
+                  ),
+                  TextButton(
+                    onPressed: widget.onDeselectAll,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(l10n.universalImport_action_deselectAll),
+                  ),
+                ],
               ),
             ],
           ),
         ),
 
         // Bulk action row (only when there are pending duplicates).
-        if (pendingIndices.isNotEmpty)
+        if (widget.pendingIndices.isNotEmpty)
           _BulkActionRow(
             isDiveTab: _isDiveTab(),
-            pendingCount: pendingIndices.length,
+            pendingCount: widget.pendingIndices.length,
             matchableConsolidateCount: _matchableConsolidateCount(),
-            availableActions: availableActions,
-            onBulkAction: onBulkAction,
+            availableActions: widget.availableActions,
+            onBulkAction: widget.onBulkAction,
           ),
 
         // Scored duplicates (dives with matchResults) appear first so rows
         // that need user attention are at the top of the tab.
         if (likelyDuplicateIndices.isNotEmpty) ...[
           _SectionLabel(
-            label: 'Potential Duplicates',
+            label: l10n.universalImport_section_potentialDuplicates,
             color: colorScheme.error,
           ),
           for (final index in likelyDuplicateIndices)
@@ -159,8 +237,8 @@ class EntityReviewList extends StatelessWidget {
         ],
 
         if (possibleDuplicateIndices.isNotEmpty) ...[
-          const _SectionLabel(
-            label: 'Possible Duplicates',
+          _SectionLabel(
+            label: l10n.universalImport_section_possibleDuplicates,
             color: Colors.orange,
           ),
           for (final index in possibleDuplicateIndices)
@@ -168,12 +246,12 @@ class EntityReviewList extends StatelessWidget {
         ],
 
         // Unscored duplicates (non-dive entities without matchResults)
-        if (_unscoredDuplicateIndices().isNotEmpty) ...[
+        if (unscoredDuplicateIndices.isNotEmpty) ...[
           _SectionLabel(
-            label: 'Potential Duplicates',
+            label: l10n.universalImport_section_potentialDuplicates,
             color: colorScheme.error,
           ),
-          for (final index in _unscoredDuplicateIndices())
+          for (final index in unscoredDuplicateIndices)
             _buildEntityDuplicateCard(index),
         ],
 
@@ -182,25 +260,114 @@ class EntityReviewList extends StatelessWidget {
         if (nonDuplicateIndices.isNotEmpty) ...[
           for (final index in nonDuplicateIndices)
             _NonDuplicateRow(
-              item: group.items[index],
+              item: widget.group.items[index],
               index: index,
-              isSelected: selectedIndices.contains(index),
-              onToggle: () => onToggleSelection(index),
-              projectedDiveNumber: projectedDiveNumbers?[index],
+              isSelected: widget.selectedIndices.contains(index),
+              onToggle: () {
+                final isShiftPressed = HardwareKeyboard
+                    .instance
+                    .logicalKeysPressed
+                    .any(
+                      (k) =>
+                          k == LogicalKeyboardKey.shiftLeft ||
+                          k == LogicalKeyboardKey.shiftRight,
+                    );
+                final isSelecting = !widget.selectedIndices.contains(index);
+
+                if (isShiftPressed &&
+                    _lastToggledIndex != null &&
+                    widget.onSetSelections != null) {
+                  final startIndex = nonDuplicateIndices.indexOf(
+                    _lastToggledIndex!,
+                  );
+                  final endIndex = nonDuplicateIndices.indexOf(index);
+                  if (startIndex != -1 && endIndex != -1) {
+                    final start = startIndex < endIndex ? startIndex : endIndex;
+                    final end = startIndex < endIndex ? endIndex : startIndex;
+                    final range = nonDuplicateIndices
+                        .sublist(start, end + 1)
+                        .toSet();
+                    widget.onSetSelections!(range, isSelecting);
+                  } else {
+                    widget.onToggleSelection(index);
+                  }
+                } else {
+                  widget.onToggleSelection(index);
+                }
+                _lastToggledIndex = index;
+              },
+              projectedDiveNumber: widget.projectedDiveNumbers?[index],
+              tripName: widget.tripNameForIndex?.call(index),
             ),
         ],
+
+        // Auto-skipped items (e.g. dives at or before the diver's first-sync
+        // cutoff): collapsed by default behind a single summary row so a
+        // long tail of already-logged dives doesn't bury the rows that need
+        // attention. Expanding reveals each item via the same row widget
+        // used above, so action changes keep working unchanged.
+        if (autoSkipIndices.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Card(
+              margin: EdgeInsets.zero,
+              clipBehavior: Clip.antiAlias,
+              child: ExpansionTile(
+                leading: const Icon(Icons.history),
+                title: Text(
+                  context.l10n.importWizard_review_olderDivesSkipped(
+                    autoSkipIndices.length,
+                  ),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                children: [
+                  for (final index in autoSkipIndices.toList()..sort())
+                    _buildRowForIndex(index),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }
 
+  /// Builds the appropriate row widget for a single item [index], reusing
+  /// the exact same per-item widgets the main list sections use above.
+  ///
+  /// Dispatches by data shape rather than by list membership so it works
+  /// identically whether called from the main sections or from inside the
+  /// auto-skipped summary's [ExpansionTile]: scored dive duplicates render
+  /// as a [DuplicateActionCard], unscored entity duplicates render as an
+  /// [_EntityDuplicateCard], and everything else renders as a
+  /// [_NonDuplicateRow].
+  Widget _buildRowForIndex(int index) {
+    if (widget.group.duplicateIndices.contains(index)) {
+      final matchResults = widget.group.matchResults;
+      if (matchResults != null && matchResults[index] != null) {
+        return _buildDuplicateCard(index);
+      }
+      return _buildEntityDuplicateCard(index);
+    }
+    return _NonDuplicateRow(
+      item: widget.group.items[index],
+      index: index,
+      isSelected: widget.selectedIndices.contains(index),
+      onToggle: () => widget.onToggleSelection(index),
+      projectedDiveNumber: widget.projectedDiveNumbers?[index],
+      tripName: widget.tripNameForIndex?.call(index),
+    );
+  }
+
   Widget _buildDuplicateCard(int index) {
-    final item = group.items[index];
-    final matchResult = group.matchResults![index]!;
+    final item = widget.group.items[index];
+    final matchResult = widget.group.matchResults![index]!;
     // Pass the user's chosen action verbatim — including `null`, which means
     // the user has not yet decided. Falling back to a default here would
     // contradict the "Needs decision" pending state and pre-highlight a
     // button the user did not pick.
-    final action = duplicateActions[index];
+    final action = widget.duplicateActions[index];
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -208,36 +375,84 @@ class EntityReviewList extends StatelessWidget {
         item: item,
         matchResult: matchResult,
         selectedAction: action,
-        availableActions: availableActions,
-        onActionChanged: (a) => onDuplicateActionChanged(index, a),
-        existingDiveId: existingDiveIdForIndex(index),
-        projectedDiveNumber: projectedDiveNumbers?[index],
-        isPending: pendingIndices.contains(index),
+        availableActions: widget.availableActions,
+        onActionChanged: (a) => widget.onDuplicateActionChanged(index, a),
+        existingDiveId: widget.existingDiveIdForIndex(index),
+        projectedDiveNumber: widget.projectedDiveNumbers?[index],
+        isPending: widget.pendingIndices.contains(index),
+        plannedDiveLabel: widget.plannedDiveLabelForIndex?.call(index),
+        onChangeFillTarget: widget.onChangeFillTarget == null
+            ? null
+            : () => widget.onChangeFillTarget!(index),
+        tripName: widget.tripNameForIndex?.call(index),
+        inBatchPartner: _inBatchPartner(matchResult),
       ),
     );
   }
 
+  /// The other copy's dive data when [match] is another row of this import.
+  IncomingDiveData? _inBatchPartner(DiveMatchResult match) {
+    final partner = match.inBatchIndex;
+    final items = widget.group.items;
+    if (partner == null || partner < 0 || partner >= items.length) return null;
+    return items[partner].diveData;
+  }
+
   List<int> _nonDuplicateIndices() {
     return [
-      for (int i = 0; i < group.items.length; i++)
-        if (!group.duplicateIndices.contains(i)) i,
+      for (int i = 0; i < widget.group.items.length; i++)
+        if (!widget.group.duplicateIndices.contains(i)) i,
     ];
+  }
+
+  /// Sorts [indices] by [widget.sortField] (date/depth/duration, read off each
+  /// item's [EntityItem.diveData]) when a sort field is set; otherwise
+  /// returns them unchanged.
+  ///
+  /// Items missing the sorted-by field always sink to the end, regardless of
+  /// direction, rather than being placed arbitrarily by a null comparison.
+  List<int> _applySort(Iterable<int> indices) {
+    final field = widget.sortField;
+    if (field == null) return indices.toList();
+
+    double? valueFor(int index) {
+      final data = widget.group.items[index].diveData;
+      return switch (field) {
+        DiveReviewSortField.date =>
+          data?.startTime?.millisecondsSinceEpoch.toDouble(),
+        DiveReviewSortField.depth => data?.maxDepth,
+        DiveReviewSortField.duration => data?.durationSeconds?.toDouble(),
+      };
+    }
+
+    final withValue = <int>[];
+    final withoutValue = <int>[];
+    for (final i in indices) {
+      (valueFor(i) == null ? withoutValue : withValue).add(i);
+    }
+
+    withValue.sort((a, b) {
+      final cmp = valueFor(a)!.compareTo(valueFor(b)!);
+      return widget.sortAscending ? cmp : -cmp;
+    });
+
+    return [...withValue, ...withoutValue];
   }
 
   /// Returns duplicate indices filtered by score range.
   ///
   /// Pending-review indices are emitted first (preserving their
-  /// enumeration order from [group.duplicateIndices]). The remaining
+  /// enumeration order from [widget.group.duplicateIndices]). The remaining
   /// non-pending indices are then sorted descending by match score.
   List<int> _sortedDuplicateIndices({
     required double minScore,
     double maxScore = double.infinity,
   }) {
-    final matchResults = group.matchResults;
+    final matchResults = widget.group.matchResults;
     if (matchResults == null) return const [];
 
     final all = <int>[];
-    for (final index in group.duplicateIndices) {
+    for (final index in widget.group.duplicateIndices) {
       final result = matchResults[index];
       if (result == null) continue;
       if (result.score >= minScore && result.score < maxScore) {
@@ -245,8 +460,8 @@ class EntityReviewList extends StatelessWidget {
       }
     }
 
-    final pendingFirst = all.where(pendingIndices.contains).toList();
-    final rest = all.where((i) => !pendingIndices.contains(i)).toList();
+    final pendingFirst = all.where(widget.pendingIndices.contains).toList();
+    final rest = all.where((i) => !widget.pendingIndices.contains(i)).toList();
     rest.sort((a, b) {
       final scoreA = matchResults[a]?.score ?? 0;
       final scoreB = matchResults[b]?.score ?? 0;
@@ -261,61 +476,152 @@ class EntityReviewList extends StatelessWidget {
   /// Pending-review indices are emitted first, in ascending index order; the
   /// remaining non-pending indices follow in ascending index order.
   List<int> _unscoredDuplicateIndices() {
-    final matchResults = group.matchResults;
+    final matchResults = widget.group.matchResults;
     if (matchResults != null) {
       // Entities with matchResults are handled by _sortedDuplicateIndices.
       return const [];
     }
-    final sorted = group.duplicateIndices.toList()..sort();
-    final pendingFirst = sorted.where(pendingIndices.contains).toList();
-    final rest = sorted.where((i) => !pendingIndices.contains(i)).toList();
+    final sorted = widget.group.duplicateIndices.toList()..sort();
+    final pendingFirst = sorted.where(widget.pendingIndices.contains).toList();
+    final rest = sorted
+        .where((i) => !widget.pendingIndices.contains(i))
+        .toList();
     return [...pendingFirst, ...rest];
   }
 
   Widget _buildEntityDuplicateCard(int index) {
-    final item = group.items[index];
+    final item = widget.group.items[index];
     // Pass the user's chosen action verbatim — `null` means "not yet decided"
     // and is rendered as a pending row with no pre-selected button.
-    final action = duplicateActions[index];
-    final entityMatch = group.entityMatches?[index];
+    final action = widget.duplicateActions[index];
+    final entityMatch = widget.group.entityMatches?[index];
 
     return _EntityDuplicateCard(
       item: item,
       entityMatch: entityMatch,
       selectedAction: action,
-      onActionChanged: (a) => onDuplicateActionChanged(index, a),
-      isPending: pendingIndices.contains(index),
+      onActionChanged: (a) => widget.onDuplicateActionChanged(index, a),
+      availableActions: widget.availableActions,
+      isPending: widget.pendingIndices.contains(index),
     );
   }
 
-  /// Whether this group represents the dive tab.
+  /// Whether this widget.group represents the dive tab.
   ///
-  /// A group is a "dive tab" if at least one item carries dive data. This
+  /// A widget.group is a "dive tab" if at least one item carries dive data. This
   /// controls the bulk-action label variant (Import all as new vs Import all).
   bool _isDiveTab() {
-    if (group.items.isEmpty) return false;
-    return group.items.any((item) => item.diveData != null);
+    if (widget.group.items.isEmpty) return false;
+    return widget.group.items.any((item) => item.diveData != null);
   }
 
-  /// Number of pending rows whose match score is high enough (>= 0.7) to
-  /// qualify for bulk consolidation.
+  /// Number of pending rows eligible for bulk consolidation.
+  ///
+  /// Mirrors the predicate in `ImportWizardNotifier.applyBulkAction`: a row
+  /// qualifies only when its match score is high enough (>= 0.7) AND it is not
+  /// a `matchedExistingSource` re-download (exact-source hits are never valid
+  /// consolidate targets). Keeping the two in sync ensures the displayed count
+  /// and button enablement match what a bulk tap actually consolidates.
   int _matchableConsolidateCount() {
-    final matchResults = group.matchResults;
+    final matchResults = widget.group.matchResults;
     if (matchResults == null) return 0;
-    return pendingIndices
-        .where((i) => (matchResults[i]?.score ?? 0) >= 0.7)
-        .length;
+    return widget.pendingIndices.where((i) {
+      final match = matchResults[i];
+      return match != null &&
+          match.score >= 0.7 &&
+          !match.matchedExistingSource &&
+          match.inBatchIndex == null;
+    }).length;
   }
 
-  String _itemCountText(int nonDuplicates, int duplicates, int selectedCount) {
+  String _itemCountText(
+    AppLocalizations l10n,
+    int nonDuplicates,
+    int duplicates,
+    int selectedCount,
+  ) {
     final parts = <String>[];
     if (nonDuplicates > 0) {
-      parts.add('$selectedCount / $nonDuplicates selected');
+      parts.add(
+        l10n.universalImport_label_xOfYSelected(selectedCount, nonDuplicates),
+      );
     }
     if (duplicates > 0) {
-      parts.add('$duplicates duplicate${duplicates == 1 ? '' : 's'}');
+      parts.add(l10n.universalImport_count_duplicates(duplicates));
     }
     return parts.join(' \u00b7 ');
+  }
+}
+
+/// Sort control for the dive tab's non-duplicate rows.
+///
+/// Shows the active field with a direction arrow; picking the active field
+/// again (via [widget.onSortFieldChanged]) flips the arrow instead of no-opping.
+class _SortMenuButton extends StatelessWidget {
+  final DiveReviewSortField sortField;
+  final bool sortAscending;
+  final ValueChanged<DiveReviewSortField> onSortFieldChanged;
+
+  const _SortMenuButton({
+    required this.sortField,
+    required this.sortAscending,
+    required this.onSortFieldChanged,
+  });
+
+  String _fieldLabel(BuildContext context, DiveReviewSortField field) {
+    final l10n = context.l10n;
+    return switch (field) {
+      DiveReviewSortField.date => l10n.importWizard_review_sortByDate,
+      DiveReviewSortField.depth => l10n.importWizard_review_sortByDepth,
+      DiveReviewSortField.duration => l10n.importWizard_review_sortByDuration,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return PopupMenuButton<DiveReviewSortField>(
+      tooltip: context.l10n.importWizard_review_sortTooltip,
+      onSelected: onSortFieldChanged,
+      itemBuilder: (context) => [
+        for (final field in DiveReviewSortField.values)
+          PopupMenuItem(
+            value: field,
+            child: Row(
+              children: [
+                Expanded(child: Text(_fieldLabel(context, field))),
+                if (field == sortField)
+                  Icon(
+                    sortAscending ? Icons.arrow_upward : Icons.arrow_downward,
+                    size: 16,
+                    color: colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              sortAscending ? Icons.arrow_upward : Icons.arrow_downward,
+              size: 16,
+              color: colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              _fieldLabel(context, sortField),
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -325,6 +631,7 @@ class _NonDuplicateRow extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onToggle;
   final int? projectedDiveNumber;
+  final String? tripName;
 
   const _NonDuplicateRow({
     required this.item,
@@ -332,6 +639,7 @@ class _NonDuplicateRow extends StatelessWidget {
     required this.isSelected,
     required this.onToggle,
     this.projectedDiveNumber,
+    this.tripName,
   });
 
   @override
@@ -394,6 +702,9 @@ class _NonDuplicateRow extends StatelessWidget {
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
+                  if (tripName case final trip?) ImportTripLine(tripName: trip),
+                  if (item.target case final target?)
+                    ImportTargetChip(target: target),
                 ],
               ),
             ),
@@ -413,7 +724,7 @@ class _NonDuplicateRow extends StatelessWidget {
                   border: Border.all(color: Colors.green, width: 1),
                 ),
                 child: Text(
-                  'IMPORT',
+                  context.l10n.universalImport_entityAction_importBadge,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: Colors.green,
                     fontWeight: FontWeight.bold,
@@ -433,7 +744,7 @@ class _NonDuplicateRow extends StatelessWidget {
                   ),
                 ),
                 child: Text(
-                  'SKIP',
+                  context.l10n.universalImport_entityAction_skipBadge,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurface.withValues(alpha: 0.4),
                     fontWeight: FontWeight.bold,
@@ -463,6 +774,9 @@ class _EntityDuplicateCard extends StatefulWidget {
   final DuplicateAction? selectedAction;
   final ValueChanged<DuplicateAction> onActionChanged;
 
+  /// Which action buttons the expanded comparison panel may offer.
+  final Set<DuplicateAction> availableActions;
+
   /// Whether this row still needs an explicit user decision.
   ///
   /// When true the card renders a warning-colored 1.5-px border and a
@@ -474,6 +788,7 @@ class _EntityDuplicateCard extends StatefulWidget {
     required this.entityMatch,
     required this.selectedAction,
     required this.onActionChanged,
+    required this.availableActions,
     this.isPending = false,
   });
 
@@ -494,14 +809,14 @@ class _EntityDuplicateCardState extends State<_EntityDuplicateCard> {
     // the tertiary warning colour so the border reads as "undecided" rather
     // than implying a skip. The pending branch below also uses tertiary, so
     // this fallback only matters for the rare non-pending-null case.
-    final Color borderColor;
-    if (widget.selectedAction == null) {
-      borderColor = colorScheme.tertiary;
-    } else if (isImporting) {
-      borderColor = Colors.green;
-    } else {
-      borderColor = colorScheme.error;
-    }
+    final Color borderColor = switch (widget.selectedAction) {
+      null => colorScheme.tertiary,
+      DuplicateAction.importAsNew => Colors.green,
+      DuplicateAction.consolidate => colorScheme.primary,
+      DuplicateAction.replaceSource => Colors.blue.shade700,
+      DuplicateAction.fillPlanned => colorScheme.tertiary,
+      DuplicateAction.skip => colorScheme.error,
+    };
 
     final BorderSide borderSide = widget.isPending
         ? BorderSide(color: colorScheme.tertiary, width: 1.5)
@@ -569,6 +884,8 @@ class _EntityDuplicateCardState extends State<_EntityDuplicateCard> {
                               ),
                               overflow: TextOverflow.ellipsis,
                             ),
+                          if (widget.item.target case final target?)
+                            ImportTargetChip(target: target),
                         ],
                       ),
                     ),
@@ -580,7 +897,7 @@ class _EntityDuplicateCardState extends State<_EntityDuplicateCard> {
                     // Action badge — suppressed when no decision has been made.
                     if (widget.selectedAction != null) ...[
                       const SizedBox(width: 8),
-                      _SimpleActionBadge(isImporting: isImporting),
+                      _SimpleActionBadge(action: widget.selectedAction!),
                     ],
                     // Expand/collapse chevron (only when comparison data exists)
                     if (widget.entityMatch != null) ...[
@@ -601,6 +918,7 @@ class _EntityDuplicateCardState extends State<_EntityDuplicateCard> {
                 entityMatch: widget.entityMatch!,
                 selectedAction: widget.selectedAction,
                 onActionChanged: widget.onActionChanged,
+                availableActions: widget.availableActions,
                 isPending: widget.isPending,
               ),
           ],
@@ -619,6 +937,10 @@ class _EntityComparisonPanel extends StatelessWidget {
   final DuplicateAction? selectedAction;
   final ValueChanged<DuplicateAction> onActionChanged;
 
+  /// Which action buttons to render. Filtered per entity type by the adapter
+  /// so a tab never offers an action whose import path would drop the row.
+  final Set<DuplicateAction> availableActions;
+
   /// Whether the enclosing row still needs an explicit user decision.
   ///
   /// When `true` AND [selectedAction] is `null`, a "Choose an action" label
@@ -629,6 +951,7 @@ class _EntityComparisonPanel extends StatelessWidget {
     required this.entityMatch,
     required this.selectedAction,
     required this.onActionChanged,
+    required this.availableActions,
     this.isPending = false,
   });
 
@@ -657,7 +980,7 @@ class _EntityComparisonPanel extends StatelessWidget {
               const SizedBox(width: 80),
               Expanded(
                 child: Text(
-                  'Existing',
+                  context.l10n.universalImport_compare_existing,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                     fontWeight: FontWeight.w700,
@@ -667,7 +990,7 @@ class _EntityComparisonPanel extends StatelessWidget {
               ),
               Expanded(
                 child: Text(
-                  'Incoming',
+                  context.l10n.universalImport_compare_incoming,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                     fontWeight: FontWeight.w700,
@@ -708,21 +1031,55 @@ class _EntityComparisonPanel extends StatelessWidget {
                 spacing: 8,
                 runSpacing: 4,
                 children: [
-                  _EntityActionButton(
-                    label: 'Skip',
-                    subtitle: 'Discard this import',
-                    isSelected: selectedAction == DuplicateAction.skip,
-                    color: colorScheme.error,
-                    onPressed: () => onActionChanged(DuplicateAction.skip),
-                  ),
-                  _EntityActionButton(
-                    label: 'Import as New',
-                    subtitle: 'Create separate entry',
-                    isSelected: selectedAction == DuplicateAction.importAsNew,
-                    color: Colors.green.shade700,
-                    onPressed: () =>
-                        onActionChanged(DuplicateAction.importAsNew),
-                  ),
+                  if (availableActions.contains(DuplicateAction.consolidate))
+                    _EntityActionButton(
+                      label: context
+                          .l10n
+                          .universalImport_entityAction_linkExisting,
+                      subtitle: context
+                          .l10n
+                          .universalImport_entityAction_linkExistingSubtitle,
+                      isSelected: selectedAction == DuplicateAction.consolidate,
+                      color: colorScheme.primary,
+                      onPressed: () =>
+                          onActionChanged(DuplicateAction.consolidate),
+                    ),
+                  if (availableActions.contains(DuplicateAction.skip))
+                    _EntityActionButton(
+                      label: context.l10n.universalImport_entityAction_skip,
+                      subtitle: context
+                          .l10n
+                          .universalImport_entityAction_skipSubtitle,
+                      isSelected: selectedAction == DuplicateAction.skip,
+                      color: colorScheme.error,
+                      onPressed: () => onActionChanged(DuplicateAction.skip),
+                    ),
+                  if (availableActions.contains(DuplicateAction.importAsNew))
+                    _EntityActionButton(
+                      label:
+                          context.l10n.universalImport_entityAction_importAsNew,
+                      subtitle: context
+                          .l10n
+                          .universalImport_entityAction_importAsNewSubtitle,
+                      isSelected: selectedAction == DuplicateAction.importAsNew,
+                      color: Colors.green.shade700,
+                      onPressed: () =>
+                          onActionChanged(DuplicateAction.importAsNew),
+                    ),
+                  if (availableActions.contains(DuplicateAction.replaceSource))
+                    _EntityActionButton(
+                      label: context
+                          .l10n
+                          .universalImport_entityAction_replaceExisting,
+                      subtitle: context
+                          .l10n
+                          .universalImport_entityAction_replaceExistingSubtitle,
+                      isSelected:
+                          selectedAction == DuplicateAction.replaceSource,
+                      color: Colors.blue.shade700,
+                      onPressed: () =>
+                          onActionChanged(DuplicateAction.replaceSource),
+                    ),
                 ],
               ),
             ],
@@ -803,7 +1160,8 @@ class _ComparisonRow extends StatelessWidget {
 /// Action button for the entity comparison panel.
 ///
 /// Matches the dive comparison card's button style: [FilledButton] when
-/// selected (with color background + white text), [OutlinedButton] when not.
+/// selected (with color background and a label that reads on it),
+/// [OutlinedButton] when not.
 class _EntityActionButton extends StatelessWidget {
   final String label;
   final String subtitle;
@@ -823,6 +1181,7 @@ class _EntityActionButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     const minSize = Size(0, 48);
+    final onFill = isSelected ? foregroundOn(theme.colorScheme, color) : null;
 
     final child = Column(
       mainAxisSize: MainAxisSize.min,
@@ -831,16 +1190,16 @@ class _EntityActionButton extends StatelessWidget {
           label,
           style: theme.textTheme.labelLarge?.copyWith(
             fontWeight: FontWeight.w600,
-            color: isSelected ? Colors.white : null,
+            color: onFill,
           ),
         ),
         if (subtitle.isNotEmpty)
           Text(
             subtitle,
             style: theme.textTheme.labelSmall?.copyWith(
-              color: isSelected
-                  ? Colors.white.withValues(alpha: 0.85)
-                  : theme.colorScheme.onSurfaceVariant,
+              color:
+                  onFill?.withValues(alpha: 0.85) ??
+                  theme.colorScheme.onSurfaceVariant,
               fontSize: 10,
             ),
           ),
@@ -853,7 +1212,7 @@ class _EntityActionButton extends StatelessWidget {
         style: FilledButton.styleFrom(
           minimumSize: minSize,
           backgroundColor: color,
-          foregroundColor: Colors.white,
+          foregroundColor: onFill,
         ),
         child: child,
       );
@@ -872,16 +1231,37 @@ class _EntityActionButton extends StatelessWidget {
 }
 
 class _SimpleActionBadge extends StatelessWidget {
-  final bool isImporting;
+  final DuplicateAction action;
 
-  const _SimpleActionBadge({required this.isImporting});
+  const _SimpleActionBadge({required this.action});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final (label, color) = isImporting
-        ? ('IMPORT', Colors.green.shade700)
-        : ('SKIP', theme.colorScheme.error);
+    final (label, color) = switch (action) {
+      DuplicateAction.importAsNew => (
+        context.l10n.universalImport_entityAction_importBadge,
+        Colors.green.shade700,
+      ),
+      DuplicateAction.consolidate => (
+        context.l10n.universalImport_entityAction_linkBadge,
+        theme.colorScheme.primary,
+      ),
+      // "REPLACE", matching the dive card's badge for the same action rather
+      // than introducing a second word ("Overwrite") for one enum value.
+      DuplicateAction.replaceSource => (
+        context.l10n.universalImport_entityAction_replaceBadge,
+        Colors.blue.shade700,
+      ),
+      DuplicateAction.fillPlanned => (
+        context.l10n.universalImport_label_fillPlanned,
+        theme.colorScheme.tertiary,
+      ),
+      DuplicateAction.skip => (
+        context.l10n.universalImport_entityAction_skipBadge,
+        theme.colorScheme.error,
+      ),
+    };
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -984,9 +1364,14 @@ class _BulkActionRow extends StatelessWidget {
               ),
             ),
           if (availableActions.contains(DuplicateAction.consolidate))
-            // TODO(#200): enable when bulk-consolidate is implemented end-to-end.
             OutlinedButton.icon(
-              onPressed: null,
+              // Enabled only when at least one pending row is eligible for
+              // consolidation (see _matchableConsolidateCount). With nothing to
+              // consolidate the button stays disabled rather than firing a
+              // no-op bulk action.
+              onPressed: matchableConsolidateCount > 0
+                  ? () => onBulkAction(DuplicateAction.consolidate)
+                  : null,
               icon: const Icon(Icons.merge_type, size: 16),
               label: Text(
                 context.l10n.universalImport_bulk_consolidateMatched(

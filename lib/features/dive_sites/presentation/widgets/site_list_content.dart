@@ -1,33 +1,77 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:go_router/go_router.dart';
-import 'package:latlong2/latlong.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/dive_sites/query/site_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_header.dart';
+import 'package:submersion/features/rules/presentation/run_rules_flow.dart';
+import 'package:submersion/features/rules/domain/rule_subject.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
+import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/shared_library/presentation/widgets/library_error_text.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
-import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
-import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
+import 'package:submersion/shared/selection/bulk_action.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/selection/selectable_list_scope.dart';
+import 'package:submersion/shared/selection/selection_app_bar.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
+import 'package:submersion/shared/widgets/master_detail/list_position_restorer.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_nav_stops.dart';
 import 'package:submersion/shared/widgets/master_detail/map_view_toggle_button.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
+import 'package:submersion/shared/widgets/shared_items/shared_item_dialogs.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/utils/site_grouping.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_grouping_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/utils/site_group_by_display.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_group_by_selector.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/grouped_site_list_view.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/catalogue_gap_notice.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/search_built_in_sites_row.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_active_filters_bar.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/compact_site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/dense_site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_filter_sheet.dart';
-import 'package:submersion/shared/widgets/debounced_search_results.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_delete_usage.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_list_tile.dart';
+import 'package:submersion/features/dive_sites/domain/services/site_location_backfill_service.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_location_backfill_dialog.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_list_count_provider.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
+import 'package:submersion/features/shared_library/presentation/providers/shared_library_providers.dart';
+import 'package:submersion/features/shared_library/presentation/widgets/library_picker_dialog.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
+import 'package:submersion/shared/widgets/shared_items/item_bulk_share.dart';
+import 'package:submersion/core/data/visibility/item_sharing.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
 /// Content widget for the site list, used in master-detail layout.
+final _log = LoggerService.forClass(SiteListContent);
+
 class SiteListContent extends ConsumerStatefulWidget {
   final void Function(String?)? onItemSelected;
   final String? selectedId;
@@ -51,6 +95,13 @@ class SiteListContent extends ConsumerStatefulWidget {
   /// If null, the map icon will navigate to the map page (mobile behavior).
   final VoidCallback? onMapViewToggle;
 
+  /// Drives bulk selection from outside the list when set.
+  ///
+  /// In table mode the page's header carries the overflow menu, "Select
+  /// items" among it, so the page has to reach the same controller the rows
+  /// use. Left null, the list owns its own.
+  final SelectionController? selectionController;
+
   const SiteListContent({
     super.key,
     this.onItemSelected,
@@ -61,6 +112,7 @@ class SiteListContent extends ConsumerStatefulWidget {
     this.isMapMode = false,
     this.isMapViewActive = false,
     this.onMapViewToggle,
+    this.selectionController,
   });
 
   @override
@@ -71,24 +123,100 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
   final ScrollController _scrollController = ScrollController();
   String? _lastScrolledToId;
   bool _selectionFromList = false;
-  bool _isSelectionMode = false;
-  final Set<String> _selectedIds = {};
-  List<DiveSite>? _deletedSites;
+
+  /// Brings the list back to the site last opened when it is built again
+  /// after the diver left it (#3301).
+  late final ListPositionRestorer _positionRestorer = ListPositionRestorer(
+    controller: _scrollController,
+    attempt: _restoreRememberedSite,
+  );
+
+  /// The bulk-selection state machine for this list: the page's when it
+  /// passes one, otherwise this list's own.
+  late final SelectionController _selection = _adoptSelection();
+
+  /// Only a controller this list created is this list's to dispose. Set in
+  /// the same step that picks the controller, so the two cannot disagree.
+  bool _ownsSelection = false;
+
+  SelectionController _adoptSelection() {
+    final external = widget.selectionController;
+    _ownsSelection = external == null;
+    return external ?? SelectionController();
+  }
+
+  /// Convenience mirrors of the controller, so the widget tree reads clearly.
+  bool get _isSelectionMode => _selection.value.isActive;
+  Set<String> get _selectedIds => _selection.value.checkedIds;
+  ({List<DiveSite> sites, SiteLinks links})? _deletedSites;
+
+  /// Another profile's shared sites the last bulk delete hid instead of
+  /// deleting (issue #2594), for its Undo.
+  List<String> _hiddenSiteIds = const [];
   MergeSnapshot? _mergeSnapshot;
+
+  /// Groups closed by hand while a filter is active; reset when the filter
+  /// changes, since a new filter opens every match again.
+  Set<String> _filterCollapsed = const {};
+
+  /// The grouping of the last site list seen under the last grouping mode
+  /// seen, reused while both are the same, so a rebuild that changes only
+  /// checks or expansion (each selection tap) does not re-fold every site.
+  /// One field rather than one per cache-key part, so the sites, mode and
+  /// groups it holds can never drift out of step with each other.
+  ({
+    List<SiteWithDiveCount> sites,
+    SiteGroupBy mode,
+    List<SiteOuterGroup<SiteWithDiveCount>> groups,
+  })?
+  _groupCache;
+
+  List<SiteOuterGroup<SiteWithDiveCount>> _groupsFor(
+    List<SiteWithDiveCount> sites,
+    SiteGroupBy groupBy,
+  ) {
+    final cached = _groupCache;
+    if (cached != null &&
+        identical(cached.sites, sites) &&
+        cached.mode == groupBy) {
+      return cached.groups;
+    }
+    final groups = groupSitesFor(groupBy, sites, (s) => s.site);
+    _groupCache = (sites: sites, mode: groupBy, groups: groups);
+    return groups;
+  }
 
   @override
   void initState() {
     super.initState();
-    if (widget.selectedId != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToSelectedItem();
-      });
-    }
+    _positionRestorer.start(ref, sortedSitesWithCountsProvider);
+  }
+
+  /// One try at showing the selected site (one in the address) or, failing
+  /// that, the site last opened, for [_positionRestorer]: true once there is
+  /// nothing left to wait for. A list pushed over another page starts at its
+  /// top unless its address names a site.
+  bool _restoreRememberedSite() {
+    if (!mounted) return true;
+    return restoreListPosition(
+      context,
+      items: ref.read(sortedSitesWithCountsProvider),
+      selectedId: widget.selectedId,
+      rememberedId: ref.read(highlightedSiteIdProvider),
+      idOf: (entry) => entry.site.id,
+      controller: _scrollController,
+      scrollTo: (id) {
+        _lastScrolledToId = id;
+        _scrollToSelectedItem(targetId: id, jump: true);
+      },
+    );
   }
 
   @override
   void dispose() {
+    _positionRestorer.dispose();
     _scrollController.dispose();
+    if (_ownsSelection) _selection.dispose();
     super.dispose();
   }
 
@@ -107,12 +235,47 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     }
   }
 
-  void _scrollToSelectedItem() {
-    if (widget.selectedId == null) return;
+  /// Scrolls to [targetId], or the selected site when omitted. [jump] moves
+  /// straight there, for a list being restored, which should not visibly
+  /// travel from the top.
+  void _scrollToSelectedItem({String? targetId, bool jump = false}) {
+    final target = targetId ?? widget.selectedId;
+    if (target == null) return;
 
     final sitesAsync = ref.read(sortedSitesWithCountsProvider);
     sitesAsync.whenData((sites) {
-      final index = sites.indexWhere((s) => s.site.id == widget.selectedId);
+      // A site selected from outside the list (map, a new site, a deep link)
+      // can sit in a group the diver collapsed. Open it first, after this
+      // frame since a provider cannot change mid-build, then scroll once the
+      // list has rebuilt with it open.
+      final hiddenGroups = _collapsedGroupsOfSelected(sites, target);
+      if (hiddenGroups != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final stored = ref.read(siteListExpandedGroupsProvider);
+          if (stored != null) {
+            ref.read(siteListExpandedGroupsProvider.notifier).state = {
+              ...stored,
+              ...hiddenGroups,
+            };
+          }
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _scrollToSelectedItem(targetId: target, jump: jump);
+          });
+        });
+        return;
+      }
+      // Grouped, the selected site's offset is its row among the visible
+      // headers and sites, not its position in the flat list.
+      final rows = _groupedView(sites, listen: false)?.rows;
+      final index = rows == null
+          ? sites.indexWhere((s) => s.site.id == target)
+          : rows.indexWhere(
+              (row) =>
+                  row is SiteRow<SiteWithDiveCount> &&
+                  row.item.site.id == target,
+            );
+      final rowCount = rows?.length ?? sites.length;
       if (index >= 0 && _scrollController.hasClients) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_scrollController.hasClients || sites.isEmpty) return;
@@ -120,17 +283,24 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
           final maxScroll = _scrollController.position.maxScrollExtent;
           final viewportHeight = _scrollController.position.viewportDimension;
           final totalContentHeight = maxScroll + viewportHeight - 80;
-          final avgItemHeight = totalContentHeight / sites.length;
+          final avgItemHeight = totalContentHeight / rowCount;
           final targetOffset = (index * avgItemHeight) - (viewportHeight / 3);
           final clampedOffset = targetOffset.clamp(0.0, maxScroll);
 
-          _scrollController.animateTo(
-            clampedOffset,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-          );
-          _lastScrolledToId = widget.selectedId;
+          if (jump) {
+            _scrollController.jumpTo(clampedOffset);
+          } else {
+            _scrollController.animateTo(
+              clampedOffset,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+            );
+          }
+          _lastScrolledToId = target;
         });
+        // The measuring callback needs a frame to run in, which a settled
+        // list being restored would not otherwise schedule.
+        WidgetsBinding.instance.scheduleFrame();
       }
     });
   }
@@ -153,6 +323,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     }
 
     ref.read(highlightedSiteIdProvider.notifier).state = site.id;
+    forgetClosedPane(ref, RecordListSection.sites);
 
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
@@ -162,65 +333,139 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     }
   }
 
-  void _enterSelectionMode(String? initialId) {
-    setState(() {
-      _isSelectionMode = true;
-      _selectedIds.clear();
-      if (initialId != null) {
-        _selectedIds.add(initialId);
+  /// Enter selection mode implicitly, from a modifier-click, checking [id].
+  ///
+  /// Clearing the highlight keeps the detail pane from arguing with the bulk
+  /// selection about what the row means: a row left highlighted but unchecked
+  /// reads as selected while no bulk action would touch it.
+  ///
+  /// The Select controls route to [SelectionController.enterExplicit] directly
+  /// -- they have no row to check -- so this helper only ever serves the
+  /// implicit path, which since the removal of long-press entry means
+  /// modifier-click alone.
+  void _enterImplicitSelection(String id, {String? seedId}) {
+    ref.read(highlightedSiteIdProvider.notifier).state = null;
+    _selection.enterImplicit(id, seedId: seedId);
+  }
+
+  void _exitSelectionMode() => _selection.exit();
+
+  void _toggleSelection(String id) => _selection.toggle(id);
+
+  /// Select the contiguous span from the anchor site to [targetId].
+  ///
+  /// With no anchor yet, the highlighted row is the origin, matching Finder.
+  void _selectRangeTo(String targetId, List<String> orderedIds) {
+    _selection.extendTo(
+      targetId,
+      orderedIds,
+      fallbackAnchorId: ref.read(highlightedSiteIdProvider),
+    );
+  }
+
+  /// Cmd/Ctrl-click [id], carrying the highlighted site into the selection.
+  ///
+  /// Outside selection mode the highlighted row is what the user sees as
+  /// selected, so a modifier-click adds to it rather than replacing it. A
+  /// highlight that filtering has pushed out of [orderedIds] is ignored, so
+  /// the count can never include a site that is not on screen.
+  void _modifierTap(String id, List<String> orderedIds) {
+    final highlighted = ref.read(highlightedSiteIdProvider);
+    _enterImplicitSelection(
+      id,
+      seedId: highlighted != null && orderedIds.contains(highlighted)
+          ? highlighted
+          : null,
+    );
+  }
+
+  /// One tap policy for every site row, in every view mode.
+  ///
+  /// A held modifier turns a tap into an implicit entry -- the one path that
+  /// still evaporates at zero checked, since touch has no gesture entry left.
+  /// Shift extends from the anchor, falling back to the highlighted row.
+  void _handleRowTap(String id, List<SiteWithDiveCount> sites) {
+    final orderedIds = sites.map((s) => s.site.id).toList();
+    if (SelectableListScope.isShiftPressed()) {
+      _selectRangeTo(id, orderedIds);
+      return;
+    }
+    if (SelectableListScope.isModifierPressed()) {
+      _modifierTap(id, orderedIds);
+      return;
+    }
+    if (_isSelectionMode) {
+      _selection.toggle(id);
+      return;
+    }
+    final index = sites.indexWhere((s) => s.site.id == id);
+    if (index < 0) return;
+    _handleItemTap(sites[index].site);
+  }
+
+  /// The checked sites with their owners, read before a merge or bulk
+  /// delete decides what it may do to each (issue #2594). A failed read
+  /// logs, tells the diver to try again and returns null, so the action
+  /// stops before its dialog rather than failing unseen.
+  Future<List<DiveSite>?> _readSelectedSites(List<String> ids) async {
+    try {
+      return await ref.read(siteRepositoryProvider).getSitesByIds(ids);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Could not read the selected sites',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.common_error_tryAgain)),
+        );
       }
-    });
+      return null;
+    }
   }
 
-  void _exitSelectionMode() {
-    setState(() {
-      _isSelectionMode = false;
-      _selectedIds.clear();
-    });
-  }
-
-  void _toggleSelection(String id) {
-    setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
-        if (_selectedIds.isEmpty) {
-          _isSelectionMode = false;
-        }
-      } else {
-        _selectedIds.add(id);
-      }
-    });
-  }
-
-  void _selectAll(List<SiteWithDiveCount> sites) {
-    setState(() {
-      _selectedIds.addAll(sites.map((s) => s.site.id));
-    });
-  }
-
-  void _deselectAll() {
-    setState(() {
-      _selectedIds.clear();
-    });
-  }
-
-  Future<void> _startMerge() async {
-    final selectedCount = _selectedIds.length;
+  Future<BulkActionOutcome> _startMerge() async {
+    // A merge destroys every site but the first (issue #2594): another
+    // profile's shared site may only be the survivor, so at most one fits.
+    final sharing = await readSharingContext(ref, context);
+    if (sharing == null) return BulkActionOutcome.failed;
+    final selected = await _readSelectedSites(_selectedIds.toList());
+    if (selected == null) return BulkActionOutcome.failed;
+    final notOwned = [
+      for (final s in selected)
+        if (!canDestroySharedItem(
+          ownerId: s.diverId,
+          activeDiverId: sharing.activeDiverId,
+          isLibrarySite: s.isLibrarySite,
+        ))
+          s.id,
+    ];
+    if (!mounted) return BulkActionOutcome.cancelled;
+    if (notOwned.length > 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.sharedItems_mergeTooManyShared)),
+      );
+      return BulkActionOutcome.cancelled;
+    }
+    final orderedIds = [
+      ...notOwned,
+      for (final id in _selectedIds)
+        if (!notOwned.contains(id)) id,
+    ];
     final result = await context.push<SiteMergeResult>(
       '/sites/merge',
-      extra: _selectedIds.toList(),
+      extra: orderedIds,
     );
 
-    if (!mounted || result == null) return;
+    if (result == null) return BulkActionOutcome.cancelled;
+    if (!mounted) return BulkActionOutcome.completed;
 
     _mergeSnapshot = result.snapshot;
     final mergedId = result.survivorId;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
 
-    setState(() {
-      _isSelectionMode = false;
-      _selectedIds.clear();
-    });
+    _selection.exit();
 
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
@@ -233,10 +478,15 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       scaffoldMessenger.showSnackBar(
         SnackBar(
           content: Text(
-            context.l10n.diveSites_list_merge_snackbar(selectedCount),
+            // The sites the merge took in: one deleted since the selection
+            // was left out of it.
+            context.l10n.diveSites_list_merge_snackbar(
+              _mergeSnapshot!.deletedSites.length + 1,
+            ),
           ),
           duration: const Duration(seconds: 5),
           showCloseIcon: true,
+          persist: false,
           action: SnackBarAction(
             label: context.l10n.diveSites_list_merge_undo,
             onPressed: () async {
@@ -259,15 +509,82 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
         ),
       );
     }
+    return BulkActionOutcome.completed;
   }
 
-  Future<void> _confirmAndDelete() async {
-    final count = _selectedIds.length;
+  Future<BulkActionOutcome> _confirmAndDelete() async {
+    // One snapshot for the dialog and the delete: the selection can change
+    // while the usage is read, and the delete must remove exactly the sites
+    // the dialog described.
+    final idsToDelete = _selectedIds.toList();
+    // Another profile's shared sites are hidden, not deleted, and the
+    // owner's shared ones are named as going for everyone (issue #2594).
+    final sharing = await readSharingContext(ref, context);
+    if (sharing == null) return BulkActionOutcome.failed;
+    final selectedSites = await _readSelectedSites(idsToDelete);
+    if (selectedSites == null) return BulkActionOutcome.failed;
+    final split = splitForBulkDelete(
+      selectedSites,
+      ownerOf: (s) => s.diverId,
+      // A listed item another profile owns reaches this one only by being
+      // shared with it, with everyone or by a share row (issue #2151).
+      isSharedOf: (_) => true,
+      isLibraryOf: (s) => s.isLibrarySite,
+      activeDiverId: sharing.activeDiverId,
+    );
+    final destroyIds = [for (final s in split.destroy) s.id];
+    final hideIds = [for (final s in split.hide) s.id];
+    final deleteCount = destroyIds.length;
+    final hideCount = hideIds.length;
+    // Shared with everyone or with chosen profiles (issue #2151).
+    final sharedByName = sharing.diverCount >= 2 && destroyIds.isNotEmpty
+        ? await ref.read(itemIdsWithSharesProvider(SharedItemKind.site).future)
+        : const <String>{};
+    if (!mounted) return BulkActionOutcome.cancelled;
+    final sharedDeleteCount = sharing.diverCount >= 2
+        ? split.destroy
+              .where(
+                (s) => isSharedWithAnyone(
+                  id: s.id,
+                  everyone: s.isShared,
+                  namedShares: sharedByName,
+                ),
+              )
+              .length
+        : 0;
+    final usage = deleteCount > 0
+        ? await readSiteDeleteUsage(ref, destroyIds)
+        : const SiteUsage();
+    if (!mounted || deleteCount + hideCount == 0) {
+      return BulkActionOutcome.cancelled;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(context.l10n.diveSites_list_bulkDelete_title),
-        content: Text(context.l10n.diveSites_list_bulkDelete_content(count)),
+        title: Text(
+          deleteCount > 0
+              ? context.l10n.diveSites_list_bulkDelete_title
+              : context.l10n.sharedItems_bulkRemoveTitle(hideCount),
+        ),
+        content: Text(
+          [
+            ...bulkDeleteLines(
+              context.l10n,
+              SharedItemKind.site,
+              deleteCount: deleteCount,
+              hideCount: hideCount,
+              sharedDeleteCount: sharedDeleteCount,
+              // The site list's own line below states it, with its Undo.
+              includeDeleteCount: false,
+            ),
+            if (deleteCount > 0)
+              withSiteDeleteUsage(
+                context.l10n,
+                context.l10n.diveSites_list_bulkDelete_content(deleteCount),
+                usage,
+              ),
+          ].join('\n\n'),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -275,10 +592,16 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
+            style: deleteCount > 0
+                ? FilledButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                  )
+                : null,
+            child: Text(
+              deleteCount > 0
+                  ? context.l10n.diveSites_list_bulkDelete_confirm
+                  : context.l10n.common_action_remove,
             ),
-            child: Text(context.l10n.diveSites_list_bulkDelete_confirm),
           ),
         ],
       ),
@@ -286,51 +609,110 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
 
     if (confirmed == true && mounted) {
       final scaffoldMessenger = ScaffoldMessenger.of(context);
-      final idsToDelete = _selectedIds.toList();
+      final l10n = context.l10n;
+      final notifier = ref.read(siteListNotifierProvider.notifier);
       _exitSelectionMode();
 
-      final deletedSites = await ref
-          .read(siteListNotifierProvider.notifier)
-          .bulkDeleteSites(idsToDelete);
+      final deleted = deleteCount > 0
+          ? await notifier.bulkDeleteSites(destroyIds)
+          : null;
+      // Null when the hide failed: the summary says so beside the deletes.
+      final hidden = hideCount > 0
+          ? await tryHideChange(() => notifier.hideSites(hideIds))
+          : 0;
 
-      _deletedSites = deletedSites;
+      _deletedSites = deleted;
+      // Even after a failed hide: it may have been written before the
+      // refresh failed, and an unhide of one not hidden does nothing.
+      _hiddenSiteIds = hideIds;
 
-      if (mounted) {
+      final summary = [
+        if (deleted != null && deleted.sites.isNotEmpty)
+          l10n.diveSites_list_bulkDelete_snackbar(deleted.sites.length),
+        if (hidden case final n? when n > 0)
+          l10n.sharedItems_bulkHiddenSnackbar(n),
+        if (hidden == null) l10n.common_error_tryAgain,
+      ];
+      // Only a failed hide to report: nothing for Undo to take back.
+      if (hidden == null && (deleted?.sites.isEmpty ?? true)) {
+        scaffoldMessenger.clearSnackBars();
+        scaffoldMessenger.showSnackBar(
+          SnackBar(content: Text(l10n.common_error_tryAgain)),
+        );
+        return BulkActionOutcome.completed;
+      }
+      // Takes back what the bulk delete did, clearing each half once it is
+      // back. Anything left says so, even once the list has closed, and
+      // offers Undo again for the rest (issue #2677).
+      Future<void> undo() async {
+        final toRestore = _deletedSites;
+        if (toRestore == null || toRestore.sites.isEmpty) {
+          _deletedSites = null;
+        } else {
+          try {
+            await notifier.restoreSites(
+              toRestore.sites,
+              links: toRestore.links,
+            );
+            _deletedSites = null;
+          } catch (e, stackTrace) {
+            _log.error(
+              'Could not restore the deleted sites',
+              error: e,
+              stackTrace: stackTrace,
+            );
+          }
+        }
+        final toUnhide = _hiddenSiteIds;
+        if (toUnhide.isEmpty ||
+            await tryHideChange(
+                  () => notifier.unhideSites(toUnhide).then((_) => true),
+                ) ==
+                true) {
+          _hiddenSiteIds = const [];
+        }
+        if (_deletedSites != null || _hiddenSiteIds.isNotEmpty) {
+          scaffoldMessenger.showSnackBar(
+            SnackBar(
+              content: Text(l10n.common_error_tryAgain),
+              duration: const Duration(seconds: 5),
+              persist: false,
+              action: SnackBarAction(
+                label: l10n.diveSites_list_bulkDelete_undo,
+                onPressed: undo,
+              ),
+            ),
+          );
+        } else if (mounted) {
+          scaffoldMessenger.showSnackBar(
+            SnackBar(
+              content: Text(l10n.diveSites_list_bulkDelete_restored),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+
+      // Nothing done (every action refused): no empty snackbar. A failure
+      // says so even once the list has closed.
+      if ((mounted || hidden == null) && summary.isNotEmpty) {
         scaffoldMessenger.clearSnackBars();
         scaffoldMessenger.showSnackBar(
           SnackBar(
-            content: Text(
-              context.l10n.diveSites_list_bulkDelete_snackbar(
-                deletedSites.length,
-              ),
-            ),
+            content: Text(summary.join(' · ')),
             duration: const Duration(seconds: 5),
             showCloseIcon: true,
+            persist: false,
             action: SnackBarAction(
-              label: context.l10n.diveSites_list_bulkDelete_undo,
-              onPressed: () async {
-                if (_deletedSites != null && _deletedSites!.isNotEmpty) {
-                  await ref
-                      .read(siteListNotifierProvider.notifier)
-                      .restoreSites(_deletedSites!);
-                  _deletedSites = null;
-                  if (mounted) {
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          context.l10n.diveSites_list_bulkDelete_restored,
-                        ),
-                        duration: const Duration(seconds: 2),
-                      ),
-                    );
-                  }
-                }
-              },
+              label: l10n.diveSites_list_bulkDelete_undo,
+              onPressed: undo,
             ),
           ),
         );
       }
+      return BulkActionOutcome.completed;
     }
+    return BulkActionOutcome.cancelled;
   }
 
   void _showSortSheet(BuildContext context) {
@@ -342,14 +724,131 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       currentField: sort.field,
       currentDirection: sort.direction,
       fields: SiteSortField.values,
-      getFieldDisplayName: (field) => field.displayName,
+      getFieldDisplayName: (field) => field.localizedName(context.l10n),
       getFieldIcon: (field) => field.icon,
       onSortChanged: (field, direction) {
-        ref.read(siteSortProvider.notifier).state = SortState(
-          field: field,
-          direction: direction,
-        );
+        ref
+            .read(settingsProvider.notifier)
+            .setSiteSort(SortState(field: field, direction: direction));
       },
+      // Table mode keeps a flat grid; headers would cut across its columns.
+      footer: ref.read(siteListViewModeProvider) == ListViewMode.table
+          ? null
+          : const SiteGroupBySelector(),
+    );
+  }
+
+  /// The grouped list for [sites], or null when the list is not grouped.
+  /// [listen] is false outside build, where watching is not allowed.
+  _GroupedSites? _groupedView(
+    List<SiteWithDiveCount> sites, {
+    bool listen = true,
+  }) {
+    final groupBy = listen
+        ? ref.watch(siteGroupByProvider)
+        : ref.read(siteGroupByProvider);
+    if (groupBy == SiteGroupBy.none) return null;
+    final groups = _groupsFor(sites, groupBy);
+    final expanded = _groupedExpansion(groups, sites, groupBy, listen: listen);
+    return (
+      groups: groups,
+      expanded: expanded,
+      rows: flattenSiteGroups(groups, expanded: expanded),
+    );
+  }
+
+  /// The open groups for [groups]: everything while a filter narrows the
+  /// list, else the diver's own choice -- outer groups and subgroups share
+  /// one stored set, seeded with the detail pane's site.
+  Set<String> _groupedExpansion(
+    List<SiteOuterGroup<SiteWithDiveCount>> groups,
+    List<SiteWithDiveCount> sites,
+    SiteGroupBy groupBy, {
+    bool listen = true,
+  }) {
+    final filter = listen
+        ? ref.watch(siteFilterProvider)
+        : ref.read(siteFilterProvider);
+    if (filter.hasActiveFilters) {
+      return allGroupKeys(
+        groups,
+      ).union(allSubGroupKeys(groups)).difference(_filterCollapsed);
+    }
+    final stored = listen
+        ? ref.watch(siteListExpandedGroupsProvider)
+        : ref.read(siteListExpandedGroupsProvider);
+    if (stored != null) return stored;
+    final selected = sites
+        .where((s) => s.site.id == widget.selectedId)
+        .firstOrNull;
+    return initialExpandedGroups(
+      groups,
+      outerKeyOf: outerKeyOfMode(groupBy),
+      innerKeyOf: innerKeyOfMode(groupBy),
+      bundlesInner: bundlesUnlabeledInner(groupBy),
+      selected: selected?.site,
+    );
+  }
+
+  /// The group keys of the selected site -- its outer group and, if the mode
+  /// nests a subgroup under it, that subgroup too -- that the grouped list
+  /// keeps collapsed in the diver's stored expansion, else null. Before the
+  /// first toggle there is no stored set and the initial expansion already
+  /// opens the selected site's groups; a filter opens every group by itself.
+  ///
+  /// Delegates to [initialExpandedGroups] for the same site rather than
+  /// re-deriving its outer/subgroup keys by hand, so this can never drift
+  /// from what "freshly opening this list" would already have opened.
+  Set<String>? _collapsedGroupsOfSelected(
+    List<SiteWithDiveCount> sites,
+    String targetId,
+  ) {
+    final groupBy = ref.read(siteGroupByProvider);
+    if (groupBy == SiteGroupBy.none) return null;
+    if (ref.read(siteFilterProvider).hasActiveFilters) return null;
+    final stored = ref.read(siteListExpandedGroupsProvider);
+    if (stored == null) return null;
+    final selected = sites.where((s) => s.site.id == targetId).firstOrNull;
+    if (selected == null) return null;
+    final required = initialExpandedGroups(
+      _groupsFor(sites, groupBy),
+      outerKeyOf: outerKeyOfMode(groupBy),
+      innerKeyOf: innerKeyOfMode(groupBy),
+      bundlesInner: bundlesUnlabeledInner(groupBy),
+      selected: selected.site,
+    );
+    final missing = required.difference(stored);
+    return missing.isEmpty ? null : missing;
+  }
+
+  /// Reopens every group collapsed only because a filter narrowed the list,
+  /// so a new filter (or a grouping mode switch, which the filter's own
+  /// collapse keys cannot survive either) starts from every match open.
+  void _resetFilterCollapsed() {
+    if (_filterCollapsed.isNotEmpty) {
+      setState(() => _filterCollapsed = const {});
+    }
+  }
+
+  /// Toggling [key] while a filter narrows the list never touches persistent
+  /// expansion state -- it only hides [key] for this filter session, via
+  /// [_filterCollapsed], so clearing the filter always starts from every
+  /// match open again. Returns whether it handled the toggle.
+  bool _toggleWhileFiltering(String key, Set<String> current) {
+    if (!ref.read(siteFilterProvider).hasActiveFilters) return false;
+    final next = toggleGroupKey(current, key);
+    final keys = current.union(_filterCollapsed);
+    setState(() => _filterCollapsed = keys.difference(next));
+    return true;
+  }
+
+  /// Opens or closes the group [key] -- a tap of an outer or a subgroup
+  /// header; both share one stored set (see [siteListExpandedGroupsProvider]).
+  void _toggleGroup(String key, Set<String> current) {
+    if (_toggleWhileFiltering(key, current)) return;
+    ref.read(siteListExpandedGroupsProvider.notifier).state = toggleGroupKey(
+      current,
+      key,
     );
   }
 
@@ -358,126 +857,213 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     final sitesAsync = ref.watch(sortedSitesWithCountsProvider);
     final filter = ref.watch(siteFilterProvider);
     final viewMode = ref.watch(siteListViewModeProvider);
+    ref.listen(siteFilterProvider, (_, _) => _resetFilterCollapsed());
+    // The stored expansion resets itself on a mode switch (it watches
+    // siteGroupByProvider); the filter's local collapse keys need the same.
+    ref.listen(siteGroupByProvider, (previous, next) {
+      if (previous == null || previous == next) return;
+      _resetFilterCollapsed();
+    });
 
     // Table mode uses a dedicated scaffold with column configuration support.
     if (viewMode == ListViewMode.table) {
       return _buildTableModeScaffold(context, sitesAsync, filter);
     }
 
-    final listContent = sitesAsync.when(
-      data: (sites) => sites.isEmpty
-          ? _buildEmptyState(context, filter.hasActiveFilters)
-          : _buildSiteList(context, ref, sites),
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => _buildErrorState(context, error),
-    );
+    // Built inside the selection listener below so rows re-render as checks
+    // change; computing it here would leave the list frozen mid-selection.
+    Widget buildContent() {
+      final listContent = sitesAsync.when(
+        data: (sites) => sites.isEmpty
+            ? _buildEmptyState(context, filter.hasActiveFilters)
+            : _buildSiteList(context, ref, sites),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stack) => _buildErrorState(context, error),
+      );
 
-    // Wrap list with active filters bar if filters are active
-    final content = filter.hasActiveFilters
-        ? Column(
-            children: [
-              _buildActiveFiltersBar(context, filter),
-              Expanded(child: listContent),
-            ],
-          )
-        : listContent;
-
-    if (!widget.showAppBar) {
       return Column(
         children: [
-          _isSelectionMode
-              ? _buildCompactSelectionAppBar(
-                  context,
-                  sitesAsync.valueOrNull ?? [],
-                )
-              : _buildCompactAppBar(context),
-          Expanded(child: content),
+          _buildSearchHeader(filter),
+          if (!filter.hasActiveFilters) const CatalogueGapNotice(),
+          if (filter.hasActiveFilters) SiteActiveFiltersBar(filter: filter),
+          Expanded(child: listContent),
         ],
       );
     }
 
-    return Scaffold(
-      appBar: _isSelectionMode
-          ? _buildSelectionAppBar(sitesAsync.valueOrNull ?? [])
-          : AppBar(
-              title: Text(context.l10n.diveSites_list_appBar_title),
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.map),
-                  tooltip: context.l10n.diveSites_list_tooltip_mapView,
-                  onPressed: () => context.push('/sites/map'),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.search),
-                  tooltip: context.l10n.diveSites_list_tooltip_searchSites,
-                  onPressed: () {
-                    showSearch(
-                      context: context,
-                      delegate: SiteSearchDelegate(ref),
-                    );
-                  },
-                ),
-                IconButton(
-                  icon: Badge(
-                    isLabelVisible: filter.hasActiveFilters,
-                    child: const Icon(Icons.filter_list),
+    final loadedSites = sitesAsync.value ?? const <SiteWithDiveCount>[];
+    final visibleIds = loadedSites.map((s) => s.site.id).toList();
+
+    // Drop checked sites that fell out of the filtered list, so the count
+    // always matches what is on screen. pruneToSettled is a no-op when nothing
+    // changed, which keeps this off a rebuild loop.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          sitesAsync,
+          (rows) => rows.map((s) => s.site.id),
+        );
+      }
+    });
+
+    if (!widget.showAppBar) {
+      return SelectableListScope(
+        controller: _selection,
+        selectableIds: visibleIds,
+        child: ValueListenableBuilder<SelectionState>(
+          valueListenable: _selection,
+          builder: (context, selection, _) => Column(
+            children: [
+              selection.isActive
+                  ? _buildCompactSelectionAppBar(context, loadedSites)
+                  : _buildCompactAppBar(context),
+              Expanded(child: buildContent()),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) => Scaffold(
+          appBar: selection.isActive
+              ? _buildSelectionAppBar(loadedSites)
+              : AppBar(
+                  title: FeatureAppBarTitle(
+                    featureId: 'sites',
+                    title: context.l10n.diveSites_list_appBar_title,
+                    subtitle: siteListCountLabel(context, ref),
                   ),
-                  tooltip: context.l10n.diveSites_list_tooltip_filterSites,
-                  onPressed: () {
-                    showModalBottomSheet(
-                      context: context,
-                      isScrollControlled: true,
-                      builder: (context) => SiteFilterSheet(ref: ref),
-                    );
-                  },
-                ),
-                IconButton(
-                  icon: const Icon(Icons.sort),
-                  tooltip: context.l10n.diveSites_list_tooltip_sort,
-                  onPressed: () => _showSortSheet(context),
-                ),
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert),
-                  onSelected: (value) {
-                    if (value == 'import') {
-                      context.push('/sites/import');
-                    } else if (value.startsWith('view_')) {
-                      final mode = ListViewMode.fromName(
-                        value.replaceFirst('view_', ''),
-                      );
-                      ref.read(siteListViewModeProvider.notifier).state = mode;
-                    }
-                  },
-                  itemBuilder: (context) {
-                    final currentMode = ref.read(siteListViewModeProvider);
-                    return [
-                      ...ListViewModeToggle.menuItems(
-                        context,
-                        currentMode: currentMode,
-                        modes: const [
-                          ListViewMode.detailed,
-                          ListViewMode.compact,
-                          ListViewMode.table,
-                        ],
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.map),
+                      tooltip: context.l10n.diveSites_list_tooltip_mapView,
+                      onPressed: () => context.push('/sites/map'),
+                    ),
+                    EntitySearchAction(
+                      subject: QuerySubject.sites,
+                      active: filter.query != null,
+                      tooltip: context.l10n.diveSites_list_tooltip_searchSites,
+                    ),
+                    IconButton(
+                      icon: Badge(
+                        isLabelVisible: filter.hasActiveFilters,
+                        child: const Icon(Icons.filter_list),
                       ),
-                      const PopupMenuDivider(),
-                      PopupMenuItem(
-                        value: 'import',
-                        child: ListTile(
-                          leading: const Icon(Icons.download),
-                          title: Text(context.l10n.diveSites_list_menu_import),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                    ];
-                  },
+                      tooltip: context.l10n.diveSites_list_tooltip_filterSites,
+                      onPressed: () {
+                        showModalBottomSheet(
+                          context: context,
+                          isScrollControlled: true,
+                          useSafeArea: true,
+                          builder: (context) => SiteFilterSheet(ref: ref),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.sort),
+                      tooltip: context.l10n.diveSites_list_tooltip_sort,
+                      onPressed: () => _showSortSheet(context),
+                    ),
+                    PopupMenuButton<String>(
+                      icon: const Icon(Icons.more_vert),
+                      onSelected: (value) {
+                        if (value == 'import') {
+                          context.push('/sites/import');
+                        } else if (value == 'fill_location_details') {
+                          unawaited(
+                            showSiteLocationBackfillFlow(
+                              context,
+                              ref,
+                              mode: SiteLocationLookupMode.fillMissing,
+                            ),
+                          );
+                        } else if (value == kCatalogueReviewMenuValue) {
+                          context.push(kCatalogueReviewRoute);
+                        } else if (value == 'refresh_place_names') {
+                          unawaited(
+                            showSiteLocationBackfillFlow(
+                              context,
+                              ref,
+                              mode: SiteLocationLookupMode.refreshAll,
+                            ),
+                          );
+                        } else if (value.startsWith('view_')) {
+                          final mode = ListViewMode.fromName(
+                            value.replaceFirst('view_', ''),
+                          );
+                          ref
+                              .read(settingsProvider.notifier)
+                              .setSiteListViewMode(mode);
+                        }
+                      },
+                      itemBuilder: (context) {
+                        final currentMode = ref.read(siteListViewModeProvider);
+                        return [
+                          ...selectItemsMenuEntries(
+                            context,
+                            onSelect: _selection.enterExplicit,
+                          ),
+                          ...ListViewModeToggle.menuItems(
+                            context,
+                            currentMode: currentMode,
+                            modes: const [
+                              ListViewMode.detailed,
+                              ListViewMode.compact,
+                              ListViewMode.table,
+                            ],
+                          ),
+                          const PopupMenuDivider(),
+                          PopupMenuItem(
+                            value: 'import',
+                            child: ListTile(
+                              leading: const Icon(Icons.download),
+                              title: Text(
+                                context.l10n.diveSites_list_menu_import,
+                              ),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'fill_location_details',
+                            child: ListTile(
+                              leading: const Icon(Icons.travel_explore),
+                              title: Text(
+                                context
+                                    .l10n
+                                    .diveSites_list_menu_fillLocationDetails,
+                              ),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'refresh_place_names',
+                            child: ListTile(
+                              leading: const Icon(Icons.translate),
+                              title: Text(
+                                context
+                                    .l10n
+                                    .diveSites_list_menu_refreshPlaceNames,
+                              ),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          catalogueReviewMenuItem(context),
+                        ];
+                      },
+                    ),
+                  ],
                 ),
-              ],
-            ),
-      body: content,
-      floatingActionButton: _isSelectionMode
-          ? null
-          : widget.floatingActionButton,
+          body: buildContent(),
+          floatingActionButton: selection.isActive
+              ? null
+              : widget.floatingActionButton,
+        ),
+      ),
     );
   }
 
@@ -491,17 +1077,45 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     AsyncValue<List<SiteWithDiveCount>> sitesAsync,
     SiteFilterState filter,
   ) {
-    final tableContent = _buildTableView(context, sitesAsync, filter);
+    final loadedSites = sitesAsync.value ?? const <SiteWithDiveCount>[];
+    final visibleIds = loadedSites.map((s) => s.site.id).toList();
 
-    if (_isSelectionMode) {
-      return Column(
-        children: [
-          _buildCompactSelectionAppBar(context, sitesAsync.valueOrNull ?? []),
-          Expanded(child: tableContent),
-        ],
-      );
-    }
-    return tableContent;
+    // Same pruning the list path does: drop checked sites that fell out of
+    // the visible list, so the count always matches what is on screen.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          sitesAsync,
+          (rows) => rows.map((s) => s.site.id),
+        );
+      }
+    });
+
+    // The scope carries Escape, Ctrl/Cmd-A and the Android back handling, and
+    // the builder is what repaints the table as checks change -- the table is
+    // built inside it for that reason.
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) {
+          final tableContent = _buildTableView(context, sitesAsync, filter);
+
+          // Table mode has no app bar of its own: "Select items" sits in the
+          // page header's overflow menu, and the contextual bar opens above
+          // the table while selecting.
+          return Column(
+            children: [
+              if (selection.isActive)
+                _buildCompactSelectionAppBar(context, loadedSites),
+              _buildSearchHeader(filter),
+              Expanded(child: tableContent),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   /// Build the [EntityTableView] for site table mode.
@@ -519,35 +1133,47 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
         }
         final config = ref.watch(siteTableConfigProvider);
         final notifier = ref.read(siteTableConfigProvider.notifier);
-        final settings = ref.watch(settingsProvider);
-        final units = UnitFormatter(settings);
-
-        // Convert SiteWithDiveCount (class) to SiteWithCount (record) as
-        // required by SiteFieldAdapter.
-        final siteRecords = sites
-            .map((s) => (site: s.site, diveCount: s.diveCount))
-            .toList();
+        final units = ref.watch(unitFormatterProvider);
 
         return Column(
           children: [
-            if (filter.hasActiveFilters)
-              _buildActiveFiltersBar(context, filter),
+            if (!filter.hasActiveFilters) const CatalogueGapNotice(),
+            if (filter.hasActiveFilters) SiteActiveFiltersBar(filter: filter),
             Expanded(
               child: EntityTableView<SiteWithCount, SiteField>(
-                entities: siteRecords,
+                entities: sites,
                 idExtractor: (s) => s.site.id,
                 adapter: SiteFieldAdapter.instance,
                 config: config,
                 units: units,
                 onSortFieldChanged: notifier.setSortField,
                 onResizeColumn: notifier.resizeColumn,
+                onHideColumn: notifier.hideColumn,
                 onEntityTapDown: (id) {
-                  if (!_isSelectionMode) {
-                    ref.read(highlightedSiteIdProvider.notifier).state = id;
+                  // Rows carry a double-tap, so onEntityTap only resolves
+                  // after the double-tap timer -- long after this fires. A
+                  // modified click is a selection gesture, not a navigation
+                  // one: moving the highlight here would overwrite the very
+                  // anchor the shift-click is about to extend from.
+                  if (_isSelectionMode ||
+                      SelectableListScope.isShiftPressed() ||
+                      SelectableListScope.isModifierPressed()) {
+                    return;
                   }
+                  ref.read(highlightedSiteIdProvider.notifier).state = id;
+                  // The same row again sets no new highlight; the pane is reopened all
+                  // the same, so it is no longer one the diver emptied (#3301).
+                  forgetClosedPane(ref, RecordListSection.sites);
                 },
                 onEntityTap: (id) {
-                  if (_isSelectionMode) {
+                  // Table mode honours modifier and shift clicks too, so
+                  // selection works the same way as in the list view modes.
+                  final orderedIds = sites.map((s) => s.site.id).toList();
+                  if (SelectableListScope.isShiftPressed()) {
+                    _selectRangeTo(id, orderedIds);
+                  } else if (SelectableListScope.isModifierPressed()) {
+                    _modifierTap(id, orderedIds);
+                  } else if (_isSelectionMode) {
                     _toggleSelection(id);
                   }
                 },
@@ -555,9 +1181,6 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                   if (_isSelectionMode) return;
                   context.push('/sites/$id');
                 },
-                onEntityLongPress: _isSelectionMode
-                    ? null
-                    : (id) => _enterSelectionMode(id),
                 selectedIds: _selectedIds,
                 isSelectionMode: _isSelectionMode,
                 highlightedId: ref.watch(highlightedSiteIdProvider),
@@ -568,6 +1191,24 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       },
     );
   }
+
+  /// The search row (#3882): the sites query, which the filter sheet's
+  /// query section also edits.
+  Widget _buildSearchHeader(SiteFilterState filter) => EntitySearchHeader(
+    subject: QuerySubject.sites,
+    root: siteQueryEntity,
+    query: filter.query,
+    // The typed words can also be taken to the built-in catalogue.
+    extraRows: sitesSearchExtraRows,
+    onChanged: (query) {
+      final notifier = ref.read(siteFilterProvider.notifier);
+      // Read at write time, so a change made during the debounce survives.
+      notifier.state = notifier.state.copyWith(
+        query: query,
+        clearQuery: query == null,
+      );
+    },
+  );
 
   Widget _buildCompactAppBar(BuildContext context) {
     final filter = ref.watch(siteFilterProvider);
@@ -586,13 +1227,21 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       child: Row(
         children: [
           const SizedBox(width: 8),
-          Text(
-            context.l10n.diveSites_list_appBar_title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          // Expanded, and no Spacer: the title must be the row's only flexible
+          // child, or Spacer takes half the free space and the leftover half
+          // lands after the last icon (see trip_list_content for the detail).
+          // The pane is narrow and this bar carries up to seven controls, so
+          // the title still has to yield; FeatureAppBarTitle ellipsises.
+          Expanded(
+            child: FeatureAppBarTitle(
+              featureId: 'sites',
+              title: context.l10n.diveSites_list_appBar_title,
+              subtitle: siteListCountLabel(context, ref),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
           ),
-          const Spacer(),
           // Map toggle: shown in detailed/compact mode only.
           // In table mode, TableModeLayout manages the map toggle.
           if (widget.onMapViewToggle != null)
@@ -606,12 +1255,11 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
               tooltip: context.l10n.diveSites_list_tooltip_mapView,
               onPressed: () => context.push('/sites/map'),
             ),
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
+          EntitySearchAction(
+            subject: QuerySubject.sites,
+            active: filter.query != null,
             tooltip: context.l10n.diveSites_list_tooltip_searchSites,
-            onPressed: () {
-              showSearch(context: context, delegate: SiteSearchDelegate(ref));
-            },
+            compact: true,
           ),
           IconButton(
             icon: Badge(
@@ -623,6 +1271,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
               showModalBottomSheet(
                 context: context,
                 isScrollControlled: true,
+                useSafeArea: true,
                 builder: (context) => SiteFilterSheet(ref: ref),
               );
             },
@@ -637,16 +1286,38 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
             onSelected: (value) {
               if (value == 'import') {
                 context.push('/sites/import');
+              } else if (value == 'fill_location_details') {
+                unawaited(
+                  showSiteLocationBackfillFlow(
+                    context,
+                    ref,
+                    mode: SiteLocationLookupMode.fillMissing,
+                  ),
+                );
+              } else if (value == kCatalogueReviewMenuValue) {
+                context.push(kCatalogueReviewRoute);
+              } else if (value == 'refresh_place_names') {
+                unawaited(
+                  showSiteLocationBackfillFlow(
+                    context,
+                    ref,
+                    mode: SiteLocationLookupMode.refreshAll,
+                  ),
+                );
               } else if (value.startsWith('view_')) {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(siteListViewModeProvider.notifier).state = mode;
+                ref.read(settingsProvider.notifier).setSiteListViewMode(mode);
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(siteListViewModeProvider);
               return [
+                ...selectItemsMenuEntries(
+                  context,
+                  onSelect: _selection.enterExplicit,
+                ),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -659,8 +1330,33 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                 const PopupMenuDivider(),
                 PopupMenuItem(
                   value: 'import',
-                  child: Text(context.l10n.diveSites_list_menu_import),
+                  child: ListTile(
+                    leading: const Icon(Icons.download),
+                    title: Text(context.l10n.diveSites_list_menu_import),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
+                PopupMenuItem(
+                  value: 'fill_location_details',
+                  child: ListTile(
+                    leading: const Icon(Icons.travel_explore),
+                    title: Text(
+                      context.l10n.diveSites_list_menu_fillLocationDetails,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'refresh_place_names',
+                  child: ListTile(
+                    leading: const Icon(Icons.translate),
+                    title: Text(
+                      context.l10n.diveSites_list_menu_refreshPlaceNames,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                catalogueReviewMenuItem(context),
               ];
             },
           ),
@@ -669,100 +1365,168 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     );
   }
 
+  /// Site-specific extras. Select-all, deselect-all and delete are supplied by
+  /// SelectionAppBar, so they are deliberately absent here. Computed once and
+  /// shared by both shells so the pane cannot drift from the full-width bar.
+  List<BulkAction> _bulkActions(List<SiteWithDiveCount> sites) {
+    final byId = {for (final s in sites) s.site.id: s.site};
+    final activeDiverId = ref.watch(validatedCurrentDiverIdProvider).value;
+    final multipleDivers =
+        (ref.watch(allDiversProvider).value?.length ?? 0) >= 2;
+    return [
+      BulkAction(
+        id: 'merge',
+        icon: Icons.merge_type,
+        label: context.l10n.diveSites_list_selection_mergeTooltip,
+        minCount: 2,
+        onInvoke: _startMerge,
+      ),
+      // Personal sites into a shared site library (issue #2567); a library site
+      // already belongs to one.
+      BulkAction(
+        id: 'addToLibrary',
+        icon: Icons.groups_outlined,
+        label: context.l10n.sharedLibrary_bulk_addToLibrary,
+        minCount: 1,
+        isEnabled: (ids) => ids.every((id) => _mayPushToLibrary(byId[id])),
+        onInvoke: _addToLibrary,
+      ),
+      // The profile's own personal sites with chosen profiles (issue
+      // #2151). Adds only; a library site follows its library.
+      if (multipleDivers && activeDiverId != null)
+        BulkAction(
+          id: 'share',
+          icon: Icons.share,
+          label: context.l10n.sharedItems_bulkShare_action,
+          isEnabled: (ids) => ids.every((id) {
+            final site = byId[id];
+            return site != null &&
+                !site.isLibrarySite &&
+                site.diverId == activeDiverId;
+          }),
+          onInvoke: () => shareItemsWithProfiles(
+            context,
+            ref,
+            kind: SharedItemKind.site,
+            ids: _selectedIds.toList(),
+            activeDiverId: activeDiverId,
+          ),
+        ),
+      // Logbook rules on the checked sites, previewed first (#3513). Library
+      // sites and other profiles' sites are left out by the rules' scope.
+      rulesBulkAction(
+        context,
+        ref,
+        subject: RuleSubject.sites,
+        selected: () => _selectedIds.toSet(),
+      ),
+    ];
+  }
+
+  /// The library group header shows the library's name; the group key and
+  /// label are its id, which the domain grouper does not resolve.
+  String _outerGroupLabel(
+    SiteGroupBy groupBy,
+    String noGroupLabel,
+    SiteOuterGroup<SiteWithDiveCount> group,
+  ) {
+    final label = siteOuterGroupLabel(noGroupLabel, group);
+    if (groupBy != SiteGroupBy.library || group.isUngroupedKey) return label;
+    final libraries = ref.watch(sharedLibrariesProvider).valueOrNull;
+    for (final l in libraries ?? const []) {
+      if (l.id == group.label) return l.name;
+    }
+    return label;
+  }
+
+  /// A personal site this profile may destroy: pushing takes it from every
+  /// other profile, so another profile's shared site never qualifies.
+  bool _mayPushToLibrary(DiveSite? site) =>
+      site != null &&
+      !site.isLibrarySite &&
+      canDestroySharedItemOnceKnown(
+            ref.read(validatedCurrentDiverIdProvider),
+            ownerId: site.diverId,
+          ) ==
+          true;
+
+  Future<BulkActionOutcome> _addToLibrary() async {
+    if (!demoSealGuard(context, DemoSealedFeature.sharedLibrary)) {
+      return BulkActionOutcome.failed;
+    }
+    final selected = await _readSelectedSites(_selectedIds.toList());
+    if (selected == null) return BulkActionOutcome.failed;
+    final personal = [
+      for (final s in selected)
+        if (_mayPushToLibrary(s)) s.id,
+    ];
+    if (personal.isEmpty || !mounted) return BulkActionOutcome.cancelled;
+    // The picker explains an empty choice itself; null is also a cancel.
+    final library = await pickLibraryToAddTo(
+      context,
+      ref,
+      siteCount: personal.length,
+      siteName: personal.length == 1
+          ? selected.firstWhere((s) => s.id == personal.single).name
+          : null,
+    );
+    if (library == null) return BulkActionOutcome.cancelled;
+    final libraryId = library.id;
+    final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
+    if (diverId == null) return BulkActionOutcome.failed;
+    final publisher = ref.read(sharedSitePublisherProvider);
+    try {
+      for (final id in personal) {
+        await publisher.push(
+          siteId: id,
+          libraryId: libraryId,
+          diverId: diverId,
+        );
+      }
+    } catch (e) {
+      ref.invalidate(sitesProvider);
+      ref.invalidate(sitesWithCountsProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(libraryErrorText(context.l10n, e))),
+        );
+      }
+      return BulkActionOutcome.failed;
+    }
+    ref.invalidate(sitesProvider);
+    ref.invalidate(sitesWithCountsProvider);
+    if (!mounted) return BulkActionOutcome.completed;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.l10n.sharedLibrary_site_added(library.name)),
+      ),
+    );
+    return BulkActionOutcome.completed;
+  }
+
+  /// Contextual bar for the master pane, which is too narrow for every icon.
   Widget _buildCompactSelectionAppBar(
     BuildContext context,
     List<SiteWithDiveCount> sites,
   ) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer,
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).colorScheme.outline,
-            width: 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.close, size: 20),
-            tooltip: context.l10n.diveSites_list_selection_closeTooltip,
-            onPressed: _exitSelectionMode,
-          ),
-          Text(
-            context.l10n.diveSites_list_selection_count(_selectedIds.length),
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const Spacer(),
-          IconButton(
-            icon: const Icon(Icons.select_all, size: 20),
-            tooltip: context.l10n.diveSites_list_selection_selectAllTooltip,
-            onPressed: _selectedIds.length < sites.length
-                ? () => _selectAll(sites)
-                : null,
-          ),
-          IconButton(
-            icon: const Icon(Icons.deselect, size: 20),
-            tooltip: context.l10n.diveSites_list_selection_deselectAllTooltip,
-            onPressed: _selectedIds.isNotEmpty ? _deselectAll : null,
-          ),
-          IconButton(
-            icon: const Icon(Icons.merge_type, size: 20),
-            tooltip: context.l10n.diveSites_list_selection_mergeTooltip,
-            onPressed: _selectedIds.length > 1 ? _startMerge : null,
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.delete,
-              size: 20,
-              color: Theme.of(context).colorScheme.error,
-            ),
-            tooltip: context.l10n.diveSites_list_selection_deleteTooltip,
-            onPressed: _selectedIds.isNotEmpty ? _confirmAndDelete : null,
-          ),
-        ],
-      ),
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: sites.map((s) => s.site.id).toList(),
+      actions: _bulkActions(sites),
+      shell: SelectionBarShell.pane,
+      maxInlineActions: 1,
+      onDelete: _confirmAndDelete,
     );
   }
 
-  AppBar _buildSelectionAppBar(List<SiteWithDiveCount> sites) {
-    return AppBar(
-      leading: IconButton(
-        icon: const Icon(Icons.close),
-        tooltip: context.l10n.diveSites_list_selection_closeTooltip,
-        onPressed: _exitSelectionMode,
-      ),
-      title: Text(
-        context.l10n.diveSites_list_selection_count(_selectedIds.length),
-      ),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.select_all),
-          tooltip: context.l10n.diveSites_list_selection_selectAllTooltip,
-          onPressed: _selectedIds.length < sites.length
-              ? () => _selectAll(sites)
-              : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.deselect),
-          tooltip: context.l10n.diveSites_list_selection_deselectAllTooltip,
-          onPressed: _selectedIds.isNotEmpty ? _deselectAll : null,
-        ),
-        IconButton(
-          icon: const Icon(Icons.merge_type),
-          tooltip: context.l10n.diveSites_list_selection_mergeTooltip,
-          onPressed: _selectedIds.length > 1 ? _startMerge : null,
-        ),
-        IconButton(
-          icon: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
-          tooltip: context.l10n.diveSites_list_selection_deleteTooltip,
-          onPressed: _selectedIds.isNotEmpty ? _confirmAndDelete : null,
-        ),
-      ],
+  /// Contextual bar for the full-width standalone layout.
+  SelectionAppBar _buildSelectionAppBar(List<SiteWithDiveCount> sites) {
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: sites.map((s) => s.site.id).toList(),
+      actions: _bulkActions(sites),
+      shell: SelectionBarShell.appBar,
+      onDelete: _confirmAndDelete,
     );
   }
 
@@ -771,73 +1535,205 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     WidgetRef ref,
     List<SiteWithDiveCount> sites,
   ) {
+    final diversCount = ref
+        .watch(allDiversProvider)
+        .when(data: (d) => d.length, loading: () => 0, error: (_, _) => 0);
+    final groupBy = ref.watch(siteGroupByProvider);
+    final noGroupLabel = groupBy.noGroupLabel(context.l10n);
+
+    final grouped = _groupedView(sites);
+    final rows = grouped?.rows;
+    final expanded = grouped?.expanded ?? const <String>{};
+    // Range selection follows what the diver sees: grouped, it walks only
+    // the sites on screen, so a shift-click across a collapsed country never
+    // checks the sites hidden inside it.
+    final orderedSites = grouped == null
+        ? sites
+        : [
+            for (final row in grouped.rows)
+              if (row is SiteRow<SiteWithDiveCount>) row.item,
+          ];
+
+    // The keyboard cursor walks the same rows: each outer header, each
+    // subgroup header nested inside an open one, then the sites of whichever
+    // is innermost and open (#3065, #3270).
+    final navStops = KeyboardNavStops();
+    if (rows == null) {
+      for (final site in sites) {
+        navStops.addRow(site.site.id);
+      }
+    } else {
+      String? header;
+      for (final row in rows) {
+        switch (row) {
+          case OuterHeaderRow(:final group):
+            header = _groupNavKey(group.key);
+            navStops.addHeader(header, group.key);
+          case SubHeaderRow(:final outerKey, :final expansionKey):
+            header = _groupNavKey(expansionKey);
+            navStops.addHeader(
+              header,
+              expansionKey,
+              parent: _groupNavKey(outerKey),
+            );
+          case SiteRow(:final item):
+            navStops.addRow(item.site.id, header: header);
+        }
+      }
+    }
+
     return RefreshIndicator(
       onRefresh: () async {
         ref.invalidate(sortedSitesWithCountsProvider);
       },
-      child: ListView.builder(
-        controller: _scrollController,
-        padding: const EdgeInsets.only(bottom: 80),
-        itemCount: sites.length,
-        itemBuilder: (context, index) {
-          final siteData = sites[index];
-          final site = siteData.site;
-          final isSelected =
-              widget.selectedId == site.id ||
-              ref.watch(highlightedSiteIdProvider) == site.id;
-          final isChecked = _selectedIds.contains(site.id);
-
-          final viewMode = ref.watch(siteListViewModeProvider);
-          final locationString = site.locationString.isNotEmpty
-              ? site.locationString
-              : null;
-          return switch (viewMode) {
-            ListViewMode.detailed => SiteListTile(
-              name: site.name,
-              location: locationString,
-              minDepth: site.minDepth,
-              maxDepth: site.maxDepth,
-              difficulty: site.difficulty?.displayName,
-              diveCount: siteData.diveCount,
-              rating: site.rating,
-              isSelectionMode: _isSelectionMode,
-              isSelected: isSelected,
-              isChecked: isChecked,
-              latitude: site.location?.latitude,
-              longitude: site.location?.longitude,
-              onTap: () => _handleItemTap(site),
-              onLongPress: _isSelectionMode
-                  ? null
-                  : () => _enterSelectionMode(site.id),
-            ),
-            ListViewMode.compact => CompactSiteListTile(
-              name: site.name,
-              location: locationString,
-              diveCount: siteData.diveCount,
-              isSelectionMode: _isSelectionMode,
-              isSelected: isChecked,
-              isHighlighted: !_isSelectionMode && isSelected,
-              onTap: () => _handleItemTap(site),
-              onLongPress: _isSelectionMode
-                  ? null
-                  : () => _enterSelectionMode(site.id),
-            ),
-            ListViewMode.dense || ListViewMode.table => DenseSiteListTile(
-              name: site.name,
-              location: locationString,
-              diveCount: siteData.diveCount,
-              isSelectionMode: _isSelectionMode,
-              isSelected: isChecked,
-              isHighlighted: !_isSelectionMode && isSelected,
-              onTap: () => _handleItemTap(site),
-              onLongPress: _isSelectionMode
-                  ? null
-                  : () => _enterSelectionMode(site.id),
-            ),
-          };
+      child: KeyboardListNavigator(
+        keys: navStops.keys,
+        currentKey: widget.selectedId ?? ref.watch(highlightedSiteIdProvider),
+        onMove: (key) {
+          if (navStops.groupOfHeader(key) != null) return;
+          moveListCursor(
+            context,
+            canOpen: !_isSelectionMode && widget.onItemSelected != null,
+            open: () => _handleRowTap(key, orderedSites),
+            highlight: () =>
+                ref.read(highlightedSiteIdProvider.notifier).state = key,
+          );
         },
+        onActivate: (key) {
+          final groupKey = navStops.groupOfHeader(key);
+          if (groupKey != null) {
+            _toggleGroup(groupKey, expanded);
+          } else {
+            _handleRowTap(key, orderedSites);
+          }
+        },
+        onExpand: (key) {
+          final groupKey = navStops.groupOfHeader(key);
+          if (groupKey != null && !expanded.contains(groupKey)) {
+            _toggleGroup(groupKey, expanded);
+          }
+        },
+        onCollapse: (key) {
+          final header = navStops.headerFor(key);
+          if (header == null) return null;
+          final groupKey = navStops.groupOfHeader(header)!;
+          if (expanded.contains(groupKey)) {
+            _toggleGroup(groupKey, expanded);
+            return header;
+          }
+          // Already folded: Left climbs from a subgroup header to the outer
+          // group it sits in, as a tree view does.
+          return navStops.parentHeaderOf(header) ?? header;
+        },
+        child: ListView.builder(
+          controller: _scrollController,
+          padding: const EdgeInsets.only(bottom: 80),
+          itemCount: rows?.length ?? sites.length,
+          itemBuilder: (context, index) {
+            if (rows == null) {
+              return _buildSiteTile(sites[index], orderedSites, diversCount);
+            }
+            return switch (rows[index]) {
+              OuterHeaderRow(:final group, :final isExpanded) =>
+                KeyboardListItem(
+                  navigationKey: _groupNavKey(group.key),
+                  child: SiteGroupHeader(
+                    label: _outerGroupLabel(groupBy, noGroupLabel, group),
+                    siteCount: group.siteCount,
+                    isExpanded: isExpanded,
+                    onTap: () => _toggleGroup(group.key, expanded),
+                  ),
+                ),
+              SubHeaderRow(
+                :final expansionKey,
+                :final subgroup,
+                :final isExpanded,
+              ) =>
+                KeyboardListItem(
+                  navigationKey: _groupNavKey(expansionKey),
+                  child: SiteGroupHeader(
+                    label: siteSubGroupLabel(
+                      groupBy.innerNoGroupLabel(context.l10n) ?? '',
+                      subgroup,
+                    ),
+                    siteCount: subgroup.items.length,
+                    isExpanded: isExpanded,
+                    indent: 40,
+                    onTap: () => _toggleGroup(expansionKey, expanded),
+                  ),
+                ),
+              SiteRow(:final item) => _buildSiteTile(
+                item,
+                orderedSites,
+                diversCount,
+              ),
+            };
+          },
+        ),
       ),
     );
+  }
+
+  /// The keyboard stop for the header of the group [groupKey]: an outer
+  /// group's key, or a subgroup's [subGroupExpansionKey].
+  static String _groupNavKey(String groupKey) => 'group:$groupKey';
+
+  Widget _buildSiteTile(
+    SiteWithDiveCount siteData,
+    List<SiteWithDiveCount> orderedSites,
+    int diversCount,
+  ) {
+    final site = siteData.site;
+    final isSelected =
+        widget.selectedId == site.id ||
+        ref.watch(highlightedSiteIdProvider) == site.id;
+    final isChecked = _selectedIds.contains(site.id);
+    // Sites shared with chosen profiles carry the badge too (issue #2151).
+    final sharedByName =
+        ref.watch(itemIdsWithSharesProvider(SharedItemKind.site)).value ??
+        const <String>{};
+    final showSharedBadge =
+        isSharedWithAnyone(
+          id: site.id,
+          everyone: site.isShared,
+          namedShares: sharedByName,
+        ) &&
+        diversCount >= 2;
+
+    final viewMode = ref.watch(siteListViewModeProvider);
+    final locationString = site.locationString.isNotEmpty
+        ? site.locationString
+        : null;
+    final tile = switch (viewMode) {
+      ListViewMode.detailed => SiteListTile(
+        entry: siteData,
+        isSelectionMode: _isSelectionMode,
+        isSelected: isSelected,
+        isChecked: isChecked,
+        showSharedBadge: showSharedBadge,
+        onTap: () => _handleRowTap(site.id, orderedSites),
+      ),
+      ListViewMode.compact => CompactSiteListTile(
+        entry: siteData,
+        isSelectionMode: _isSelectionMode,
+        isSelected: isChecked,
+        isHighlighted: !_isSelectionMode && isSelected,
+        showSharedBadge: showSharedBadge,
+        onTap: () => _handleRowTap(site.id, orderedSites),
+      ),
+      ListViewMode.dense || ListViewMode.table => DenseSiteListTile(
+        name: site.name,
+        site: site,
+        location: locationString,
+        diveCount: siteData.diveCount,
+        isSelectionMode: _isSelectionMode,
+        isSelected: isChecked,
+        isHighlighted: !_isSelectionMode && isSelected,
+        showSharedBadge: showSharedBadge,
+        onTap: () => _handleRowTap(site.id, orderedSites),
+      ),
+    };
+    return KeyboardListItem(navigationKey: site.id, child: tile);
   }
 
   Widget _buildEmptyState(BuildContext context, bool hasActiveFilters) {
@@ -901,19 +1797,23 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
             ),
           ),
           const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () {
-              if (ResponsiveBreakpoints.isMasterDetail(context)) {
-                final routerState = GoRouterState.of(context);
-                context.go('${routerState.uri.path}?mode=new');
-              } else {
-                context.push('/sites/new');
-              }
-            },
-            icon: const Icon(Icons.add_location),
-            label: Text(context.l10n.diveSites_list_empty_addFirstSite),
-          ),
-          const SizedBox(height: 12),
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!MasterDetailFormScope.isFormOpenOf(context)) ...[
+            FilledButton.icon(
+              onPressed: () {
+                if (ResponsiveBreakpoints.isMasterDetail(context)) {
+                  final routerState = GoRouterState.of(context);
+                  context.go('${routerState.uri.path}?mode=new');
+                } else {
+                  openNewSite(context);
+                }
+              },
+              icon: const Icon(Icons.add_location),
+              label: Text(context.l10n.diveSites_list_empty_addFirstSite),
+            ),
+            const SizedBox(height: 12),
+          ],
           OutlinedButton.icon(
             onPressed: () => context.push('/sites/import'),
             icon: const Icon(Icons.download),
@@ -922,113 +1822,6 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
         ],
       ),
     );
-  }
-
-  Widget _buildActiveFiltersBar(BuildContext context, SiteFilterState filter) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-        border: Border(
-          bottom: BorderSide(color: colorScheme.outlineVariant, width: 1),
-        ),
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            // Clear all button
-            ActionChip(
-              avatar: const Icon(Icons.clear_all, size: 18),
-              label: Text(context.l10n.diveSites_list_activeFilter_clear),
-              onPressed: () {
-                ref.read(siteFilterProvider.notifier).state =
-                    const SiteFilterState();
-              },
-            ),
-            const SizedBox(width: 8),
-            // Individual filter chips
-            if (filter.country != null)
-              _buildFilterChip(
-                context.l10n.diveSites_list_activeFilter_country(
-                  filter.country!,
-                ),
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearCountry: true),
-              ),
-            if (filter.region != null)
-              _buildFilterChip(
-                context.l10n.diveSites_list_activeFilter_region(filter.region!),
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearRegion: true),
-              ),
-            if (filter.difficulty != null)
-              _buildFilterChip(
-                filter.difficulty!.displayName,
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearDifficulty: true),
-              ),
-            if (filter.minDepth != null || filter.maxDepth != null)
-              _buildFilterChip(
-                _formatDepthRange(filter.minDepth, filter.maxDepth),
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearMinDepth: true, clearMaxDepth: true),
-              ),
-            if (filter.minRating != null)
-              _buildFilterChip(
-                context.l10n.diveSites_filter_rating_starsPlus(
-                  filter.minRating!.toInt(),
-                ),
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearMinRating: true),
-              ),
-            if (filter.hasCoordinates == true)
-              _buildFilterChip(
-                context.l10n.diveSites_list_activeFilter_hasCoordinates,
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearHasCoordinates: true),
-              ),
-            if (filter.hasDives == true)
-              _buildFilterChip(
-                context.l10n.diveSites_list_activeFilter_hasDives,
-                () => ref.read(siteFilterProvider.notifier).state = filter
-                    .copyWith(clearHasDives: true),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFilterChip(String label, VoidCallback onDeleted) {
-    return Padding(
-      padding: const EdgeInsetsDirectional.only(end: 8),
-      child: InputChip(
-        label: Text(label),
-        onDeleted: onDeleted,
-        deleteIconColor: Theme.of(context).colorScheme.onSurfaceVariant,
-      ),
-    );
-  }
-
-  String _formatDepthRange(double? min, double? max) {
-    if (min != null && max != null) {
-      return context.l10n.diveSites_list_activeFilter_depthRangeBoth(
-        min.toInt(),
-        max.toInt(),
-      );
-    } else if (min != null) {
-      return context.l10n.diveSites_list_activeFilter_depthRangeMin(
-        min.toInt(),
-      );
-    } else if (max != null) {
-      return context.l10n.diveSites_list_activeFilter_depthRangeMax(
-        max.toInt(),
-      );
-    }
-    return '';
   }
 
   Widget _buildErrorState(BuildContext context, Object error) {
@@ -1052,364 +1845,10 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
   }
 }
 
-/// Search delegate for dive sites
-class SiteSearchDelegate extends SearchDelegate<DiveSite?> {
-  final WidgetRef ref;
-
-  SiteSearchDelegate(this.ref);
-
-  @override
-  String get searchFieldLabel => 'Search sites...';
-
-  @override
-  List<Widget> buildActions(BuildContext context) {
-    return [
-      if (query.isNotEmpty)
-        IconButton(
-          icon: const Icon(Icons.clear),
-          tooltip: context.l10n.diveSites_list_search_clearTooltip,
-          onPressed: () => query = '',
-        ),
-    ];
-  }
-
-  @override
-  Widget buildLeading(BuildContext context) {
-    return IconButton(
-      icon: const Icon(Icons.arrow_back),
-      tooltip: context.l10n.diveSites_list_search_backTooltip,
-      onPressed: () => close(context, null),
-    );
-  }
-
-  @override
-  Widget buildResults(BuildContext context) {
-    return _buildSearchResults(context);
-  }
-
-  @override
-  Widget buildSuggestions(BuildContext context) {
-    if (query.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.search,
-              size: 64,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              context.l10n.diveSites_list_search_emptyHint,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return _buildSearchResults(context);
-  }
-
-  Widget _buildSearchResults(BuildContext context) {
-    return DebouncedSearchResults<DiveSite>(
-      query: query,
-      watchProvider: (ref, q) => ref.watch(siteSearchProvider(q)),
-      dataBuilder: (context, sites) {
-        return ListView.builder(
-          itemCount: sites.length,
-          itemBuilder: (context, index) {
-            final site = sites[index];
-            return SiteListTile(
-              name: site.name,
-              location: site.locationString.isNotEmpty
-                  ? site.locationString
-                  : null,
-              minDepth: site.minDepth,
-              maxDepth: site.maxDepth,
-              difficulty: site.difficulty?.displayName,
-              rating: site.rating,
-              latitude: site.location?.latitude,
-              longitude: site.location?.longitude,
-              onTap: () {
-                close(context, site);
-                context.push('/sites/${site.id}');
-              },
-            );
-          },
-        );
-      },
-      emptyBuilder: (context, query) {
-        return Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.search_off,
-                size: 64,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                context.l10n.diveSites_list_search_noResults(query),
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-      errorBuilder: (context, error) {
-        return Center(
-          child: Text(
-            context.l10n.diveSites_list_search_error(error.toString()),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// List item widget for displaying a dive site summary
-class SiteListTile extends ConsumerWidget {
-  final String name;
-  final String? location;
-  final double? minDepth;
-  final double? maxDepth;
-  final String? difficulty;
-  final int diveCount;
-  final double? rating;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-  final bool isSelectionMode;
-  final bool isSelected;
-  final bool isChecked;
-  final double? latitude;
-  final double? longitude;
-
-  const SiteListTile({
-    super.key,
-    required this.name,
-    this.location,
-    this.minDepth,
-    this.maxDepth,
-    this.difficulty,
-    this.diveCount = 0,
-    this.rating,
-    this.onTap,
-    this.onLongPress,
-    this.isSelectionMode = false,
-    this.isSelected = false,
-    this.isChecked = false,
-    this.latitude,
-    this.longitude,
-  });
-
-  String? get _depthString {
-    if (minDepth != null && maxDepth != null) {
-      return '${minDepth!.toStringAsFixed(0)}-${maxDepth!.toStringAsFixed(0)}m';
-    }
-    if (maxDepth != null) {
-      return '${maxDepth!.toStringAsFixed(0)}m';
-    }
-    return null;
-  }
-
-  bool get _hasLocation => latitude != null && longitude != null;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final showMapBackground = ref.watch(showMapBackgroundOnSiteCardsProvider);
-    final shouldShowMap =
-        showMapBackground && _hasLocation && !isSelected && !isChecked;
-    final useLightText = shouldShowMap;
-    final primaryTextColor = useLightText ? Colors.white : null;
-    final secondaryTextColor = useLightText
-        ? Colors.white70
-        : colorScheme.onSurfaceVariant;
-
-    Widget buildContent() {
-      return Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 40,
-              height: 40,
-              child: isSelectionMode
-                  ? Center(
-                      child: Checkbox(
-                        value: isChecked,
-                        onChanged: (_) => onTap?.call(),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    )
-                  : CircleAvatar(
-                      backgroundColor: colorScheme.secondaryContainer,
-                      child: Icon(
-                        Icons.location_on,
-                        color: colorScheme.onSecondaryContainer,
-                      ),
-                    ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: primaryTextColor,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (location != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      location!,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: secondaryTextColor,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (_depthString != null)
-                  Text(
-                    _depthString!,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: secondaryTextColor,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                if (difficulty != null)
-                  Text(
-                    difficulty!,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: secondaryTextColor),
-                  ),
-                if (diveCount > 0)
-                  Text(
-                    context.l10n.diveSites_list_tile_diveCount(diveCount),
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: secondaryTextColor),
-                  ),
-                if (rating != null)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.star, color: Colors.amber, size: 16),
-                      Text(
-                        rating!.toStringAsFixed(1),
-                        style: TextStyle(color: primaryTextColor),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-            if (!isSelectionMode)
-              Icon(Icons.chevron_right, color: secondaryTextColor),
-          ],
-        ),
-      );
-    }
-
-    if (shouldShowMap) {
-      final siteLocation = LatLng(latitude!, longitude!);
-      return Card(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        clipBehavior: Clip.antiAlias,
-        child: Semantics(
-          button: true,
-          label: context.l10n.diveSites_list_tile_semantics(name),
-          child: InkWell(
-            onTap: onTap,
-            onLongPress: onLongPress,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: FlutterMap(
-                    options: MapOptions(
-                      initialCenter: siteLocation,
-                      initialZoom: 13.0,
-                      interactionOptions: const InteractionOptions(
-                        flags: InteractiveFlag.none,
-                      ),
-                    ),
-                    children: [
-                      TileLayer(
-                        urlTemplate: ref.watch(mapTileUrlProvider),
-                        userAgentPackageName: 'app.submersion',
-                        maxZoom: ref.watch(mapTileMaxZoomProvider),
-                        tileProvider: TileCacheService.instance.isInitialized
-                            ? TileCacheService.instance.getTileProvider()
-                            : null,
-                      ),
-                      const MapAttribution(),
-                    ],
-                  ),
-                ),
-                Positioned.fill(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        stops: const [0.0, 0.3, 0.7, 1.0],
-                        colors: [
-                          Colors.black.withValues(alpha: 0.4),
-                          Colors.black.withValues(alpha: 0.5),
-                          Colors.black.withValues(alpha: 0.7),
-                          Colors.black.withValues(alpha: 0.85),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                buildContent(),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      color: isSelected
-          ? colorScheme.primaryContainer.withValues(alpha: 0.5)
-          : isChecked
-          ? colorScheme.primaryContainer.withValues(alpha: 0.3)
-          : null,
-      child: Semantics(
-        button: true,
-        label: context.l10n.diveSites_list_tile_semantics(name),
-        child: InkWell(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          borderRadius: BorderRadius.circular(12),
-          child: buildContent(),
-        ),
-      ),
-    );
-  }
-}
+/// The grouped Dive Sites list for one build: its groups, the groups open,
+/// and the flattened rows those give.
+typedef _GroupedSites = ({
+  List<SiteOuterGroup<SiteWithDiveCount>> groups,
+  Set<String> expanded,
+  List<SiteListRow<SiteWithDiveCount>> rows,
+});

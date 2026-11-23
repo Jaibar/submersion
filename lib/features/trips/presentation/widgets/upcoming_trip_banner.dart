@@ -1,0 +1,130 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/features/checklists/presentation/providers/checklist_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/providers/scrubber_margin_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_scrubber_margin_details.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// Countdown + checklist progress line shown on upcoming trip tiles, plus a
+/// service-alert line when gear falls due before the trip ends.
+class UpcomingTripBanner extends ConsumerWidget {
+  final Trip trip;
+
+  const UpcomingTripBanner({super.key, required this.trip});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final progressAsync = ref.watch(
+      tripChecklistCombinedProgressProvider(trip.id),
+    );
+    final progress = progressAsync.value;
+    final serviceAlerts =
+        ref.watch(tripServiceAlertsProvider(trip.id)).value ?? const [];
+    final margins =
+        ref.watch(tripScrubberMarginsProvider(trip.id)).value ?? const [];
+    final marginLine = tripScrubberMarginSummary(context.l10n, margins);
+    final marginCaution = margins.any((m) => m.caution);
+    // Red only when a blocking clock is already overdue; gear merely coming
+    // due before the trip reads amber, matching the trip page's banner.
+    final serviceColor =
+        serviceAlerts.any(
+          (a) => a.status.severity == ServiceClockSeverity.overdue,
+        )
+        ? StatusColors.of(context).alert.accent
+        : StatusColors.of(context).warn.accent;
+
+    final countdown = trip.isInProgress
+        ? context.l10n.trips_list_inProgress
+        : context.l10n.trips_list_countdown(trip.daysUntilStart);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.schedule, size: 14, color: theme.colorScheme.primary),
+            const SizedBox(width: 4),
+            Text(
+              countdown,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            if (progress != null && progress.total > 0) ...[
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  context.l10n.checklists_progress(
+                    progress.done,
+                    progress.total,
+                  ),
+                  style: theme.textTheme.labelMedium,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (serviceAlerts.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
+              children: [
+                Icon(Icons.build, size: 14, color: serviceColor),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    // Per-clock alerts collapse to distinct items for the
+                    // "N items" phrasing.
+                    context.l10n.trips_serviceAlert_count(
+                      serviceAlerts.map((a) => a.item.id).toSet().length,
+                    ),
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: serviceColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (marginLine != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.air,
+                  size: 14,
+                  color: marginCaution
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    marginLine,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: marginCaution
+                          ? theme.colorScheme.error
+                          : theme.colorScheme.primary,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}

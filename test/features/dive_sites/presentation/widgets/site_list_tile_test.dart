@@ -1,0 +1,762 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/theme/feature_accent_colors.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_type_badge.dart';
+import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_with_dive_count.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_list_tile.dart';
+import 'package:submersion/features/maps/presentation/widgets/locked_map_scroll_passthrough.dart';
+import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/site_types/domain/entities/site_type_entity.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/shared/models/entity_card_view_config.dart';
+import 'package:submersion/shared/providers/entity_card_config_providers.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
+import 'package:submersion/shared/widgets/entity_card/entity_card_stat.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
+
+const _defaultConfig = EntityCardViewConfig<SiteField>(
+  slots: [
+    EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+    EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.location),
+    EntityCardSlotConfig(slotId: 'stat1', field: SiteField.depthRange),
+    EntityCardSlotConfig(slotId: 'stat2', field: SiteField.diveCount),
+  ],
+  extraFields: [SiteField.lastDived, SiteField.maxDepthReached],
+);
+
+Future<List<dynamic>> _overrides({
+  EntityCardViewConfig<SiteField> config = _defaultConfig,
+  bool mapBackground = false,
+}) async => [
+  ...await getBaseOverrides(),
+  siteDetailedCardConfigProvider.overrideWith(
+    (ref) => EntityCardConfigNotifier<SiteField>(
+      defaultConfig: config,
+      fieldFromName: SiteFieldAdapter.instance.fieldFromName,
+    ),
+  ),
+  showMapBackgroundOnSiteCardsProvider.overrideWithValue(mapBackground),
+];
+
+final _richEntry = SiteWithDiveCount(
+  site: const DiveSite(
+    id: 'site-1',
+    name: 'Blue Hole',
+    country: 'Egypt',
+    region: 'South Sinai',
+    city: 'Dahab',
+    minDepth: 5,
+    maxDepth: 50,
+    difficulty: SiteDifficulty.advanced,
+    waterType: WaterType.salt,
+    rating: 4.5,
+  ),
+  diveCount: 14,
+  lastDivedAt: DateTime(2024, 3, 5),
+  maxDepthReached: 31.5,
+  featureTypes: const ['wreck', 'mooring'],
+);
+
+const _bareEntry = SiteWithDiveCount(
+  site: DiveSite(id: 'site-2', name: 'Unknown Reef'),
+  diveCount: 0,
+);
+
+void main() {
+  testWidgets('renders slots, rating, chips and extra fields', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: SiteListTile(entry: _richEntry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Blue Hole'), findsOneWidget);
+    expect(find.text('Dahab · South Sinai, Egypt'), findsOneWidget);
+    expect(find.text('5-50m'), findsOneWidget);
+    expect(find.text('14 dives'), findsOneWidget);
+    expect(find.text('4.5'), findsOneWidget);
+    // Difficulty no longer earns a chip on the card; it stays on the site
+    // detail page and in the table view.
+    expect(find.text('Advanced'), findsNothing);
+    expect(find.byIcon(Icons.signal_cellular_alt), findsNothing);
+    expect(find.text('Salt Water'), findsOneWidget);
+    expect(find.text('Wreck'), findsOneWidget);
+    expect(find.text('Mooring'), findsOneWidget);
+    expect(find.text('Last dived: '), findsOneWidget);
+    expect(find.text('Your max: '), findsOneWidget);
+    expect(find.text('32m'), findsOneWidget);
+    expect(find.byType(ListTile), findsNothing);
+  });
+
+  testWidgets('hides stats, chips and extras that have no value', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: SiteListTile(entry: _bareEntry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Unknown Reef'), findsOneWidget);
+    expect(find.textContaining('dives'), findsNothing);
+    expect(find.textContaining('Last dived'), findsNothing);
+    expect(find.textContaining('--'), findsNothing);
+    expect(find.byIcon(Icons.star), findsNothing);
+  });
+
+  testWidgets('honours a reconfigured stat slot', (tester) async {
+    const config = EntityCardViewConfig<SiteField>(
+      slots: [
+        EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+        EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.country),
+        EntityCardSlotConfig(slotId: 'stat1', field: SiteField.maxDepthReached),
+        EntityCardSlotConfig(slotId: 'stat2', field: SiteField.rating),
+      ],
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(config: config),
+        locale: const Locale('en'),
+        child: SiteListTile(entry: _richEntry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Egypt'), findsOneWidget);
+    expect(find.text('32m'), findsOneWidget);
+    expect(find.text('5-50m'), findsNothing);
+  });
+
+  testWidgets('wraps a long title onto more lines instead of ellipsizing', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(353, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const longName =
+        'Blue Hole Arch and Canyon drift along the northern reef wall';
+    final entry = SiteWithDiveCount(
+      site: _richEntry.site.copyWith(name: longName),
+      diveCount: _richEntry.diveCount,
+    );
+
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: SiteListTile(entry: entry, onTap: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    final title = tester.renderObject<RenderParagraph>(find.text(longName));
+    final lineHeight = title.text.style!.fontSize!;
+    expect(
+      title.didExceedMaxLines,
+      isFalse,
+      reason: 'an ellipsized title hides the rest of the site name',
+    );
+    expect(
+      title.size.height,
+      greaterThan(lineHeight * 2),
+      reason: 'the full name only fits on a narrow card by wrapping',
+    );
+  });
+
+  testWidgets('shows a checkbox in selection mode', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: SiteListTile(
+          entry: _richEntry,
+          isSelectionMode: true,
+          isChecked: true,
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(Checkbox), findsOneWidget);
+  });
+
+  testWidgets('keeps the avatar beside the checkbox in selection mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: SiteListTile(
+          entry: _richEntry,
+          isSelectionMode: true,
+          isChecked: false,
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byIcon(Icons.location_on),
+      findsOneWidget,
+      reason: 'the checkbox is inserted ahead of the avatar (issue #1717)',
+    );
+    expect(
+      tester.getTopRight(find.byType(Checkbox)).dx,
+      lessThanOrEqualTo(tester.getTopLeft(find.byType(CircleAvatar)).dx),
+    );
+  });
+
+  testWidgets('keeps the stat line under the title in selection mode', (
+    tester,
+  ) async {
+    Future<double> statOffsetFromTitle({required bool selecting}) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: SiteListTile(
+            entry: _richEntry,
+            isSelectionMode: selecting,
+            isChecked: false,
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return tester.getTopLeft(find.text('5-50m')).dx -
+          tester.getTopLeft(find.text('Blue Hole')).dx;
+    }
+
+    final normal = await statOffsetFromTitle(selecting: false);
+    final selecting = await statOffsetFromTitle(selecting: true);
+    expect(
+      selecting,
+      normal,
+      reason: 'the lower lines move with the checkbox column',
+    );
+  });
+
+  testWidgets('renders a FlutterMap background for a located site', (
+    tester,
+  ) async {
+    const located = SiteWithDiveCount(
+      site: DiveSite(
+        id: 'site-3',
+        name: 'Located Reef',
+        location: GeoPoint(17.3155, -87.5346),
+      ),
+      diveCount: 0,
+    );
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(mapBackground: true),
+        child: SiteListTile(entry: located, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(FlutterMap), findsWidgets);
+    expect(find.text('Located Reef'), findsOneWidget);
+    // A trackpad scroll over the background map must scroll the list, so the
+    // static map carries no trackpad zoom recognizer (#3156).
+    expect(find.byType(TrackpadZoomMap), findsNothing);
+    expect(find.byType(LockedMapScrollPassthrough), findsOneWidget);
+  });
+
+  testWidgets('tapping the checkbox toggles the row', (tester) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: SiteListTile(
+          entry: _richEntry,
+          isSelectionMode: true,
+          isChecked: false,
+          onTap: () => taps++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<Checkbox>(find.byType(Checkbox)).onChanged,
+      isNotNull,
+      reason: 'a disabled checkbox would read as an unselectable row',
+    );
+    await tester.tap(find.byType(Checkbox));
+    expect(
+      taps,
+      1,
+      reason: 'the checkbox claims the tap, so the row toggles exactly once',
+    );
+  });
+
+  testWidgets('tints the avatar with the sites accent when list accents are '
+      'on', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...await _overrides(),
+          accentListIconsProvider.overrideWithValue(true),
+        ],
+        child: Builder(
+          builder: (context) => Theme(
+            data: Theme.of(
+              context,
+            ).copyWith(extensions: const [FeatureAccentColors.light]),
+            child: SiteListTile(entry: _richEntry, onTap: () {}),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final accent = FeatureAccentColors.light.of('sites')!;
+    expect(
+      tester.widget<CircleAvatar>(find.byType(CircleAvatar)).backgroundColor,
+      accent.withValues(alpha: 0.15),
+    );
+    expect(tester.widget<Icon>(find.byIcon(Icons.location_on)).color, accent);
+  });
+
+  group('site types and tags (issue #1765)', () {
+    final now = DateTime(2026);
+    Tag tag(String name) => Tag(
+      id: name,
+      name: name,
+      createdAt: now,
+      updatedAt: now,
+      scopes: const {TagScope.dives, TagScope.sites},
+    );
+
+    final classified = SiteWithDiveCount(
+      site: const DiveSite(id: 'site-3', name: 'Lake wreck'),
+      diveCount: 0,
+      featureTypes: const ['wreck', 'mooring'],
+      siteTypes: [
+        SiteTypeEntity(
+          id: 'wreck',
+          name: 'Wreck',
+          isBuiltIn: true,
+          createdAt: now,
+          updatedAt: now,
+        ),
+        SiteTypeEntity(
+          id: 'lake',
+          name: 'Lake',
+          isBuiltIn: true,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ],
+      tags: [
+        tag('Avoid'),
+        tag('Deep'),
+        tag('Night'),
+        tag('To try'),
+        tag('Zeta'),
+      ],
+    );
+
+    testWidgets('types, deduped feature pins, and capped tag chips', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: SiteListTile(entry: classified, onTap: () {}),
+        ),
+      );
+      await tester.pump();
+
+      // A wreck pin on a site typed wreck shows one chip, not two.
+      expect(find.text('Wreck'), findsOneWidget);
+      expect(find.text('Lake'), findsOneWidget);
+      expect(find.text('Mooring'), findsOneWidget);
+      expect(find.text('Avoid'), findsOneWidget);
+      expect(find.text('Deep'), findsOneWidget);
+      expect(find.text('Night'), findsOneWidget);
+      expect(find.text('To try'), findsNothing);
+      expect(find.text('+2'), findsOneWidget);
+    });
+  });
+
+  group('site type badges match the dive card (issue #4353)', () {
+    final now = DateTime(2026);
+    SiteTypeEntity siteType(String id, String name) => SiteTypeEntity(
+      id: id,
+      name: name,
+      isBuiltIn: true,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    final typed = SiteWithDiveCount(
+      site: const DiveSite(
+        id: 'site-4',
+        name: 'Coral garden',
+        minDepth: 5,
+        maxDepth: 50,
+        waterType: WaterType.salt,
+      ),
+      diveCount: 3,
+      featureTypes: const ['mooring'],
+      siteTypes: [siteType('reef', 'Reef'), siteType('wall', 'Wall')],
+    );
+
+    Future<void> pumpTyped(WidgetTester tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: SiteListTile(entry: typed, onTap: () {}),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('site types render as dense dive type badges', (tester) async {
+      await pumpTyped(tester);
+
+      for (final name in ['Reef', 'Wall']) {
+        final badge = find.widgetWithText(DiveTypeBadge, name);
+        expect(badge, findsOneWidget, reason: '$name is a dive type badge');
+        expect(tester.widget<DiveTypeBadge>(badge).dense, isTrue);
+      }
+    });
+
+    testWidgets('site type badges sit right-aligned on the stat line', (
+      tester,
+    ) async {
+      await pumpTyped(tester);
+
+      final stat = tester.getRect(find.text('5-50m'));
+      final lastBadge = tester.getRect(
+        find.widgetWithText(DiveTypeBadge, 'Wall'),
+      );
+      final chevron = tester.getRect(find.byType(RecordListChevron));
+
+      expect(
+        lastBadge.center.dy,
+        moreOrLessEquals(stat.center.dy, epsilon: 1),
+        reason: 'the badges share the stat line, as on a dive card',
+      );
+      // The chevron has a column of its own at the end of the card (#4639),
+      // so the content edge is where that column starts.
+      expect(
+        lastBadge.right,
+        moreOrLessEquals(chevron.left, epsilon: 0.5),
+        reason: 'the badges are right-aligned to the content edge',
+      );
+    });
+
+    testWidgets('badges stay on the first stat line when the stats wrap', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(300, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await pumpTyped(tester);
+
+      final firstStat = tester.getRect(find.text('5-50m'));
+      final secondStat = tester.getRect(find.text('3 dives'));
+      expect(
+        secondStat.top,
+        greaterThan(firstStat.bottom),
+        reason: 'the narrow card wraps the stats onto two lines',
+      );
+      final badge = tester.getRect(find.byType(DiveTypeBadge).first);
+      expect(
+        badge.center.dy,
+        moreOrLessEquals(firstStat.center.dy, epsilon: 2),
+        reason: 'the badges sit on the first stat line, not between lines',
+      );
+    });
+
+    testWidgets('identity chips use the muted outline, not the accent', (
+      tester,
+    ) async {
+      await pumpTyped(tester);
+
+      final colorScheme = Theme.of(
+        tester.element(find.text('Mooring')),
+      ).colorScheme;
+      for (final label in ['Salt Water', 'Mooring']) {
+        final chip = tester.widget<Container>(
+          find
+              .ancestor(
+                of: find.text(label),
+                matching: find.byWidgetPredicate(
+                  (w) =>
+                      w is Container &&
+                      w.decoration is BoxDecoration &&
+                      (w.decoration! as BoxDecoration).border != null,
+                ),
+              )
+              .first,
+        );
+        final border = (chip.decoration! as BoxDecoration).border! as Border;
+        expect(
+          border.top.color,
+          colorScheme.outlineVariant,
+          reason: '$label chip outline is muted',
+        );
+      }
+    });
+  });
+
+  group('country flag (issue #4426)', () {
+    testWidgets('a stored code shows its flag for unread text', (tester) async {
+      final korea = SiteWithDiveCount(
+        site: _richEntry.site.copyWith(country: 'Korea', countryCode: 'KR'),
+        diveCount: 1,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: SiteListTile(entry: korea, onTap: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<CountryFlag>(find.byType(CountryFlag)).code, 'KR');
+    });
+
+    Future<void> pumpTile(
+      WidgetTester tester, {
+      EntityCardViewConfig<SiteField> config = _defaultConfig,
+      bool flags = true,
+    }) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...await _overrides(config: config),
+            showCountryFlagsProvider.overrideWithValue(flags),
+          ],
+          locale: const Locale('en'),
+          child: SiteListTile(entry: _richEntry, onTap: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the location line carries the country flag', (tester) async {
+      await pumpTile(tester);
+      final flag = tester.widget<CountryFlag>(find.byType(CountryFlag));
+      expect(flag.code, 'EG');
+    });
+
+    testWidgets('no flag when flags are off', (tester) async {
+      await pumpTile(tester, flags: false);
+      expect(find.byType(CountryFlag), findsNothing);
+      expect(find.textContaining('Egypt'), findsOneWidget);
+    });
+
+    testWidgets('no flag when the subtitle shows something else', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        config: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(
+              slotId: 'subtitle',
+              field: SiteField.depthRange,
+            ),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.diveCount),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.rating),
+          ],
+        ),
+      );
+      expect(find.byType(CountryFlag), findsNothing);
+    });
+
+    testWidgets('a country-only subtitle carries the flag too', (tester) async {
+      await pumpTile(
+        tester,
+        config: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.country),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.diveCount),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.rating),
+          ],
+        ),
+      );
+      expect(find.byType(CountryFlag), findsOneWidget);
+    });
+  });
+
+  group('water type sits on the stat line (issue #4469)', () {
+    const salt = SiteWithDiveCount(
+      site: DiveSite(
+        id: 'site-5',
+        name: 'Salt reef',
+        minDepth: 5,
+        maxDepth: 50,
+        waterType: WaterType.salt,
+      ),
+      diveCount: 14,
+    );
+
+    Future<void> pumpEntries(
+      WidgetTester tester,
+      List<SiteWithDiveCount> entries,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: Column(
+            children: [
+              for (final entry in entries)
+                SiteListTile(key: ValueKey(entry.site.id), entry: entry),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('the water type follows the dive count on its line', (
+      tester,
+    ) async {
+      await pumpEntries(tester, [salt]);
+
+      final count = tester.getRect(find.text('14 dives'));
+      final water = tester.getRect(find.text('Salt Water'));
+      expect(
+        water.center.dy,
+        moreOrLessEquals(count.center.dy, epsilon: 1),
+        reason: 'the water type shares the dive count line',
+      );
+      expect(
+        water.left,
+        greaterThan(count.right),
+        reason: 'the water type sits to the right of the dive count',
+      );
+    });
+
+    testWidgets('a water type alone adds no line to the card', (tester) async {
+      final noWater = SiteWithDiveCount(
+        site: salt.site.copyWith(id: 'site-6', clearWaterType: true),
+        diveCount: 14,
+      );
+      await pumpEntries(tester, [salt, noWater]);
+
+      // The chip is a little taller than the stat text, so the stat line may
+      // grow by a few pixels; it must not grow by a whole chip line.
+      final chip = tester.getSize(
+        find
+            .ancestor(of: find.text('Salt Water'), matching: find.byType(Row))
+            .first,
+      );
+      final withWater = tester.getSize(find.byKey(const ValueKey('site-5')));
+      final without = tester.getSize(find.byKey(const ValueKey('site-6')));
+      expect(
+        withWater.height - without.height,
+        lessThan(chip.height),
+        reason: 'the water type no longer takes a line of its own',
+      );
+    });
+
+    testWidgets('a hidden zero dive count leaves no double gap', (
+      tester,
+    ) async {
+      const unvisited = SiteWithDiveCount(
+        site: DiveSite(
+          id: 'site-7',
+          name: 'Unvisited',
+          minDepth: 5,
+          maxDepth: 50,
+          waterType: WaterType.fresh,
+        ),
+        diveCount: 0,
+      );
+      const visited = SiteWithDiveCount(
+        site: DiveSite(
+          id: 'site-8',
+          name: 'Visited',
+          minDepth: 5,
+          maxDepth: 50,
+        ),
+        diveCount: 2,
+      );
+      await pumpEntries(tester, [unvisited, visited]);
+
+      // Each stat is an icon and text, and the chip pads its label, so
+      // measure the widgets themselves: the gap after the depth stat must be
+      // the single stat gap the visited card shows before its dive count.
+      Rect statRect(Finder text) => tester.getRect(
+        find
+            .ancestor(
+              of: text,
+              matching: find.byWidgetPredicate((w) => w is EntityCardStat),
+            )
+            .first,
+      );
+      final depths = find.text('5-50m');
+      final chip = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Fresh Water'),
+              matching: find.byWidgetPredicate(
+                (w) =>
+                    w is Container &&
+                    w.decoration is BoxDecoration &&
+                    (w.decoration! as BoxDecoration).border != null,
+              ),
+            )
+            .first,
+      );
+      expect(
+        chip.left - statRect(depths.at(0)).right,
+        moreOrLessEquals(
+          statRect(find.text('2 dives')).left - statRect(depths.at(1)).right,
+          epsilon: 0.5,
+        ),
+        reason: 'the missing count does not leave two stat gaps',
+      );
+    });
+  });
+
+  testWidgets('chevron ends one card padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: SiteListTile(entry: _richEntry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: recordCardBounds(tester),
+      padding: kRecordCardDetailedPadding,
+    );
+  });
+}

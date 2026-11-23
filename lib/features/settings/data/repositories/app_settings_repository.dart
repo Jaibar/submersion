@@ -1,0 +1,414 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/device_local_fields.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
+import 'package:submersion/features/gas_calculators/domain/blending/blender_preferences.dart';
+
+/// Read/write global (not per-diver) app settings stored in the
+/// key-value `settings` table.
+class AppSettingsRepository {
+  AppDatabase get _db => DatabaseService.instance.database;
+  final SyncRepository _syncRepository = SyncRepository();
+  static final _log = LoggerService.forClass(AppSettingsRepository);
+
+  static const _shareByDefaultKey = 'share_new_records_by_default';
+  static const _navPrimaryIdsKey = 'nav_primary_ids';
+  static const _navRailIdsKey = 'nav_rail_ids';
+  static const _navAlwaysHideLabelsPhoneKey = 'nav_always_hide_labels_phone';
+  static const _navAlwaysHideLabelsDesktopKey =
+      'nav_always_hide_labels_desktop';
+
+  /// Pre-#3222 key shared by both surfaces. No longer written; kept only so
+  /// [_getNavAlwaysHideLabelsFor] can fall back to it for a device that had
+  /// the setting on before the split, instead of silently resetting it.
+  static const _legacyNavAlwaysHideLabelsKey = 'nav_always_hide_labels';
+  static const _blenderPrefsKey = 'gas_blender_prefs';
+  static const _equipmentArrangementKey = 'equipment_arrangement';
+  static const _equipmentGroupByLocationKey = 'equipment_group_by_location';
+
+  /// Emits whenever the `settings` table changes so providers holding a
+  /// setting refresh after a sync applies a remote change.
+  ///
+  /// Emits nothing when the database is not up, matching the contract every
+  /// read in this class already keeps: [getShareByDefault] and friends catch
+  /// their own errors and fall back to a default rather than failing the
+  /// caller. A tick that threw here would take that robustness away -- a
+  /// settings-backed provider that used to resolve to its default before the
+  /// database was initialised would start erroring instead, which is exactly
+  /// what happens during the null-database window of a restore.
+  Stream<void> watchSettingsChanges() {
+    final db = DatabaseService.instance.databaseOrNull;
+    if (db == null) return const Stream.empty();
+    return db.tableUpdates(TableUpdateQuery.onTable(db.settings));
+  }
+
+  /// Returns the raw stored phone nav order, or `null` if unset / on read error.
+  ///
+  /// Caller should normalize via `normalizeNavOrder` before using the result.
+  Future<List<String>?> getNavPrimaryIdsRaw() =>
+      _getIdListRaw(_navPrimaryIdsKey);
+
+  /// Persists the phone nav order (bottom-bar slots first, then the More menu).
+  Future<void> setNavPrimaryIds(List<String> ids) =>
+      _setIdList(_navPrimaryIdsKey, ids);
+
+  /// Returns the raw stored wide-screen rail order, or `null` if unset / on
+  /// read error. Normalize via `normalizeNavOrder` before using the result.
+  ///
+  /// Stored under its own key so a phone and a desktop syncing to the same
+  /// account each keep their own layout instead of overwriting each other.
+  Future<List<String>?> getNavRailIdsRaw() => _getIdListRaw(_navRailIdsKey);
+
+  /// Persists the wide-screen rail order, below the pinned Home destination.
+  Future<void> setNavRailIds(List<String> ids) =>
+      _setIdList(_navRailIdsKey, ids);
+
+  /// Whether the phone bottom bar is forced to icon-only, hiding its text
+  /// labels even where the bar would otherwise show one (#1424, split by
+  /// surface in #3222).
+  ///
+  /// Falls back to the pre-split [_legacyNavAlwaysHideLabelsKey] value while
+  /// this surface's own key has never been written, so a device upgrading
+  /// from before the split keeps its chosen behavior instead of silently
+  /// resetting to `false`. Defaults to `false` when neither key was ever
+  /// written or on a read error, matching [getShareByDefault]'s
+  /// degrade-to-default contract.
+  Future<bool> getNavAlwaysHideLabelsPhone() =>
+      _getNavAlwaysHideLabelsFor(_navAlwaysHideLabelsPhoneKey);
+
+  /// Persists the phone always-hide-labels toggle. Rethrows so a failed save
+  /// is visible, matching [setNavPrimaryIds].
+  Future<void> setNavAlwaysHideLabelsPhone(bool value) =>
+      setRawSetting(_navAlwaysHideLabelsPhoneKey, value ? 'true' : 'false');
+
+  /// Whether the desktop navigation rail starts collapsed to icon-only
+  /// (#1424, split by surface in #3222). Only the starting state: the
+  /// collapse arrow can still override it for the rest of the session
+  /// without persisting that override.
+  ///
+  /// Falls back to the pre-split [_legacyNavAlwaysHideLabelsKey] value while
+  /// this surface's own key has never been written; see
+  /// [getNavAlwaysHideLabelsPhone] for why.
+  Future<bool> getNavAlwaysHideLabelsDesktop() =>
+      _getNavAlwaysHideLabelsFor(_navAlwaysHideLabelsDesktopKey);
+
+  /// Persists the desktop always-hide-labels toggle. Rethrows so a failed
+  /// save is visible, matching [setNavPrimaryIds].
+  Future<void> setNavAlwaysHideLabelsDesktop(bool value) =>
+      setRawSetting(_navAlwaysHideLabelsDesktopKey, value ? 'true' : 'false');
+
+  /// Shared read path for [getNavAlwaysHideLabelsPhone] and
+  /// [getNavAlwaysHideLabelsDesktop]: reads [key], or -- key never written --
+  /// the legacy shared key both surfaces fell back to before the split.
+  Future<bool> _getNavAlwaysHideLabelsFor(String key) async {
+    final raw = await getRawSetting(key);
+    if (raw != null) return raw == 'true';
+    final legacy = await getRawSetting(_legacyNavAlwaysHideLabelsKey);
+    return legacy == 'true';
+  }
+
+  /// Whether the Equipment page groups its list under one heading per
+  /// location (v268), as older builds saved it for the whole app. Since
+  /// issue #3748 the switch is saved per diver and this is only the fallback
+  /// for a diver who has not changed it. False when unset or on a read
+  /// error.
+  Future<bool> getEquipmentGroupByLocation() async =>
+      await getRawSetting(_equipmentGroupByLocationKey) == 'true';
+
+  /// Persists the group-by-location switch. Rethrows so a failed save is
+  /// visible.
+  Future<void> setEquipmentGroupByLocation(bool value) =>
+      setRawSetting(_equipmentGroupByLocationKey, value ? 'true' : 'false');
+
+  /// Reads a JSON-encoded list of strings, returning `null` when unset, when
+  /// the stored value is not a JSON list, or on read error.
+  Future<List<String>?> _getIdListRaw(String key) async {
+    try {
+      final row = await (_db.select(
+        _db.settings,
+      )..where((t) => t.key.equals(key))).getSingleOrNull();
+      if (row == null) return null;
+      final raw = row.value;
+      if (raw == null) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return null;
+      return decoded.whereType<String>().toList(growable: false);
+    } catch (e, stackTrace) {
+      _log.error('Failed to read $key', error: e, stackTrace: stackTrace);
+      return null;
+    }
+  }
+
+  /// Writes a JSON-encoded list of strings and, unless the key is
+  /// device-local, marks it pending for sync.
+  ///
+  /// Rethrows so a failed save is visible to the caller, which rolls the UI
+  /// back rather than leaving the user believing a layout was stored.
+  Future<void> _setIdList(String key, List<String> ids) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.settings)
+          .insertOnConflictUpdate(
+            SettingsCompanion(
+              key: Value(key),
+              value: Value(jsonEncode(ids)),
+              updatedAt: Value(now),
+            ),
+          );
+      // A device-local key never syncs (issue #2947); queuing it would only
+      // publish a changeset that carries nothing.
+      if (deviceLocalSettingsKeys.contains(key)) return;
+      await _syncRepository.markRecordPending(
+        entityType: 'settings',
+        recordId: key,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error('Failed to write $key', error: e, stackTrace: stackTrace);
+      rethrow;
+    }
+  }
+
+  /// The blender's saved templates, gas prices and blending conditions.
+  ///
+  /// Returns null when the key has never been written, which is what lets the
+  /// caller seed the default templates exactly once. A read error also returns
+  /// null rather than throwing, matching every other read in this class.
+  Future<BlenderPreferences?> getBlenderPreferences() async {
+    try {
+      final row = await (_db.select(
+        _db.settings,
+      )..where((t) => t.key.equals(_blenderPrefsKey))).getSingleOrNull();
+      final raw = row?.value;
+      if (raw == null) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      return BlenderPreferences.fromJson(decoded);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to read $_blenderPrefsKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  /// Persist the blender preferences. Rethrows so a failed save is visible,
+  /// matching [setNavPrimaryIds].
+  Future<void> setBlenderPreferences(BlenderPreferences prefs) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.settings)
+          .insertOnConflictUpdate(
+            SettingsCompanion(
+              key: const Value(_blenderPrefsKey),
+              value: Value(jsonEncode(prefs.toJson())),
+              updatedAt: Value(now),
+            ),
+          );
+      await _syncRepository.markRecordPending(
+        entityType: 'settings',
+        recordId: _blenderPrefsKey,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to write $_blenderPrefsKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// How gear lists on a dive are grouped and ordered (#1486, #1576).
+  ///
+  /// Returns null when no usable value is stored: the key has never been
+  /// written, or the stored value is not a JSON object. Both mean the same
+  /// thing to the caller, use `EquipmentArrangement.defaults`, which is what
+  /// a fresh launch would show.
+  ///
+  /// A read that FAILS (the database is unavailable, as in the null-database
+  /// window of a restore, or the query errors) is different and rethrows,
+  /// unlike the other reads in this class. Reporting it as null would tell
+  /// the caller "nothing is stored", so one transient error would let the
+  /// next edit save the defaults over the real value. Since issue #3748 the
+  /// arrangement is saved per diver and this is only the fallback for a
+  /// diver who has not changed it: an edit refuses on a throw, and the PDF
+  /// export falls back to the defaults itself.
+  Future<EquipmentArrangement?> getEquipmentArrangement() async {
+    final String? raw;
+    try {
+      final row =
+          await (_db.select(_db.settings)
+                ..where((t) => t.key.equals(_equipmentArrangementKey)))
+              .getSingleOrNull();
+      raw = row?.value;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to read $_equipmentArrangementKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+    if (raw == null) return null;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException catch (e, stackTrace) {
+      _log.error(
+        'Stored $_equipmentArrangementKey is not valid JSON',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+    if (decoded is! Map<String, dynamic>) return null;
+    return EquipmentArrangement.fromJson(decoded);
+  }
+
+  /// Persist the gear arrangement. Rethrows so a failed save is visible,
+  /// matching [setNavPrimaryIds].
+  Future<void> setEquipmentArrangement(EquipmentArrangement arrangement) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.settings)
+          .insertOnConflictUpdate(
+            SettingsCompanion(
+              key: const Value(_equipmentArrangementKey),
+              value: Value(jsonEncode(arrangement.toJson())),
+              updatedAt: Value(now),
+            ),
+          );
+      await _syncRepository.markRecordPending(
+        entityType: 'settings',
+        recordId: _equipmentArrangementKey,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to write $_equipmentArrangementKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Whether newly created sites and trips default to shared.
+  /// Returns `false` when the key has never been set.
+  ///
+  /// Reads are intentionally non-throwing: a failed read degrades to the
+  /// safe default (not shared) so the UI can render without blocking on
+  /// a transient DB error. Writes (via [setShareByDefault]) do rethrow so
+  /// the user sees when a toggle change did not take.
+  Future<bool> getShareByDefault() async {
+    try {
+      final row = await (_db.select(
+        _db.settings,
+      )..where((t) => t.key.equals(_shareByDefaultKey))).getSingleOrNull();
+      return row?.value == 'true';
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to read $_shareByDefaultKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<void> setShareByDefault(bool value) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.settings)
+          .insertOnConflictUpdate(
+            SettingsCompanion(
+              key: const Value(_shareByDefaultKey),
+              value: Value(value ? 'true' : 'false'),
+              updatedAt: Value(now),
+            ),
+          );
+      await _syncRepository.markRecordPending(
+        entityType: 'settings',
+        recordId: _shareByDefaultKey,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to write $_shareByDefaultKey',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Returns the raw stored value for [key], or `null` if unset or on a read
+  /// error.
+  ///
+  /// Generic because the backing table is a key-value store; callers own the
+  /// key name and any parsing (same idiom as [getNavPrimaryIdsRaw]). Reads are
+  /// non-throwing so a caller can degrade to its own safe default rather than
+  /// block on a transient DB error.
+  Future<String?> getRawSetting(String key) async {
+    try {
+      final row = await (_db.select(
+        _db.settings,
+      )..where((t) => t.key.equals(key))).getSingleOrNull();
+      return row?.value;
+    } catch (e, stackTrace) {
+      _log.error('Failed to read $key', error: e, stackTrace: stackTrace);
+      return null;
+    }
+  }
+
+  /// Writes [value] under [key] and, unless the key is device-local
+  /// ([deviceLocalSettingsKeys]), stages the row for sync.
+  ///
+  /// Writes rethrow (unlike reads) so a caller can tell the user their change
+  /// did not take.
+  Future<void> setRawSetting(String key, String value) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.settings)
+          .insertOnConflictUpdate(
+            SettingsCompanion(
+              key: Value(key),
+              value: Value(value),
+              updatedAt: Value(now),
+            ),
+          );
+      // A device-local key never syncs (issue #2947); queuing it would only
+      // publish a changeset that carries nothing.
+      if (deviceLocalSettingsKeys.contains(key)) return;
+      await _syncRepository.markRecordPending(
+        entityType: 'settings',
+        recordId: key,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error('Failed to write $key', error: e, stackTrace: stackTrace);
+      rethrow;
+    }
+  }
+}

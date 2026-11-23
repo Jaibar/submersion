@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/gas_model.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 
 /// Helper to create a dive with common SAC-test defaults.
@@ -34,10 +36,11 @@ const _singleTank = DiveTank(
 );
 
 void main() {
+  sacReferenceTankTests();
   // ─────────────────────────────────────────────────────────────────────────
-  // Dive.sac (L/min at surface)
+  // Dive.rmvFor (L/min at surface)
   // ─────────────────────────────────────────────────────────────────────────
-  group('Dive.sac', () {
+  group('Dive.rmvFor', () {
     test('calculates correctly using runtime (issue #72 reproduction)', () {
       // Reproduce issue #72 exactly:
       // 170 bar used, AL80 (11.1L), avg depth 20.3m, runtime 42 min
@@ -48,11 +51,12 @@ void main() {
         avgDepth: 20.3,
         tanks: const [_singleTank],
       );
-      // (200-30) * 11.1 / 42 / (20.3/10 + 1) = 1887 / 42 / 3.03 = 14.83
-      expect(dive.sac!, closeTo(14.83, 0.1));
+      // With Z-factor correction against the 1 bar reference (issue #828):
+      // gasVol(200) - gasVol(30) ≈ 1808L, SAC = 1808 / 42 / 3.03 ≈ 14.21
+      expect(dive.rmvFor(GasModel.real)!, closeTo(14.21, 0.1));
     });
 
-    test('uses effectiveRuntime via entry/exit when runtime is null', () {
+    test('uses measuredRuntime via entry/exit when runtime is null', () {
       final dive = _sacDive(
         bottomTime: const Duration(minutes: 20),
         entryTime: DateTime(2024, 1, 1, 10, 0),
@@ -61,10 +65,10 @@ void main() {
         tanks: const [_singleTank],
       );
       // Uses 42 min from entry/exit, not 20 min from bottomTime
-      expect(dive.sac!, closeTo(14.83, 0.1));
+      expect(dive.rmvFor(GasModel.real)!, closeTo(14.21, 0.1));
     });
 
-    test('falls back to bottomTime when no runtime source', () {
+    test('has no value for a dive with only a bottom time', () {
       final dive = _sacDive(
         bottomTime: const Duration(minutes: 30),
         avgDepth: 20.0,
@@ -78,20 +82,20 @@ void main() {
           ),
         ],
       );
-      // (200-50) * 12 / 30 / (20/10+1) = 1800 / 30 / 3 = 20.0
-      expect(dive.sac!, closeTo(20.0, 0.1));
+      // Dividing the whole dive's gas by a bottom time would read high.
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     // --- Null return cases ---
 
     test('returns null when no time source available', () {
       final dive = _sacDive(tanks: const [_singleTank]);
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('returns null when tanks are empty', () {
       final dive = _sacDive(runtime: const Duration(minutes: 42));
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('returns null when avgDepth is null', () {
@@ -100,15 +104,15 @@ void main() {
         avgDepth: null,
         tanks: const [_singleTank],
       );
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
-    test('returns null when effectiveRuntime is zero', () {
+    test('returns null when measuredRuntime is zero', () {
       final dive = _sacDive(
         bottomTime: Duration.zero,
         tanks: const [_singleTank],
       );
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     // --- Tank edge cases ---
@@ -126,7 +130,7 @@ void main() {
         ],
       );
       // No tanks with complete data → null
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('skips tanks missing start pressure', () {
@@ -136,7 +140,7 @@ void main() {
           DiveTank(id: 't1', name: 'Tank', volume: 12.0, endPressure: 50),
         ],
       );
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('skips tanks missing end pressure', () {
@@ -146,7 +150,7 @@ void main() {
           DiveTank(id: 't1', name: 'Tank', volume: 12.0, startPressure: 200),
         ],
       );
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('skips tanks with zero or negative pressure used', () {
@@ -162,7 +166,7 @@ void main() {
           ),
         ],
       );
-      expect(dive.sac, isNull);
+      expect(dive.rmvFor(GasModel.real), isNull);
     });
 
     test('sums gas across multiple tanks', () {
@@ -186,10 +190,10 @@ void main() {
           ),
         ],
       );
-      // Tank 1: 100 bar * 12L = 1200L
-      // Tank 2: 50 bar * 7L = 350L
-      // Total: 1550L / 60 min / 2.0 atm = 12.917 L/min
-      expect(dive.sac!, closeTo(12.917, 0.1));
+      // Tank 1: gasVol(200)-gasVol(100) at 12L
+      // Tank 2: gasVol(200)-gasVol(150) at 7L
+      // With Z-factor correction: ≈ 11.70 L/min
+      expect(dive.rmvFor(GasModel.real)!, closeTo(11.86, 0.1));
     });
 
     test('skips invalid tanks but uses valid ones', () {
@@ -204,23 +208,26 @@ void main() {
             startPressure: 200,
             endPressure: 100,
           ),
+          // A stage, so it has no matched partner to borrow a volume from
+          // (back-gas doubles on one gas would, #3109).
           DiveTank(
             id: 't2',
             name: 'No volume',
             startPressure: 200,
             endPressure: 150,
+            role: TankRole.stage,
           ),
         ],
       );
-      // Only Tank 1: 100 * 12 = 1200L / 60 / 2.0 = 10.0
-      expect(dive.sac!, closeTo(10.0, 0.1));
+      // Only Tank 1: gasVol(200)-gasVol(100) at 12L / 60 / 2.0 ≈ 9.14
+      expect(dive.rmvFor(GasModel.real)!, closeTo(9.26, 0.1));
     });
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Dive.sacPressure (bar/min at surface)
+  // Dive.sac (bar/min at surface)
   // ─────────────────────────────────────────────────────────────────────────
-  group('Dive.sacPressure', () {
+  group('Dive.sac', () {
     test('calculates correctly using runtime (issue #72)', () {
       final dive = _sacDive(
         bottomTime: const Duration(minutes: 20),
@@ -229,10 +236,10 @@ void main() {
         tanks: const [_singleTank],
       );
       // (200-30) / 42 / (20.3/10+1) = 170 / 42 / 3.03 = 1.336
-      expect(dive.sacPressure!, closeTo(1.34, 0.1));
+      expect(dive.sac!, closeTo(1.34, 0.1));
     });
 
-    test('uses effectiveRuntime via entry/exit when runtime is null', () {
+    test('uses measuredRuntime via entry/exit when runtime is null', () {
       final dive = _sacDive(
         bottomTime: const Duration(minutes: 20),
         entryTime: DateTime(2024, 1, 1, 10, 0),
@@ -240,19 +247,28 @@ void main() {
         avgDepth: 20.3,
         tanks: const [_singleTank],
       );
-      expect(dive.sacPressure!, closeTo(1.34, 0.1));
+      expect(dive.sac!, closeTo(1.34, 0.1));
     });
 
     // --- Null return cases ---
 
     test('returns null when no time source available', () {
       final dive = _sacDive(tanks: const [_singleTank]);
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
+    });
+
+    test('has no value for a dive with only a bottom time', () {
+      final dive = _sacDive(
+        bottomTime: const Duration(minutes: 30),
+        avgDepth: 20.3,
+        tanks: const [_singleTank],
+      );
+      expect(dive.sac, isNull);
     });
 
     test('returns null when tanks are empty', () {
       final dive = _sacDive(runtime: const Duration(minutes: 42));
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
     });
 
     test('returns null when avgDepth is null', () {
@@ -261,15 +277,15 @@ void main() {
         avgDepth: null,
         tanks: const [_singleTank],
       );
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
     });
 
-    test('returns null when effectiveRuntime is zero', () {
+    test('returns null when measuredRuntime is zero', () {
       final dive = _sacDive(
         bottomTime: Duration.zero,
         tanks: const [_singleTank],
       );
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
     });
 
     // --- Tank edge cases ---
@@ -282,7 +298,7 @@ void main() {
           DiveTank(id: 't2', name: 'No end', startPressure: 200),
         ],
       );
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
     });
 
     test('skips tanks with zero pressure used', () {
@@ -297,10 +313,10 @@ void main() {
           ),
         ],
       );
-      expect(dive.sacPressure, isNull);
+      expect(dive.sac, isNull);
     });
 
-    test('averages pressure across multiple tanks', () {
+    test('sacPressure on multi-tank dive uses back gas tank only', () {
       final dive = _sacDive(
         runtime: const Duration(minutes: 60),
         avgDepth: 10.0, // ambientPressure = 2.0 atm
@@ -310,20 +326,44 @@ void main() {
             name: 'Back gas',
             startPressure: 200,
             endPressure: 100,
+            role: TankRole.backGas,
           ),
           DiveTank(
             id: 't2',
             name: 'Stage',
             startPressure: 200,
             endPressure: 150,
+            role: TankRole.stage,
           ),
         ],
       );
-      // Tank 1: 100 bar used
-      // Tank 2: 50 bar used
-      // Total: 150, count: 2, avg: 75 bar
-      // sacPressure = (150/2) / 60 / 2.0 = 75 / 60 / 2.0 = 0.625
-      expect(dive.sacPressure!, closeTo(0.625, 0.01));
+      // Back gas only: 100 bar used / 60 min / 2.0 atm = 0.833 bar/min
+      expect(dive.sac!, closeTo(0.833, 0.01));
+    });
+
+    test('sacPressure falls back to first tank when no back gas role', () {
+      final dive = _sacDive(
+        runtime: const Duration(minutes: 60),
+        avgDepth: 10.0, // ambientPressure = 2.0 atm
+        tanks: const [
+          DiveTank(
+            id: 't1',
+            name: 'Stage 1',
+            startPressure: 200,
+            endPressure: 100,
+            role: TankRole.stage,
+          ),
+          DiveTank(
+            id: 't2',
+            name: 'Stage 2',
+            startPressure: 200,
+            endPressure: 150,
+            role: TankRole.stage,
+          ),
+        ],
+      );
+      // No back gas role — falls back to tanks.first: 100 bar / 60 min / 2.0 atm = 0.833
+      expect(dive.sac!, closeTo(0.833, 0.01));
     });
 
     test('does not require tank volume (unlike sac)', () {
@@ -341,7 +381,7 @@ void main() {
       );
       // sacPressure works without volume
       // 100 / 60 / 2.0 = 0.833
-      expect(dive.sacPressure!, closeTo(0.833, 0.01));
+      expect(dive.sac!, closeTo(0.833, 0.01));
     });
   });
 
@@ -351,7 +391,7 @@ void main() {
   group('Issue regression tests', () {
     test('issue #72: SAC no longer inflated by bottom time', () {
       // Before fix: used bottomTime (20 min) → SAC ≈ 31.5 L/min
-      // After fix: uses runtime (42 min) → SAC ≈ 14.83 L/min
+      // After fix: uses runtime (42 min) with Z-factor → SAC ≈ 14.02 L/min
       final dive = _sacDive(
         bottomTime: const Duration(minutes: 20),
         runtime: const Duration(minutes: 42),
@@ -359,8 +399,8 @@ void main() {
         tanks: const [_singleTank],
       );
       // Must NOT be ~31.5 (the old buggy value)
-      expect(dive.sac!, lessThan(20.0));
-      expect(dive.sac!, closeTo(14.83, 0.1));
+      expect(dive.rmvFor(GasModel.real)!, lessThan(20.0));
+      expect(dive.rmvFor(GasModel.real)!, closeTo(14.21, 0.1));
     });
 
     test('issue #87: sacPressure uses runtime correctly', () {
@@ -382,7 +422,37 @@ void main() {
       );
       // Verifies runtime (70 min) is used, not bottomTime (50 min)
       // With bottomTime: 95 / 50 / 2.5 = 0.76 (the old buggy value)
-      expect(dive.sacPressure!, closeTo(0.543, 0.05));
+      expect(dive.sac!, closeTo(0.543, 0.05));
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Dive.sacReferenceTank (the cylinder the pressure lane reads)
+// ─────────────────────────────────────────────────────────────────────────
+void sacReferenceTankTests() {
+  group('Dive.sacReferenceTank', () {
+    const backGas = DiveTank(id: 'bg', role: TankRole.backGas);
+    const stage = DiveTank(id: 'st', role: TankRole.stage, volume: 11.1);
+
+    test('is null with no cylinders', () {
+      expect(_sacDive().sacReferenceTank, isNull);
+    });
+
+    test('is the only cylinder on a single-tank dive, whatever its role', () {
+      expect(_sacDive(tanks: const [stage]).sacReferenceTank?.id, 'st');
+    });
+
+    test('is the back gas on a multi-tank dive even when listed later', () {
+      expect(
+        _sacDive(tanks: const [stage, backGas]).sacReferenceTank?.id,
+        'bg',
+      );
+    });
+
+    test('falls back to the first cylinder when none is back gas', () {
+      const deco = DiveTank(id: 'dc', role: TankRole.deco);
+      expect(_sacDive(tanks: const [stage, deco]).sacReferenceTank?.id, 'st');
     });
   });
 }

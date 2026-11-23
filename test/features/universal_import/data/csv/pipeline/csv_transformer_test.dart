@@ -1,8 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/universal_import/data/csv/models/import_configuration.dart';
 import 'package:submersion/features/universal_import/data/csv/models/parsed_csv.dart';
+import 'package:submersion/features/universal_import/data/csv/models/transformed_rows.dart';
 import 'package:submersion/features/universal_import/data/csv/pipeline/csv_transformer.dart';
+import 'package:submersion/features/universal_import/data/csv/transforms/date_order.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
+import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 
 void main() {
@@ -145,6 +148,192 @@ void main() {
       expect(result.rows, hasLength(1));
       final duration = result.rows[0]['duration'] as Duration;
       expect(duration.inSeconds, 2700);
+    });
+
+    // The import summary shows coded warnings only, grouped by code.
+    group('summary codes', () {
+      const noDate = ParsedCsv(
+        headers: ['Max Depth'],
+        rows: [
+          ['25.5'],
+        ],
+      );
+      const depthOnly = FieldMapping(
+        name: 'Test',
+        columns: [
+          ColumnMapping(sourceColumn: 'Max Depth', targetField: 'maxDepth'),
+        ],
+      );
+
+      test('a dive-list row with no dateTime is an unreadable date', () {
+        // Listed by row in the summary's card for dives that did not import.
+        final result = transformer.transform(
+          noDate,
+          const ImportConfiguration(mappings: {'primary': depthOnly}),
+        );
+
+        expect(result.warnings.single.code, ImportWarningCode.unreadableDate);
+      });
+
+      test('a profile row with no dateTime is not a skipped dive', () {
+        // Profile rows are samples, not dives: reporting them as skipped dives
+        // would overstate the loss.
+        final result = transformer.transform(
+          noDate,
+          const ImportConfiguration(mappings: {'dive_profile': depthOnly}),
+          fileRole: 'dive_profile',
+        );
+
+        expect(result.warnings.single.code, ImportWarningCode.diagnostic);
+      });
+
+      test('a value a transform rejects is a value not converted', () {
+        final result = transformer.transform(
+          const ParsedCsv(
+            headers: ['Date', 'Duration'],
+            rows: [
+              ['2024-06-15', 'not-a-duration'],
+            ],
+          ),
+          const ImportConfiguration(
+            mappings: {
+              'primary': FieldMapping(
+                name: 'Test',
+                columns: [
+                  ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+                  ColumnMapping(
+                    sourceColumn: 'Duration',
+                    targetField: 'duration',
+                    transform: ValueTransform.hmsToSeconds,
+                  ),
+                ],
+              ),
+            },
+          ),
+        );
+
+        expect(
+          result.warnings.single.code,
+          ImportWarningCode.valuesNotConverted,
+        );
+      });
+
+      test('a role with no mapping is an error: it yields no rows', () {
+        final result = transformer.transform(
+          noDate,
+          const ImportConfiguration(mappings: {'primary': depthOnly}),
+          fileRole: 'nonexistent',
+        );
+
+        expect(result.warnings.single.severity, ImportWarningSeverity.error);
+      });
+    });
+
+    group('gas percentages (#3930)', () {
+      const gasMapping = FieldMapping(
+        name: 'Gas',
+        columns: [
+          ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+          ColumnMapping(sourceColumn: 'O2', targetField: 'o2Percent_1'),
+          ColumnMapping(sourceColumn: 'He', targetField: 'hePercent_1'),
+        ],
+      );
+
+      TransformedRows transformGas(String o2, String he) =>
+          transformer.transform(
+            ParsedCsv(
+              headers: const ['Date', 'O2', 'He'],
+              rows: [
+                ['2024-01-15', o2, he],
+              ],
+            ),
+            const ImportConfiguration(mappings: {'primary': gasMapping}),
+          );
+
+      test('reads a plain percentage as a number', () {
+        final result = transformGas('32', '10.5');
+
+        expect(result.rows.single['o2Percent_1'], 32.0);
+        expect(result.rows.single['hePercent_1'], 10.5);
+        expect(result.warnings, isEmpty);
+      });
+
+      test('warns about a cell it cannot read rather than dropping it', () {
+        final result = transformGas('EAN32', '0');
+
+        expect(result.rows.single.containsKey('o2Percent_1'), isFalse);
+        expect(
+          result.warnings.single.code,
+          ImportWarningCode.valuesNotConverted,
+        );
+        expect(result.warnings.single.field, 'o2Percent_1');
+      });
+
+      for (final cell in ['NaN', 'Infinity', '-Infinity', '-5', '150']) {
+        test('warns about $cell, which is not a percentage', () {
+          final result = transformGas(cell, '0');
+
+          expect(result.rows.single.containsKey('o2Percent_1'), isFalse);
+          expect(result.warnings.single.field, 'o2Percent_1');
+        });
+      }
+
+      test('accepts both ends of the percentage range', () {
+        final result = transformGas('100', '0');
+
+        expect(result.rows.single['o2Percent_1'], 100.0);
+        expect(result.rows.single['hePercent_1'], 0.0);
+        expect(result.warnings, isEmpty);
+      });
+
+      TransformedRows transformGasDefault(String defaultValue) =>
+          transformer.transform(
+            const ParsedCsv(
+              headers: ['Date', 'O2'],
+              rows: [
+                ['2024-01-15', ''],
+              ],
+            ),
+            ImportConfiguration(
+              mappings: {
+                'primary': FieldMapping(
+                  name: 'Gas default',
+                  columns: [
+                    const ColumnMapping(
+                      sourceColumn: 'Date',
+                      targetField: 'date',
+                    ),
+                    ColumnMapping(
+                      sourceColumn: 'O2',
+                      targetField: 'o2Percent_1',
+                      defaultValue: defaultValue,
+                    ),
+                  ],
+                ),
+              },
+            ),
+          );
+
+      test('reads a default value as a number, like a cell', () {
+        final result = transformGasDefault('32');
+
+        expect(result.rows.single['o2Percent_1'], 32.0);
+      });
+
+      for (final defaultValue in ['150', 'Infinity', 'EAN32']) {
+        test('refuses a default of $defaultValue', () {
+          final result = transformGasDefault(defaultValue);
+
+          expect(result.rows.single['o2Percent_1'], isNull);
+        });
+      }
+
+      test('does not read a comma decimal as a larger number', () {
+        final result = transformGas('31,0', '0');
+
+        expect(result.rows.single.containsKey('o2Percent_1'), isFalse);
+        expect(result.warnings, hasLength(1));
+      });
     });
 
     test('skips rows with no valid dateTime and warns', () {
@@ -597,6 +786,96 @@ void main() {
       expect(result.rows[0]['diveType'], 'wreck');
     });
 
+    // Issue #2203: an unrecognised dive type is preserved as its slug, and
+    // the row carries it as a diveTypeIds entry so DiveTypeExtractor creates
+    // a real custom dive type for it. Without that the junction row would
+    // reference a dive_types row that does not exist.
+    test('promotes an unrecognised diveType to a custom type reference', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Dive Type'],
+        rows: [
+          ['2024-06-15', 'Cenote'],
+        ],
+      );
+
+      const config = ImportConfiguration(
+        mappings: {
+          'primary': FieldMapping(
+            name: 'Test',
+            columns: [
+              ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+              ColumnMapping(sourceColumn: 'Dive Type', targetField: 'diveType'),
+            ],
+          ),
+        },
+      );
+
+      final result = transformer.transform(csv, config);
+
+      expect(result.rows[0]['diveType'], 'cenote');
+      expect(result.rows[0]['diveTypeIds'], ['cenote']);
+    });
+
+    // The extractor names a type from its slug when the row does not name it,
+    // which would store "Cenote Dive" as "Cenote dive". The diver's own
+    // spelling is available here, so the row carries it.
+    test('names a promoted dive type as the diver spelled it', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Dive Type'],
+        rows: [
+          ['2024-06-15', 'Sidemount / CCR'],
+        ],
+      );
+
+      const config = ImportConfiguration(
+        mappings: {
+          'primary': FieldMapping(
+            name: 'Test',
+            columns: [
+              ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+              ColumnMapping(sourceColumn: 'Dive Type', targetField: 'diveType'),
+            ],
+          ),
+        },
+      );
+
+      final result = transformer.transform(csv, config);
+
+      expect(result.rows[0]['diveTypeIds'], ['sidemount_ccr']);
+      expect(result.rows[0]['diveTypeNames'], {
+        'sidemount_ccr': 'Sidemount / CCR',
+      });
+    });
+
+    // A built-in needs no custom dive type, so the row must not gain a
+    // diveTypeIds entry: that would put every ordinary import's built-in
+    // types on the review step as though they were new.
+    test('does not promote a built-in diveType', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Dive Type'],
+        rows: [
+          ['2024-06-15', 'Wreck'],
+        ],
+      );
+
+      const config = ImportConfiguration(
+        mappings: {
+          'primary': FieldMapping(
+            name: 'Test',
+            columns: [
+              ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+              ColumnMapping(sourceColumn: 'Dive Type', targetField: 'diveType'),
+            ],
+          ),
+        },
+      );
+
+      final result = transformer.transform(csv, config);
+
+      expect(result.rows[0]['diveType'], 'wreck');
+      expect(result.rows[0].containsKey('diveTypeIds'), isFalse);
+    });
+
     test('emits warning when explicit transform fails on malformed value', () {
       const csv = ParsedCsv(
         headers: ['Date', 'Duration'],
@@ -664,6 +943,33 @@ void main() {
       final duration = result.rows[0]['duration'] as Duration;
       // 45 minutes = 2700 seconds
       expect(duration.inSeconds, 2700);
+    });
+
+    test('infers a duration written with its unit (#1809)', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Duration'],
+        rows: [
+          ['2024-06-15', '45 min'],
+          ['2024-06-16', '1h 5m'],
+        ],
+      );
+
+      const config = ImportConfiguration(
+        mappings: {
+          'primary': FieldMapping(
+            name: 'Test',
+            columns: [
+              ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+              ColumnMapping(sourceColumn: 'Duration', targetField: 'duration'),
+            ],
+          ),
+        },
+      );
+
+      final result = transformer.transform(csv, config);
+
+      expect(result.rows[0]['duration'], const Duration(minutes: 45));
+      expect(result.rows[1]['duration'], const Duration(minutes: 65));
     });
 
     test('_coerceDefault applies transform to default value', () {
@@ -902,6 +1208,413 @@ void main() {
       expect(result.rows, hasLength(1));
       expect(result.rows[0]['diveNum'], isA<int>());
       expect(result.rows[0]['diveNum'], 42);
+    });
+  });
+
+  group('CsvTransformer custom field columns (#1814)', () {
+    const dateOnly = FieldMapping(
+      name: 'Test',
+      columns: [ColumnMapping(sourceColumn: 'Date', targetField: 'date')],
+    );
+
+    test('reads every non-empty custom:<key> cell into customFields', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'custom:camera', 'custom:formula', 'custom:empty'],
+        rows: [
+          ['2024-06-15', 'GoPro', "'=1+1", ''],
+          ['2024-06-16', '', '', ''],
+        ],
+      );
+
+      final result = transformer.transform(
+        csv,
+        const ImportConfiguration(mappings: {'primary': dateOnly}),
+      );
+
+      expect(result.rows[0]['customFields'], [
+        {'key': 'camera', 'value': 'GoPro'},
+        {'key': 'formula', 'value': '=1+1'},
+      ]);
+      expect(result.rows[1].containsKey('customFields'), isFalse);
+    });
+
+    test('keeps whitespace around a custom field value', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'custom:note'],
+        rows: [
+          ['2024-06-15', '  two\nlines  '],
+          ['2024-06-16', '   '],
+        ],
+      );
+
+      final result = transformer.transform(
+        csv,
+        const ImportConfiguration(mappings: {'primary': dateOnly}),
+      );
+
+      expect(result.rows[0]['customFields'], [
+        {'key': 'note', 'value': '  two\nlines  '},
+      ]);
+      expect(result.rows[1].containsKey('customFields'), isFalse);
+    });
+
+    test('leaves a custom column the mapping claims to that mapping', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'custom:buddy'],
+        rows: [
+          ['2024-06-15', 'Alex'],
+        ],
+      );
+
+      final result = transformer.transform(
+        csv,
+        const ImportConfiguration(
+          mappings: {
+            'primary': FieldMapping(
+              name: 'Test',
+              columns: [
+                ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+                ColumnMapping(
+                  sourceColumn: 'custom:buddy',
+                  targetField: 'buddy',
+                ),
+              ],
+            ),
+          },
+        ),
+      );
+
+      expect(result.rows.single['buddy'], 'Alex');
+      expect(result.rows.single.containsKey('customFields'), isFalse);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #1828: the day/month order is decided per column.
+  group('CsvTransformer: date order', () {
+    ImportConfiguration configFor(List<ColumnMapping> columns) =>
+        ImportConfiguration(
+          mappings: {'primary': FieldMapping(name: 'Test', columns: columns)},
+        );
+
+    final dateAndTime = configFor(const [
+      ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+      ColumnMapping(sourceColumn: 'Time', targetField: 'time'),
+    ]);
+
+    List<DateTime> datesOf(TransformedRows result) => [
+      for (final row in result.rows) row['dateTime'] as DateTime,
+    ];
+
+    test('one day above 12 makes the whole column day first', () {
+      // A UK logbook: only the second row proves the order, and it must fix
+      // the reading of the ambiguous first row as well.
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['03/04/1991', '09:00'],
+          ['15/04/1991', '10:00'],
+        ],
+      );
+
+      final result = CsvTransformer(
+        localeDateOrder: DateOrder.monthFirst,
+      ).transform(csv, dateAndTime);
+
+      expect(datesOf(result), [
+        DateTime.utc(1991, 4, 3, 9),
+        DateTime.utc(1991, 4, 15, 10),
+      ]);
+      expect(result.warnings, isEmpty);
+    });
+
+    test('one second field above 12 makes the column month first', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['03/04/1991', '09:00'],
+          ['04/15/1991', '10:00'],
+        ],
+      );
+
+      final result = CsvTransformer(
+        localeDateOrder: DateOrder.dayFirst,
+      ).transform(csv, dateAndTime);
+
+      expect(datesOf(result), [
+        DateTime.utc(1991, 3, 4, 9),
+        DateTime.utc(1991, 4, 15, 10),
+      ]);
+    });
+
+    test('an ambiguous column follows the device locale', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['03/04/1991', '09:00'],
+          ['01/02/1992', '10:00'],
+        ],
+      );
+
+      final uk = CsvTransformer(
+        localeDateOrder: DateOrder.dayFirst,
+      ).transform(csv, dateAndTime);
+      final us = CsvTransformer(
+        localeDateOrder: DateOrder.monthFirst,
+      ).transform(csv, dateAndTime);
+
+      expect(datesOf(uk), [
+        DateTime.utc(1991, 4, 3, 9),
+        DateTime.utc(1992, 2, 1, 10),
+      ]);
+      expect(datesOf(us), [
+        DateTime.utc(1991, 3, 4, 9),
+        DateTime.utc(1992, 1, 2, 10),
+      ]);
+    });
+
+    test('a date-only column is read in the detected order', () {
+      // Rows without a time go through the informal-time pass, which must use
+      // the same order.
+      const csv = ParsedCsv(
+        headers: ['Date'],
+        rows: [
+          ['03/04/1991'],
+          ['15/04/1991'],
+        ],
+      );
+
+      final result = CsvTransformer(localeDateOrder: DateOrder.monthFirst)
+          .transform(
+            csv,
+            configFor(const [
+              ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+            ]),
+          );
+
+      expect(datesOf(result).map((d) => (d.month, d.day)), [(4, 3), (4, 15)]);
+    });
+
+    test('reports the order it read the dates in', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['15/04/1991', '10:00'],
+        ],
+      );
+
+      final result = CsvTransformer(
+        localeDateOrder: DateOrder.monthFirst,
+      ).transform(csv, dateAndTime);
+
+      expect(result.dateOrder, DateOrder.dayFirst);
+    });
+
+    test('an ambiguous column prefers a given fallback to the locale', () {
+      // A profile file follows the order its dive list proved, so the two
+      // files' dates agree and the profiles attach.
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['03/04/1991', '09:00'],
+        ],
+      );
+
+      final result = CsvTransformer(
+        localeDateOrder: DateOrder.monthFirst,
+      ).transform(csv, dateAndTime, fallbackDateOrder: DateOrder.dayFirst);
+
+      expect(datesOf(result), [DateTime.utc(1991, 4, 3, 9)]);
+    });
+
+    test('a combined date-time column is detected on its own', () {
+      const csv = ParsedCsv(
+        headers: ['When'],
+        rows: [
+          ['03/04/1991 09:00'],
+          ['15/04/1991 14:30'],
+        ],
+      );
+
+      final result = CsvTransformer(localeDateOrder: DateOrder.monthFirst)
+          .transform(
+            csv,
+            configFor(const [
+              ColumnMapping(sourceColumn: 'When', targetField: 'dateTime'),
+            ]),
+          );
+
+      expect(datesOf(result), [
+        DateTime.utc(1991, 4, 3, 9),
+        DateTime.utc(1991, 4, 15, 14, 30),
+      ]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  group('CsvTransformer: skipped rows', () {
+    const dateAndTime = ImportConfiguration(
+      mappings: {
+        'primary': FieldMapping(
+          name: 'Test',
+          columns: [
+            ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+            ColumnMapping(sourceColumn: 'Time', targetField: 'time'),
+          ],
+        ),
+      },
+    );
+
+    test('a skipped row carries a code and its spreadsheet row', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['2024-06-15', '09:00'],
+          ['Spring 2024', '10:00'],
+        ],
+      );
+
+      final result = CsvTransformer().transform(csv, dateAndTime);
+
+      expect(result.rows, hasLength(1));
+      final skipped = result.warnings.single;
+      expect(skipped.code, ImportWarningCode.unreadableDate);
+      expect(skipped.entityType, ImportEntityType.dives);
+      // Header is row 1, so the second data row is row 3.
+      expect(skipped.sourceRow, 3);
+      expect(skipped.message, startsWith('Row 3:'));
+    });
+
+    test('uses the row numbers the parser recorded', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['2024-06-15', '09:00'],
+          ['someday', '10:00'],
+        ],
+        sourceRowNumbers: [2, 7],
+      );
+
+      final result = CsvTransformer().transform(csv, dateAndTime);
+
+      expect(result.warnings.single.sourceRow, 7);
+    });
+
+    test('a failed transform names the same spreadsheet row', () {
+      // Both kinds of row message can appear in one import, so they must not
+      // count rows differently.
+      const csv = ParsedCsv(
+        headers: ['Date', 'Duration'],
+        rows: [
+          ['2024-06-15', 'not-a-duration'],
+        ],
+      );
+
+      final result = CsvTransformer().transform(
+        csv,
+        const ImportConfiguration(
+          mappings: {
+            'primary': FieldMapping(
+              name: 'Test',
+              columns: [
+                ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+                ColumnMapping(
+                  sourceColumn: 'Duration',
+                  targetField: 'duration',
+                  transform: ValueTransform.hmsToSeconds,
+                ),
+              ],
+            ),
+          },
+        ),
+      );
+
+      expect(result.warnings.single.message, startsWith('Row 2:'));
+    });
+
+    test('an unreadable value names the same spreadsheet row', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Max Depth'],
+        rows: [
+          ['2024-06-15', 'deep'],
+        ],
+      );
+
+      final result = CsvTransformer().transform(
+        csv,
+        const ImportConfiguration(
+          mappings: {
+            'primary': FieldMapping(
+              name: 'Test',
+              columns: [
+                ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+                ColumnMapping(
+                  sourceColumn: 'Max Depth',
+                  targetField: 'maxDepth',
+                ),
+              ],
+            ),
+          },
+        ),
+      );
+
+      final warning = result.warnings.single;
+      expect(warning.message, startsWith('Row 2:'));
+      expect(warning.sourceRow, 2);
+    });
+
+    test('an unreadable date with no time is skipped, not dated 1970', () {
+      const csv = ParsedCsv(
+        headers: ['Date'],
+        rows: [
+          ['Spring 2024'],
+        ],
+      );
+
+      final result = CsvTransformer().transform(
+        csv,
+        const ImportConfiguration(
+          mappings: {
+            'primary': FieldMapping(
+              name: 'Test',
+              columns: [
+                ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+              ],
+            ),
+          },
+        ),
+      );
+
+      expect(result.rows, isEmpty);
+      expect(result.warnings.single.code, ImportWarningCode.unreadableDate);
+    });
+
+    test('a skipped profile sample is not reported as a skipped dive', () {
+      const csv = ParsedCsv(
+        headers: ['Date', 'Time'],
+        rows: [
+          ['someday', '10:00'],
+        ],
+      );
+
+      final result = CsvTransformer().transform(
+        csv,
+        const ImportConfiguration(
+          mappings: {
+            'dive_profile': FieldMapping(
+              name: 'Profile',
+              columns: [
+                ColumnMapping(sourceColumn: 'Date', targetField: 'date'),
+                ColumnMapping(sourceColumn: 'Time', targetField: 'time'),
+              ],
+            ),
+          },
+        ),
+        fileRole: 'dive_profile',
+      );
+
+      // Recorded, but as a diagnostic: the summary never shows it.
+      expect(result.warnings.single.code, ImportWarningCode.diagnostic);
     });
   });
 }

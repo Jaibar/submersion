@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/universal_import/data/csv/transforms/unit_detector.dart';
 import 'package:submersion/features/universal_import/data/csv/transforms/value_converter.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
@@ -169,6 +170,79 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // A hand-made dives CSV writes its duration however the diver's old log or
+  // spreadsheet did. Every one of these used to import as no duration (#1809).
+  group('parseFlexibleDuration', () {
+    const cases = {
+      '45': Duration(minutes: 45),
+      ' 45 ': Duration(minutes: 45),
+      '45.5': Duration(minutes: 45, seconds: 30),
+      '45,5': Duration(minutes: 45, seconds: 30),
+      '45 min': Duration(minutes: 45),
+      '45min': Duration(minutes: 45),
+      '45 mins': Duration(minutes: 45),
+      '45 Minutes': Duration(minutes: 45),
+      '45m': Duration(minutes: 45),
+      "45'": Duration(minutes: 45),
+      "45'30\"": Duration(minutes: 45, seconds: 30),
+      '45m 30s': Duration(minutes: 45, seconds: 30),
+      '45 min 30 sec': Duration(minutes: 45, seconds: 30),
+      '1h 5m': Duration(hours: 1, minutes: 5),
+      '1h05': Duration(hours: 1, minutes: 5),
+      '1 hr 5 min': Duration(hours: 1, minutes: 5),
+      '1.5 h': Duration(minutes: 90),
+      '2700 s': Duration(minutes: 45),
+      '45:00': Duration(minutes: 45),
+      '25:20': Duration(minutes: 25, seconds: 20),
+      '00:45:00': Duration(minutes: 45),
+      '1:23:45': Duration(hours: 1, minutes: 23, seconds: 45),
+      '0:45:30.4': Duration(minutes: 45, seconds: 30),
+      '45:00 min': Duration(minutes: 45),
+    };
+    for (final entry in cases.entries) {
+      test('reads "${entry.key}" as ${entry.value}', () {
+        expect(converter.parseFlexibleDuration(entry.key), entry.value);
+      });
+    }
+
+    const unreadable = [
+      '',
+      '   ',
+      'abc',
+      'n/a',
+      '-45',
+      '45 kg',
+      '45 min 1h',
+      '30s 5',
+      '1:2:3:4',
+      'a:b',
+      '45 45',
+    ];
+    for (final raw in unreadable) {
+      test('returns null for "$raw"', () {
+        expect(converter.parseFlexibleDuration(raw), isNull);
+      });
+    }
+
+    test('returns null for null', () {
+      expect(converter.parseFlexibleDuration(null), isNull);
+    });
+
+    // A cell too large for an int or a double must read as unreadable, not
+    // throw: nothing above the transformer catches, so a throw would end the
+    // whole import.
+    test('returns null for numbers too large to hold', () {
+      final huge = '9' * 400;
+      expect(
+        converter.parseFlexibleDuration('99999999999999999999:00'),
+        isNull,
+      );
+      expect(converter.parseFlexibleDuration(huge), isNull);
+      expect(converter.parseFlexibleDuration('0:$huge'), isNull);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   group('parseVisibility', () {
     test('maps "excellent" (case-insensitive)', () {
       expect(converter.parseVisibility('excellent'), 'excellent');
@@ -282,6 +356,146 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  group('parseDiveTypes', () {
+    group('from names alone', () {
+      test('keys each name by its slug, in order', () {
+        expect(converter.parseDiveTypes(names: 'Night; Search & Recovery'), [
+          ('night', 'Night'),
+          ('search_recovery', 'Search & Recovery'),
+        ]);
+      });
+
+      test('drops blanks and repeated slugs, keeping the first name', () {
+        expect(converter.parseDiveTypes(names: 'Night;; night ; '), [
+          ('night', 'Night'),
+        ]);
+        expect(converter.parseDiveTypes(names: ' ; '), isEmpty);
+      });
+    });
+
+    group('with ids (#1834)', () {
+      test('takes the ids verbatim and pairs names by position', () {
+        // A slug of either name would give neither id.
+        expect(
+          converter.parseDiveTypes(
+            names: 'Search & Recovery; Deep wreck',
+            ids: 'search_recovery_1a2b3c4d; deep_wreck',
+          ),
+          [
+            ('search_recovery_1a2b3c4d', 'Search & Recovery'),
+            ('deep_wreck', 'Deep wreck'),
+          ],
+        );
+      });
+
+      test('gives a lone id the whole names cell', () {
+        expect(converter.parseDiveTypes(names: 'Rec; Tech', ids: 'rec_tech'), [
+          ('rec_tech', 'Rec; Tech'),
+        ]);
+      });
+
+      test('pairs no names when a ";" in one leaves the counts unequal', () {
+        expect(
+          converter.parseDiveTypes(names: 'Rec; Tech; Night', ids: 'rt; night'),
+          [('rt', null), ('night', null)],
+        );
+      });
+
+      test('pairs no names when a ";" in one leaves an empty segment', () {
+        // 'Rec;' then 'Night' joins to 'Rec;; Night': two non-empty parts
+        // for two ids, but not the two names.
+        expect(
+          converter.parseDiveTypes(names: 'Rec;; Night', ids: 'rec; night'),
+          [('rec', null), ('night', null)],
+        );
+      });
+
+      test('leaves names unknown without a names cell', () {
+        expect(converter.parseDiveTypes(ids: 'night'), [('night', null)]);
+      });
+
+      test('drops blank and repeated ids', () {
+        expect(
+          converter.parseDiveTypes(names: 'Night; Night', ids: 'night; night'),
+          [('night', 'Night')],
+        );
+        expect(converter.parseDiveTypes(ids: ' ; '), isEmpty);
+      });
+    });
+  });
+
+  group('parseEnumName', () {
+    String? direction(String raw) => converter.parseEnumName(
+      raw,
+      CurrentDirection.values,
+      (v) => v.displayName,
+    );
+
+    test('matches the display name, ignoring case', () {
+      expect(direction('North-East'), 'northEast');
+      expect(direction('north-east'), 'northEast');
+    });
+
+    test('matches the enum name', () {
+      expect(direction('northEast'), 'northEast');
+    });
+
+    test('returns null for unknown or blank input', () {
+      expect(direction('NNW'), isNull);
+      expect(direction('  '), isNull);
+    });
+  });
+
+  group('parseCustomFieldsJson', () {
+    test('reads key/value pairs in order, empty values included', () {
+      expect(
+        converter.parseCustomFieldsJson(
+          '[{"key":"zulu","value":" a "},{"key":"flag","value":""}]',
+        ),
+        [
+          {'key': 'zulu', 'value': ' a '},
+          {'key': 'flag', 'value': ''},
+        ],
+      );
+    });
+
+    test('skips entries without a string key', () {
+      expect(
+        converter.parseCustomFieldsJson(
+          '[{"value":"x"},{"key":3},"text",{"key":"ok"}]',
+        ),
+        [
+          {'key': 'ok', 'value': ''},
+        ],
+      );
+    });
+
+    test('returns null for text that is not a JSON list', () {
+      expect(converter.parseCustomFieldsJson('not json'), isNull);
+      expect(converter.parseCustomFieldsJson('{"key":"a"}'), isNull);
+    });
+  });
+
+  group('unescapeCsvInjectionGuard', () {
+    test('drops the quote the export adds before a formula character', () {
+      for (final value in ['=1+1', '+5', '-5', '@a', '|b']) {
+        expect(converter.unescapeCsvInjectionGuard("'$value"), value);
+      }
+    });
+
+    test('drops the quote the export adds before a leading quote', () {
+      expect(converter.unescapeCsvInjectionGuard("''quoted"), "'quoted");
+      expect(converter.unescapeCsvInjectionGuard("''=1+1"), "'=1+1");
+      expect(converter.unescapeCsvInjectionGuard("''"), "'");
+    });
+
+    test('leaves any other value unchanged', () {
+      expect(converter.unescapeCsvInjectionGuard("'"), "'");
+      expect(converter.unescapeCsvInjectionGuard("'quoted"), "'quoted");
+      expect(converter.unescapeCsvInjectionGuard('=raw'), '=raw');
+    });
+  });
+
   group('parseDiveType', () {
     test('maps training keywords', () {
       expect(converter.parseDiveType('training'), 'training');
@@ -305,9 +519,12 @@ void main() {
       expect(converter.parseDiveType('drift'), 'drift');
     });
 
-    test('maps cave/cavern', () {
+    test('maps cave', () {
       expect(converter.parseDiveType('cave'), 'cave');
-      expect(converter.parseDiveType('cavern'), 'cave');
+    });
+
+    test('maps cavern', () {
+      expect(converter.parseDiveType('cavern'), 'cavern');
     });
 
     test('maps technical/tec', () {
@@ -358,6 +575,64 @@ void main() {
 
     test('returns recreational for empty string', () {
       expect(converter.parseDiveType(''), 'recreational');
+    });
+
+    // -------------------------------------------------------------------
+    // Issue #2203: overhead and configuration terms were silently recorded
+    // as recreational, which misrepresents an overhead dive as a
+    // recreational one.
+    test('maps sump to cave', () {
+      expect(converter.parseDiveType('sump'), 'cave');
+      expect(converter.parseDiveType('Sump dive'), 'cave');
+    });
+
+    test('maps mine to cave', () {
+      expect(converter.parseDiveType('mine'), 'cave');
+      expect(converter.parseDiveType('Flooded mine'), 'cave');
+    });
+
+    test('preserves an unrecognised type as its slug', () {
+      expect(converter.parseDiveType('Cenote'), 'cenote');
+      expect(converter.parseDiveType('Sidemount'), 'sidemount');
+      expect(converter.parseDiveType('Spring'), 'spring');
+      expect(converter.parseDiveType('Overhead'), 'overhead');
+      expect(converter.parseDiveType('Penetration'), 'penetration');
+    });
+
+    test('slugs a multi-word unrecognised type', () {
+      expect(converter.parseDiveType('Cenote Dive'), 'cenote_dive');
+      expect(converter.parseDiveType('Sidemount / CCR'), 'sidemount_ccr');
+    });
+
+    test('returns recreational when a value slugs to nothing', () {
+      expect(converter.parseDiveType('???'), 'recreational');
+      expect(converter.parseDiveType('   '), 'recreational');
+    });
+
+    test('maps recreational synonyms rather than slugging them', () {
+      expect(converter.parseDiveType('Recreational'), 'recreational');
+      expect(converter.parseDiveType('Fun dive'), 'recreational');
+      expect(converter.parseDiveType('Vacation'), 'recreational');
+      expect(converter.parseDiveType('Pleasure'), 'recreational');
+      expect(converter.parseDiveType('Leisure'), 'recreational');
+      expect(converter.parseDiveType('Open water'), 'recreational');
+    });
+
+    // A recreational synonym must never be tested before 'wreck': the word
+    // "wreck" contains "rec". Same hazard as cavern/cave below.
+    test('wreck wins over the recreational synonyms', () {
+      expect(converter.parseDiveType('Wreck'), 'wreck');
+      expect(converter.parseDiveType('Recreational wreck'), 'wreck');
+    });
+
+    // Regression guard for the cavern/cave ordering: 'cavern' contains the
+    // substring 'cave', so testing cave first misclassifies every cavern
+    // dive. A bare 'cavern' input passes either way once the slug fallback
+    // exists, so these cells must also contain the word "cave".
+    test('cavern wins over cave', () {
+      expect(converter.parseDiveType('Cavern'), 'cavern');
+      expect(converter.parseDiveType('Cavern / Cave'), 'cavern');
+      expect(converter.parseDiveType('Cavern dive, no cave'), 'cavern');
     });
   });
 
@@ -515,6 +790,19 @@ void main() {
         expect(result, 'wreck');
       });
 
+      test('dispatches diveModeMap', () {
+        // The mode transform drops a breathing-loop name; the dive type
+        // transform beside it preserves the same value (#2203).
+        expect(
+          service.applyTransform(ValueTransform.diveModeMap, 'CCR'),
+          'recreational',
+        );
+        expect(
+          service.applyTransform(ValueTransform.diveTypeMap, 'CCR'),
+          'ccr',
+        );
+      });
+
       test('dispatches ratingScale', () {
         final result = service.applyTransform(ValueTransform.ratingScale, '4');
         expect(result, 4);
@@ -616,6 +904,22 @@ void main() {
       test('returns null for non-numeric input', () {
         expect(service.minutesToSeconds('abc'), isNull);
       });
+
+      // Stripping the colons used to read "00:45:00" as 4500 minutes (#1809).
+      test('reads a clock-style value as H:MM:SS, not digits', () {
+        expect(
+          service.minutesToSeconds('00:45:00'),
+          const Duration(minutes: 45),
+        );
+      });
+
+      test('reads a unit suffix and a decimal comma', () {
+        expect(service.minutesToSeconds('45 min'), const Duration(minutes: 45));
+        expect(
+          service.minutesToSeconds('45,5'),
+          const Duration(minutes: 45, seconds: 30),
+        );
+      });
     });
 
     // -------------------------------------------------------------------------
@@ -644,8 +948,17 @@ void main() {
         expect(result!.inSeconds, 0);
       });
 
-      test('returns null for single-part input', () {
-        expect(service.hmsToSeconds('42'), isNull);
+      // A bare number under an H:M:S preset is a whole-minute duration, not
+      // an unreadable cell (#1809).
+      test('reads single-part input as minutes', () {
+        expect(service.hmsToSeconds('42'), const Duration(minutes: 42));
+      });
+
+      test('reads fractional seconds', () {
+        expect(
+          service.hmsToSeconds('0:45:30.4'),
+          const Duration(minutes: 45, seconds: 30),
+        );
       });
 
       test('returns null for non-numeric colon-separated input', () {
@@ -746,9 +1059,12 @@ void main() {
         expect(service.parseDiveType('drift'), 'drift');
       });
 
-      test('maps cave/cavern', () {
+      test('maps cave', () {
         expect(service.parseDiveType('cave'), 'cave');
-        expect(service.parseDiveType('cavern'), 'cave');
+      });
+
+      test('maps cavern', () {
+        expect(service.parseDiveType('cavern'), 'cavern');
       });
 
       test('maps tech/technical', () {

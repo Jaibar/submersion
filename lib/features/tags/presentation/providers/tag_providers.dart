@@ -4,6 +4,7 @@ import 'package:submersion/features/dive_log/presentation/providers/dive_provide
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/core/utils/log_failure.dart';
 
 /// Repository provider
 final tagRepositoryProvider = Provider<TagRepository>((ref) {
@@ -11,17 +12,24 @@ final tagRepositoryProvider = Provider<TagRepository>((ref) {
 });
 
 /// All tags list provider
+///
+/// Stays a [FutureProvider] so imperative `ref.read(tagsProvider.future)` reads
+/// still resolve, while self-invalidating whenever the `tags` table changes --
+/// including when a sync applies remote changes -- so list UIs refresh instead
+/// of serving a cached one-shot snapshot.
 final tagsProvider = FutureProvider<List<Tag>>((ref) async {
   final repository = ref.watch(tagRepositoryProvider);
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchTagsChanges());
   return repository.getAllTags(diverId: validatedDiverId);
 });
 
 /// Single tag provider
 final tagProvider = FutureProvider.family<Tag?, String>((ref, id) async {
   final repository = ref.watch(tagRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchTagsChanges());
   return repository.getTagById(id);
 });
 
@@ -31,6 +39,9 @@ final tagStatisticsProvider = FutureProvider<List<TagStatistic>>((ref) async {
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchTagsChanges());
+  ref.invalidateSelfWhen(ref.read(diveRepositoryProvider).watchDivesChanges());
+  ref.invalidateSelfWhen(repository.watchTagLinkChanges());
   return repository.getTagStatistics(diverId: validatedDiverId);
 });
 
@@ -40,6 +51,13 @@ final tagsForDiveProvider = FutureProvider.family<List<Tag>, String>((
   diveId,
 ) async {
   final repository = ref.watch(tagRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchTagsChanges());
+  // A junction read over dive_tags, whose rows vanish by cascade on a dive
+  // delete without the tags table being written. Same pairing as
+  // tagStatisticsProvider above.
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchDiveDetailChanges(),
+  );
   return repository.getTagsForDive(diveId);
 });
 
@@ -52,6 +70,7 @@ final tagSearchProvider = FutureProvider.family<List<Tag>, String>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchTagsChanges());
   return repository.searchTags(query, diverId: validatedDiverId);
 });
 
@@ -63,7 +82,7 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
 
   TagListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
-    _initializeAndLoad();
+    logFailure(_initializeAndLoad(), TagListNotifier, 'initialize and load');
 
     // Listen for diver changes and reload
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -72,9 +91,20 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
         _ref.invalidate(validatedCurrentDiverIdProvider);
         _ref.invalidate(tagsProvider);
         _ref.invalidate(tagStatisticsProvider);
-        _initializeAndLoad();
+        logFailure(
+          _initializeAndLoad(),
+          TagListNotifier,
+          'initialize and load',
+        );
       }
     });
+
+    // Reload when the `tags` table changes (e.g. a sync writes rows directly)
+    // so surfaces watching this notifier (e.g. the tag picker) refresh too.
+    final tableChangeSub = _repository.watchTagsChanges().listen(
+      (_) => _silentReloadTags(),
+    );
+    _ref.onDispose(tableChangeSub.cancel);
   }
 
   Future<void> _initializeAndLoad() async {
@@ -94,6 +124,21 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
     }
   }
 
+  /// Reload without flipping to a loading state, for table-change ticks (e.g.
+  /// a sync). Resolves the validated diver id first so an early tick scopes
+  /// correctly.
+  Future<void> _silentReloadTags() async {
+    try {
+      _validatedDiverId = await _ref.read(
+        validatedCurrentDiverIdProvider.future,
+      );
+      final tags = await _repository.getAllTags(diverId: _validatedDiverId);
+      if (mounted) state = AsyncValue.data(tags);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
+    }
+  }
+
   Future<void> refresh() async {
     // Get fresh validated diver ID before loading
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
@@ -102,7 +147,12 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
     _ref.invalidate(tagsProvider);
   }
 
-  Future<Tag> addTag(Tag tag) async {
+  /// [widenExistingTo] is passed to [TagRepository.createTag]: what a tag
+  /// already holding the name is widened to, nothing by default.
+  Future<Tag> addTag(
+    Tag tag, {
+    Set<TagScope> widenExistingTo = const {},
+  }) async {
     // Get fresh validated diver ID before creating
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
 
@@ -110,18 +160,29 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
     final tagWithDiver = validatedId != null
         ? tag.copyWith(diverId: validatedId)
         : tag;
-    final newTag = await _repository.createTag(tagWithDiver);
+    final newTag = await _repository.createTag(
+      tagWithDiver,
+      widenExistingTo: widenExistingTo,
+    );
     await _loadTags();
     _ref.invalidate(tagStatisticsProvider);
     return newTag;
   }
 
-  Future<Tag> getOrCreateTag(String name, {String? colorHex}) async {
+  /// The tag named [name], offered in [scope] (issue #1765). A new tag is
+  /// offered everywhere, so the user can reuse it on any kind of item
+  /// (issue #4407); an existing one is only widened to [scope].
+  Future<Tag> getOrCreateTag(
+    String name, {
+    String? colorHex,
+    TagScope scope = TagScope.dives,
+  }) async {
     final validatedId = await _ref.read(validatedCurrentDiverIdProvider.future);
     final tag = await _repository.getOrCreateTag(
       name,
       colorHex: colorHex,
       diverId: validatedId,
+      scope: scope,
     );
     await _loadTags();
     _ref.invalidate(tagStatisticsProvider);
@@ -136,6 +197,14 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
 
   Future<void> updateTag(Tag tag) async {
     await _repository.updateTag(tag);
+    await _loadTags();
+    _invalidateDiveProviders();
+  }
+
+  /// Recolours the tag [id] without touching its scopes; see
+  /// [TagRepository.setTagColor].
+  Future<void> setTagColor(String id, String? colorHex) async {
+    await _repository.setTagColor(id, colorHex);
     await _loadTags();
     _invalidateDiveProviders();
   }

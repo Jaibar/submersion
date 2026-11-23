@@ -7,8 +7,19 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:submersion/core/constants/app_directories.dart';
 import 'package:submersion/core/domain/entities/storage_config.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/security_scoped_bookmark_service.dart';
+import 'package:submersion/core/services/storage/gc/storage_gc_store.dart';
+
+/// Where the browser's database lives.
+///
+/// A virtual path: the browser keeps the database in the origin private file
+/// system under drift's name for it (the file name without its extension),
+/// and nothing reads this string as a filesystem path. It exists so the code
+/// that passes a database path around has one, and so a log line names it.
+const String kWebDatabasePath = '/opfs/Submersion/submersion.db';
 
 /// Service for managing database file location
 ///
@@ -17,6 +28,61 @@ import 'package:submersion/core/services/security_scoped_bookmark_service.dart';
 /// - Resolving the actual database path based on configuration
 /// - Platform-specific folder selection
 /// - Verifying folder accessibility
+/// The folder picker itself failed (as opposed to the user cancelling).
+class FolderPickException implements Exception {
+  final String message;
+  const FolderPickException(this.message);
+
+  @override
+  String toString() => 'FolderPickException: $message';
+}
+
+/// Outcome of the startup accessibility check for a custom DB location.
+///
+/// No outcome changes the stored configuration. The check used to reset it on
+/// macOS and iOS when the database could not be read, with nothing said on
+/// screen, so the next launch opened an empty default database while the
+/// diver's real one sat untouched in their folder (#2178). Going back to the
+/// default location is now something only the diver can choose, from the
+/// startup failure screen.
+enum StartupLocationCheck {
+  /// No custom location configured; nothing to check.
+  defaultLocation,
+
+  /// Custom database exists and is readable.
+  accessible,
+
+  /// The folder is configured but holds no database yet -- the normal
+  /// first launch after choosing a location. The database is created at the
+  /// chosen path.
+  keptDatabaseMissing,
+
+  /// The folder itself cannot be read: one the sandbox no longer grants, a
+  /// permissions fault on the folder. The open surfaces a real error (#218).
+  keptInaccessible,
+
+  /// The folder can be read but the database in it cannot be opened: a
+  /// permissions fault on the file, or something that is not a file at all.
+  /// The folder is fine, so this is not [isUnreachable]; the failure screen
+  /// keeps the routes that repair or replace the file.
+  keptDatabaseUnreadable,
+
+  /// The custom database is in iCloud but its contents are not on this
+  /// device. Not [isUnreachable]: it is a fetch still to happen, which
+  /// startup does under the splash instead of creating an empty dive log
+  /// (#2177).
+  keptNotDownloaded,
+
+  /// The configured folder itself is not there: an unplugged drive, a share
+  /// that is not mounted, a folder that was moved or deleted.
+  keptFolderMissing;
+
+  /// Whether the configured folder cannot be used as things stand.
+  bool get isUnreachable =>
+      this == StartupLocationCheck.keptInaccessible ||
+      this == StartupLocationCheck.keptFolderMissing;
+}
+
 class DatabaseLocationService {
   final SharedPreferences _prefs;
 
@@ -26,10 +92,22 @@ class DatabaseLocationService {
   static const _lastVerifiedKey = 'db_path_last_verified';
   static const _bookmarkDataKey = 'db_security_bookmark';
 
+  /// The browser's current library (issue #4121); see [webLibraryPath].
+  static const _webLibraryPathKey = 'web_library_database_path';
+
   // Database filename
   static const databaseFilename = 'submersion.db';
 
   DatabaseLocationService(this._prefs);
+
+  /// UI hook to let the user choose among external volumes (Android). Set by the
+  /// storage settings page; when null the first (internal) volume is used.
+  Future<ExternalVolumeOption?> Function(List<ExternalVolumeOption>)?
+  _chooseExternalVolume;
+
+  set externalVolumeChooser(
+    Future<ExternalVolumeOption?> Function(List<ExternalVolumeOption>)? chooser,
+  ) => _chooseExternalVolume = chooser;
 
   /// Get the current storage configuration
   Future<StorageConfig> getStorageConfig() async {
@@ -76,7 +154,25 @@ class DatabaseLocationService {
   }
 
   /// Get the database file path based on current configuration
+  ///
+  /// A `SUBMERSION_DB_PATH` environment variable, when set, short-circuits
+  /// this entirely and skips SharedPreferences. SharedPreferences on
+  /// desktop is one file per Windows user account, shared by every running
+  /// instance of the app regardless of which build or working copy launched
+  /// it -- running two development builds side by side (one worktree per
+  /// branch) means the one that happens to start second silently inherits
+  /// whatever custom folder the first one configured, and if its schema is
+  /// newer it auto-migrates the first one's database out from under it. No
+  /// real install ever sets this variable, so production behaviour is
+  /// unchanged; it exists purely so each worktree's dev run can point at a
+  /// folder nothing else touches.
   Future<String> getDatabasePath() async {
+    final override = HostPlatform.environment['SUBMERSION_DB_PATH'];
+    if (override != null && override.isNotEmpty) {
+      return override;
+    }
+    if (HostPlatform.isWeb) return webLibraryPath;
+
     final config = await getStorageConfig();
 
     if (config.mode == StorageLocationMode.customFolder &&
@@ -87,16 +183,25 @@ class DatabaseLocationService {
     return getDefaultDatabasePath();
   }
 
+  /// The browser's library: [kWebDatabasePath] until a restore installs a
+  /// backup under a new name and points here (`web_library_paths.dart`).
+  String get webLibraryPath =>
+      _prefs.getString(_webLibraryPathKey) ?? kWebDatabasePath;
+
+  /// Points the browser at the library a restore installed, once it opens.
+  Future<void> setWebLibraryPath(String path) =>
+      _prefs.setString(_webLibraryPathKey, path);
+
   /// Get the default database path (app documents directory)
   Future<String> getDefaultDatabasePath() async {
     final dbFolder = await getApplicationDocumentsDirectory();
-    return p.join(dbFolder.path, 'Submersion', databaseFilename);
+    return p.join(dbFolder.path, kAppDocumentsFolder, databaseFilename);
   }
 
   /// Get the default database directory
   Future<String> getDefaultDatabaseDirectory() async {
     final dbFolder = await getApplicationDocumentsDirectory();
-    return p.join(dbFolder.path, 'Submersion');
+    return p.join(dbFolder.path, kAppDocumentsFolder);
   }
 
   /// Check if custom folder mode is supported on this platform
@@ -105,12 +210,13 @@ class DatabaseLocationService {
   /// - macOS: Full support with security-scoped bookmarks
   /// - iOS: Full support with security-scoped bookmarks for iCloud Drive
   /// - Windows/Linux: Full support with standard file system access
-  /// - Android: Uses Storage Access Framework (SAF)
-  bool get isCustomFolderSupported => true;
-
-  /// Check if we're running on a desktop platform
-  bool get isDesktopPlatform =>
-      Platform.isMacOS || Platform.isWindows || Platform.isLinux;
+  /// - Android: app-specific external storage (internal or SD card). The live
+  ///   DB needs a real lockable path; arbitrary SAF folders cannot back a
+  ///   SQLite file, so the choice is curated to writable app-specific volumes.
+  ///
+  /// Not in a browser, where the database lives in the origin private file
+  /// system and no folder can be chosen.
+  bool get isCustomFolderSupported => !HostPlatform.isWeb;
 
   /// Pick a custom folder for database storage
   ///
@@ -121,7 +227,7 @@ class DatabaseLocationService {
   /// bookmark data (iOS only), or null if cancelled.
   Future<FolderPickResultWithBookmark?> pickCustomFolder() async {
     // On iOS, use native picker to capture security-scoped URL
-    if (Platform.isIOS) {
+    if (HostPlatform.isIOS) {
       try {
         final result =
             await SecurityScopedBookmarkService.pickFolderWithSecurityScope();
@@ -137,18 +243,39 @@ class DatabaseLocationService {
       }
     }
 
-    // On other platforms, use file_picker
+    // Android: the live DB needs a real lockable path (SQLite locking + WAL),
+    // so SAF content URIs cannot back it. Offer the app-specific external
+    // volumes (internal storage + SD card) from path_provider -- real writable
+    // paths that need no permissions.
+    // The native volume query + platform gate are untestable in the host VM;
+    // the selection/cancel logic lives in the unit-tested [resolveAndroidDbDir].
+    // coverage:ignore-start
+    if (HostPlatform.isAndroid) {
+      final dirs = await getExternalStorageDirectories();
+      if (dirs == null || dirs.isEmpty) return null;
+      final options = classifyExternalDirs(dirs.map((d) => d.path).toList());
+      final dbDir = await resolveAndroidDbDir(options, _chooseExternalVolume);
+      if (dbDir == null) return null;
+      return FolderPickResultWithBookmark(path: dbDir);
+    }
+    // coverage:ignore-end
+
+    // On other platforms (desktop), use file_picker
     try {
       final result = await FilePicker.getDirectoryPath(
         dialogTitle: 'Choose Database Storage Location',
-        lockParentWindow: true,
+        windowsOptions: const WindowsOptions(lockParentWindow: true),
+        linuxOptions: const LinuxOptions(lockParentWindow: true),
       );
 
       if (result == null) return null;
       return FolderPickResultWithBookmark(path: result);
-    } catch (e) {
-      // Handle any errors from file picker
-      return null;
+    } catch (e, stackTrace) {
+      // A thrown picker (e.g. a missing/broken XDG desktop portal on
+      // Linux) must be distinguishable from a user cancel, or the setting
+      // silently appears to do nothing (#218). Rethrow on the original
+      // stack so logs point at the failing portal/DBus call.
+      Error.throwWithStackTrace(FolderPickException('$e'), stackTrace);
     }
   }
 
@@ -167,7 +294,7 @@ class DatabaseLocationService {
       }
 
       // On iOS, use native security-scoped verification
-      if (Platform.isIOS) {
+      if (HostPlatform.isIOS) {
         final result = await SecurityScopedBookmarkService.verifyWriteAccess(
           folderPath,
         );
@@ -188,10 +315,19 @@ class DatabaseLocationService {
     }
   }
 
-  /// Check if a database file exists at the given folder path
+  /// Whether a database file is at [folderPath]: false only when it is not
+  /// there. Any other failure, such as a folder that cannot be read or a
+  /// share that drops the request, throws a [FileSystemException] rather than
+  /// read as "no database" (as [File.exists] would), so a caller about to
+  /// write there can refuse instead of overwriting one it could not see.
   Future<bool> databaseExistsAt(String folderPath) async {
     final dbPath = p.join(folderPath, databaseFilename);
-    return File(dbPath).exists();
+    try {
+      await (await File(dbPath).open()).close();
+      return true;
+    } on PathNotFoundException {
+      return false;
+    }
   }
 
   /// Update the last verified timestamp for the current config
@@ -200,7 +336,198 @@ class DatabaseLocationService {
     await saveStorageConfig(config.copyWith(lastVerified: DateTime.now()));
   }
 
-  /// Clear the storage configuration and reset to default
+  /// Stamps a custom location as one that has held a dive log, if nothing
+  /// has stamped it yet (#2177).
+  ///
+  /// Called once a dive log has opened there. Every flow that saves a custom
+  /// location stamps it today, but configurations saved before the stamp
+  /// existed carry none, and without it a later loss reads as a first launch
+  /// and an empty dive log is created in its place. This records a fact the
+  /// app just observed; it changes no choice the diver made.
+  Future<void> markCustomLocationVerified() async {
+    final config = await getStorageConfig();
+    if (!config.isCustomLocation || config.lastVerified != null) return;
+    await saveStorageConfig(config.copyWith(lastVerified: DateTime.now()));
+  }
+
+  /// Restores access to a configured custom database location, then reports
+  /// on it (#218).
+  ///
+  /// On bookmark platforms (macOS/iOS) the stored security-scoped bookmark is
+  /// resolved first, because the sandbox drops folder access when the app
+  /// quits. The diver's choice is KEPT whatever the check finds, on every
+  /// platform: a folder that cannot be read right now is very often one that
+  /// can be read later, and the failed open reports it on screen (#2178).
+  /// A database iCloud holds but has not downloaded is left unread: that is a
+  /// fetch still to happen, not lost access (#2177).
+  Future<StartupLocationCheck> validateCustomLocationAtStartup({
+    bool? isBookmarkPlatform,
+  }) async {
+    final bookmarkPlatform =
+        isBookmarkPlatform ?? SecurityScopedBookmarkService.isSupported;
+    final config = await restoreCustomLocationAccess(
+      isBookmarkPlatform: bookmarkPlatform,
+    );
+    return _check(config, sandboxed: bookmarkPlatform);
+  }
+
+  /// The part of [validateCustomLocationAtStartup] that opening the database
+  /// depends on: restores sandbox access through the stored bookmark and
+  /// follows a folder the bookmark tracked to a new path. Returns the config
+  /// in force afterwards. Reads nothing in the folder.
+  ///
+  /// Split out so startup can await just this before its first frame and
+  /// leave the check, which only feeds a log line there, unawaited: on a dead
+  /// network mount each of its file calls can block for the network timeout.
+  Future<StorageConfig> restoreCustomLocationAccess({
+    bool? isBookmarkPlatform,
+  }) async {
+    final bookmarkPlatform =
+        isBookmarkPlatform ?? SecurityScopedBookmarkService.isSupported;
+    final config = await getStorageConfig();
+    if (!config.isCustomLocation || !bookmarkPlatform || !hasStoredBookmark()) {
+      return config;
+    }
+    final resolved = await resolveStoredBookmark();
+    return _followMovedFolder(config, resolved);
+  }
+
+  /// Points the config at the folder's new path when the bookmark followed a
+  /// folder the diver moved or renamed.
+  ///
+  /// The same folder, not a new choice: a bookmark tracks its folder across a
+  /// move, the stored path does not. Only a stored path that is GONE is
+  /// replaced, and only by one that exists, so a folder still where the diver
+  /// put it is never second-guessed.
+  Future<StorageConfig> _followMovedFolder(
+    StorageConfig config,
+    String? resolved,
+  ) async {
+    final stored = config.customFolderPath;
+    if (resolved == null || stored == null || p.equals(resolved, stored)) {
+      return config;
+    }
+    if (await Directory(stored).exists() ||
+        !await Directory(resolved).exists()) {
+      return config;
+    }
+    debugPrint('Custom folder moved: $stored -> $resolved (from its bookmark)');
+    final moved = config.copyWith(customFolderPath: resolved);
+    await saveStorageConfig(moved);
+    return moved;
+  }
+
+  /// Reports on a configured custom database location, changing nothing.
+  ///
+  /// Separate from [validateCustomLocationAtStartup] so the startup failure
+  /// screen can ask again without resolving the bookmark a second time, which
+  /// would start another security-scoped access that nothing stops.
+  Future<StartupLocationCheck> checkCustomLocation() async =>
+      _check(await getStorageConfig());
+
+  Future<StartupLocationCheck> _check(
+    StorageConfig config, {
+    bool? sandboxed,
+  }) async {
+    final folder = config.customFolderPath;
+    if (!config.isCustomLocation || folder == null) {
+      return StartupLocationCheck.defaultLocation;
+    }
+
+    final dbPath = p.join(folder, databaseFilename);
+
+    // A dive log iCloud has evicted is a fetch still to happen, not lost
+    // access, so it is kept and left unread. Reading an evicted file would
+    // fetch all of it before the read returned, with no limit and before the
+    // app has drawn a frame. Startup fetches it instead, under the splash,
+    // where it can say what is happening and give up (#2177).
+    if (await isOnlyInICloud(dbPath)) {
+      return StartupLocationCheck.keptNotDownloaded;
+    }
+
+    // Nothing at the path is NOT an access failure when the folder is there:
+    // it is the first launch after choosing it (#218). Anything that DOES
+    // occupy the path (including a directory) has to be opened to decide, so
+    // test the entity type rather than File.exists().
+    if (await FileSystemEntity.type(dbPath) == FileSystemEntityType.notFound) {
+      if (!await Directory(folder).exists()) {
+        return StartupLocationCheck.keptFolderMissing;
+      }
+      // A folder that cannot be entered hides its contents, so the database
+      // reads as absent. That is lost access, not a first launch.
+      return await _canList(folder)
+          ? StartupLocationCheck.keptDatabaseMissing
+          : StartupLocationCheck.keptInaccessible;
+    }
+
+    final error = await readProbeError(dbPath);
+    if (error == null) return StartupLocationCheck.accessible;
+    return unreadableVerdict(
+      error,
+      folderListable: await _canList(folder),
+      sandboxed: sandboxed ?? SecurityScopedBookmarkService.isSupported,
+    );
+  }
+
+  /// Decides whether a database that would not open is the FOLDER's fault.
+  ///
+  /// A folder that cannot be listed always is. But listing alone cannot
+  /// decide it: a security-scoped folder can still be listed after the
+  /// sandbox refuses its files (the headless guard in background_service.dart
+  /// was written against exactly that). The refusal is the sandbox's
+  /// signature instead: it denies a read with EPERM ("Operation not
+  /// permitted"), where plain file permissions answer EACCES. So on a
+  /// [sandboxed] platform EPERM blames the folder. Anything else in a folder
+  /// that can be read is the file.
+  @visibleForTesting
+  static StartupLocationCheck unreadableVerdict(
+    Object error, {
+    required bool folderListable,
+    required bool sandboxed,
+  }) {
+    if (!folderListable) return StartupLocationCheck.keptInaccessible;
+    if (sandboxed &&
+        error is FileSystemException &&
+        error.osError?.errorCode == _ePerm) {
+      return StartupLocationCheck.keptInaccessible;
+    }
+    return StartupLocationCheck.keptDatabaseUnreadable;
+  }
+
+  /// POSIX EPERM, which macOS and iOS share.
+  static const int _ePerm = 1;
+
+  /// Whether [folder]'s contents can be listed. Never throws.
+  static Future<bool> _canList(String folder) async {
+    try {
+      await Directory(folder).list().isEmpty;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The configured custom folder, when it cannot be used as things stand.
+  ///
+  /// Null at the default location and whenever the folder is reachable, so a
+  /// startup failure with some other cause is never blamed on the folder.
+  Future<String?> unreachableCustomFolder() async {
+    final config = await getStorageConfig();
+    final check = await _check(config);
+    return check.isUnreachable ? config.customFolderPath : null;
+  }
+
+  /// Clears the storage configuration, so the app goes back to its default
+  /// location. Nothing at the custom location is moved or deleted.
+  /// Records that another dive log file is about to replace the open one
+  /// (adopting a folder, switching to an existing database, going back to
+  /// the default location). The storage cleanup treats it as a restore:
+  /// what the last sync told it described the previous file, so no cloud
+  /// media is deleted until a sync after the switch. Throws when the mark
+  /// cannot be saved, so the switch does not go ahead without it.
+  Future<void> markDatabaseSwitched() =>
+      StorageGcStore.markRestored(_prefs, DateTime.now());
+
   Future<void> resetToDefault() async {
     // Stop accessing any security-scoped resource first
     await SecurityScopedBookmarkService.stopAccessingSecurityScopedResource();
@@ -309,4 +636,81 @@ class FolderPickResultWithBookmark {
   final Uint8List? bookmarkData;
 
   const FolderPickResultWithBookmark({required this.path, this.bookmarkData});
+}
+
+/// A selectable external volume for the database location (Android).
+class ExternalVolumeOption {
+  const ExternalVolumeOption({required this.path, required this.isInternal});
+
+  final String path;
+
+  /// True for the primary emulated/internal volume; false for removable (SD).
+  final bool isInternal;
+}
+
+/// Classifies app-specific external dirs without native code: the primary
+/// emulated volume is internal; any other volume is removable (SD card). The UI
+/// maps [ExternalVolumeOption.isInternal] to a localized label.
+List<ExternalVolumeOption> classifyExternalDirs(List<String> dirPaths) {
+  final out = <ExternalVolumeOption>[];
+  for (var i = 0; i < dirPaths.length; i++) {
+    final path = dirPaths[i];
+    final isInternal = i == 0 || path.contains('/storage/emulated/');
+    out.add(ExternalVolumeOption(path: path, isInternal: isInternal));
+  }
+  return out;
+}
+
+/// Resolves and creates the database directory among [options] using [chooser]
+/// (or the primary internal volume when no chooser is provided). Returns null
+/// if the user dismissed the chooser.
+///
+/// Extracted from the Android branch of
+/// [DatabaseLocationService.pickCustomFolder] so the selection + cancel logic
+/// is unit-testable without a platform channel.
+Future<String?> resolveAndroidDbDir(
+  List<ExternalVolumeOption> options,
+  Future<ExternalVolumeOption?> Function(List<ExternalVolumeOption>)? chooser,
+) async {
+  final ExternalVolumeOption chosen;
+  if (chooser != null) {
+    final picked = await chooser(options);
+    // A null result means the user dismissed the chooser -> cancel rather than
+    // silently relocating to the first volume.
+    if (picked == null) return null;
+    chosen = picked;
+  } else {
+    // No chooser injected (e.g. background/headless flows): default to the
+    // primary internal volume.
+    chosen = options.first;
+  }
+  final dbDir = p.join(chosen.path, kAppDocumentsFolder);
+  await Directory(dbDir).create(recursive: true);
+  return dbDir;
+}
+
+/// Why [path] cannot be read, or null when it can.
+///
+/// Opens it and reads the first 16 bytes (the SQLite header), which is what
+/// proves access: a sandboxed folder can be stat-ed and still refuse the
+/// open. Shared by the foreground startup check and the headless background
+/// guard so the two can never disagree about readability. Never throws.
+Future<Object?> readProbeError(String path) async {
+  RandomAccessFile? handle;
+  try {
+    handle = await File(path).open(mode: FileMode.read);
+    await handle.read(16);
+    return null;
+  } catch (e) {
+    return e;
+  } finally {
+    // Close even when the read throws, or the handle leaks on every launch
+    // that hits a revoked-permission folder. Guarded, because an exception
+    // raised in a finally block REPLACES the answer the try/catch settled on.
+    try {
+      await handle?.close();
+    } catch (_) {
+      // Nothing to do: the probe's answer is already decided.
+    }
+  }
 }

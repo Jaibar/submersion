@@ -1,0 +1,264 @@
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/buoyancy/weight_observation.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/core/utils/stream_value_changes.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/domain/services/equipment_lead.dart';
+import 'package:submersion/features/equipment/domain/services/gear_tree.dart';
+
+/// Assembles weight-prediction training rows from the dive log.
+///
+/// Seven batch queries (dives, dive_weights, dive_equipment, dive_tanks,
+/// dive_sites for water type, and equipment + equipment_attributes for
+/// gear-carried lead) -- no per-dive N+1. Only dives that recorded any
+/// weight qualify.
+class WeightHistoryRepository {
+  WeightHistoryRepository([AppDatabase? db]) : _dbOverride = db;
+
+  final AppDatabase? _dbOverride;
+  AppDatabase get _db => _dbOverride ?? DatabaseService.instance.database;
+
+  /// Emits when the gear side of an observation's carried lead changes.
+  ///
+  /// Since #1103 an observation's `carriedKg` also comes from weights-type
+  /// equipment, whose mass lives in `equipment_attributes`. `saveAttributes`
+  /// writes that table alone, so watching `equipment` would miss an
+  /// attribute-only write (a sync apply, for instance) entirely; both tables
+  /// are needed. Dives-table changes are watched separately by the caller.
+  Stream<void> watchGearLeadChanges() => _db.tableUpdates(
+    TableUpdateQuery.onAllTables([_db.equipment, _db.equipmentAttributes]),
+  );
+
+  /// Emits when any site's water type changes, the fallback an observation
+  /// takes for a dive with none of its own (issue #3196). Other site writes
+  /// (notes, coordinates, the altitude backfill) leave it quiet.
+  ///
+  /// Built on table updates, not a query stream, which would emit on
+  /// subscribe (see test/architecture/query_stream_tick_test.dart).
+  Stream<void> watchSiteWaterTypeChanges() => whenValueChanges(
+    _db.tableUpdates(TableUpdateQuery.onTable(_db.diveSites)),
+    _siteWaterTypeSnapshot,
+  );
+
+  /// Every site's id and water type, as one comparable string.
+  Future<String> _siteWaterTypeSnapshot() async {
+    final rows = await (_db.selectOnly(
+      _db.diveSites,
+    )..addColumns([_db.diveSites.id, _db.diveSites.waterType])).get();
+    final pairs = [
+      for (final r in rows)
+        '${r.read(_db.diveSites.id)}=${r.read(_db.diveSites.waterType)}',
+    ]..sort();
+    return pairs.join('\n');
+  }
+
+  /// All dives of [diverId] that recorded any weight, ordered oldest-first.
+  Future<List<WeightObservation>> observationsForDiver(String diverId) async {
+    final diveRows =
+        await (_db.select(_db.dives)
+              ..where((d) => d.diverId.equals(diverId))
+              ..orderBy([(d) => OrderingTerm.asc(d.diveDateTime)]))
+            .get();
+    if (diveRows.isEmpty) return const [];
+
+    final diveIds = diveRows.map((d) => d.id).toList();
+
+    final weightRows = await (_db.select(
+      _db.diveWeights,
+    )..where((w) => w.diveId.isIn(diveIds))).get();
+    final equipmentRows = await (_db.select(
+      _db.diveEquipment,
+    )..where((e) => e.diveId.isIn(diveIds))).get();
+    final tankRows = await (_db.select(
+      _db.diveTanks,
+    )..where((t) => t.diveId.isIn(diveIds))).get();
+    final siteWaterTypes = await _siteWaterTypes(diveRows);
+
+    final weightsByDive = <String, List<DiveWeight>>{};
+    for (final row in weightRows) {
+      weightsByDive.putIfAbsent(row.diveId, () => []).add(row);
+    }
+    // Leaf gear only: an assembly whose parts are on the dive would be a
+    // second feature for one object, and its parts carry the lead (#1487).
+    // GearTree's placement walk decides what is rolled up, so a corrupt
+    // loop still leaves one row counted rather than dropping the dive's
+    // gear entirely.
+    final provenanceByDive = <String, List<GearProvenance>>{};
+    for (final row in equipmentRows) {
+      provenanceByDive
+          .putIfAbsent(row.diveId, () => [])
+          .add(
+            GearProvenance(
+              equipmentId: row.equipmentId,
+              viaEquipmentId: row.viaEquipmentId,
+              viaSetId: row.viaSetId,
+            ),
+          );
+    }
+    final equipmentByDive = <String, List<String>>{};
+    for (final entry in provenanceByDive.entries) {
+      final rolledUp = GearTree.rolledUpIds(entry.value);
+      equipmentByDive[entry.key] = [
+        for (final p in entry.value)
+          if (!rolledUp.contains(p.equipmentId)) p.equipmentId,
+      ];
+    }
+    final leadByEquipment = await _gearCarriedLead(
+      equipmentRows.map((e) => e.equipmentId).toSet(),
+    );
+    final tanksByDive = <String, List<ObservedTank>>{};
+    for (final row in tankRows) {
+      tanksByDive
+          .putIfAbsent(row.diveId, () => [])
+          .add(
+            ObservedTank(
+              volumeL: row.volume,
+              workingPressureBar: row.workingPressure,
+              material: row.tankMaterial != null
+                  ? TankMaterial.values.firstWhere(
+                      (m) => m.name == row.tankMaterial,
+                      orElse: () => TankMaterial.aluminum,
+                    )
+                  : null,
+              presetName: row.presetName,
+            ),
+          );
+    }
+
+    final observations = <WeightObservation>[];
+    for (final dive in diveRows) {
+      final typedWeights = weightsByDive[dive.id] ?? const [];
+      final placement = <String, double>{};
+      var carried = 0.0;
+      for (final w in typedWeights) {
+        carried += w.amountKg;
+        placement.update(
+          w.weightType,
+          (v) => v + w.amountKg,
+          ifAbsent: () => w.amountKg,
+        );
+      }
+      if (typedWeights.isEmpty) {
+        carried = dive.weightAmount ?? 0.0;
+      }
+      // Ballast built into the rig (weighted plates, weighted STAs, bolt-on
+      // trim) is lead the diver carried even when the Weights section is
+      // empty. Without it these dives failed the `carried <= 0` gate below
+      // and never became training rows at all (issue #1103).
+      for (final equipmentId in equipmentByDive[dive.id] ?? const <String>[]) {
+        final gear = leadByEquipment[equipmentId];
+        if (gear == null) continue;
+        carried += gear.kg;
+        final placedAs = gear.placement?.name;
+        if (placedAs != null) {
+          placement.update(
+            placedAs,
+            (v) => v + gear.kg,
+            ifAbsent: () => gear.kg,
+          );
+        }
+      }
+      if (carried <= 0) continue;
+
+      observations.add(
+        WeightObservation(
+          diveId: dive.id,
+          diveDateTime: wallClockUtcFromMillis(dive.diveDateTime),
+          waterType:
+              _waterType(dive.waterType) ??
+              _waterType(siteWaterTypes[dive.siteId]),
+          carriedKg: carried,
+          placement: placement,
+          equipmentIds: equipmentByDive[dive.id] ?? const [],
+          tanks: tanksByDive[dive.id] ?? const [],
+          feedback: dive.weightingFeedback,
+          feedbackKg: dive.weightingFeedbackKg,
+        ),
+      );
+    }
+    return observations;
+  }
+
+  /// The stored water type of each site of [diveRows], keyed by site id, so a
+  /// dive with none of its own is trained in its site's water, as
+  /// `Dive.effectiveWaterType` reads it (issue #3196). One batch query.
+  Future<Map<String, String>> _siteWaterTypes(List<Dive> diveRows) async {
+    final siteIds = {
+      for (final d in diveRows)
+        if (_waterType(d.waterType) == null && d.siteId != null) d.siteId!,
+    };
+    if (siteIds.isEmpty) return const {};
+    final rows = await (_db.select(
+      _db.diveSites,
+    )..where((s) => s.id.isIn(siteIds) & s.waterType.isNotNull())).get();
+    return {for (final s in rows) s.id: s.waterType!};
+  }
+
+  /// By name, so a legacy empty string reads as none recorded, as the query
+  /// fields read it (issue #3958).
+  static WaterType? _waterType(String? name) =>
+      WaterType.values.asNameMap()[name];
+
+  /// Ballast and placement for every [EquipmentType.weights] item among
+  /// [equipmentIds], keyed by equipment id. Items that declare no usable mass
+  /// are omitted, so a weights item with no numbers changes nothing.
+  ///
+  /// Two more batch queries (equipment, equipment_attributes), keeping the
+  /// no-N+1 property of the caller.
+  Future<Map<String, _GearLead>> _gearCarriedLead(
+    Set<String> equipmentIds,
+  ) async {
+    if (equipmentIds.isEmpty) return const {};
+    final ids = equipmentIds.toList();
+
+    final gearRows =
+        await (_db.select(_db.equipment)..where(
+              (e) => e.id.isIn(ids) & e.type.equals(EquipmentType.weights.name),
+            ))
+            .get();
+    if (gearRows.isEmpty) return const {};
+
+    final weightsIds = gearRows.map((e) => e.id).toList();
+    final attrRows =
+        await (_db.select(_db.equipmentAttributes)..where(
+              (a) => a.equipmentId.isIn(weightsIds) & a.isCustom.equals(false),
+            ))
+            .get();
+
+    final attrsByEquipment = <String, Map<String, EquipmentAttributeRow>>{};
+    for (final row in attrRows) {
+      attrsByEquipment
+          .putIfAbsent(row.equipmentId, () => {})
+          .putIfAbsent(row.attrKey, () => row);
+    }
+
+    final result = <String, _GearLead>{};
+    for (final gear in gearRows) {
+      final attrs = attrsByEquipment[gear.id] ?? const {};
+      final kg = EquipmentLead.ballastKg(
+        dryWeightKg: attrs[EquipmentAttrKeys.dryWeightKg]?.valueNum,
+        buoyancyKg: attrs[EquipmentAttrKeys.buoyancyKg]?.valueNum,
+      );
+      if (kg <= 0) continue;
+      result[gear.id] = _GearLead(
+        kg: kg,
+        placement: EquipmentLead.placementFor(
+          attrs[EquipmentAttrKeys.weightStyle]?.valueText,
+        ),
+      );
+    }
+    return result;
+  }
+}
+
+/// One weights item's contribution to a dive's carried lead.
+class _GearLead {
+  final double kg;
+  final WeightType? placement;
+  const _GearLead({required this.kg, required this.placement});
+}

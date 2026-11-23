@@ -1,13 +1,17 @@
-# Weekly Performance Benchmarks
+# Performance Benchmarks
 #
-# Runs performance-tagged tests on a schedule to detect regressions.
-# Also available via manual dispatch for on-demand testing.
+# Runs performance-tagged tests on demand to detect regressions.
+#
+# The weekly schedule is paused. Every scheduled run from 2026-08-17 to
+# 2026-09-21 was cancelled at the 30-minute timeout before the tests
+# finished. The tests alone did not fit even when code generation took
+# 4 minutes, and code generation has since grown to about 17 minutes on the
+# macos-26 runner (issue #2453). Restore the schedule once a run fits in its
+# timeout.
 
 name: Performance Benchmarks
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'  # Monday 6am UTC
   workflow_dispatch:
 
 permissions:
@@ -23,12 +27,12 @@ env:
 jobs:
   benchmark:
     name: Run Performance Tests
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -42,20 +46,14 @@ jobs:
           xcode-version: 'latest-stable'
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: ./.github/actions/setup-flutter
         id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: stable
 
-      - name: Cache Flutter SDK
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
-          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
-
       - name: Cache pub dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.pub-cache

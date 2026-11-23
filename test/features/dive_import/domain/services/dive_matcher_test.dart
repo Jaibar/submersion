@@ -9,6 +9,37 @@ void main() {
       matcher = const DiveMatcher();
     });
 
+    group('candidateWindow', () {
+      double scoreAt(Duration apart) {
+        final start = DateTime.utc(2026, 1, 15, 10);
+        return matcher.calculateMatchScore(
+          wearableStartTime: start.add(apart),
+          wearableMaxDepth: 18.5,
+          wearableDurationSeconds: 45 * 60,
+          existingStartTime: start,
+          existingMaxDepth: 18.5,
+          existingDurationSeconds: 45 * 60,
+        );
+      }
+
+      test('a gap at the window scores zero, however alike the dives', () {
+        expect(scoreAt(DiveMatcher.candidateWindow), 0.0);
+        expect(scoreAt(-DiveMatcher.candidateWindow), 0.0);
+      });
+
+      test('any gap beyond the window scores zero', () {
+        expect(scoreAt(const Duration(days: 3650)), 0.0);
+      });
+
+      test('the last moment inside the window can still match', () {
+        final justInside =
+            DiveMatcher.candidateWindow - const Duration(microseconds: 1);
+
+        expect(matcher.isPossibleDuplicate(scoreAt(justInside)), isTrue);
+        expect(matcher.isPossibleDuplicate(scoreAt(-justInside)), isTrue);
+      });
+    });
+
     group('calculateMatchScore', () {
       test('returns high score for identical time, depth, duration', () {
         final score = matcher.calculateMatchScore(
@@ -113,6 +144,69 @@ void main() {
         // Should not throw, should return a valid score
         expect(score, greaterThanOrEqualTo(0.0));
         expect(score, lessThanOrEqualTo(1.0));
+      });
+
+      test('gates to 0 for dives months apart even with identical '
+          'depth and duration (ScubaBoard report regression)', () {
+        // Months apart, both 47 min, similar depth previously scored exactly
+        // 0.50 = (0*0.5)+(1*0.3)+(1*0.2) and was flagged as a possible
+        // duplicate. Time is a necessary condition: they cannot be the same
+        // dive.
+        final score = matcher.calculateMatchScore(
+          wearableStartTime: DateTime(2026, 3, 15, 10, 0),
+          wearableMaxDepth: 18.0,
+          wearableDurationSeconds: 47 * 60,
+          existingStartTime: DateTime(2026, 6, 20, 14, 0),
+          existingMaxDepth: 18.0,
+          existingDurationSeconds: 47 * 60,
+        );
+
+        expect(score, 0.0);
+        expect(matcher.isPossibleDuplicate(score), isFalse);
+      });
+
+      test('gates to 0 for same-day dives hours apart with identical '
+          'depth and duration', () {
+        final score = matcher.calculateMatchScore(
+          wearableStartTime: DateTime(2026, 3, 15, 9, 0),
+          wearableMaxDepth: 18.0,
+          wearableDurationSeconds: 45 * 60,
+          existingStartTime: DateTime(2026, 3, 15, 14, 0),
+          existingMaxDepth: 18.0,
+          existingDurationSeconds: 45 * 60,
+        );
+
+        expect(score, 0.0);
+      });
+
+      test('gates to 0 exactly at the 15-minute boundary', () {
+        final score = matcher.calculateMatchScore(
+          wearableStartTime: DateTime(2026, 1, 15, 10, 0),
+          wearableMaxDepth: 18.5,
+          wearableDurationSeconds: 45 * 60,
+          existingStartTime: DateTime(2026, 1, 15, 10, 15),
+          existingMaxDepth: 18.5,
+          existingDurationSeconds: 45 * 60,
+        );
+
+        expect(score, 0.0);
+      });
+
+      test('still scores a near-in-time match within the 15-minute '
+          'window', () {
+        // 14 min apart: timeScore = 1 - ((14-5)/10) = 0.1
+        // composite = (0.1*0.5)+(1*0.3)+(1*0.2) = 0.55 -> still a match.
+        final score = matcher.calculateMatchScore(
+          wearableStartTime: DateTime(2026, 1, 15, 10, 0),
+          wearableMaxDepth: 18.5,
+          wearableDurationSeconds: 45 * 60,
+          existingStartTime: DateTime(2026, 1, 15, 10, 14),
+          existingMaxDepth: 18.5,
+          existingDurationSeconds: 45 * 60,
+        );
+
+        expect(score, greaterThan(0.0));
+        expect(score, closeTo(0.55, 0.0001));
       });
     });
 

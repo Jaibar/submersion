@@ -1,0 +1,621 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late DiveRepository repository;
+  late AppDatabase db;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    repository = DiveRepository();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  Future<void> insertSite(
+    String id, {
+    double? latitude,
+    double? longitude,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db
+        .into(db.diveSites)
+        .insert(
+          DiveSitesCompanion.insert(
+            id: id,
+            name: 'Site $id',
+            createdAt: now,
+            updatedAt: now,
+            latitude: Value(latitude),
+            longitude: Value(longitude),
+          ),
+        );
+  }
+
+  Future<void> insertDive(
+    String id, {
+    String? siteId,
+    String? diverId,
+    int? diveDateTime,
+    int? entryTime,
+    double? entryLatitude,
+    double? entryLongitude,
+    double? exitLatitude,
+    double? exitLongitude,
+    DivesCompanion weather = const DivesCompanion(),
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion.insert(
+            id: id,
+            diveDateTime: diveDateTime ?? now,
+            createdAt: now,
+            updatedAt: now,
+            siteId: Value(siteId),
+            diverId: Value(diverId),
+            entryTime: Value(entryTime),
+            entryLatitude: Value(entryLatitude),
+            entryLongitude: Value(entryLongitude),
+            exitLatitude: Value(exitLatitude),
+            exitLongitude: Value(exitLongitude),
+            windSpeed: weather.windSpeed,
+            windDirection: weather.windDirection,
+            cloudCover: weather.cloudCover,
+            precipitation: weather.precipitation,
+            humidity: weather.humidity,
+            weatherCode: weather.weatherCode,
+            weatherSource: weather.weatherSource,
+            weatherFetchedAt: weather.weatherFetchedAt,
+            airTemp: weather.airTemp,
+            surfacePressure: weather.surfacePressure,
+          ),
+        );
+  }
+
+  Future<Dive> readRow(String id) async =>
+      (db.select(db.dives)..where((t) => t.id.equals(id))).getSingle();
+
+  group('DiveRepository.getDivesNeedingConditions', () {
+    test('returns a dive whose site has coordinates and no weather', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive('d1', siteId: 's1');
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates, hasLength(1));
+      expect(candidates.single.id, 'd1');
+      expect(candidates.single.latitude, 12.5);
+      expect(candidates.single.longitude, -68.25);
+    });
+
+    test('excludes a dive with no site', () async {
+      await insertDive('d1');
+
+      expect(await repository.getDivesNeedingConditions(), isEmpty);
+    });
+
+    test('excludes a dive whose site has no coordinates', () async {
+      await insertSite('s1');
+      await insertDive('d1', siteId: 's1');
+
+      expect(await repository.getDivesNeedingConditions(), isEmpty);
+    });
+
+    test('excludes a dive whose fillable columns are all populated', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: const DivesCompanion(
+          windSpeed: Value(4.0),
+          windDirection: Value('north'),
+          cloudCover: Value('clear'),
+          precipitation: Value('none'),
+          humidity: Value(70.0),
+          weatherCode: Value(0),
+          airTemp: Value(28.0),
+          surfacePressure: Value(1.013),
+        ),
+      );
+
+      expect(await repository.getDivesNeedingConditions(), isEmpty);
+    });
+
+    test('includes a dive with only some weather columns filled', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: const DivesCompanion(
+          windSpeed: Value(4.0),
+          airTemp: Value(28.0),
+        ),
+      );
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.map((c) => c.id), ['d1']);
+    });
+
+    test('prefers entryTime over diveDateTime for the sample hour', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      final day = DateTime.utc(2024, 3, 9, 6);
+      final entry = DateTime.utc(2024, 3, 9, 14, 30);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        diveDateTime: day.millisecondsSinceEpoch,
+        entryTime: entry.millisecondsSinceEpoch,
+      );
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.dateTime, entry);
+    });
+
+    test('falls back to diveDateTime when entryTime is null', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      final day = DateTime.utc(2024, 3, 9, 6);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        diveDateTime: day.millisecondsSinceEpoch,
+      );
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.dateTime, day);
+    });
+
+    test('restricts to the requested diver when diverId is given', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-a',
+              name: 'A',
+              createdAt: DateTime.now().millisecondsSinceEpoch,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          );
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-b',
+              name: 'B',
+              createdAt: DateTime.now().millisecondsSinceEpoch,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          );
+      await insertDive('d1', siteId: 's1', diverId: 'diver-a');
+      await insertDive('d2', siteId: 's1', diverId: 'diver-b');
+
+      final candidates = await repository.getDivesNeedingConditions(
+        diverId: 'diver-a',
+      );
+
+      expect(candidates.map((c) => c.id), ['d1']);
+    });
+  });
+
+  group('DiveRepository.countDivesNeedingConditions', () {
+    test('counts the same dives the candidate query returns', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertSite('s2');
+      await insertDive('d1', siteId: 's1');
+      await insertDive('d2', siteId: 's1');
+      await insertDive('d3', siteId: 's2'); // site has no coordinates
+      await insertDive('d4'); // no site
+
+      expect(await repository.countDivesNeedingConditions(), 2);
+    });
+
+    test('counts zero when every fillable column is populated', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: const DivesCompanion(
+          windSpeed: Value(4.0),
+          windDirection: Value('north'),
+          cloudCover: Value('clear'),
+          precipitation: Value('none'),
+          humidity: Value(70.0),
+          weatherCode: Value(0),
+          airTemp: Value(28.0),
+          surfacePressure: Value(1.013),
+        ),
+      );
+
+      expect(await repository.countDivesNeedingConditions(), 0);
+    });
+
+    test('restricts to the requested diver', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      for (final id in ['diver-a', 'diver-b']) {
+        await db
+            .into(db.divers)
+            .insert(
+              DiversCompanion.insert(
+                id: id,
+                name: id,
+                createdAt: DateTime.now().millisecondsSinceEpoch,
+                updatedAt: DateTime.now().millisecondsSinceEpoch,
+              ),
+            );
+      }
+      await insertDive('d1', siteId: 's1', diverId: 'diver-a');
+      await insertDive('d2', siteId: 's1', diverId: 'diver-b');
+
+      expect(
+        await repository.countDivesNeedingConditions(diverId: 'diver-a'),
+        1,
+      );
+    });
+  });
+
+  group('conditions location falls back to the dive GPS fix (#4329)', () {
+    test('a siteless dive with an entry fix is a candidate there', () async {
+      await insertDive('d1', entryLatitude: 21.1, entryLongitude: -86.7);
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.id, 'd1');
+      expect(candidates.single.latitude, 21.1);
+      expect(candidates.single.longitude, -86.7);
+      expect(await repository.countDivesNeedingConditions(), 1);
+    });
+
+    test('the exit fix is used when there is no entry fix', () async {
+      await insertDive('d1', exitLatitude: 21.2, exitLongitude: -86.8);
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.latitude, 21.2);
+      expect(candidates.single.longitude, -86.8);
+    });
+
+    test('the site wins over the dive fix', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        entryLatitude: 21.1,
+        entryLongitude: -86.7,
+      );
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.latitude, 12.5);
+      expect(candidates.single.longitude, -68.25);
+    });
+
+    test('a site without coordinates falls through to the fix', () async {
+      await insertSite('s1');
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        entryLatitude: 21.1,
+        entryLongitude: -86.7,
+      );
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.single.latitude, 21.1);
+      expect(await repository.countDivesNeedingConditions(), 1);
+    });
+
+    test('half a fix is no location at all', () async {
+      await insertDive('d1', entryLatitude: 21.1, exitLongitude: -86.8);
+
+      expect(await repository.getDivesNeedingConditions(), isEmpty);
+      expect(await repository.countDivesNeedingConditions(), 0);
+    });
+  });
+
+  group('conditions queries restricted to chosen dives (#4329)', () {
+    test('only the given dives are candidates and counted', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive('d1', siteId: 's1');
+      await insertDive('d2', siteId: 's1');
+      await insertDive('d3', siteId: 's1');
+
+      final candidates = await repository.getDivesNeedingConditions(
+        diveIds: {'d1', 'd3'},
+      );
+
+      expect(candidates.map((c) => c.id).toSet(), {'d1', 'd3'});
+      expect(
+        await repository.countDivesNeedingConditions(diveIds: {'d1', 'd3'}),
+        2,
+      );
+    });
+
+    test('an empty selection matches nothing', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive('d1', siteId: 's1');
+
+      expect(await repository.getDivesNeedingConditions(diveIds: {}), isEmpty);
+      expect(await repository.countDivesNeedingConditions(diveIds: {}), 0);
+    });
+
+    test('a selection larger than one bound-variable chunk is covered whole, '
+        'newest first', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      final base = DateTime.utc(2024, 1, 1).millisecondsSinceEpoch;
+      final ids = <String>{};
+      for (var i = 0; i < 950; i++) {
+        final id = 'd$i';
+        ids.add(id);
+        await insertDive(id, siteId: 's1', diveDateTime: base + i * 60000);
+      }
+
+      final candidates = await repository.getDivesNeedingConditions(
+        diveIds: ids,
+      );
+
+      expect(candidates, hasLength(950));
+      expect(candidates.first.id, 'd949');
+      expect(candidates.last.id, 'd0');
+      expect(await repository.countDivesNeedingConditions(diveIds: ids), 950);
+    });
+  });
+
+  group('planned dives are left out of conditions fetches', () {
+    test('a planned dive is neither a candidate nor counted', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final (id, siteId) in [('planned', 's1'), ('planned-bare', null)]) {
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion.insert(
+                id: id,
+                diveDateTime: now,
+                createdAt: now,
+                updatedAt: now,
+                siteId: Value(siteId),
+                isPlanned: const Value(true),
+              ),
+            );
+      }
+      await insertDive('logged', siteId: 's1');
+
+      final candidates = await repository.getDivesNeedingConditions();
+
+      expect(candidates.map((c) => c.id), ['logged']);
+      expect(await repository.countDivesNeedingConditions(), 1);
+      expect(
+        await repository.countDivesNeedingConditions(diveIds: {'planned'}),
+        0,
+      );
+      expect(await repository.countDivesMissingConditionsWithoutLocation(), 0);
+    });
+
+    test(
+      'countLoggedDives counts only the logged dives among the ids',
+      () async {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion.insert(
+                id: 'planned',
+                diveDateTime: now,
+                createdAt: now,
+                updatedAt: now,
+                isPlanned: const Value(true),
+              ),
+            );
+        await insertDive('a');
+        await insertDive('b');
+
+        expect(
+          await repository.countLoggedDives({'a', 'b', 'planned', 'gone'}),
+          2,
+        );
+        expect(await repository.countLoggedDives({}), 0);
+      },
+    );
+  });
+
+  group('DiveRepository.countDivesMissingConditionsWithoutLocation', () {
+    test('counts dives with a gap and no usable location', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertSite('s2');
+      await insertDive('located', siteId: 's1');
+      await insertDive('gps', entryLatitude: 21.1, entryLongitude: -86.7);
+      await insertDive('bare-site', siteId: 's2');
+      await insertDive('no-site');
+
+      expect(await repository.countDivesMissingConditionsWithoutLocation(), 2);
+      expect(
+        await repository.countDivesMissingConditionsWithoutLocation(
+          diveIds: {'located', 'no-site'},
+        ),
+        1,
+      );
+    });
+
+    test('ignores a dive with no gap even when it has no location', () async {
+      await insertDive(
+        'd1',
+        weather: const DivesCompanion(
+          windSpeed: Value(4.0),
+          windDirection: Value('north'),
+          cloudCover: Value('clear'),
+          precipitation: Value('none'),
+          humidity: Value(70.0),
+          weatherCode: Value(0),
+          airTemp: Value(28.0),
+          surfacePressure: Value(1.013),
+        ),
+      );
+
+      expect(await repository.countDivesMissingConditionsWithoutLocation(), 0);
+    });
+  });
+
+  group('DiveRepository.fillDiveConditions (fills only NULL columns)', () {
+    final fetchedAt = DateTime.utc(2024, 5, 1, 12);
+
+    test('fills every empty column and stamps the source', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive('d1', siteId: 's1');
+
+      final filled = await repository.fillDiveConditions(
+        'd1',
+        windSpeed: 5.5,
+        windDirection: CurrentDirection.southEast,
+        cloudCover: CloudCover.partlyCloudy,
+        precipitation: Precipitation.none,
+        humidity: 72.0,
+        weatherCode: 2,
+        airTemp: 29.5,
+        surfacePressure: 1.011,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      expect(filled, isTrue);
+      final row = await readRow('d1');
+      expect(row.windSpeed, 5.5);
+      expect(row.windDirection, CurrentDirection.southEast.name);
+      expect(row.cloudCover, CloudCover.partlyCloudy.name);
+      expect(row.precipitation, Precipitation.none.name);
+      expect(row.humidity, 72.0);
+      expect(row.weatherCode, 2);
+      expect(row.airTemp, 29.5);
+      expect(row.surfacePressure, 1.011);
+      expect(row.weatherSource, WeatherSource.openMeteo.name);
+      expect(row.weatherFetchedAt, fetchedAt.millisecondsSinceEpoch ~/ 1000);
+    });
+
+    test('the fetch time reads back as the moment it was fetched', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive('d1', siteId: 's1');
+
+      await repository.fillDiveConditions(
+        'd1',
+        humidity: 55.0,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      final dive = await repository.getDiveById('d1');
+      expect(dive!.weatherFetchedAt!.toUtc(), fetchedAt);
+    });
+
+    test('never overwrites a column that already has a value', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: const DivesCompanion(
+          windSpeed: Value(1.5),
+          cloudCover: Value('overcast'),
+          airTemp: Value(19.0),
+        ),
+      );
+
+      final filled = await repository.fillDiveConditions(
+        'd1',
+        windSpeed: 9.9,
+        windDirection: CurrentDirection.north,
+        cloudCover: CloudCover.clear,
+        precipitation: Precipitation.rain,
+        humidity: 55.0,
+        weatherCode: 61,
+        airTemp: 30.0,
+        surfacePressure: 1.005,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      expect(filled, isTrue);
+      final row = await readRow('d1');
+      // Pre-existing values survive untouched.
+      expect(row.windSpeed, 1.5);
+      expect(row.cloudCover, 'overcast');
+      expect(row.airTemp, 19.0);
+      // Empty ones get filled.
+      expect(row.windDirection, CurrentDirection.north.name);
+      expect(row.precipitation, Precipitation.rain.name);
+      expect(row.humidity, 55.0);
+      expect(row.weatherCode, 61);
+      expect(row.surfacePressure, 1.005);
+    });
+
+    test('leaves an existing weatherSource stamp alone', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      final manualStamp =
+          DateTime.utc(2020, 1, 1).millisecondsSinceEpoch ~/ 1000;
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: DivesCompanion(
+          windSpeed: const Value(1.5),
+          weatherSource: Value(WeatherSource.manual.name),
+          weatherFetchedAt: Value(manualStamp),
+        ),
+      );
+
+      await repository.fillDiveConditions(
+        'd1',
+        humidity: 55.0,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      final row = await readRow('d1');
+      expect(row.humidity, 55.0);
+      expect(row.weatherSource, WeatherSource.manual.name);
+      expect(row.weatherFetchedAt, manualStamp);
+    });
+
+    test('returns false and writes nothing when there is no gap', () async {
+      await insertSite('s1', latitude: 12.5, longitude: -68.25);
+      await insertDive(
+        'd1',
+        siteId: 's1',
+        weather: const DivesCompanion(humidity: Value(70.0)),
+      );
+      final before = await readRow('d1');
+
+      final filled = await repository.fillDiveConditions(
+        'd1',
+        humidity: 55.0,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      expect(filled, isFalse);
+      final after = await readRow('d1');
+      expect(after.humidity, 70.0);
+      expect(after.weatherSource, isNull);
+      expect(after.updatedAt, before.updatedAt);
+    });
+
+    test('returns false for an unknown dive id', () async {
+      final filled = await repository.fillDiveConditions(
+        'nope',
+        humidity: 55.0,
+        source: WeatherSource.openMeteo,
+        fetchedAt: fetchedAt,
+      );
+
+      expect(filled, isFalse);
+    });
+  });
+}

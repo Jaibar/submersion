@@ -12,6 +12,18 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>Submersion Buddy Card</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>app.submersion.buddy-card</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>UDDF Dive Log</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
@@ -61,6 +73,18 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>Suunto JSON Export</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.json</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>SQLite Database</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
@@ -69,6 +93,18 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>org.sqlite.v3</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>DAN DL7 Dive Log</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>app.submersion.dl7</string>
 			</array>
 		</dict>
 	</array>
@@ -96,29 +132,92 @@
 				<string>com.googleusercontent.apps.433819313354-8sn10bh15pij7hsqbld4tunccrsgi4bf</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>app.submersion.lightroom</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>adobe+66776bfb6c08aeff345bb6435bf88a06f406d90d</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>app.submersion.passport</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>submersion</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 	<key>GIDClientID</key>
 	<string>433819313354-8sn10bh15pij7hsqbld4tunccrsgi4bf.apps.googleusercontent.com</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>flutter</string>
+					<key>UISceneDelegateClassName</key>
+					<string>FlutterSceneDelegate</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Submersion finds nearby divers on the swap screen to exchange buddy cards.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_subm-card._tcp</string>
+		<string>_subm-card._udp</string>
+	</array>
+	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+	<array>
+		<!-- The NFC Forum Type 4 tag application: an Android phone presenting a
+		     buddy card (issue #3728). Core NFC only surfaces an ISO 7816 tag
+		     whose application identifier is listed here. -->
+		<string>D2760000850101</string>
+	</array>
+	<key>NSNearbyInteractionUsageDescription</key>
+	<string>Submersion senses when you hold your phone next to a buddy's to swap buddy cards.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Submersion uses Bluetooth to connect to dive computers and import dive data.</string>
+	<string>Submersion uses Bluetooth to connect to dive computers and to sync with your other devices nearby.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Submersion uses Bluetooth to connect to dive computers and import dive data.</string>
+	<string>Submersion uses Bluetooth to connect to dive computers and to sync with your other devices nearby.</string>
+	<key>NFCReaderUsageDescription</key>
+	<string>Submersion reads and writes the NFC tags on your cylinders.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Submersion uses the camera to take photos of dive sites and marine life.</string>
+	<string>Submersion uses the camera to take photos of dive sites and marine life, and to scan cylinder labels.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Submersion uses Face ID to unlock your dive log.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>This app uses your contacts to import dive buddies.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Submersion uses your location to record dive site coordinates and find nearby dive sites.</string>
+	<string>Submersion uses your location to record dive site coordinates, find nearby dive sites, and record a GPS surface track during dive days so imported dives can be matched to positions.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Submersion uses your location to record dive site coordinates and find nearby dive sites.</string>
+	<string>Submersion uses your location to record dive site coordinates, find nearby dive sites, and record a GPS surface track during dive days so imported dives can be matched to positions.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Submersion saves dive photos to your photo library.</string>
 	<key>NSHealthShareUsageDescription</key>
@@ -150,12 +249,33 @@
 	<array>
 		<string>bluetooth-central</string>
 		<string>fetch</string>
+		<string>location</string>
 		<string>processing</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 		<string>com.submersion.notificationRefresh</string>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Submersion Buddy Card</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.submersion.buddy-card</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>subbuddy</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
@@ -176,6 +296,24 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/x-uddf</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>DAN DL7 Dive Log</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.submersion.dl7</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>zxu</string>
+					<string>zxl</string>
+				</array>
 			</dict>
 		</dict>
 		<dict>

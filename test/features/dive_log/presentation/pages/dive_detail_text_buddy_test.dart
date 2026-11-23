@@ -1,0 +1,415 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/dive_detail_sections.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/providers/legacy_buddy_conversion_providers.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/signatures/domain/entities/signature.dart';
+import 'package:submersion/features/signatures/presentation/providers/signature_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../buddies/helpers/fake_legacy_buddy_conversion_service.dart';
+
+/// Mock SettingsNotifier that does not access the database.
+class _MockSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _MockSettingsNotifier(super.initial);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Only the Buddies section visible, so the Details section's own "Buddy"
+/// row cannot satisfy a text assertion meant for the Buddies card.
+AppSettings _buddiesOnly() => AppSettings(
+  diveDetailSections: DiveDetailSectionId.values
+      .map(
+        (id) => DiveDetailSectionConfig(
+          id: id,
+          visible: id == DiveDetailSectionId.buddies,
+        ),
+      )
+      .toList(),
+);
+
+/// Only the Details section visible, so its legacy Buddy and Dive Master
+/// rows are the only place the free text can appear (#3581).
+AppSettings _detailsOnly() => AppSettings(
+  diveDetailSections: DiveDetailSectionId.values
+      .map(
+        (id) => DiveDetailSectionConfig(
+          id: id,
+          visible: id == DiveDetailSectionId.details,
+        ),
+      )
+      .toList(),
+);
+
+/// The generated English strings, read so a wording change cannot break
+/// these tests or silently turn a "findsNothing" into an always-green check.
+final AppLocalizations _en = lookupAppLocalizations(const Locale('en'));
+
+/// The Buddies card's solo copy.
+final String _soloDive = _en.diveLog_detail_soloDive;
+
+/// The label on the diver's own role tile.
+final String _me = _en.buddies_picker_me;
+
+BuddyWithRole _linkedBuddy() => BuddyWithRole(
+  buddy: Buddy(
+    id: 'b1',
+    name: 'Alice Adams',
+    createdAt: DateTime(2026, 1, 1),
+    updatedAt: DateTime(2026, 1, 1),
+  ),
+  roles: [DiveRole.builtInBuddy()],
+);
+
+Future<void> _pump(
+  WidgetTester tester,
+  SharedPreferences prefs, {
+  String? textBuddy,
+  String? textDiveMaster,
+  String? diverRoleId,
+  List<String>? diverRoleIds,
+  List<DiveRole> roles = const [],
+  List<BuddyWithRole> linked = const [],
+  FakeLegacyBuddyConversionService? service,
+  AppSettings? settings,
+  bool linkedLoadFails = false,
+  Completer<List<BuddyWithRole>>? linkedLoad,
+}) async {
+  final dive = Dive(
+    id: 'd1',
+    diverId: 'me',
+    diveMaster: textDiveMaster,
+    dateTime: DateTime(2026, 3, 15, 10, 0),
+    buddy: textBuddy,
+    diverRoleIds: diverRoleIds ?? [?diverRoleId],
+  );
+
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: <Override>[
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        diveProvider(dive.id).overrideWith((ref) async => dive),
+        diveDataSourcesProvider(
+          dive.id,
+        ).overrideWith((ref) async => <DiveDataSource>[]),
+        settingsProvider.overrideWith(
+          (ref) => _MockSettingsNotifier(settings ?? _buddiesOnly()),
+        ),
+        buddiesForDiveProvider(dive.id).overrideWith(
+          (ref) async => linkedLoad != null
+              ? linkedLoad.future
+              : linkedLoadFails
+              ? throw StateError('junction failed')
+              : linked,
+        ),
+        diveSightingsProvider(
+          dive.id,
+        ).overrideWith((ref) async => <Sighting>[]),
+        buddySignaturesForDiveProvider(
+          dive.id,
+        ).overrideWith((ref) async => <Signature>[]),
+        allDiveRolesProvider.overrideWith((ref) async => roles),
+        legacyBuddyConversionServiceProvider.overrideWithValue(
+          service ?? FakeLegacyBuddyConversionService(),
+        ),
+      ],
+      child: MaterialApp(
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: DiveDetailPage(diveId: dive.id),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  late SharedPreferences prefs;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+  });
+
+  group('Buddies card with a free-text buddy (#1831)', () {
+    testWidgets('linked buddy records are listed and the dive is not solo', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, linked: [_linkedBuddy()]);
+
+      expect(find.text('Alice Adams'), findsOneWidget);
+      expect(find.text(_soloDive), findsNothing);
+    });
+
+    testWidgets('linked buddy records win over stale free-text buddy', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Legacy Text',
+        linked: [_linkedBuddy()],
+      );
+
+      expect(find.text('Alice Adams'), findsOneWidget);
+      expect(
+        find.text('Legacy Text'),
+        findsNothing,
+        reason:
+            'the dive_buddies junction is authoritative once it holds anyone; '
+            'the frozen free-text column must not duplicate it',
+      );
+    });
+
+    testWidgets('a text-only buddy is shown instead of "Solo dive"', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, textBuddy: 'Bob Brown');
+
+      expect(find.text('Bob Brown'), findsOneWidget);
+      expect(
+        find.text(_soloDive),
+        findsNothing,
+        reason: 'a dive with a buddy stored as text is not a solo dive',
+      );
+    });
+
+    testWidgets("a text-only buddy is shown below the diver's own role", (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Bob Brown',
+        diverRoleId: 'mysterySlug',
+      );
+
+      expect(find.text(_me), findsOneWidget);
+      expect(find.text('Bob Brown'), findsOneWidget);
+      final meY = tester.getCenter(find.text(_me)).dy;
+      final bobY = tester.getCenter(find.text('Bob Brown')).dy;
+      expect(meY, lessThan(bobY));
+    });
+
+    testWidgets('no linked and no text buddy still reads "Solo dive"', (
+      tester,
+    ) async {
+      await _pump(tester, prefs);
+
+      expect(find.text(_soloDive), findsOneWidget);
+    });
+
+    testWidgets('a whitespace-only text buddy still reads "Solo dive"', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, textBuddy: '   ');
+
+      expect(find.text(_soloDive), findsOneWidget);
+    });
+
+    testWidgets('a placeholder-only text buddy reads "Solo dive"', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, textBuddy: 'None');
+
+      expect(find.text(_soloDive), findsOneWidget);
+      expect(find.text('None'), findsNothing);
+      expect(find.text(_en.buddies_linkText_action), findsNothing);
+    });
+
+    testWidgets('dive-master text shows with the Dive master role', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, textDiveMaster: 'Ana Ruiz');
+
+      expect(find.text('Ana Ruiz'), findsOneWidget);
+      expect(find.text(_en.diveRole_builtin_diveMaster), findsOneWidget);
+      expect(find.text(_soloDive), findsNothing);
+    });
+
+    testWidgets('text buddies offer the link action; linked ones do not', (
+      tester,
+    ) async {
+      await _pump(tester, prefs, textBuddy: 'Bob Brown');
+      expect(find.text(_en.buddies_linkText_action), findsOneWidget);
+
+      // Unmount first: re-pumping a ProviderScope in place keeps each
+      // provider's computed value, so the new overrides would not apply.
+      await tester.pumpWidget(const SizedBox());
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Bob Brown',
+        linked: [_linkedBuddy()],
+      );
+      expect(find.text(_en.buddies_linkText_action), findsNothing);
+    });
+  });
+
+  group('Details card with free-text buddy and dive master (#3581)', () {
+    testWidgets('linked buddy records hide the stale free-text rows', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Legacy Text',
+        textDiveMaster: 'Legacy Master',
+        linked: [_linkedBuddy()],
+        settings: _detailsOnly(),
+      );
+
+      expect(find.text(_en.diveLog_detail_section_details), findsOneWidget);
+      expect(
+        find.text('Legacy Text'),
+        findsNothing,
+        reason:
+            'the dive_buddies junction is authoritative once it holds anyone, '
+            'so the Details card must not disagree with the Buddies card',
+      );
+      expect(find.text('Legacy Master'), findsNothing);
+      expect(find.text(_en.diveLog_detail_label_buddy), findsNothing);
+      expect(find.text(_en.diveLog_detail_label_diveMaster), findsNothing);
+    });
+
+    testWidgets('free-text rows still show when no buddy is linked', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Bob Brown',
+        textDiveMaster: 'Ana Ruiz',
+        settings: _detailsOnly(),
+      );
+
+      expect(find.text('Bob Brown'), findsOneWidget);
+      expect(find.text('Ana Ruiz'), findsOneWidget);
+      expect(find.text(_en.diveLog_detail_label_buddy), findsOneWidget);
+      expect(find.text(_en.diveLog_detail_label_diveMaster), findsOneWidget);
+    });
+
+    testWidgets('a failed linked-buddy load shows no free-text rows', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Legacy Text',
+        textDiveMaster: 'Legacy Master',
+        linkedLoadFails: true,
+        settings: _detailsOnly(),
+      );
+
+      expect(
+        find.text('Legacy Text'),
+        findsNothing,
+        reason:
+            'without the junction the dive may have linked buddies, so the '
+            'text is shown only once the junction is known to be empty',
+      );
+      expect(find.text('Legacy Master'), findsNothing);
+    });
+
+    testWidgets('free-text rows wait for the linked-buddy load', (
+      tester,
+    ) async {
+      final linkedLoad = Completer<List<BuddyWithRole>>();
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'Bob Brown',
+        textDiveMaster: 'Ana Ruiz',
+        linkedLoad: linkedLoad,
+        settings: _detailsOnly(),
+      );
+
+      expect(find.text(_en.diveLog_detail_section_details), findsOneWidget);
+      expect(
+        find.text('Bob Brown'),
+        findsNothing,
+        reason:
+            'the dive may have linked buddies, so the text waits until the '
+            'junction is known to be empty',
+      );
+      expect(find.text('Ana Ruiz'), findsNothing);
+
+      linkedLoad.complete(const <BuddyWithRole>[]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bob Brown'), findsOneWidget);
+      expect(find.text('Ana Ruiz'), findsOneWidget);
+    });
+
+    testWidgets('placeholder or blank free text shows no row', (tester) async {
+      await _pump(
+        tester,
+        prefs,
+        textBuddy: 'None',
+        textDiveMaster: '   ',
+        settings: _detailsOnly(),
+      );
+
+      expect(find.text('None'), findsNothing);
+      expect(find.text(_en.diveLog_detail_label_buddy), findsNothing);
+      expect(find.text(_en.diveLog_detail_label_diveMaster), findsNothing);
+    });
+  });
+
+  testWidgets("shows my roles and each buddy's roles, joined (#1221)", (
+    tester,
+  ) async {
+    final epoch = DateTime(2026);
+    final builtIns = [
+      for (final id in DiveRole.builtInIds)
+        DiveRole(
+          id: id,
+          name: id,
+          isBuiltIn: true,
+          createdAt: epoch,
+          updatedAt: epoch,
+        ),
+    ];
+    DiveRole role(String id) => builtIns.firstWhere((r) => r.id == id);
+    await _pump(
+      tester,
+      prefs,
+      diverRoleIds: const [DiveRole.diveGuideId, DiveRole.diveMasterId],
+      roles: builtIns,
+      linked: [
+        BuddyWithRole(
+          buddy: Buddy(
+            id: 'b1',
+            name: 'Alice Adams',
+            createdAt: epoch,
+            updatedAt: epoch,
+          ),
+          roles: [role(DiveRole.instructorId), role(DiveRole.safetyDiverId)],
+        ),
+      ],
+    );
+
+    expect(find.text('Dive Guide, Divemaster'), findsOneWidget);
+    expect(find.text('Instructor, Safety Diver'), findsOneWidget);
+    expect(find.text(_en.diveLog_detail_buddyCount(1)), findsOneWidget);
+  });
+}

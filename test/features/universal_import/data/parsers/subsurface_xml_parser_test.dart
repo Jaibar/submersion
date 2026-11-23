@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
+import 'package:submersion/features/universal_import/data/models/import_payload.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 import 'package:submersion/features/universal_import/data/parsers/subsurface_xml_parser.dart';
 
@@ -80,6 +81,24 @@ void main() {
       expect(dives[0]['dateTime'], DateTime.utc(2025, 11, 13, 7, 23, 58));
       expect(dives[0]['diveNumber'], 5);
     });
+
+    test('a two-digit year is not the year 91 (#2617)', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='5' date='91-11-13' time='07:23:58' duration='10:00 min'>
+  <divecomputer model='Test'>
+  <depth max='8.0 m' mean='4.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives[0]['dateTime'], DateTime.utc(1991, 11, 13, 7, 23, 58));
+    });
   });
 
   group('dive metadata', () {
@@ -135,6 +154,142 @@ void main() {
       expect(dive['notes'], contains('SAC: 16.262 l/min'));
     });
 
+    group('suit as gear (#1824)', () {
+      test('a classified suit becomes gear linked to its dives', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<trip date='2025-01-15' time='09:00:00' location='Reef'>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <suit>3mm Bare wetsuit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+<dive number='2' date='2025-01-15' time='14:00:00' duration='30:00 min'>
+  <suit>Drysuit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</trip>
+<dive number='3' date='2025-01-16' time='10:00:00' duration='30:00 min'>
+  <suit>3mm Bare wetsuit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final gear = result.entitiesOf(ImportEntityType.equipment);
+        expect(gear, hasLength(2));
+        final wetsuit = gear.firstWhere((g) => g['name'] == '3mm Bare wetsuit');
+        expect(wetsuit['type'], 'wetsuit');
+        expect(wetsuit['thickness'], '3mm');
+        final drysuit = gear.firstWhere((g) => g['name'] == 'Drysuit');
+        expect(drysuit['type'], 'drysuit');
+        expect(drysuit.containsKey('thickness'), isFalse);
+
+        final dives = result.entitiesOf(ImportEntityType.dives);
+        expect(dives[0]['equipmentRefs'], [wetsuit['uddfId']]);
+        expect(dives[1]['equipmentRefs'], [drysuit['uddfId']]);
+        expect(dives[2]['equipmentRefs'], [wetsuit['uddfId']]);
+        // The notes line stays: a diver who deselects the suit in review
+        // still has the text on the dive.
+        expect(dives[0]['notes'], contains('Suit: 3mm Bare wetsuit'));
+      });
+
+      test('an unclear suit becomes Other gear linked to its dives '
+          '(#633)', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <suit>Full suit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+<dive number='2' date='2025-01-16' time='10:00:00' duration='30:00 min'>
+  <suit>Full suit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final suit = result.entitiesOf(ImportEntityType.equipment).single;
+        expect(suit['name'], 'Full suit');
+        expect(suit['type'], 'other');
+        // No thickness: an unclear suit must not reach the Suit Thickness
+        // statistic as a wetsuit of some size.
+        expect(suit.containsKey('thickness'), isFalse);
+        final dives = result.entitiesOf(ImportEntityType.dives);
+        expect(dives[0]['equipmentRefs'], [suit['uddfId']]);
+        expect(dives[1]['equipmentRefs'], [suit['uddfId']]);
+        expect(dives[0]['notes'], contains('Suit: Full suit'));
+      });
+
+      test('a layer that names itself takes the layer type (#633)', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <suit>Dry undersuit</suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final suit = result.entitiesOf(ImportEntityType.equipment).single;
+        expect(suit['type'], 'undersuit');
+        final dive = result.entitiesOf(ImportEntityType.dives).single;
+        expect(dive['equipmentRefs'], [suit['uddfId']]);
+      });
+
+      test('a blank suit emits no equipment', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <suit>   </suit>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        expect(
+          result.entities.containsKey(ImportEntityType.equipment),
+          isFalse,
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).single;
+        expect(dive.containsKey('equipmentRefs'), isFalse);
+      });
+
+      test('a log without suits emits no equipment', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'><depth max='20.0 m' /></divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        expect(
+          result.entities.containsKey(ImportEntityType.equipment),
+          isFalse,
+        );
+      });
+    });
+
     test('parses air temperature from divetemperature element', () async {
       final result = await parser.parse(
         xmlBytes('''
@@ -172,8 +327,55 @@ void main() {
       );
       final dive = result.entitiesOf(ImportEntityType.dives).first;
       expect(dive['visibility'], Visibility.excellent);
-      expect(dive['currentStrength'], CurrentStrength.strong);
+      expect(dive['currentStrength'], CurrentStrength.light);
       expect(dive['rating'], 3);
+    });
+
+    // Subsurface rates every dive condition on a comfort scale: five stars is
+    // the most comfortable (no current), one star the least (strongest
+    // current). The mapping must run the other way round from visibility's.
+    for (final (stars, expected) in [
+      (1, CurrentStrength.strong),
+      (2, CurrentStrength.strong),
+      (3, CurrentStrength.moderate),
+      (4, CurrentStrength.light),
+      (5, CurrentStrength.none),
+    ]) {
+      test('maps current=$stars stars to $expected', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' current='$stars' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        expect(dive['currentStrength'], expected);
+      });
+    }
+
+    test('leaves currentStrength unset when current is absent', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive.containsKey('currentStrength'), isFalse);
     });
 
     test('maps watersalinity to WaterType', () async {
@@ -217,6 +419,62 @@ void main() {
       final dives = result.entitiesOf(ImportEntityType.dives);
       expect(dives[0]['diveMode'], DiveMode.ccr);
       expect(dives[1]['diveMode'], DiveMode.scr);
+    });
+
+    test('maps Subsurface PSCR to semi-closed (issue #2593)', () async {
+      // Subsurface writes OC, CCR, PSCR or Freedive; PSCR used to fall
+      // through to open circuit.
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test PSCR' dctype='PSCR'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive['diveMode'], DiveMode.scr);
+    });
+
+    test('a loop logged by a second computer makes the dive a loop dive '
+        '(issue #2593)', () async {
+      // A CCR diver's backup computer often runs in open-circuit mode beside
+      // the controller and may be listed first. The diver was still on the
+      // loop, so the dive must not import as open circuit.
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Backup'>
+  <depth max='82.0 m' mean='40.0 m' />
+  </divecomputer>
+  <divecomputer model='Controller' dctype='CCR'>
+  <depth max='82.0 m' mean='40.0 m' />
+  </divecomputer>
+</dive>
+<dive number='2' date='2025-01-16' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Backup' dctype='OC'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+  <divecomputer model='Second OC'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives[0]['diveMode'], DiveMode.ccr);
+      expect(dives[1]['diveMode'], DiveMode.oc);
     });
 
     test('parses dive-level cns and preserves fractional otu', () async {
@@ -390,7 +648,90 @@ void main() {
               as List<Map<String, dynamic>>;
       expect(tanks[0]['role'], TankRole.diluent);
       expect(tanks[1]['role'], TankRole.stage);
-      expect(tanks[2]['role'], isNull);
+      // Subsurface writes a side-less 'sidemount'; the side comes from the
+      // order the cylinders appear in. See the 'sidemount' group below.
+      expect(tanks[2]['role'], TankRole.sidemountLeft);
+    });
+
+    group('sidemount', () {
+      Future<List<Map<String, dynamic>>> tanksOf(String cylinders) async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+$cylinders
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        return result.entitiesOf(ImportEntityType.dives).first['tanks']
+            as List<Map<String, dynamic>>;
+      }
+
+      test('a pair of sidemount cylinders becomes left then right', () async {
+        final tanks = await tanksOf(
+          "  <cylinder size='11.1 l' description='SM1' use='sidemount' o2='32.0%' />\n"
+          "  <cylinder size='11.1 l' description='SM2' use='sidemount' o2='32.0%' />",
+        );
+        expect(tanks[0]['role'], TankRole.sidemountLeft);
+        expect(tanks[1]['role'], TankRole.sidemountRight);
+      });
+
+      test('a third sidemount cylinder is left without a side', () async {
+        // Two sides is all a diver has. Inventing one for a third cylinder
+        // would be data the file never carried.
+        final tanks = await tanksOf(
+          "  <cylinder size='11.1 l' description='SM1' use='sidemount' o2='32.0%' />\n"
+          "  <cylinder size='11.1 l' description='SM2' use='sidemount' o2='32.0%' />\n"
+          "  <cylinder size='11.1 l' description='SM3' use='sidemount' o2='32.0%' />",
+        );
+        expect(tanks[2]['role'], isNull);
+      });
+
+      test('the explicit sides Subsurface can write still win', () async {
+        final tanks = await tanksOf(
+          "  <cylinder size='11.1 l' description='R' use='sidemount-right' o2='32.0%' />\n"
+          "  <cylinder size='11.1 l' description='L' use='sidemount-left' o2='32.0%' />\n"
+          "  <cylinder size='11.1 l' description='SM' use='sidemount' o2='32.0%' />",
+        );
+        expect(tanks[0]['role'], TankRole.sidemountRight);
+        expect(tanks[1]['role'], TankRole.sidemountLeft);
+        // The side-less cylinder counts from the start of the dive's own
+        // sidemount cylinders, independently of the explicit ones.
+        expect(tanks[2]['role'], TankRole.sidemountLeft);
+      });
+
+      test('the side counter restarts on every dive', () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <cylinder size='11.1 l' description='SM1' use='sidemount' o2='32.0%' />
+  <cylinder size='11.1 l' description='SM2' use='sidemount' o2='32.0%' />
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+<dive number='2' date='2025-01-16' time='10:00:00' duration='30:00 min'>
+  <cylinder size='11.1 l' description='SM1' use='sidemount' o2='32.0%' />
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dives = result.entitiesOf(ImportEntityType.dives);
+        final second = dives[1]['tanks'] as List<Map<String, dynamic>>;
+        expect(second[0]['role'], TankRole.sidemountLeft);
+      });
     });
 
     test(
@@ -476,6 +817,39 @@ void main() {
       expect(profile[4]['timestamp'], 120);
       expect(profile[4]['depth'], 0.0);
       expect(pressureAt(4), 170.0);
+    });
+
+    // Issue #3055: Subsurface writes `temp` only when it changes, so an absent
+    // attribute means "unchanged". A 1 C computer held at 30 C for minutes
+    // and then reading 29 C must step there, not ramp across the whole gap.
+    test('holds temperature until the next change instead of '
+        'interpolating', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test'>
+  <depth max='5.0 m' mean='3.0 m' />
+  <sample time='0:00 min' depth='0.0 m' />
+  <sample time='0:10 min' depth='1.0 m' temp='30.0 C' />
+  <sample time='2:00 min' depth='3.0 m' />
+  <sample time='4:00 min' depth='3.0 m' />
+  <sample time='6:00 min' depth='3.0 m' temp='29.0 C' />
+  <sample time='8:00 min' depth='3.0 m' />
+  <sample time='10:00 min' depth='0.0 m' temp='30.0 C' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final profile = dive['profile'] as List<Map<String, dynamic>>;
+      final temps = [for (final p in profile) p['temperature']];
+
+      // Before the first reading the first value is back-filled, as before.
+      expect(temps, [30.0, 30.0, 30.0, 30.0, 29.0, 29.0, 30.0]);
     });
 
     test('parses multi-tank pressure from pressure0 and pressure1', () async {
@@ -570,15 +944,23 @@ void main() {
       expect(profile[1]['decoType'], 2);
     });
 
-    test('maps sample po2 to ppO2', () async {
+    test('carries delta-encoded ndl, tts, cns, and in_deco forward across '
+        'samples that omit them', () async {
+      // Subsurface only writes these attributes when the value changes
+      // from the previous sample; omission means "unchanged".
       final result = await parser.parse(
         xmlBytes('''
 <divelog program='subsurface' version='3'>
 <dives>
-<dive number='1' date='2025-01-15' time='10:00:00' duration='2:00 min'>
-  <divecomputer model='Test CCR'>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='6:00 min'>
+  <divecomputer model='Test'>
   <depth max='20.0 m' mean='15.0 m' />
-  <sample time='1:00 min' depth='20.0 m' po2='1.21' />
+  <sample time='1:00 min' depth='20.0 m' />
+  <sample time='2:00 min' depth='20.0 m' ndl='0:00 min' tts='8:00 min' cns='12%' in_deco='1' />
+  <sample time='3:00 min' depth='18.0 m' />
+  <sample time='4:00 min' depth='15.0 m' tts='5:00 min' />
+  <sample time='5:00 min' depth='6.0 m' tts='0:00 min' in_deco='0' />
+  <sample time='6:00 min' depth='3.0 m' />
   </divecomputer>
 </dive>
 </dives>
@@ -589,7 +971,239 @@ void main() {
       final dive = result.entitiesOf(ImportEntityType.dives).first;
       final profile = dive['profile'] as List<Map<String, dynamic>>;
 
-      expect(profile.single['ppO2'], 1.21);
+      // Before the first occurrence the values are genuinely unknown
+      expect(profile[0]['tts'], isNull);
+      expect(profile[0]['ndl'], isNull);
+      expect(profile[0]['cns'], isNull);
+      expect(profile[0]['decoType'], isNull);
+
+      // Explicit values
+      expect(profile[1]['tts'], 480);
+      expect(profile[1]['ndl'], 0);
+      expect(profile[1]['cns'], 12.0);
+      expect(profile[1]['decoType'], 2);
+
+      // Omitted attributes hold the previous value
+      expect(profile[2]['tts'], 480);
+      expect(profile[2]['ndl'], 0);
+      expect(profile[2]['cns'], 12.0);
+      expect(profile[2]['decoType'], 2);
+
+      expect(profile[3]['tts'], 300);
+
+      // Explicit tts=0 with in_deco=0 ends the obligation
+      expect(profile[4]['tts'], 0);
+      expect(profile[4]['decoType'], isNull);
+
+      // And the zero/cleared state also carries forward
+      expect(profile[5]['tts'], 0);
+      expect(profile[5]['decoType'], isNull);
+    });
+
+    test('maps delta-encoded stopdepth to ceiling and carries it forward '
+        'across samples that omit it', () async {
+      // Subsurface writes stopdepth only when the computer's stop depth
+      // changes; omission means "unchanged", so the value is sticky like
+      // ndl/tts/cns/in_deco.
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='4:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='30.0 m' />
+  <sample time='1:00 min' depth='40.0 m' />
+  <sample time='2:00 min' depth='40.0 m' in_deco='1' stopdepth='6.0 m' />
+  <sample time='3:00 min' depth='38.0 m' />
+  <sample time='4:00 min' depth='30.0 m' stopdepth='9.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+      // Before the first stopdepth the ceiling is genuinely unknown.
+      expect(profile[0]['ceiling'], isNull);
+      // Explicit stop depth maps straight to ceiling (meters).
+      expect(profile[1]['ceiling'], 6.0);
+      // A sample that omits stopdepth inherits the previous value.
+      expect(profile[2]['ceiling'], 6.0);
+      // The next explicit value takes over.
+      expect(profile[3]['ceiling'], 9.0);
+    });
+
+    test(
+      "stopdepth '0.0 m' clears the obligation instead of being skipped",
+      () async {
+        // 0.0 m is a real "no stop" value, not missing data, so it maps to no
+        // ceiling and that cleared state carries forward.
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='3:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='20.0 m' />
+  <sample time='1:00 min' depth='40.0 m' in_deco='1' stopdepth='6.0 m' />
+  <sample time='2:00 min' depth='6.0 m' in_deco='0' stopdepth='0.0 m' />
+  <sample time='3:00 min' depth='3.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+        expect(profile[0]['ceiling'], 6.0);
+        // 0.0 m resolves to no obligation.
+        expect(profile[1]['ceiling'], isNull);
+        // The cleared state carries forward to samples that omit stopdepth.
+        expect(profile[2]['ceiling'], isNull);
+      },
+    );
+
+    test('re-acquires a ceiling after a stopdepth 0.0 clear', () async {
+      // A sawtooth profile can clear the obligation and then incur it again;
+      // an explicit stopdepth after a 0.0 must restore the ceiling rather than
+      // latch the cleared state.
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='4:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='25.0 m' />
+  <sample time='1:00 min' depth='40.0 m' in_deco='1' stopdepth='6.0 m' />
+  <sample time='2:00 min' depth='5.0 m' in_deco='0' stopdepth='0.0 m' />
+  <sample time='3:00 min' depth='38.0 m' in_deco='1' stopdepth='9.0 m' />
+  <sample time='4:00 min' depth='36.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+      expect(profile[0]['ceiling'], 6.0);
+      expect(profile[1]['ceiling'], isNull);
+      // Re-acquired after the clear.
+      expect(profile[2]['ceiling'], 9.0);
+      // And the re-acquired value carries forward.
+      expect(profile[3]['ceiling'], 9.0);
+    });
+
+    test(
+      'maps sample po2 to setpoint (not ppO2) and carries it forward',
+      () async {
+        // Subsurface exports the CCR setpoint as `po2`, delta-encoded (written
+        // only when it changes). It is NOT the measured ppO2.
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='3:00 min'>
+  <divecomputer model='Test CCR' dctype='CCR'>
+  <depth max='20.0 m' mean='15.0 m' />
+  <sample time='0:10 min' depth='5.0 m' po2='0.7' />
+  <sample time='1:00 min' depth='20.0 m' />
+  <sample time='2:00 min' depth='20.0 m' po2='1.3' />
+  <sample time='3:00 min' depth='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+        // po2 feeds setpoint, carried forward across samples that omit it.
+        expect(profile[0]['setpoint'], 0.7);
+        expect(profile[1]['setpoint'], 0.7);
+        expect(profile[2]['setpoint'], 1.3);
+        expect(profile[3]['setpoint'], 1.3);
+        // po2 must NOT be stored as measured ppO2.
+        expect(profile.every((p) => !p.containsKey('ppO2')), isTrue);
+      },
+    );
+
+    test(
+      'maps dc_supplied_ppo2 to ppO2, carried forward (delta-encoded)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='3:00 min'>
+  <divecomputer model='Test CCR' dctype='CCR'>
+  <depth max='20.0 m' mean='15.0 m' />
+  <sample time='1:00 min' depth='20.0 m' dc_supplied_ppo2='1.26' />
+  <sample time='2:00 min' depth='20.0 m' />
+  <sample time='3:00 min' depth='20.0 m' dc_supplied_ppo2='1.30' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+        expect(profile[0]['ppO2'], 1.26);
+        // dc_supplied_ppo2 is delta-encoded: an absent value means unchanged.
+        expect(profile[1]['ppO2'], 1.26);
+        expect(profile[2]['ppO2'], 1.30);
+      },
+    );
+
+    test('imports O2 cells and carries each forward (delta-encoded)', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='3:00 min'>
+  <divecomputer model='Test CCR' dctype='CCR' no_o2sensors='3'>
+  <depth max='20.0 m' mean='15.0 m' />
+  <sample time='1:00 min' depth='20.0 m' sensor1='0.641 bar' sensor2='0.659 bar' sensor3='0.664 bar' />
+  <sample time='2:00 min' depth='20.0 m' sensor1='0.700 bar' />
+  <sample time='3:00 min' depth='20.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final profile = dive['profile'] as List<Map<String, dynamic>>;
+
+      expect(profile[0]['o2Sensor1'], 0.641);
+      expect(profile[0]['o2Sensor2'], 0.659);
+      expect(profile[0]['o2Sensor3'], 0.664);
+      // Each cell is delta-encoded: only sensor1 changed at 2:00, the others
+      // carry forward; at 3:00 nothing is written so all three carry forward.
+      expect(profile[1]['o2Sensor1'], 0.700);
+      expect(profile[1]['o2Sensor2'], 0.659);
+      expect(profile[1]['o2Sensor3'], 0.664);
+      expect(profile[2]['o2Sensor1'], 0.700);
+      expect(profile[2]['o2Sensor2'], 0.659);
+      expect(profile[2]['o2Sensor3'], 0.664);
+      // Cell 4 never appears -> stays absent (not synthesized).
+      expect(profile[0].containsKey('o2Sensor4'), isFalse);
+      // Cells are never averaged into ppO2 on import.
+      expect(profile.every((p) => !p.containsKey('ppO2')), isTrue);
     });
   });
 
@@ -614,7 +1228,36 @@ void main() {
       expect(weights.length, 1);
       expect(weights[0]['amount'], closeTo(6.35, 0.01));
       expect(weights[0]['type'], WeightType.belt);
-      expect(weights[0]['notes'], 'belt');
+      // 'belt' is a stock Subsurface name: it sets the type, not a name.
+      expect(weights[0]['label'], '');
+      expect(weights[0].containsKey('notes'), isFalse);
+    });
+
+    test('a custom description becomes the weight\'s name', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <weightsystem weight='2.0 kg' description='Top pocket' />
+  <weightsystem weight='1.0 kg' description=' Clip-On ' />
+  <weightsystem weight='3.0 kg' description='trim pocket left' />
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final weights = dive['weights'] as List<Map<String, dynamic>>;
+      expect(weights.map((w) => w['label']).toList(), [
+        'Top pocket',
+        '',
+        'trim pocket left',
+      ]);
+      expect(weights[2]['type'], WeightType.trimWeights);
     });
   });
 
@@ -677,6 +1320,299 @@ void main() {
       final dive = result.entitiesOf(ImportEntityType.dives).first;
       final siteRef = dive['site'] as Map<String, dynamic>;
       expect(siteRef['uddfId'], 'b95bba6');
+    });
+  });
+
+  group('site folding and coordinate retention', () {
+    String divelog(String divesites, String dives) =>
+        '''
+<divelog program='subsurface' version='3'>
+<divesites>
+$divesites
+</divesites>
+<dives>
+$dives
+</dives>
+</divelog>
+''';
+
+    String dive(String uuid, {int number = 1}) =>
+        '''
+<dive number='$number' divesiteid='$uuid' date='2025-01-15' time='1$number:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+''';
+
+    String siteRefOf(Map<String, dynamic> diveData) =>
+        (diveData['site'] as Map<String, dynamic>)['uddfId'] as String;
+
+    test(
+      'folds same-named sites logged within a kilometre of each other',
+      () async {
+        // Subsurface splits a site whenever a dive's GPS drifts more than 20 m,
+        // so one real location accumulates many same-named site entries.
+        final result = await parser.parse(
+          xmlBytes(
+            divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' name='Blue Hole' gps='18.470562 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+          ),
+        );
+
+        final sites = result.entitiesOf(ImportEntityType.sites);
+        expect(sites.length, 1);
+        expect(sites[0]['uddfId'], 'aaa');
+
+        final dives = result.entitiesOf(ImportEntityType.dives);
+        expect(dives.map(siteRefOf), ['aaa', 'aaa']);
+      },
+    );
+
+    test('keeps same-named sites that are kilometres apart', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' name='Blue Hole' gps='18.665562 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 2);
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives.map(siteRefOf), ['aaa', 'bbb']);
+    });
+
+    test('folds a same-named site that carries no coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' name='Blue Hole'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives.map(siteRefOf), ['aaa', 'aaa']);
+    });
+
+    test('folds case- and whitespace-variant names together', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' name='  blue   hole ' gps='18.465562 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.sites).length, 1);
+    });
+
+    test('keeps an unnamed site and names it from its coordinates', () async {
+      // Subsurface omits the name attribute entirely for unnamed sites.
+      // Dropping the site strands the dive with no coordinates at all.
+      final result = await parser.parse(
+        xmlBytes(
+          divelog("<site uuid='aaa' gps='18.465562 -66.084902'/>", dive('aaa')),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0]['name'], '18.465562, -66.084902');
+      expect(sites[0]['latitude'], closeTo(18.465562, 0.000001));
+      expect(sites[0]['longitude'], closeTo(-66.084902, 0.000001));
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(siteRefOf(dives.first), 'aaa');
+    });
+
+    test('folds an unnamed site into a named site within 100 metres', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' gps='18.465862 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0]['name'], 'Blue Hole');
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives.map(siteRefOf), ['aaa', 'aaa']);
+    });
+
+    test('folds two unnamed sites that sit on each other', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' gps='18.465562 -66.084902'/>
+<site uuid='bbb' gps='18.465862 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0]['name'], '18.465562, -66.084902');
+
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives.map(siteRefOf), ['aaa', 'aaa']);
+    });
+
+    test('keeps an unnamed site that is far from any named site', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' gps='18.475562 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.sites).length, 2);
+    });
+
+    test('never folds two named sites on proximity alone', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole' gps='18.465562 -66.084902'/>
+<site uuid='bbb' name='Coral Gardens' gps='18.465562 -66.084902'/>
+''', '${dive('aaa')}${dive('bbb', number: 2)}'),
+        ),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.sites).length, 2);
+    });
+
+    test('survivor inherits fields the first entry was missing', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog('''
+<site uuid='aaa' name='Blue Hole'/>
+<site uuid='bbb' name='Blue Hole' gps='18.465562 -66.084902'>
+  <geo cat='2' origin='2' value='Puerto Rico'/>
+  <geo cat='3' origin='0' value='Isabela'/>
+  <notes>Wall dive on the north side.</notes>
+</site>
+''', dive('aaa')),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0]['uddfId'], 'aaa');
+      expect(sites[0]['latitude'], closeTo(18.465562, 0.000001));
+      expect(sites[0]['country'], 'Puerto Rico');
+      expect(sites[0]['region'], 'Isabela');
+      expect(sites[0]['notes'], 'Wall dive on the north side.');
+    });
+
+    test('parses comma-separated coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='aaa' name='Blue Hole' gps='18.465562,-66.084902'/>",
+            dive('aaa'),
+          ),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites[0]['latitude'], closeTo(18.465562, 0.000001));
+      expect(sites[0]['longitude'], closeTo(-66.084902, 0.000001));
+    });
+
+    test('drops coordinates outside the valid range', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='aaa' name='Blue Hole' gps='118.465562 -66.084902'/>",
+            dive('aaa'),
+          ),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0]['name'], 'Blue Hole');
+      expect(sites[0].containsKey('latitude'), isFalse);
+      expect(sites[0].containsKey('longitude'), isFalse);
+    });
+
+    test('drops non-finite coordinates', () async {
+      // double.tryParse('NaN') succeeds, and every comparison against NaN is
+      // false, so a range check alone lets it through.
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='aaa' name='Blue Hole' gps='NaN NaN'/>",
+            dive('aaa'),
+          ),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0].containsKey('latitude'), isFalse);
+      expect(sites[0].containsKey('longitude'), isFalse);
+    });
+
+    test('trims whitespace off the stored site name', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog("<site uuid='aaa' name='  Blue Hole  '/>", dive('aaa')),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites[0]['name'], 'Blue Hole');
+    });
+
+    test('stores no uddfId when the uuid attribute is blank', () async {
+      final result = await parser.parse(
+        xmlBytes(divelog("<site uuid='  ' name='Blue Hole'/>", dive('aaa'))),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1);
+      expect(sites[0].containsKey('uddfId'), isFalse);
+    });
+
+    test('skips a site with neither a name nor coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes(divelog("<site uuid='aaa'/>", dive('aaa'))),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.sites), isEmpty);
+    });
+
+    test('reads the site description attribute', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='aaa' name='Blue Hole' description='Boat access only'/>",
+            dive('aaa'),
+          ),
+        ),
+      );
+
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites[0]['description'], 'Boat access only');
     });
   });
 
@@ -749,6 +1685,273 @@ void main() {
     });
   });
 
+  group('tag classification (#2202)', () {
+    String divelogWithTags(String tags) =>
+        '''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' tags='$tags' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+''';
+
+    Future<Map<String, dynamic>> diveWithTags(String tags) async {
+      final result = await parser.parse(xmlBytes(divelogWithTags(tags)));
+      return result.entitiesOf(ImportEntityType.dives).first;
+    }
+
+    test('a cave tag classifies the dive as a cave dive', () async {
+      final dive = await diveWithTags('cave');
+      expect(dive['diveTypeIds'], ['cave']);
+    });
+
+    test('a cavern tag classifies the dive as a cavern dive', () async {
+      // 'cavern' contains 'cave': a substring match would lose the
+      // distinction that matters most to the diver who recorded it.
+      final dive = await diveWithTags('cavern');
+      expect(dive['diveTypeIds'], ['cavern']);
+    });
+
+    test('classification adds to the tags, it does not replace them', () async {
+      final dive = await diveWithTags('cave, sardine run');
+      expect(dive['tagRefs'], ['cave', 'sardine run']);
+      expect(dive['diveTypeIds'], ['cave']);
+    });
+
+    test('maps the whole Subsurface built-in vocabulary', () async {
+      final dive = await diveWithTags(
+        'boat, shore, drift, deep, ice, wreck, altitude, night, student',
+      );
+      expect(dive['diveTypeIds'], [
+        'boat',
+        'shore',
+        'drift',
+        'deep',
+        'ice',
+        'wreck',
+        'altitude',
+        'night',
+        'training',
+      ]);
+    });
+
+    test('keeps tag order and drops repeats', () async {
+      final dive = await diveWithTags('boat, cave, Boat');
+      expect(dive['diveTypeIds'], ['boat', 'cave']);
+    });
+
+    test('tags that map to nothing leave the dive unclassified', () async {
+      // No diveTypeIds at all, so the importer's own default (recreational,
+      // or technical when the profile shows deco) still decides.
+      final dive = await diveWithTags('photo, video, sardine run');
+      expect(dive.containsKey('diveTypeIds'), isFalse);
+      expect(dive['tagRefs'], ['photo', 'video', 'sardine run']);
+    });
+
+    test('a dive with no tags is left unclassified', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive.containsKey('diveTypeIds'), isFalse);
+    });
+  });
+
+  group('tag-derived site type suggestions (#2202)', () {
+    String divelog(String divesites, String dives) =>
+        '''
+<divelog program='subsurface' version='3'>
+<divesites>
+$divesites
+</divesites>
+<dives>
+$dives
+</dives>
+</divelog>
+''';
+
+    String dive(String tags, {String? siteId, int number = 1}) =>
+        '''
+<dive number='$number' tags='$tags'${siteId == null ? '' : " divesiteid='$siteId'"} date='2025-01-1$number' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='15.0 m' />
+  </divecomputer>
+</dive>
+''';
+
+    test('a cave dive suggests a cave site, never asserting it', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Dos Ojos' gps='20.323 -87.392'/>",
+            dive('cave', siteId: 's1'),
+          ),
+        ),
+      );
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site['suggestedSiteTypeRefs'], ['cave']);
+      // Only a suggestion: an explicit classification the diver already made
+      // must survive the import.
+      expect(site.containsKey('siteTypeRefs'), isFalse);
+    });
+
+    test('a cavern dive suggests a cavern site', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Chac Mool' gps='20.323 -87.392'/>",
+            dive('cavern', siteId: 's1'),
+          ),
+        ),
+      );
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site['suggestedSiteTypeRefs'], ['cavern']);
+    });
+
+    test('suggestions from several dives at one site combine', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Ginnie Springs' gps='29.836 -82.700'/>",
+            dive('cave', siteId: 's1') +
+                dive('cavern, river', siteId: 's1', number: 2),
+          ),
+        ),
+      );
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site['suggestedSiteTypeRefs'], ['cave', 'cavern', 'river']);
+    });
+
+    test('a suggestion follows a site through the duplicate fold', () async {
+      // Subsurface starts a fresh site whenever a dive's GPS drifts, so the
+      // dive that carries the cave tag often points at an entry that folds
+      // away. The suggestion has to land on the survivor.
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Dos Ojos' gps='20.323000 -87.392000'/>\n"
+            "<site uuid='s2' name='Dos Ojos' gps='20.323050 -87.392050'/>",
+            dive('cave', siteId: 's2'),
+          ),
+        ),
+      );
+      final sites = result.entitiesOf(ImportEntityType.sites);
+      expect(sites.length, 1, reason: 'the two entries fold together');
+      expect(sites.single['suggestedSiteTypeRefs'], ['cave']);
+    });
+
+    test('tags that classify only the dive suggest no site type', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Escambron' gps='18.465 -66.084'/>",
+            dive('boat, night, deep', siteId: 's1'),
+          ),
+        ),
+      );
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site.containsKey('suggestedSiteTypeRefs'), isFalse);
+    });
+
+    test('a cave dive with no site is imported without complaint', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Escambron' gps='18.465 -66.084'/>",
+            dive('cave'),
+          ),
+        ),
+      );
+      expect(result.entitiesOf(ImportEntityType.dives).single['diveTypeIds'], [
+        'cave',
+      ]);
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site.containsKey('suggestedSiteTypeRefs'), isFalse);
+    });
+
+    test('a dive pointing at a site the file never declared is safe', () async {
+      final result = await parser.parse(
+        xmlBytes(
+          divelog(
+            "<site uuid='s1' name='Escambron' gps='18.465 -66.084'/>",
+            dive('cave', siteId: 'missing'),
+          ),
+        ),
+      );
+      expect(result.entitiesOf(ImportEntityType.dives).length, 1);
+      final site = result.entitiesOf(ImportEntityType.sites).single;
+      expect(site.containsKey('suggestedSiteTypeRefs'), isFalse);
+    });
+  });
+
+  group('a cave logbook (real Subsurface export)', () {
+    const fixturePath =
+        'test/features/universal_import/data/parsers/fixtures/cave-tags.ssrf';
+
+    Future<ImportPayload> parseFixture() async {
+      final bytes = await File(fixturePath).readAsBytes();
+      return parser.parse(Uint8List.fromList(bytes));
+    }
+
+    test('classifies every tagged dive', () async {
+      final dives = (await parseFixture()).entitiesOf(ImportEntityType.dives);
+      expect(dives.length, 4);
+      expect(dives[0]['diveTypeIds'], ['cave']);
+      expect(dives[1]['diveTypeIds'], ['cavern']);
+      expect(dives[2]['diveTypeIds'], ['cave', 'deep']);
+      expect(dives[3]['diveTypeIds'], ['boat', 'night']);
+    });
+
+    test('keeps the free-text tags alongside the classification', () async {
+      final result = await parseFixture();
+      final dives = result.entitiesOf(ImportEntityType.dives);
+      expect(dives[1]['tagRefs'], ['cavern', 'photo']);
+      final tagNames = result
+          .entitiesOf(ImportEntityType.tags)
+          .map((t) => t['name'])
+          .toSet();
+      expect(tagNames, containsAll(['cave', 'cavern', 'photo', 'boat']));
+    });
+
+    test(
+      'suggests a cave site for the cenote, and nothing for the reef',
+      () async {
+        final sites = (await parseFixture()).entitiesOf(ImportEntityType.sites);
+        final dosOjos = sites.firstWhere((s) => s['name'] == 'Dos Ojos');
+        final chacMool = sites.firstWhere((s) => s['name'] == 'Chac Mool');
+        final escambron = sites.firstWhere((s) => s['name'] == 'Escambron');
+        // Both Dos Ojos entries fold into one site, and the cave dive that
+        // referenced the folded-away entry still classifies the survivor.
+        expect(sites.where((s) => s['name'] == 'Dos Ojos').length, 1);
+        expect(dosOjos['suggestedSiteTypeRefs'], ['cave']);
+        expect(chacMool['suggestedSiteTypeRefs'], ['cavern']);
+        expect(escambron.containsKey('suggestedSiteTypeRefs'), isFalse);
+      },
+    );
+
+    test('reads the sidemount pair as left and right', () async {
+      final dives = (await parseFixture()).entitiesOf(ImportEntityType.dives);
+      final tanks = dives[2]['tanks'] as List<Map<String, dynamic>>;
+      expect(tanks[0]['role'], TankRole.sidemountLeft);
+      expect(tanks[1]['role'], TankRole.sidemountRight);
+      expect(tanks[2]['role'], TankRole.deco);
+    });
+  });
+
   group('edge cases', () {
     test('returns error warning for empty input', () async {
       final result = await parser.parse(Uint8List(0));
@@ -790,6 +1993,14 @@ void main() {
   });
 
   group('integration - real Subsurface export', () {
+    const shoreLogFixturePath =
+        'test/features/universal_import/data/parsers/fixtures/shore-log.ssrf';
+
+    Future<ImportPayload> parseShoreLog() async {
+      final bytes = await File(shoreLogFixturePath).readAsBytes();
+      return parser.parse(Uint8List.fromList(bytes));
+    }
+
     test('parses dual-cylinder fixture as two tanks', () async {
       final file = File(dualTankFixturePath);
       final diveXml = await file.readAsString();
@@ -867,24 +2078,32 @@ $diveXml
       ]);
     });
 
-    test('parses subsurface_export.ssrf with correct counts', () async {
-      final file = File('subsurface_export.ssrf');
-      if (!file.existsSync()) {
-        markTestSkipped('subsurface_export.ssrf not found in project root');
-        return;
-      }
+    test('parses the shore-log fixture with correct counts', () async {
+      final result = await parseShoreLog();
 
-      final bytes = Uint8List.fromList(await file.readAsBytes());
-      final result = await parser.parse(bytes);
-
-      // Verify counts from the actual export
       final dives = result.entitiesOf(ImportEntityType.dives);
-      expect(dives.length, 16);
+      expect(dives.length, 4);
 
+      // The export holds three site entries, two of which are 'North Jetty'
+      // 1.8 m apart -- Subsurface split them on GPS drift between two entries.
+      // They fold back into one site, and every dive that referenced either
+      // uuid follows the survivor.
       final sites = result.entitiesOf(ImportEntityType.sites);
-      expect(sites.length, 5);
+      expect(sites.length, 2);
+      expect(
+        sites.where((s) => s['name'] == 'North Jetty').length,
+        1,
+        reason: 'GPS-drift duplicates of one site must not import twice',
+      );
 
-      // Verify a specific dive has expected data
+      final jettyId = sites.firstWhere(
+        (s) => s['name'] == 'North Jetty',
+      )['uddfId'];
+      final jettyDives = dives.where(
+        (d) => (d['site'] as Map<String, dynamic>?)?['uddfId'] == jettyId,
+      );
+      expect(jettyDives.map((d) => d['diveNumber']), [1, 2]);
+
       final dive1 = dives.firstWhere((d) => d['diveNumber'] == 1);
       expect(dive1['dateTime'], DateTime.utc(2025, 9, 20, 7, 44, 37));
       final buddyRefs = dive1['buddyRefs'] as List<String>;
@@ -896,31 +2115,26 @@ $diveXml
       final buddies = result.entitiesOf(ImportEntityType.buddies);
       expect(buddies.length, greaterThanOrEqualTo(2));
       expect(dive1['visibility'], Visibility.poor);
-      expect(dive1['currentStrength'], CurrentStrength.strong);
+      expect(dive1['currentStrength'], CurrentStrength.light);
       expect(dive1['waterType'], WaterType.salt);
 
-      // Verify profile data exists
       final profile = dive1['profile'] as List<Map<String, dynamic>>?;
       expect(profile, isNotNull);
       expect(profile!.length, greaterThan(10));
 
-      // Verify tanks
       final tanks = dive1['tanks'] as List<Map<String, dynamic>>?;
       expect(tanks, isNotNull);
       expect(tanks!.length, 1);
       expect(tanks[0]['name'], 'AL80');
 
-      // Verify weights
       final weights = dive1['weights'] as List<Map<String, dynamic>>?;
       expect(weights, isNotNull);
       expect(weights!.length, 1);
       expect(weights[0]['type'], WeightType.belt);
 
-      // Verify tags extracted
       final tags = result.entitiesOf(ImportEntityType.tags);
       expect(tags.length, greaterThanOrEqualTo(2));
 
-      // Verify no error warnings
       final errors = result.warnings.where(
         (w) => w.severity == ImportWarningSeverity.error,
       );
@@ -928,34 +2142,1291 @@ $diveXml
     });
 
     test('does not invent extra tanks from placeholder cylinders', () async {
-      final file = File('subsurface_export.ssrf');
-      if (!file.existsSync()) {
-        markTestSkipped('subsurface_export.ssrf not found in project root');
-        return;
-      }
+      final dives = (await parseShoreLog()).entitiesOf(ImportEntityType.dives);
 
-      final bytes = Uint8List.fromList(await file.readAsBytes());
-      final result = await parser.parse(bytes);
-      final dives = result.entitiesOf(ImportEntityType.dives);
-
-      final tankCounts = dives.map((dive) {
-        final tanks = dive['tanks'] as List<Map<String, dynamic>>?;
-        return tanks?.length ?? 0;
-      }).toList();
-
-      expect(tankCounts, isNotEmpty);
-      expect(tankCounts.reduce((a, b) => a > b ? a : b), 1);
-
+      // Empty `<cylinder />` slots sit beside a real cylinder.
       final dive1 = dives.firstWhere((d) => d['diveNumber'] == 1);
       final dive1Tanks = dive1['tanks'] as List<Map<String, dynamic>>?;
       expect(dive1Tanks, isNotNull);
       expect(dive1Tanks!.length, 1);
 
-      final dive10 = dives.firstWhere((d) => d['diveNumber'] == 10);
-      expect(dive10.containsKey('tanks'), isFalse);
+      // Pressure readings alone (`end`, or `start` with `end`) are dive
+      // computer artifacts, not a cylinder the diver described.
+      final dive3 = dives.firstWhere((d) => d['diveNumber'] == 3);
+      expect(dive3.containsKey('tanks'), isFalse);
 
-      final dive11 = dives.firstWhere((d) => d['diveNumber'] == 11);
-      expect(dive11.containsKey('tanks'), isFalse);
+      final dive4 = dives.firstWhere((d) => d['diveNumber'] == 4);
+      expect(dive4.containsKey('tanks'), isFalse);
+    });
+  });
+
+  group('sample setpoint', () {
+    test(
+      'direct sample setpoint attribute is parsed into profile samples',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='10.0 m' />
+  <sample time='1:00 min' depth='10.0 m' setpoint='1.2' />
+  <sample time='2:00 min' depth='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final profile = dive['profile'] as List<Map<String, dynamic>>;
+        expect(
+          profile[0]['setpoint'],
+          1.2,
+          reason:
+              'direct sample attribute is persisted into the profile sample',
+        );
+        expect(
+          profile[1].containsKey('setpoint'),
+          isFalse,
+          reason:
+              'samples without the direct attribute stay untouched '
+              '(SP change event forward-fill is intentionally not implemented; '
+              'that belongs to Slice C via a derive-at-read helper over persisted events)',
+        );
+      },
+    );
+  });
+
+  group('cylinder partial preservation', () {
+    test(
+      'a cylinder Subsurface marks not used is suit inflation (#4243)',
+      () async {
+        // Subsurface's "not used" is its non-breathing cylinder: an argon
+        // bottle on a drysuit.
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <cylinder size='11.1 l' workpressure='207.0 bar' description='AL80' o2='21.0%' start='200.0 bar' end='100.0 bar' />
+  <cylinder size='0.85 l' description='Argon' o2='21.0%' use='not used' />
+  <divecomputer model='Test'>
+  <depth max='30.0 m' mean='15.0 m' />
+  <sample time='0:10 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final tanks = dive['tanks'] as List<Map<String, dynamic>>;
+
+        expect(tanks[1]['role'], TankRole.suitInflation);
+      },
+    );
+
+    test('preserves a cylinder with only a gas mix and role', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <cylinder size='11.1 l' workpressure='207.0 bar' description='AL80' o2='21.0%' start='200.0 bar' end='100.0 bar' />
+  <cylinder o2='98.0%' use='oxygen' />
+  <divecomputer model='Test'>
+  <depth max='30.0 m' mean='15.0 m' />
+  <sample time='0:10 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final tanks = dive['tanks'] as List<Map<String, dynamic>>;
+      expect(tanks.length, 2, reason: 'gas-only cylinder is preserved');
+
+      final gasOnly = tanks[1];
+      final gasMix = gasOnly['gasMix'] as GasMix;
+      expect(gasMix.o2, 98.0);
+      expect(gasOnly['role'], TankRole.oxygenSupply);
+      expect(
+        gasOnly.containsKey('volume'),
+        isFalse,
+        reason: 'no size attribute, so no volume',
+      );
+      expect(gasOnly.containsKey('startPressure'), isFalse);
+      expect(gasOnly.containsKey('endPressure'), isFalse);
+    });
+
+    test(
+      'truly-empty cylinder still advances the source index for pressureN',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <cylinder size='11.1 l' workpressure='207.0 bar' description='AL80' o2='21.0%' />
+  <cylinder />
+  <cylinder size='11.1 l' workpressure='207.0 bar' description='DECO50' o2='50.0%' />
+  <divecomputer model='Test'>
+  <depth max='20.0 m' mean='10.0 m' />
+  <!-- pressure1 is intentionally absent: if cylinderIndex fails to advance past
+       the empty slot above, DECO50 would look up pressure1 (missing) instead of
+       pressure2 (present), and startPressure/endPressure would end up null. -->
+  <sample time='0:10 min' depth='5.0 m' pressure0='200.0 bar' pressure2='150.0 bar' />
+  <sample time='5:00 min' depth='20.0 m' pressure0='150.0 bar' pressure2='120.0 bar' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final tanks = dive['tanks'] as List<Map<String, dynamic>>;
+
+        // Two emitted tanks (the truly-empty one is skipped).
+        expect(
+          tanks.length,
+          2,
+          reason:
+              'truly-empty cylinder is filtered out, leaving AL80 and DECO50',
+        );
+
+        // The second emitted tank must have derived its start/end pressure from
+        // the sample-level pressure2 attributes, which requires the source-index
+        // counter to have stepped past the empty cylinder.
+        final secondTank = tanks[1];
+        expect(
+          secondTank['startPressure'],
+          150.0,
+          reason:
+              'DECO50 is at SSRF source-index 2 and must read pressure2; '
+              'if cylinderIndex did not advance past the empty slot it would '
+              'look up pressure1, find nothing, and leave startPressure null',
+        );
+        expect(
+          secondTank['endPressure'],
+          120.0,
+          reason:
+              'endPressure fallback draws the last pressure2 value; '
+              'a wrong cylinderIndex would leave this null as well',
+        );
+        expect(
+          secondTank['uddfTankId'],
+          '2:DECO50',
+          reason: 'DECO50 must be labeled with SSRF source-index 2, not 1',
+        );
+      },
+    );
+  });
+
+  group('dive-level metadata', () {
+    test('parses divecomputer model attribute', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Shearwater Peregrine'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive['diveComputerModel'], 'Shearwater Peregrine');
+    });
+
+    test('parses Serial extradata into diveComputerSerial', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='Serial' value='98d09a47' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive['diveComputerSerial'], '98d09a47');
+    });
+
+    test('parses FW Version extradata into diveComputerFirmware', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='FW Version' value='86' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive['diveComputerFirmware'], '86');
+    });
+
+    test(
+      'parses Deco model "GF 40/85" into buhlmann + gradient factors',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='Deco model' value='GF 40/85' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        expect(dive['decoAlgorithm'], 'buhlmann');
+        expect(dive['gradientFactorLow'], 40);
+        expect(dive['gradientFactorHigh'], 85);
+      },
+    );
+
+    test(
+      'parses Deco model "GF40/85" (no space) into buhlmann + gradient factors',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='Deco model' value='GF40/85' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        expect(dive['decoAlgorithm'], 'buhlmann');
+        expect(dive['gradientFactorLow'], 40);
+        expect(dive['gradientFactorHigh'], 85);
+      },
+    );
+
+    test(
+      'parses Deco model non-GF format as lowercased algo string without GFs',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='Deco model' value='VPM-B +2' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        expect(dive['decoAlgorithm'], 'vpm-b +2');
+        expect(dive.containsKey('gradientFactorLow'), isFalse);
+        expect(dive.containsKey('gradientFactorHigh'), isFalse);
+      },
+    );
+
+    test('parses surface pressure attribute', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <surface pressure='1.012 bar' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive['surfacePressure'], 1.012);
+    });
+
+    test('ignores unrelated extradata keys', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <extradata key='Logversion' value='13(PNF)' />
+  <extradata key='Battery type' value='3.7V Li-Ion' />
+  <extradata key='Battery at end' value='4.0 V' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive.containsKey('diveComputerSerial'), isFalse);
+      expect(dive.containsKey('diveComputerFirmware'), isFalse);
+      expect(dive.containsKey('decoAlgorithm'), isFalse);
+      expect(dive.containsKey('gradientFactorLow'), isFalse);
+    });
+
+    test('no metadata present yields no metadata keys', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer>
+  <depth max='10.0 m' mean='5.0 m' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive.containsKey('diveComputerModel'), isFalse);
+      expect(dive.containsKey('diveComputerSerial'), isFalse);
+      expect(dive.containsKey('diveComputerFirmware'), isFalse);
+      expect(dive.containsKey('decoAlgorithm'), isFalse);
+      expect(dive.containsKey('surfacePressure'), isFalse);
+    });
+  });
+
+  group('profile events', () {
+    test('emits setpointChange from SP change event with mbar value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='20.0 m' mean='10.0 m' />
+  <event time='5:00 min' name='SP change' value='1200' />
+  <sample time='0:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'setpointChange');
+      expect(events[0]['timestamp'], 300);
+      expect(events[0]['value'], 1.2);
+    });
+
+    test('emits setpointChange from SP change event with bar value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='1:00 min' name='SP change' value='1.2' />
+  <sample time='1:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['value'], 1.2);
+    });
+
+    test('drops SP change events with non-positive value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='0:00 min' name='SP change' value='0' />
+  <event time='1:00 min' name='SP change' value='-100' />
+  <sample time='2:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(
+        dive.containsKey('events'),
+        isFalse,
+        reason: 'both events dropped; result has no events key',
+      );
+    });
+
+    test('emits multiple SP change events in document order', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='30.0 m' mean='15.0 m' />
+  <event time='0:00 min' name='SP change' value='700' />
+  <event time='25:00 min' name='SP change' value='1300' />
+  <sample time='0:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 2);
+      expect(events[0]['timestamp'], 0);
+      expect(events[0]['value'], 0.7);
+      expect(events[1]['timestamp'], 1500);
+      expect(events[1]['value'], 1.3);
+    });
+
+    test('no events key on dive without SP change events', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <sample time='1:00 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(dive.containsKey('events'), isFalse);
+    });
+
+    test(
+      'value exactly 10 passes through unchanged (> 10 boundary is exclusive)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='0:00 min' name='SP change' value='10' />
+  <sample time='0:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(
+          events[0]['value'],
+          10.0,
+          reason:
+              'the > 10 threshold is exclusive; value=10 stays as 10.0 bar per '
+              '_parseProfileEvents doc comment. Do NOT change the heuristic to >= 10.',
+        );
+      },
+    );
+
+    test('emits bookmark event', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='2:00 min' name='bookmark' description='cool fish' />
+  <sample time='2:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'bookmark');
+      expect(events[0]['timestamp'], 120);
+      expect(events[0]['description'], 'cool fish');
+    });
+
+    test(
+      'bookmark event without description attribute omits description key',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='5:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='1:00 min' name='bookmark' />
+  <sample time='1:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(events[0]['eventType'], 'bookmark');
+        expect(events[0]['timestamp'], 60);
+        expect(
+          events[0].containsKey('description'),
+          isFalse,
+          reason: 'null-aware `?description` should omit the key entirely',
+        );
+      },
+    );
+
+    test('emits safetyStopStart event from safety stop', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='45:00 min'>
+  <divecomputer model='Test'>
+  <depth max='30.0 m' mean='15.0 m' />
+  <event time='40:00 min' name='safety stop' />
+  <sample time='40:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'safetyStopStart');
+      expect(events[0]['timestamp'], 2400);
+    });
+
+    test('emits decoStopStart event from deco stop', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='45:00 min'>
+  <divecomputer model='Test'>
+  <depth max='60.0 m' mean='30.0 m' />
+  <event time='35:00 min' name='deco stop' />
+  <sample time='35:30 min' depth='9.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'decoStopStart');
+      expect(events[0]['timestamp'], 2100);
+    });
+
+    test('emits decoViolation from ceiling event with value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='20.0 m' />
+  <event time='25:00 min' name='ceiling' value='18.0' />
+  <sample time='25:30 min' depth='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'decoViolation');
+      expect(events[0]['timestamp'], 1500);
+      expect(events[0]['value'], 18.0);
+    });
+
+    test('emits decoViolation from generic violation event', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='20.0 m' />
+  <event time='30:00 min' name='violation' />
+  <sample time='30:30 min' depth='10.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'decoViolation');
+      expect(events[0]['timestamp'], 1800);
+      expect(
+        events[0].containsKey('value'),
+        isFalse,
+        reason: 'no value attribute -> no value field',
+      );
+    });
+
+    test(
+      'ceiling and violation at same timestamp both produce decoViolation events',
+      () async {
+        // Subsurface can emit both `ceiling` and `violation` for the same moment.
+        // Spec-approved flat mapping: preserve both. Dedup (if needed) is a
+        // downstream concern, not a parser concern. This test pins that contract.
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='40.0 m' mean='20.0 m' />
+  <event time='25:00 min' name='ceiling' value='18.0' />
+  <event time='25:00 min' name='violation' />
+  <sample time='25:30 min' depth='15.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(
+          events.length,
+          2,
+          reason: 'both ceiling and violation preserved',
+        );
+        expect(events[0]['eventType'], 'decoViolation');
+        expect(events[1]['eventType'], 'decoViolation');
+        expect(events[0]['timestamp'], 1500);
+        expect(events[1]['timestamp'], 1500);
+        expect(events[0]['value'], 18.0);
+        expect(events[1].containsKey('value'), isFalse);
+      },
+    );
+
+    test('emits ascentRateWarning from ascent event with rate value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
+  <divecomputer model='Test'>
+  <depth max='30.0 m' mean='15.0 m' />
+  <event time='5:00 min' name='ascent' value='12.5' />
+  <sample time='5:30 min' depth='20.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      final events = dive['events'] as List<Map<String, dynamic>>;
+      expect(events.length, 1);
+      expect(events[0]['eventType'], 'ascentRateWarning');
+      expect(events[0]['timestamp'], 300);
+      expect(events[0]['value'], 12.5);
+    });
+
+    test(
+      'emits ppO2High from po2 event with value >= 1.4 (toxicity threshold)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='50.0 m' mean='30.0 m' />
+  <event time='10:00 min' name='po2' value='1.65' />
+  <sample time='10:30 min' depth='45.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(events[0]['eventType'], 'ppO2High');
+        expect(events[0]['timestamp'], 600);
+        expect(
+          events[0]['value'],
+          1.65,
+          reason: '>= 1.4 bar crosses the toxicity threshold -> ppO2High',
+        );
+      },
+    );
+
+    test(
+      'emits ppO2Low from po2 event with value <= 0.18 (hypoxia threshold)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='50.0 m' mean='30.0 m' />
+  <event time='5:00 min' name='po2' value='0.15' />
+  <sample time='5:30 min' depth='45.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(
+          events[0]['eventType'],
+          'ppO2Low',
+          reason: '<= 0.18 bar crosses the hypoxia threshold -> ppO2Low',
+        );
+        expect(events[0]['timestamp'], 300);
+        expect(events[0]['value'], 0.15);
+      },
+    );
+
+    test(
+      'po2 value in normal range (0.18 < v < 1.4) defaults to ppO2High',
+      () async {
+        // Subsurface shouldn't emit po2 events in the normal breathing range,
+        // but if it does, preserve the event as ppO2High rather than drop it.
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='20.0 m' mean='10.0 m' />
+  <event time='5:00 min' name='po2' value='1.0' />
+  <sample time='5:30 min' depth='10.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(
+          events[0]['eventType'],
+          'ppO2High',
+          reason: 'mid-range default preserves the anomaly for surfacing',
+        );
+        expect(events[0]['value'], 1.0);
+      },
+    );
+
+    test('drops po2 event with non-positive value', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test'>
+  <depth max='10.0 m' mean='5.0 m' />
+  <event time='5:00 min' name='po2' value='0' />
+  <sample time='5:30 min' depth='5.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      expect(
+        dive.containsKey('events'),
+        isFalse,
+        reason:
+            'po2=0 is implausible -> dropped; no other events -> no events key',
+      );
+    });
+
+    test(
+      'po2 value exactly 0.18 maps to ppO2Low (hypoxia boundary is inclusive)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='50.0 m' mean='30.0 m' />
+  <event time='5:00 min' name='po2' value='0.18' />
+  <sample time='5:30 min' depth='45.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(
+          events[0]['eventType'],
+          'ppO2Low',
+          reason: '<= 0.18 threshold is INCLUSIVE; do not change to < 0.18',
+        );
+        expect(events[0]['value'], 0.18);
+      },
+    );
+
+    test(
+      'po2 value exactly 1.4 maps to ppO2High (toxicity boundary sits in high range)',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='10:00 min'>
+  <divecomputer model='Test' dctype='CCR'>
+  <depth max='50.0 m' mean='30.0 m' />
+  <event time='5:00 min' name='po2' value='1.4' />
+  <sample time='5:30 min' depth='45.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+        final dive = result.entitiesOf(ImportEntityType.dives).first;
+        final events = dive['events'] as List<Map<String, dynamic>>;
+        expect(events.length, 1);
+        expect(
+          events[0]['eventType'],
+          'ppO2High',
+          reason:
+              'value 1.4 is NOT below 0.18, so it falls into the ppO2High default',
+        );
+        expect(events[0]['value'], 1.4);
+      },
+    );
+  });
+
+  group('CCR fixtures (real Subsurface exports)', () {
+    Future<List<Map<String, dynamic>>> profileOf(String path) async {
+      final bytes = Uint8List.fromList(await File(path).readAsBytes());
+      final result = await parser.parse(bytes);
+      final dive = result.entitiesOf(ImportEntityType.dives).first;
+      return dive['profile'] as List<Map<String, dynamic>>;
+    }
+
+    test(
+      '002 (cells only, no calculated po2): cells imported, ppO2 stays null',
+      () async {
+        final profile = await profileOf(
+          'test/dives/002_ccr_only_low_sp_no_calculated_po2.ssrf.xml',
+        );
+
+        // Only one po2 (0.7) appears; it is the setpoint, carried forward.
+        expect(profile.first['setpoint'], 0.7);
+        expect(profile.last['setpoint'], 0.7);
+        // No dc_supplied_ppo2 anywhere -> measured ppO2 never set.
+        expect(profile.any((p) => p.containsKey('ppO2')), isFalse);
+        // Individual cells are imported raw.
+        expect(profile.any((p) => p.containsKey('o2Sensor1')), isTrue);
+      },
+    );
+
+    test(
+      '003 (setpoint switch + calculated po2): setpoint, ppO2 and cells',
+      () async {
+        final profile = await profileOf(
+          'test/dives/003_ccr_with_setpoint_switch_and_calculated_po2.ssrf.xml',
+        );
+
+        // Setpoint switch low -> high -> low, carried forward between changes.
+        final setpoints = profile
+            .map((p) => p['setpoint'] as double?)
+            .whereType<double>()
+            .toSet();
+        expect(setpoints, containsAll(<double>[0.7, 1.3]));
+        // Calculated ppO2 (dc_supplied_ppo2) is imported as measured ppO2.
+        expect(profile.any((p) => p.containsKey('ppO2')), isTrue);
+        // Individual cells are imported raw.
+        expect(profile.any((p) => p.containsKey('o2Sensor1')), isTrue);
+      },
+    );
+
+    test(
+      '003 (deco stop schedule): stopdepth maps to a non-null ceiling from the '
+      'first stop onward with the 6/9/12/15 m schedule intact',
+      () async {
+        final profile = await profileOf(
+          'test/dives/003_ccr_with_setpoint_switch_and_calculated_po2.ssrf.xml',
+        );
+
+        // The opening samples are pre-deco and carry no ceiling.
+        expect(profile.first['ceiling'], isNull);
+        // The computer reports stop depths that reach the app as ceilings.
+        expect(profile.any((p) => p['ceiling'] != null), isTrue);
+        // The full stop schedule survives the import rather than being thrown
+        // away (previously every ceiling was null).
+        final ceilings = profile
+            .map((p) => p['ceiling'] as double?)
+            .whereType<double>()
+            .toSet();
+        expect(ceilings, containsAll(<double>[6.0, 9.0, 12.0, 15.0]));
+        // stopdepth '0.0 m' near the end clears the obligation.
+        expect(profile.last['ceiling'], isNull);
+      },
+    );
+  });
+  group('picture parsing', () {
+    test(
+      'parses filename, offset and gps, pointing at the owning dive',
+      () async {
+        final result = await parser.parse(
+          xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00' duration='40:00 min'>
+  <picture filename='/home/jai/Pictures/2025/dive042.jpg' offset='+3:20 min' gps='18.465562 -66.084902'/>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        final media = result.entitiesOf(ImportEntityType.media);
+        expect(media, hasLength(1));
+        expect(media.first['filename'], '/home/jai/Pictures/2025/dive042.jpg');
+        expect(media.first['offsetSeconds'], 200);
+        expect(media.first['latitude'], closeTo(18.465562, 1e-6));
+        expect(media.first['longitude'], closeTo(-66.084902, 1e-6));
+        expect(media.first['_diveIndex'], 0);
+      },
+    );
+
+    test('accepts comma-separated picture coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='/p/a.jpg' gps='18.465562, -66.084902'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final media = result.entitiesOf(ImportEntityType.media);
+      expect(media.single['latitude'], closeTo(18.465562, 1e-6));
+      expect(media.single['longitude'], closeTo(-66.084902, 1e-6));
+    });
+
+    test('rejects NaN picture coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='/p/a.jpg' gps='NaN NaN'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      // double.tryParse happily parses 'NaN', and every comparison against
+      // NaN is false, so a range check alone would wave it through.
+      final media = result.entitiesOf(ImportEntityType.media);
+      expect(media.single['latitude'], isNull);
+      expect(media.single['longitude'], isNull);
+    });
+
+    test('rejects out-of-range picture coordinates', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='/p/a.jpg' gps='91.0 -200.0'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final media = result.entitiesOf(ImportEntityType.media);
+      expect(media.single['latitude'], isNull);
+      expect(media.single['longitude'], isNull);
+    });
+
+    test('parses a negative offset', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='/p/before.jpg' offset='-1:05 min'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(
+        result.entitiesOf(ImportEntityType.media).single['offsetSeconds'],
+        -65,
+      );
+    });
+
+    test('keeps a picture whose offset is unparseable', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='/p/odd.jpg' offset='not a duration'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final media = result.entitiesOf(ImportEntityType.media);
+      expect(media, hasLength(1));
+      expect(media.single['offsetSeconds'], isNull);
+    });
+
+    test(
+      'keeps a Windows path verbatim for the resolver to normalise',
+      () async {
+        final result = await parser.parse(
+          xmlBytes(r'''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture filename='C:\Users\jai\Pictures\dive042.jpg' offset='+1:00 min'/>
+</dive>
+</dives>
+</divelog>
+'''),
+        );
+
+        expect(
+          result.entitiesOf(ImportEntityType.media).single['filename'],
+          r'C:\Users\jai\Pictures\dive042.jpg',
+        );
+      },
+    );
+
+    test('drops a picture with no filename and warns', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'>
+  <picture offset='+1:00 min'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.media), isEmpty);
+      expect(
+        result.warnings.any((w) => w.entityType == ImportEntityType.media),
+        isTrue,
+      );
+      expect(result.warnings.single.code, ImportWarningCode.photosSkipped);
+    });
+
+    test('collects pictures from trip-wrapped dives too', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<trip date='2025-01-15' location='Bonaire'>
+  <dive number='1' date='2025-01-15' time='10:00:00'>
+    <picture filename='/p/trip.jpg' offset='+1:00 min'/>
+  </dive>
+</trip>
+<dive number='2' date='2025-01-16' time='10:00:00'>
+  <picture filename='/p/solo.jpg' offset='+2:00 min'/>
+</dive>
+</dives>
+</divelog>
+'''),
+      );
+
+      final media = result.entitiesOf(ImportEntityType.media);
+      expect(media, hasLength(2));
+      // Trip dives are walked first, so the trip picture points at dive 0.
+      expect(media.map((m) => [m['filename'], m['_diveIndex']]), [
+        ['/p/trip.jpg', 0],
+        ['/p/solo.jpg', 1],
+      ]);
+    });
+
+    test('omits the media key when a logbook has no pictures', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<dive number='1' date='2025-01-15' time='10:00:00'/>
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entities.containsKey(ImportEntityType.media), isFalse);
+    });
+  });
+
+  // A gradient factor too large for an int makes the dive's parse throw,
+  // which is how a real file with a corrupt dive reaches the skip path.
+  group('a dive that cannot be read', () {
+    const corruptDive = '''
+<dive number='2' date='2025-01-16' time='10:00:00'>
+  <divecomputer model='X'>
+    <extradata key='Deco model' value='GF 99999999999999999999/85'/>
+  </divecomputer>
+</dive>''';
+    const goodDive = "<dive number='1' date='2025-01-15' time='10:00:00'/>";
+
+    test('is coded as a skipped dive', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+$goodDive
+$corruptDive
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.dives), hasLength(1));
+      expect(result.warnings.single.code, ImportWarningCode.divesSkipped);
+    });
+
+    test('inside a trip is coded as a skipped dive too', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<trip date='2025-01-15' time='09:00:00' location='Somewhere'>
+$goodDive
+$corruptDive
+</trip>
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.dives), hasLength(1));
+      expect(result.warnings.single.code, ImportWarningCode.divesSkipped);
+    });
+
+    // A dive with no date cannot be placed in the log, so it is left out.
+    // The summary must count it rather than let it vanish silently.
+    const datelessDive = "<dive number='3' time='10:00:00'/>";
+
+    test('with no date is coded as a skipped dive', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+$goodDive
+$datelessDive
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.dives), hasLength(1));
+      expect(result.warnings.single.code, ImportWarningCode.divesSkipped);
+    });
+
+    test('with no date inside a trip is coded as a skipped dive', () async {
+      final result = await parser.parse(
+        xmlBytes('''
+<divelog program='subsurface' version='3'>
+<dives>
+<trip date='2025-01-15' time='09:00:00' location='Somewhere'>
+$goodDive
+$datelessDive
+</trip>
+</dives>
+</divelog>
+'''),
+      );
+
+      expect(result.entitiesOf(ImportEntityType.dives), hasLength(1));
+      expect(result.warnings.single.code, ImportWarningCode.divesSkipped);
     });
   });
 }

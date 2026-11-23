@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/map_style.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/settings/presentation/pages/appearance_page.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/settings/presentation/widgets/appearance_settings_tiles.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 /// Mock SettingsNotifier that doesn't access the database
@@ -16,15 +19,32 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
       state = state.copyWith(mapStyle: style);
 
   @override
+  Future<void> setAccentNavIcons(bool value) async =>
+      state = state.copyWith(accentNavIcons: value);
+
+  @override
+  Future<void> setAccentSectionHeaders(bool value) async =>
+      state = state.copyWith(accentSectionHeaders: value);
+
+  @override
+  Future<void> setAccentListIcons(bool value) async =>
+      state = state.copyWith(accentListIcons: value);
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+/// Backs the display zoom control, which AppearancePage now embeds.
+late SharedPreferences _prefs;
 
 Widget _buildTestWidget() {
   return ProviderScope(
     overrides: [
       settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+      sharedPreferencesProvider.overrideWithValue(_prefs),
     ],
     child: const MaterialApp(
+      locale: Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: AppearancePage(),
@@ -33,6 +53,11 @@ Widget _buildTestWidget() {
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _prefs = await SharedPreferences.getInstance();
+  });
+
   group('AppearancePage hub layout', () {
     testWidgets('shows General section header', (tester) async {
       await tester.binding.setSurfaceSize(const Size(400, 2000));
@@ -86,14 +111,18 @@ void main() {
       expect(find.text('Sections'), findsOneWidget);
     });
 
-    testWidgets('shows all 8 section navigation tiles', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(400, 2000));
+    testWidgets('shows all 9 section navigation tiles', (tester) async {
+      // Taller since the page gained the gear-arrangement tile (#1486,
+      // #1576); at 2000 the last section tile fell below the surface and the
+      // lazy list never built it.
+      await tester.binding.setSurfaceSize(const Size(400, 2200));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(_buildTestWidget());
       await tester.pumpAndSettle();
 
       for (final label in [
+        'Home',
         'Dives',
         'Sites',
         'Buddies',
@@ -111,6 +140,89 @@ void main() {
       }
     });
 
+    testWidgets('Home tile opens the home appearance page', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      String? pushed;
+      final router = GoRouter(
+        routes: [
+          GoRoute(path: '/', builder: (_, _) => const AppearancePage()),
+          GoRoute(
+            path: '/settings/appearance/home',
+            builder: (_, _) => Builder(
+              builder: (context) {
+                pushed = '/settings/appearance/home';
+                return const Scaffold();
+              },
+            ),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+            sharedPreferencesProvider.overrideWithValue(_prefs),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            routerConfig: router,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Home'));
+      await tester.pumpAndSettle();
+
+      expect(pushed, '/settings/appearance/home');
+    });
+
+    testWidgets('Language tile pushes the language page', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final router = GoRouter(
+        routes: [
+          GoRoute(path: '/', builder: (_, _) => const AppearancePage()),
+          GoRoute(
+            path: '/settings/language',
+            builder: (_, _) => const Scaffold(body: Text('language page')),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+            sharedPreferencesProvider.overrideWithValue(_prefs),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            routerConfig: router,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The wide settings pane says Language too (#3095).
+      await tester.tap(find.text('Language'));
+      await tester.pumpAndSettle();
+
+      // PUSH (not go): the settings page stays underneath, so the Android
+      // system back button returns to it instead of closing the app (#647).
+      expect(find.text('language page'), findsOneWidget);
+      expect(router.routerDelegate.canPop(), isTrue);
+    });
+
     testWidgets('does NOT show old inline settings', (tester) async {
       await tester.binding.setSurfaceSize(const Size(400, 2000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -121,6 +233,58 @@ void main() {
       expect(find.text('Dive List View'), findsNothing);
       expect(find.text('Show Profile Panel in Table View'), findsNothing);
       expect(find.text('Show details pane in table mode'), findsNothing);
+    });
+  });
+
+  group('AppearancePage color accents', () {
+    testWidgets('shows the three accent toggles, all off by default', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Color accents'), findsOneWidget);
+      expect(find.text('Colored navigation icons'), findsOneWidget);
+      expect(find.text('Colored section headers'), findsOneWidget);
+      expect(find.text('Colored list icons'), findsOneWidget);
+
+      // Only the accent group's switches: General also holds the country
+      // flags switch (issue #4426).
+      final switches = tester
+          .widgetList<SwitchListTile>(
+            find.descendant(
+              of: find.byType(AppearanceAccentTiles),
+              matching: find.byType(SwitchListTile),
+            ),
+          )
+          .toList();
+      expect(switches, hasLength(3));
+      expect(switches.every((s) => s.value == false), isTrue);
+    });
+
+    testWidgets('tapping a toggle turns only that surface on', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Colored navigation icons'));
+      await tester.pumpAndSettle();
+
+      SwitchListTile tileFor(String title) => tester.widget<SwitchListTile>(
+        find.ancestor(
+          of: find.text(title),
+          matching: find.byType(SwitchListTile),
+        ),
+      );
+
+      expect(tileFor('Colored navigation icons').value, isTrue);
+      expect(tileFor('Colored section headers').value, isFalse);
+      expect(tileFor('Colored list icons').value, isFalse);
     });
   });
 }

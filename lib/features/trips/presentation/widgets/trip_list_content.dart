@@ -1,31 +1,84 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
+import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
+import 'package:submersion/core/router/section_navigation.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/trips/presentation/helpers/side_trip_delete_lines.dart';
+import 'package:submersion/features/trips/presentation/providers/side_trip_providers.dart';
+import 'package:submersion/shared/selection/bulk_action.dart';
+import 'package:submersion/shared/selection/select_items_menu_entries.dart';
+import 'package:submersion/shared/widgets/master_detail/estimated_row_scroll.dart';
+import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/list_position_restorer.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
+import 'package:submersion/shared/widgets/shared_items/shared_item_dialogs.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/selectable_list_scope.dart';
+import 'package:submersion/shared/selection/selection_leading.dart';
+import 'package:submersion/shared/selection/selection_app_bar.dart';
+import 'package:submersion/shared/selection/selection_controller.dart';
+import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/features/trips/domain/constants/trip_field.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_frame.dart';
+import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_edit_routes.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/query/trip_query_entity.dart';
 import 'package:submersion/features/trips/presentation/widgets/compact_trip_list_tile.dart';
 import 'package:submersion/features/trips/presentation/widgets/dense_trip_list_tile.dart';
+import 'package:submersion/features/trips/presentation/widgets/upcoming_trip_banner.dart';
+import 'package:submersion/shared/widgets/card_icon_label.dart';
+import 'package:submersion/shared/widgets/feature_accent.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_list_count_provider.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
+import 'package:submersion/shared/widgets/shared_items/item_bulk_share.dart';
+import 'package:submersion/core/data/visibility/item_sharing.dart';
+import 'package:submersion/features/trips/presentation/helpers/trip_list_rows.dart';
+import 'package:submersion/features/trips/presentation/widgets/side_trip_indent.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_country_flags.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Content widget for the trip list, used in master-detail layout.
+final _log = LoggerService.forClass(TripListContent);
+
 class TripListContent extends ConsumerStatefulWidget {
   final void Function(String?)? onItemSelected;
   final String? selectedId;
   final bool showAppBar;
   final Widget? floatingActionButton;
+
+  /// Leads the compact (master-detail) header with a back arrow. Set when
+  /// the list was pushed over the page that opened it (#3350); the phone
+  /// app bar adds its own.
+  final bool showBackButton;
+
+  /// Drives bulk selection from outside the list when set.
+  ///
+  /// In table mode the page's header carries the overflow menu, "Select
+  /// items" among it, so the page has to reach the same controller the rows
+  /// use. Left null, the list owns its own.
+  final SelectionController? selectionController;
 
   const TripListContent({
     super.key,
@@ -33,6 +86,8 @@ class TripListContent extends ConsumerStatefulWidget {
     this.selectedId,
     this.showAppBar = true,
     this.floatingActionButton,
+    this.showBackButton = false,
+    this.selectionController,
   });
 
   @override
@@ -40,23 +95,46 @@ class TripListContent extends ConsumerStatefulWidget {
 }
 
 class _TripListContentState extends ConsumerState<TripListContent> {
+  /// The bulk-selection state machine for this list: the page's when it
+  /// passes one, otherwise this list's own.
+  late final SelectionController _selection = _adoptSelection();
+
+  /// Only a controller this list created is this list's to dispose. Set in
+  /// the same step that picks the controller, so the two cannot disagree.
+  bool _ownsSelection = false;
+
+  SelectionController _adoptSelection() {
+    final external = widget.selectionController;
+    _ownsSelection = external == null;
+    return external ?? SelectionController();
+  }
+
+  /// Convenience mirrors of the controller, so the widget tree reads clearly.
+  bool get _isSelectionMode => _selection.value.isActive;
+  Set<String> get _selectedIds => _selection.value.checkedIds;
+
   final ScrollController _scrollController = ScrollController();
   String? _lastScrolledToId;
   bool _selectionFromList = false;
 
+  /// Brings the list back to the trip last opened when it is built again
+  /// after the diver left it (#3301).
+  late final ListPositionRestorer _positionRestorer = ListPositionRestorer(
+    controller: _scrollController,
+    attempt: _restoreRememberedTrip,
+  );
+
   @override
   void initState() {
     super.initState();
-    if (widget.selectedId != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToSelectedItem();
-      });
-    }
+    _positionRestorer.start(ref, sortedFilteredTripsProvider);
   }
 
   @override
   void dispose() {
+    _positionRestorer.dispose();
     _scrollController.dispose();
+    if (_ownsSelection) _selection.dispose();
     super.dispose();
   }
 
@@ -75,36 +153,45 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     }
   }
 
-  void _scrollToSelectedItem() {
-    if (widget.selectedId == null) return;
+  /// One try at showing the selected trip (one in the address) or, failing
+  /// that, the trip last opened, for [_positionRestorer]: true once there
+  /// is nothing left to wait for. A list pushed over another page starts at
+  /// its top unless its address names one.
+  bool _restoreRememberedTrip() {
+    if (!mounted) return true;
+    return restoreListPosition(
+      context,
+      items: ref.read(sortedFilteredTripsProvider),
+      selectedId: widget.selectedId,
+      rememberedId: ref.read(highlightedTripIdProvider),
+      idOf: (item) => item.trip.id,
+      controller: _scrollController,
+      scrollTo: (id) => _scrollToSelectedItem(targetId: id, jump: true),
+    );
+  }
 
-    final tripsAsync = ref.read(tripListNotifierProvider);
-    tripsAsync.whenData((trips) {
-      final index = trips.indexWhere((t) => t.trip.id == widget.selectedId);
-      if (index >= 0 && _scrollController.hasClients) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_scrollController.hasClients || trips.isEmpty) return;
-
-          final maxScroll = _scrollController.position.maxScrollExtent;
-          final viewportHeight = _scrollController.position.viewportDimension;
-          final totalContentHeight = maxScroll + viewportHeight - 80;
-          final avgItemHeight = totalContentHeight / trips.length;
-          final targetOffset = (index * avgItemHeight) - (viewportHeight / 3);
-          final clampedOffset = targetOffset.clamp(0.0, maxScroll);
-
-          _scrollController.animateTo(
-            clampedOffset,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-          );
-          _lastScrolledToId = widget.selectedId;
-        });
-      }
-    });
+  /// Scrolls to [targetId], or the selected trip when omitted. [jump] moves
+  /// straight there, for a list being restored, which should not visibly
+  /// travel from the top.
+  void _scrollToSelectedItem({String? targetId, bool jump = false}) {
+    final target = targetId ?? widget.selectedId;
+    if (target == null || !_scrollController.hasClients) return;
+    final items = ref.read(sortedFilteredTripsProvider).value;
+    if (items == null) return;
+    final index = items.indexWhere((item) => item.trip.id == target);
+    if (index < 0) return;
+    _lastScrolledToId = target;
+    scrollToEstimatedRow(
+      _scrollController,
+      index: index,
+      rowCount: items.length,
+      jump: jump,
+    );
   }
 
   void _handleItemTap(Trip trip) {
     ref.read(highlightedTripIdProvider.notifier).state = trip.id;
+    forgetClosedPane(ref, RecordListSection.trips);
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(trip.id);
@@ -122,16 +209,34 @@ class _TripListContentState extends ConsumerState<TripListContent> {
       currentField: sort.field,
       currentDirection: sort.direction,
       fields: TripSortField.values,
-      getFieldDisplayName: (field) => field.displayName,
+      getFieldDisplayName: (field) => field.localizedName(context.l10n),
       getFieldIcon: (field) => field.icon,
       onSortChanged: (field, direction) {
-        ref.read(tripSortProvider.notifier).state = SortState(
-          field: field,
-          direction: direction,
-        );
+        ref
+            .read(settingsProvider.notifier)
+            .setTripSort(SortState(field: field, direction: direction));
       },
     );
   }
+
+  void _setQuery(QueryNode? query) => setTripQuery(ref, query);
+
+  void _openQueryFilter() => showQueryFilterSheet(
+    context,
+    subject: QuerySubject.trips,
+    root: tripQueryEntity,
+    initial: ref.read(tripFilterProvider).query,
+    onApply: setTripQuery,
+  );
+
+  /// The list body with the query's chips above it (#2365).
+  Widget _withQueryChips(Widget child) => EntitySearchFrame(
+    subject: QuerySubject.trips,
+    root: tripQueryEntity,
+    query: ref.watch(tripFilterProvider).query,
+    onChanged: _setQuery,
+    child: child,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -144,68 +249,118 @@ class _TripListContentState extends ConsumerState<TripListContent> {
       return _buildTableModeScaffold(context, tripsAsync, filter);
     }
 
-    final content = tripsAsync.when(
-      data: (trips) => trips.isEmpty
-          ? _buildEmptyState(context, filter.hasActiveFilters)
-          : _buildTripList(context, ref, trips, filter.hasActiveFilters),
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => _buildErrorState(context, error),
-    );
-
-    if (!widget.showAppBar) {
-      return Column(
-        children: [
-          _buildCompactAppBar(context),
-          Expanded(child: content),
-        ],
+    // Built inside the selection listener below so rows re-render as checks
+    // change; computing it here would leave the list frozen mid-selection.
+    Widget buildContent() {
+      return tripsAsync.when(
+        data: (trips) => trips.isEmpty
+            ? _buildEmptyState(context, filter.hasActiveFilters)
+            : _buildTripList(context, ref, trips, filter.equipmentId != null),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (_, _) => _buildErrorState(context),
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(context.l10n.trips_appBar_title),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: context.l10n.trips_list_tooltip_search,
-            onPressed: () {
-              showSearch(context: context, delegate: TripSearchDelegate());
-            },
+    final loadedTrips = tripsAsync.value ?? const <TripWithStats>[];
+    final visibleIds = loadedTrips.map((t) => t.trip.id).toList();
+
+    // Drop checked trips that fell out of the filtered list once its rows
+    // settle, so a bulk action can never reach a trip that is not on screen.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          tripsAsync,
+          (rows) => rows.map((t) => t.trip.id),
+        );
+      }
+    });
+
+    if (!widget.showAppBar) {
+      return SelectableListScope(
+        controller: _selection,
+        selectableIds: visibleIds,
+        child: ValueListenableBuilder<SelectionState>(
+          valueListenable: _selection,
+          builder: (context, selection, _) => Column(
+            children: [
+              selection.isActive
+                  ? _buildSelectionBar(loadedTrips, SelectionBarShell.pane)
+                  : _buildCompactAppBar(context),
+              Expanded(child: _withQueryChips(buildContent())),
+            ],
           ),
-          IconButton(
-            icon: const Icon(Icons.sort),
-            tooltip: context.l10n.trips_list_tooltip_sort,
-            onPressed: () => _showSortSheet(context),
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert),
-            onSelected: (value) {
-              if (value.startsWith('view_')) {
-                final mode = ListViewMode.fromName(
-                  value.replaceFirst('view_', ''),
-                );
-                ref.read(tripListViewModeProvider.notifier).state = mode;
-              }
-            },
-            itemBuilder: (context) {
-              final currentMode = ref.read(tripListViewModeProvider);
-              return [
-                ...ListViewModeToggle.menuItems(
-                  context,
-                  currentMode: currentMode,
-                  modes: const [
-                    ListViewMode.detailed,
-                    ListViewMode.compact,
-                    ListViewMode.table,
+        ),
+      );
+    }
+
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) => Scaffold(
+          appBar: selection.isActive
+              ? _buildSelectionBar(loadedTrips, SelectionBarShell.appBar)
+              : AppBar(
+                  title: FeatureAppBarTitle(
+                    featureId: 'trips',
+                    title: context.l10n.trips_appBar_title,
+                    subtitle: tripListCountLabel(context, ref),
+                  ),
+                  actions: [
+                    EntitySearchAction(
+                      subject: QuerySubject.trips,
+                      active: ref.watch(tripFilterProvider).query != null,
+                      tooltip: context.l10n.trips_list_tooltip_search,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.sort),
+                      tooltip: context.l10n.trips_list_tooltip_sort,
+                      onPressed: () => _showSortSheet(context),
+                    ),
+                    QueryFilterButton(
+                      active: ref.watch(tripFilterProvider).query != null,
+                      onPressed: _openQueryFilter,
+                    ),
+                    PopupMenuButton<String>(
+                      icon: const Icon(Icons.more_vert),
+                      onSelected: (value) {
+                        if (value.startsWith('view_')) {
+                          final mode = ListViewMode.fromName(
+                            value.replaceFirst('view_', ''),
+                          );
+                          ref
+                              .read(settingsProvider.notifier)
+                              .setTripListViewMode(mode);
+                        }
+                      },
+                      itemBuilder: (context) {
+                        final currentMode = ref.read(tripListViewModeProvider);
+                        return [
+                          ...selectItemsMenuEntries(
+                            context,
+                            onSelect: _selection.enterExplicit,
+                          ),
+                          ...ListViewModeToggle.menuItems(
+                            context,
+                            currentMode: currentMode,
+                            modes: const [
+                              ListViewMode.detailed,
+                              ListViewMode.compact,
+                              ListViewMode.table,
+                            ],
+                          ),
+                        ];
+                      },
+                    ),
                   ],
                 ),
-              ];
-            },
-          ),
-        ],
+          body: _withQueryChips(buildContent()),
+          floatingActionButton: selection.isActive
+              ? null
+              : widget.floatingActionButton,
+        ),
       ),
-      body: content,
-      floatingActionButton: widget.floatingActionButton,
     );
   }
 
@@ -213,14 +368,244 @@ class _TripListContentState extends ConsumerState<TripListContent> {
   ///
   /// When embedded inside [TableModeLayout], provides only the table content.
   /// The app bar, map, and column settings are managed by [TableModeLayout].
+  /// Trips offer one extra: Share with... (issue #2151), with two or more
+  /// profiles, for the active profile's own trips.
+  ///
+  /// The per-trip export menu item is a stub -- both its CSV and PDF entries
+  /// only show a "coming soon" snackbar (trip_detail_page.dart:573) -- so
+  /// there is no working single-item action to lift into a bulk one.
+  SelectionAppBar _buildSelectionBar(
+    List<TripWithStats> trips,
+    SelectionBarShell shell,
+  ) {
+    final activeDiverId = ref.watch(validatedCurrentDiverIdProvider).value;
+    final multipleDivers =
+        (ref.watch(allDiversProvider).value?.length ?? 0) >= 2;
+    final ownerById = {for (final t in trips) t.trip.id: t.trip.diverId};
+    return SelectionAppBar(
+      controller: _selection,
+      selectableIds: trips.map((t) => t.trip.id).toList(),
+      actions: [
+        if (multipleDivers && activeDiverId != null)
+          BulkAction(
+            id: 'share',
+            icon: Icons.share,
+            label: context.l10n.sharedItems_bulkShare_action,
+            isEnabled: (ids) =>
+                ids.every((id) => ownerById[id] == activeDiverId),
+            onInvoke: () => shareItemsWithProfiles(
+              context,
+              ref,
+              kind: SharedItemKind.trip,
+              ids: _selectedIds.toList(),
+              activeDiverId: activeDiverId,
+            ),
+          ),
+      ],
+      shell: shell,
+      onDelete: _confirmAndDelete,
+    );
+  }
+
+  Future<BulkActionOutcome> _confirmAndDelete() async {
+    final ids = _selectedIds.toList();
+    if (ids.isEmpty) return BulkActionOutcome.cancelled;
+
+    // Another profile's shared trips are hidden, not deleted, and the
+    // owner's shared ones are named as going for everyone (issue #2594).
+    final sharing = await readSharingContext(ref, context);
+    if (sharing == null) return BulkActionOutcome.failed;
+    if (!mounted) return BulkActionOutcome.cancelled;
+    final trips = ref.read(tripListNotifierProvider).value ?? const [];
+    final selected = [
+      for (final t in trips)
+        if (ids.contains(t.trip.id)) t.trip,
+    ];
+    final split = splitForBulkDelete(
+      selected,
+      ownerOf: (t) => t.diverId,
+      // A listed item another profile owns reaches this one only by being
+      // shared with it, with everyone or by a share row (issue #2151).
+      isSharedOf: (_) => true,
+      activeDiverId: sharing.activeDiverId,
+    );
+    final deleteCount = split.destroy.length;
+    final hideCount = split.hide.length;
+    if (deleteCount + hideCount == 0) return BulkActionOutcome.cancelled;
+    // Shared with everyone or with chosen profiles (issue #2151).
+    final sharedByName = sharing.diverCount >= 2 && split.destroy.isNotEmpty
+        ? await ref.read(itemIdsWithSharesProvider(SharedItemKind.trip).future)
+        : const <String>{};
+    if (!mounted) return BulkActionOutcome.cancelled;
+    // What the delete does to side trips and their dives (issue #3658).
+    final sideTripLines = await sideTripDeleteLines(
+      context.l10n,
+      ref.read(sideTripRepositoryProvider),
+      [for (final t in split.destroy) t.id],
+      diverId: sharing.activeDiverId,
+    );
+    if (!mounted) return BulkActionOutcome.cancelled;
+    final sharedDeleteCount = sharing.diverCount >= 2
+        ? split.destroy
+              .where(
+                (t) => isSharedWithAnyone(
+                  id: t.id,
+                  everyone: t.isShared,
+                  namedShares: sharedByName,
+                ),
+              )
+              .length
+        : 0;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          // Counts only what is deleted: the body lines name the shared
+          // trips that are only removed from this profile.
+          deleteCount > 0
+              ? ctx.l10n.common_bulkDelete_title(deleteCount)
+              : ctx.l10n.sharedItems_bulkRemoveTitle(hideCount),
+        ),
+        content: Text(
+          [
+            ...bulkDeleteLines(
+              ctx.l10n,
+              SharedItemKind.trip,
+              deleteCount: deleteCount,
+              hideCount: hideCount,
+              sharedDeleteCount: sharedDeleteCount,
+            ),
+            ...sideTripLines,
+            if (deleteCount > 0) ctx.l10n.common_bulkDelete_body,
+          ].join('\n\n'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(ctx.l10n.common_action_cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: deleteCount > 0
+                ? FilledButton.styleFrom(
+                    backgroundColor: Theme.of(ctx).colorScheme.error,
+                  )
+                : null,
+            child: Text(
+              deleteCount > 0
+                  ? ctx.l10n.common_action_delete
+                  : ctx.l10n.common_action_remove,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return BulkActionOutcome.cancelled;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = context.l10n;
+    final notifier = ref.read(tripListNotifierProvider.notifier);
+    _selection.exit();
+
+    var deleted = 0;
+    var hidden = 0;
+    var failed = false;
+    // The selection is gone, so a failure part way says what was done and
+    // that the rest was not, rather than escaping unseen (issue #2682).
+    try {
+      for (final trip in split.destroy) {
+        if (await notifier.deleteTrip(trip.id)) deleted++;
+      }
+      if (split.hide.isNotEmpty) {
+        hidden = await notifier.hideTrips([for (final t in split.hide) t.id]);
+      }
+    } catch (e, stackTrace) {
+      _log.error(
+        'Could not finish the trip bulk delete',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      failed = true;
+    }
+
+    final summary = [
+      if (deleted > 0) l10n.common_bulkDelete_snackbar(deleted),
+      if (hidden > 0) l10n.sharedItems_bulkHiddenSnackbar(hidden),
+      if (failed) l10n.common_error_tryAgain,
+    ];
+    // Nothing done (every action refused): no empty snackbar. A failure
+    // says so even once the list has closed.
+    if ((mounted || failed) && summary.isNotEmpty) {
+      // Replaces any earlier summary, as the site list's does, so the
+      // latest outcome is the one showing.
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text(summary.join(' · '))));
+    }
+    return BulkActionOutcome.completed;
+  }
+
+  /// One tap policy for every trip row.
+  ///
+  /// A held modifier turns a tap into an implicit entry -- the one path
+  /// that still evaporates at zero checked, since touch has no gesture
+  /// entry left.
+  void _handleRowTap(Trip trip) {
+    if (SelectableListScope.isModifierPressed()) {
+      _selection.enterImplicit(trip.id);
+      return;
+    }
+    if (_isSelectionMode) {
+      _selection.toggle(trip.id);
+      return;
+    }
+    _handleItemTap(trip);
+  }
+
   Widget _buildTableModeScaffold(
     BuildContext context,
     AsyncValue<List<TripWithStats>> tripsAsync,
     TripFilterState filter,
   ) {
-    final tableContent = _buildTableView(context, tripsAsync, filter);
+    final loadedTrips = tripsAsync.value ?? const <TripWithStats>[];
+    final visibleIds = loadedTrips.map((t) => t.trip.id).toList();
 
-    return tableContent;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selection.pruneToSettled(
+          tripsAsync,
+          (rows) => rows.map((t) => t.trip.id),
+        );
+      }
+    });
+
+    return SelectableListScope(
+      controller: _selection,
+      selectableIds: visibleIds,
+      child: ValueListenableBuilder<SelectionState>(
+        valueListenable: _selection,
+        builder: (context, selection, _) {
+          // Built inside the builder so the table's own rows re-render as
+          // checks change; building it outside left them on a stale
+          // selectedIds while only the bar updated.
+          final tableContent = _withQueryChips(
+            _buildTableView(context, tripsAsync, filter),
+          );
+
+          // Table mode has no app bar of its own: "Select items" sits in the
+          // page header's overflow menu, and the contextual bar opens above
+          // the table while selecting.
+          return Column(
+            children: [
+              if (selection.isActive)
+                _buildSelectionBar(loadedTrips, SelectionBarShell.pane),
+              Expanded(child: tableContent),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   /// Build the [EntityTableView] for trip table mode.
@@ -231,19 +616,19 @@ class _TripListContentState extends ConsumerState<TripListContent> {
   ) {
     return tripsAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, s) => _buildErrorState(context, e),
+      error: (_, _) => _buildErrorState(context),
       data: (trips) {
         if (trips.isEmpty) {
           return _buildEmptyState(context, filter.hasActiveFilters);
         }
         final config = ref.watch(tripTableConfigProvider);
         final notifier = ref.read(tripTableConfigProvider.notifier);
-        final settings = ref.watch(settingsProvider);
-        final units = UnitFormatter(settings);
+        final units = ref.watch(unitFormatterProvider);
 
         return Column(
           children: [
-            if (filter.hasActiveFilters) _buildActiveFiltersBar(context, ref),
+            if (filter.equipmentId != null)
+              _buildActiveFiltersBar(context, ref),
             Expanded(
               child: EntityTableView<TripWithStats, TripField>(
                 entities: trips,
@@ -253,10 +638,18 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                 units: units,
                 onSortFieldChanged: notifier.setSortField,
                 onResizeColumn: notifier.resizeColumn,
+                onHideColumn: notifier.hideColumn,
                 onEntityTapDown: (id) {
                   ref.read(highlightedTripIdProvider.notifier).state = id;
+                  // The same row again sets no new highlight; the pane is reopened all
+                  // the same, so it is no longer one the diver emptied (#3301).
+                  forgetClosedPane(ref, RecordListSection.trips);
                 },
-                onEntityTap: (id) {},
+                onEntityTap: (id) {
+                  if (_isSelectionMode) _selection.toggle(id);
+                },
+                selectedIds: _selectedIds,
+                isSelectionMode: _isSelectionMode,
                 onEntityDoubleTap: (id) {
                   context.push('/trips/$id');
                 },
@@ -283,25 +676,43 @@ class _TripListContentState extends ConsumerState<TripListContent> {
       ),
       child: Row(
         children: [
-          const SizedBox(width: 8),
-          Text(
-            context.l10n.trips_appBar_title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          // A list pushed over the page that opened it (a gear item's
+          // trips, say) leads with the way back to that page (#3350).
+          if (widget.showBackButton)
+            const BackButton()
+          else
+            const SizedBox(width: 8),
+          // Expanded, and no Spacer: the title must be the row's only flexible
+          // child. Pairing Flexible with Spacer gave each flex: 1, so the
+          // Spacer took exactly half the free space instead of the remainder
+          // and the leftover half fell after the last icon, left-shifting the
+          // whole action row. The title still yields before the row overflows,
+          // because FeatureAppBarTitle ellipsises.
+          Expanded(
+            child: FeatureAppBarTitle(
+              featureId: 'trips',
+              title: context.l10n.trips_appBar_title,
+              subtitle: tripListCountLabel(context, ref),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
           ),
-          const Spacer(),
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
+          EntitySearchAction(
+            subject: QuerySubject.trips,
+            active: ref.watch(tripFilterProvider).query != null,
             tooltip: context.l10n.trips_list_tooltip_search,
-            onPressed: () {
-              showSearch(context: context, delegate: TripSearchDelegate());
-            },
+            compact: true,
           ),
           IconButton(
             icon: const Icon(Icons.sort, size: 20),
             tooltip: context.l10n.trips_list_tooltip_sort,
             onPressed: () => _showSortSheet(context),
+          ),
+          QueryFilterButton(
+            active: ref.watch(tripFilterProvider).query != null,
+            compact: true,
+            onPressed: _openQueryFilter,
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, size: 20),
@@ -310,12 +721,16 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(tripListViewModeProvider.notifier).state = mode;
+                ref.read(settingsProvider.notifier).setTripListViewMode(mode);
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(tripListViewModeProvider);
               return [
+                ...selectItemsMenuEntries(
+                  context,
+                  onSelect: _selection.enterExplicit,
+                ),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -340,7 +755,7 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     if (filter.equipmentId != null) {
       final equipmentName =
           ref.watch(equipmentItemProvider(filter.equipmentId!)).value?.name ??
-          'Equipment';
+          context.l10n.equipment_appBar_title;
       chips.add(
         InputChip(
           label: Text(equipmentName),
@@ -374,10 +789,7 @@ class _TripListContentState extends ConsumerState<TripListContent> {
             ),
           ),
           TextButton(
-            onPressed: () {
-              ref.read(tripFilterProvider.notifier).state =
-                  const TripFilterState();
-            },
+            onPressed: () => clearTripFilter(ref),
             child: Text(context.l10n.trips_list_filters_clearAll),
           ),
         ],
@@ -391,6 +803,40 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     List<TripWithStats> trips,
     bool hasActiveFilters,
   ) {
+    final diversCount = ref
+        .watch(allDiversProvider)
+        .when(data: (d) => d.length, loading: () => 0, error: (_, _) => 0);
+    // Trips shared with chosen profiles carry the badge too (issue #2151).
+    final sharedByName =
+        ref.watch(itemIdsWithSharesProvider(SharedItemKind.trip)).value ??
+        const <String>{};
+
+    // Side trips nest under their larger trip, which decides the section
+    // (issue #3658).
+    // The listed trips nest on their own; the full list adds larger trips a
+    // filter hid, and fills in once it has loaded.
+    final allTripsById = {
+      for (final t in trips) t.trip.id: t.trip,
+      for (final t in ref.watch(allTripsProvider).value ?? const <Trip>[])
+        t.id: t,
+    };
+    final groups = tripRowGroups(nestTripRows(trips, allTripsById));
+    final upcoming = groups.where((g) => g.first.item.trip.isUpcoming).toList()
+      ..sort(
+        (a, b) =>
+            a.first.item.trip.startDate.compareTo(b.first.item.trip.startDate),
+      );
+    final past = groups.where((g) => !g.first.item.trip.isUpcoming).toList();
+    // Flatten into one item list: header sentinels + trips, so the
+    // existing ListView.builder/itemBuilder structure is preserved.
+    final rows = <Object>[
+      if (upcoming.isNotEmpty) _SectionHeader.upcoming,
+      ...upcoming.expand((g) => g),
+      if (upcoming.isNotEmpty && past.isNotEmpty) _SectionHeader.past,
+      ...past.expand((g) => g),
+    ];
+    final tripsById = {for (final t in trips) t.trip.id: t.trip};
+
     return RefreshIndicator(
       onRefresh: () async {
         await ref.read(tripListNotifierProvider.notifier).refresh();
@@ -399,35 +845,124 @@ class _TripListContentState extends ConsumerState<TripListContent> {
         children: [
           if (hasActiveFilters) _buildActiveFiltersBar(context, ref),
           Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.only(bottom: 80),
-              itemCount: trips.length,
-              itemBuilder: (context, index) {
-                final tripWithStats = trips[index];
-                final isSelected =
-                    widget.selectedId == tripWithStats.trip.id ||
-                    ref.watch(highlightedTripIdProvider) ==
-                        tripWithStats.trip.id;
-                final viewMode = ref.watch(tripListViewModeProvider);
-                return switch (viewMode) {
-                  ListViewMode.detailed => TripListTile(
-                    tripWithStats: tripWithStats,
-                    isSelected: isSelected,
-                    onTap: () => _handleItemTap(tripWithStats.trip),
-                  ),
-                  ListViewMode.compact => CompactTripListTile(
-                    tripWithStats: tripWithStats,
-                    isSelected: isSelected,
-                    onTap: () => _handleItemTap(tripWithStats.trip),
-                  ),
-                  ListViewMode.dense || ListViewMode.table => DenseTripListTile(
-                    tripWithStats: tripWithStats,
-                    isSelected: isSelected,
-                    onTap: () => _handleItemTap(tripWithStats.trip),
-                  ),
-                };
-              },
+            child: KeyboardListNavigator(
+              keys: [
+                for (final row in rows)
+                  if (row is TripListRow) row.item.trip.id,
+              ],
+              currentKey:
+                  widget.selectedId ?? ref.watch(highlightedTripIdProvider),
+              onMove: (id) => moveListCursor(
+                context,
+                canOpen: !_isSelectionMode && widget.onItemSelected != null,
+                open: () => _handleRowTap(tripsById[id]!),
+                highlight: () =>
+                    ref.read(highlightedTripIdProvider.notifier).state = id,
+              ),
+              onActivate: (id) => _handleRowTap(tripsById[id]!),
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.only(bottom: 80),
+                itemCount: rows.length,
+                itemBuilder: (context, index) {
+                  final row = rows[index];
+                  if (row is _SectionHeader) {
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                      child: Text(
+                        row == _SectionHeader.upcoming
+                            ? context.l10n.trips_list_upcomingSection
+                            : context.l10n.trips_list_pastSection,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.primary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    );
+                  }
+                  final listRow = row as TripListRow;
+                  final tripWithStats = listRow.item;
+                  final nestingNote = listRow.sideTripCount > 0
+                      ? context.l10n.trips_list_sideTripCount(
+                          listRow.sideTripCount,
+                        )
+                      : listRow.partOfName == null
+                      ? null
+                      : context.l10n.trips_partOf(listRow.partOfName!);
+                  final isSelected =
+                      widget.selectedId == tripWithStats.trip.id ||
+                      ref.watch(highlightedTripIdProvider) ==
+                          tripWithStats.trip.id;
+                  final viewMode = ref.watch(tripListViewModeProvider);
+                  final showSharedBadge =
+                      isSharedWithAnyone(
+                        id: tripWithStats.trip.id,
+                        everyone: tripWithStats.trip.isShared,
+                        namedShares: sharedByName,
+                      ) &&
+                      diversCount >= 2;
+                  final isChecked = _selectedIds.contains(
+                    tripWithStats.trip.id,
+                  );
+                  void onCheckChanged(bool _) =>
+                      _selection.toggle(tripWithStats.trip.id);
+                  final selectableTile = switch (viewMode) {
+                    ListViewMode.detailed => TripListTile(
+                      tripWithStats: tripWithStats,
+                      nestingNote: nestingNote,
+                      isSelected: isSelected,
+                      onTap: () => _handleRowTap(tripWithStats.trip),
+                      showSharedBadge: showSharedBadge,
+                      isSelectionMode: _isSelectionMode,
+                      isChecked: isChecked,
+                      onCheckChanged: onCheckChanged,
+                    ),
+                    ListViewMode.compact => CompactTripListTile(
+                      tripWithStats: tripWithStats,
+                      nestingNote: nestingNote,
+                      isSelected: isSelected,
+                      onTap: () => _handleRowTap(tripWithStats.trip),
+                      showSharedBadge: showSharedBadge,
+                      isSelectionMode: _isSelectionMode,
+                      isChecked: isChecked,
+                      onCheckChanged: onCheckChanged,
+                    ),
+                    ListViewMode.dense ||
+                    ListViewMode.table => DenseTripListTile(
+                      tripWithStats: tripWithStats,
+                      nestingNote: nestingNote,
+                      isSelected: isSelected,
+                      onTap: () => _handleRowTap(tripWithStats.trip),
+                      showSharedBadge: showSharedBadge,
+                      isSelectionMode: _isSelectionMode,
+                      isChecked: isChecked,
+                      onCheckChanged: onCheckChanged,
+                    ),
+                  };
+                  // The banner is the row's header: a click on it moves the
+                  // keyboard cursor to the trip (#3224).
+                  return KeyboardListItem(
+                    navigationKey: tripWithStats.trip.id,
+                    header: tripWithStats.trip.isUpcoming
+                        ? Padding(
+                            // Indented with a side trip's card (#3658).
+                            padding: EdgeInsetsDirectional.fromSTEB(
+                              listRow.isSideTrip
+                                  ? 20 + sideTripIndentWidth
+                                  : 20,
+                              4,
+                              20,
+                              0,
+                            ),
+                            child: UpcomingTripBanner(trip: tripWithStats.trip),
+                          )
+                        : null,
+                    child: listRow.isSideTrip
+                        ? SideTripIndent(child: selectableTile)
+                        : selectableTile,
+                  );
+                },
+              ),
             ),
           ),
         ],
@@ -436,6 +971,9 @@ class _TripListContentState extends ConsumerState<TripListContent> {
   }
 
   Widget _buildEmptyState(BuildContext context, bool hasActiveFilters) {
+    if (ref.watch(tripFilterProvider).query != null) {
+      return QueryNoMatchState(onClear: () => _setQuery(null));
+    }
     if (hasActiveFilters) {
       return Center(
         child: Column(
@@ -488,32 +1026,37 @@ class _TripListContentState extends ConsumerState<TripListContent> {
             ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () {
-              if (ResponsiveBreakpoints.isMasterDetail(context)) {
-                final routerState = GoRouterState.of(context);
-                context.go('${routerState.uri.path}?mode=new');
-              } else {
-                context.push('/trips/new');
-              }
-            },
-            icon: const Icon(Icons.add),
-            label: Text(context.l10n.trips_list_empty_button),
-          ),
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!MasterDetailFormScope.isFormOpenOf(context)) ...[
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: () {
+                if (ResponsiveBreakpoints.isMasterDetail(context)) {
+                  final routerState = GoRouterState.of(context);
+                  context.goInPlace('${routerState.uri.path}?mode=new');
+                } else {
+                  openNewTrip(context);
+                }
+              },
+              icon: const Icon(Icons.add),
+              label: Text(context.l10n.trips_list_empty_button),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildErrorState(BuildContext context, Object error) {
+  /// The repository logs the failure; the diver gets a plain line and Retry.
+  Widget _buildErrorState(BuildContext context) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           const Icon(Icons.error_outline, size: 48, color: Colors.red),
           const SizedBox(height: 16),
-          Text(context.l10n.trips_list_error_loading('$error')),
+          Text(context.l10n.trips_list_error_loading),
           const SizedBox(height: 16),
           FilledButton(
             onPressed: () =>
@@ -527,231 +1070,195 @@ class _TripListContentState extends ConsumerState<TripListContent> {
 }
 
 /// List item widget for displaying a trip
-class TripListTile extends StatelessWidget {
+class TripListTile extends ConsumerWidget {
   final TripWithStats tripWithStats;
   final bool isSelected;
   final VoidCallback? onTap;
+  final bool showSharedBadge;
+  final bool isSelectionMode;
+  final bool isChecked;
+  final ValueChanged<bool>? onCheckChanged;
+
+  /// How the trip nests (issue #3658): its side trip count, or the larger
+  /// trip it is part of when that trip is not listed.
+  final String? nestingNote;
 
   const TripListTile({
     super.key,
     required this.tripWithStats,
+    this.nestingNote,
     this.isSelected = false,
     this.onTap,
+    this.showSharedBadge = false,
+    this.isSelectionMode = false,
+    this.isChecked = false,
+    this.onCheckChanged,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final trip = tripWithStats.trip;
-    final dateFormat = DateFormat.yMMMd();
+    final units = ref.watch(unitFormatterProvider);
     final theme = Theme.of(context);
 
     final subtitleStr = trip.subtitle != null ? ', ${trip.subtitle}' : '';
-    final diveCountStr = '${tripWithStats.diveCount} dives';
-    final bottomTimeStr = tripWithStats.totalBottomTime > 0
-        ? ', ${tripWithStats.formattedBottomTime}'
+    final diveCountStr = context.l10n.trips_list_tile_diveCount(
+      tripWithStats.diveCount,
+    );
+    final runtimeStr = tripWithStats.totalRuntime > 0
+        ? ', ${tripWithStats.formattedRuntime}'
         : '';
+    // The two dates are joined with a dash rather than a connector word, both
+    // to match the compact tile and because a translated "to" would need an
+    // ARB key per locale to read correctly.
+    final dateRangeStr =
+        '${units.formatDate(trip.startDate)} - ${units.formatDate(trip.endDate)}';
     final tripLabel =
-        '${trip.name}, ${dateFormat.format(trip.startDate)} to ${dateFormat.format(trip.endDate)}$subtitleStr, $diveCountStr$bottomTimeStr${isSelected ? ', selected' : ''}';
+        '${trip.name}, $dateRangeStr$subtitleStr, $diveCountStr$runtimeStr';
 
     return Semantics(
+      // Selection is a semantics flag, not label prose: assistive tech
+      // announces it in the user's own language and can filter on it.
+      selected: isSelected,
       label: tripLabel,
       child: Card(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         color: isSelected
             ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
             : null,
-        child: ListTile(
-          onTap: onTap,
-          leading: CircleAvatar(
-            backgroundColor: theme.colorScheme.primaryContainer,
-            child: Icon(
-              trip.isLiveaboard ? Icons.sailing : Icons.flight_takeoff,
-              color: theme.colorScheme.onPrimaryContainer,
+        child: RecordListChevronOverlay(
+          child: ListTile(
+            onTap: onTap,
+            contentPadding: kRecordListTileContentPadding,
+            // ListTile's Material 3 defaults resolve the title to bodyLarge and
+            // the subtitle to bodyMedium. The detailed dive and site cards are
+            // hand-rolled and ask for titleMedium/bodyMedium explicitly, so the
+            // roles are restated here to keep all three lists on the same text
+            // theme roles. Theme presets differ between the title and body roles
+            // (console uses a monospace family for title roles only, minimalist
+            // uses w500 for title roles and w300 for body roles), so inheriting
+            // the default renders trip titles in a different font from the rest
+            // of the app's lists.
+            titleTextStyle: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w600,
             ),
-          ),
-          title: Text(trip.name),
-          subtitle: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}',
-                style: theme.textTheme.bodySmall,
+            subtitleTextStyle: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+            leading: SelectionLeading(
+              isSelectionMode: isSelectionMode,
+              isChecked: isChecked,
+              onChanged: onCheckChanged,
+              child: Consumer(
+                builder: (context, ref, _) {
+                  final accent = resolveFeatureAccent(
+                    context,
+                    ref,
+                    surface: AccentSurface.list,
+                    featureId: 'trips',
+                  );
+                  return CircleAvatar(
+                    backgroundColor:
+                        accent?.withValues(alpha: 0.15) ??
+                        theme.colorScheme.primaryContainer,
+                    child: Icon(
+                      trip.isLiveaboard ? Icons.sailing : Icons.flight_takeoff,
+                      color: accent ?? theme.colorScheme.onPrimaryContainer,
+                    ),
+                  );
+                },
               ),
-              if (trip.subtitle != null)
-                Text(
-                  trip.subtitle!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+            ),
+            title: Row(
+              children: [
+                Expanded(
+                  // The flags ride inline after the name's last word, so a name
+                  // that wraps keeps them on its last line (issue #4426). With
+                  // no flags to show the title stays plain text.
+                  child: tripHasFlags(ref, trip.id)
+                      ? Text.rich(
+                          TextSpan(
+                            text: trip.name,
+                            children: [
+                              WidgetSpan(
+                                alignment: PlaceholderAlignment.middle,
+                                child: TripCountryFlags(
+                                  tripId: trip.id,
+                                  maxFlags: 3,
+                                  gap: 6,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : Text(trip.name),
                 ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Icon(
-                    Icons.scuba_diving,
-                    size: 14,
-                    color: theme.colorScheme.primary,
+                if (showSharedBadge) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message:
+                        context.l10n.accessibility_label_sharedWithProfiles,
+                    child: Icon(
+                      Icons.people_outline,
+                      size: 16,
+                      color: theme.colorScheme.primary,
+                    ),
                   ),
-                  const SizedBox(width: 4),
+                ],
+              ],
+            ),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Date range takes the subtitle role from the ListTile above,
+                // matching the dive card's date line.
+                Text(
+                  '${units.formatDate(trip.startDate)} - ${units.formatDate(trip.endDate)}',
+                ),
+                if (trip.subtitle != null)
                   Text(
-                    context.l10n.trips_list_tile_diveCount(
-                      tripWithStats.diveCount,
-                    ),
+                    trip.subtitle!,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.primary,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (tripWithStats.totalBottomTime > 0) ...[
-                    const SizedBox(width: 12),
-                    Icon(
-                      Icons.timer,
-                      size: 14,
+                const SizedBox(height: 4),
+                // A Wrap, not a Row: the runtime drops onto its own line when a
+                // narrow tile, or the checkbox column in selection mode, leaves
+                // too little width for both.
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 4,
+                  children: [
+                    CardIconLabel(
+                      icon: Icons.scuba_diving,
+                      text: context.l10n.trips_list_tile_diveCount(
+                        tripWithStats.diveCount,
+                      ),
                       color: theme.colorScheme.primary,
                     ),
-                    const SizedBox(width: 4),
-                    Text(
-                      tripWithStats.formattedBottomTime,
-                      style: theme.textTheme.bodySmall?.copyWith(
+                    if (tripWithStats.totalRuntime > 0)
+                      CardIconLabel(
+                        icon: Icons.timer,
+                        text: tripWithStats.formattedRuntime,
                         color: theme.colorScheme.primary,
                       ),
-                    ),
+                    if (nestingNote != null)
+                      CardIconLabel(
+                        icon: Icons.account_tree_outlined,
+                        text: nestingNote!,
+                        color: theme.colorScheme.primary,
+                      ),
                   ],
-                ],
-              ),
-            ],
+                ),
+              ],
+            ),
+            isThreeLine: true,
           ),
-          trailing: const Icon(Icons.chevron_right),
-          isThreeLine: true,
         ),
       ),
     );
   }
 }
 
-/// Search delegate for trips
-class TripSearchDelegate extends SearchDelegate<Trip?> {
-  TripSearchDelegate();
-
-  @override
-  String get searchFieldLabel => 'Search trips...';
-
-  @override
-  List<Widget> buildActions(BuildContext context) {
-    return [
-      if (query.isNotEmpty)
-        IconButton(
-          icon: const Icon(Icons.clear),
-          tooltip: context.l10n.trips_search_tooltip_clear,
-          onPressed: () => query = '',
-        ),
-    ];
-  }
-
-  @override
-  Widget buildLeading(BuildContext context) {
-    return IconButton(
-      icon: const Icon(Icons.arrow_back),
-      tooltip: context.l10n.trips_search_tooltip_back,
-      onPressed: () => close(context, null),
-    );
-  }
-
-  @override
-  Widget buildResults(BuildContext context) {
-    return _buildSearchResults(context);
-  }
-
-  @override
-  Widget buildSuggestions(BuildContext context) {
-    if (query.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.search,
-              size: 64,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              context.l10n.trips_search_empty_hint,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return _buildSearchResults(context);
-  }
-
-  Widget _buildSearchResults(BuildContext context) {
-    return Consumer(
-      builder: (context, ref, child) {
-        final searchAsync = ref.watch(tripSearchProvider(query));
-
-        return searchAsync.when(
-          data: (trips) {
-            if (trips.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.search_off,
-                      size: 64,
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      context.l10n.trips_search_noResults(query),
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-
-            return ListView.builder(
-              itemCount: trips.length,
-              itemBuilder: (context, index) {
-                final trip = trips[index];
-                final dateFormat = DateFormat.yMMMd();
-                return ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor: Theme.of(
-                      context,
-                    ).colorScheme.primaryContainer,
-                    child: Icon(
-                      trip.isLiveaboard ? Icons.sailing : Icons.flight_takeoff,
-                      color: Theme.of(context).colorScheme.onPrimaryContainer,
-                    ),
-                  ),
-                  title: Text(trip.name),
-                  subtitle: Text(
-                    '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}',
-                  ),
-                  onTap: () {
-                    close(context, trip);
-                    context.push('/trips/${trip.id}');
-                  },
-                );
-              },
-            );
-          },
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (error, _) =>
-              Center(child: Text('${context.l10n.common_label_error}: $error')),
-        );
-      },
-    );
-  }
-}
+enum _SectionHeader { upcoming, past }

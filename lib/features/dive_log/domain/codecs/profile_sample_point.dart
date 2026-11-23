@@ -1,0 +1,93 @@
+import 'package:submersion/features/dive_log/domain/codecs/deco_type.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+
+/// Conversions between the codec's [ProfileSample] and the domain
+/// [DiveProfilePoint]. Kept out of `profile_sample.dart` so the codec files,
+/// and through them `database.dart`, never import the entity graph (which
+/// reaches Flutter through `tag.dart`).
+extension ProfileSampleToPoint on ProfileSample {
+  /// The domain point. Drops [ProfileSample.pressure], which
+  /// [DiveProfilePoint] does not carry, and a safety stop's ceiling: a
+  /// series stored before #2550, or synced from a peer that has not
+  /// updated, can still hold one, and a safety stop is no obligation.
+  DiveProfilePoint toPoint() {
+    return DiveProfilePoint(
+      timestamp: timestamp,
+      depth: depth,
+      temperature: temperature,
+      heartRate: heartRate,
+      heading: heading,
+      setpoint: setpoint,
+      ppO2: ppO2,
+      o2Sensor1: o2Sensor1,
+      o2Sensor2: o2Sensor2,
+      o2Sensor3: o2Sensor3,
+      o2Sensor4: o2Sensor4,
+      o2Sensor5: o2Sensor5,
+      o2Sensor6: o2Sensor6,
+      o2SensorMv1: o2SensorMv1,
+      o2SensorMv2: o2SensorMv2,
+      o2SensorMv3: o2SensorMv3,
+      o2SensorMv4: o2SensorMv4,
+      o2SensorMv5: o2SensorMv5,
+      o2SensorMv6: o2SensorMv6,
+      heartRateSource: heartRateSource,
+      cns: cns,
+      ndl: ndl,
+      ceiling: decoType == kDecoTypeSafetyStop ? null : ceiling,
+      ascentRate: ascentRate,
+      rbt: rbt,
+      decoType: decoType,
+      tts: tts,
+      gf99: gf99,
+      n2Load: n2Load,
+      aveloBuoyancy: aveloBuoyancy,
+      aveloGasRemaining: aveloGasRemaining,
+      computerRmv: computerRmv,
+    );
+  }
+}
+
+/// [ProfileSample] from a domain point, with the legacy per-sample
+/// [pressure] supplied separately.
+ProfileSample profileSampleFromPoint(
+  DiveProfilePoint point, {
+  double? pressure,
+}) {
+  return ProfileSample(
+    timestamp: point.timestamp,
+    depth: point.depth,
+    pressure: pressure,
+    temperature: point.temperature,
+    heartRate: point.heartRate,
+    ascentRate: point.ascentRate,
+    ceiling: point.ceiling,
+    ndl: point.ndl,
+    setpoint: point.setpoint,
+    ppO2: point.ppO2,
+    o2Sensor1: point.o2Sensor1,
+    o2Sensor2: point.o2Sensor2,
+    o2Sensor3: point.o2Sensor3,
+    o2Sensor4: point.o2Sensor4,
+    o2Sensor5: point.o2Sensor5,
+    o2Sensor6: point.o2Sensor6,
+    cns: point.cns,
+    tts: point.tts,
+    rbt: point.rbt,
+    decoType: point.decoType,
+    heartRateSource: point.heartRateSource,
+    heading: point.heading,
+    o2SensorMv1: point.o2SensorMv1,
+    o2SensorMv2: point.o2SensorMv2,
+    o2SensorMv3: point.o2SensorMv3,
+    o2SensorMv4: point.o2SensorMv4,
+    o2SensorMv5: point.o2SensorMv5,
+    o2SensorMv6: point.o2SensorMv6,
+    gf99: point.gf99,
+    n2Load: point.n2Load,
+    aveloBuoyancy: point.aveloBuoyancy,
+    aveloGasRemaining: point.aveloGasRemaining,
+    computerRmv: point.computerRmv,
+  );
+}

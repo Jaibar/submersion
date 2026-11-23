@@ -1,0 +1,251 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
+import 'package:submersion/features/planner/domain/entities/mission/mission_outcome.dart';
+import 'package:submersion/features/planner/presentation/providers/mission_issues_provider.dart';
+import 'package:submersion/features/planner/presentation/providers/mission_outcome_provider.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/planner/domain/services/plan_issue_grouping.dart';
+
+/// Colour for a plan-issue severity (shared by chips and the results sheet).
+Color planIssueSeverityColor(ColorScheme scheme, PlanIssueSeverity severity) {
+  switch (severity) {
+    case PlanIssueSeverity.critical:
+      return scheme.error;
+    case PlanIssueSeverity.alert:
+    case PlanIssueSeverity.warning:
+      return Colors.orange;
+    case PlanIssueSeverity.info:
+      return scheme.outline;
+  }
+}
+
+/// A small pill chip; tinted and tappable when [tint]/[onTap] are supplied.
+class PlanChip extends StatelessWidget {
+  const PlanChip({
+    super.key,
+    required this.label,
+    this.value,
+    this.tint,
+    this.emphasized = false,
+    this.onTap,
+  });
+
+  final String label;
+  final String? value;
+  final Color? tint;
+  final bool emphasized;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final background = tint != null
+        ? tint!.withValues(alpha: 0.15)
+        : emphasized
+        ? theme.colorScheme.primaryContainer
+        : theme.colorScheme.surfaceContainerHighest;
+    final border = tint != null
+        ? tint!.withValues(alpha: 0.6)
+        : Colors.transparent;
+
+    final chip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tint ?? theme.colorScheme.outline,
+              fontWeight: emphasized ? FontWeight.w600 : null,
+            ),
+          ),
+          if (value != null) ...[
+            const SizedBox(width: 5),
+            Text(
+              value!,
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: tint,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    if (onTap == null) return chip;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: chip,
+    );
+  }
+}
+
+/// The always-visible headline numbers above the segment list: runtime,
+/// NDL/TTS, deco time, CNS, and a tappable issue count.
+class PlanStatusChips extends ConsumerWidget {
+  const PlanStatusChips({super.key, required this.onIssuesTap});
+
+  /// Opens the results sheet to the issues section.
+  final VoidCallback onIssuesTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final outcome = ref.watch(activePlanOutcomeProvider);
+    final cnsThreshold = ref.watch(cnsWarningThresholdProvider);
+    final theme = Theme.of(context);
+
+    String minutes(int seconds) => '${(seconds / 60).ceil()}′';
+
+    final inDeco = outcome.ndlAtBottom < 0;
+    final maxSeverity = outcome.issues.isEmpty
+        ? null
+        : outcome.issues
+              .map((i) => i.severity)
+              .reduce((a, b) => a.index >= b.index ? a : b);
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        PlanChip(
+          label: context.l10n.divePlanner_label_runtime,
+          value: minutes(outcome.runtimeSeconds),
+          emphasized: true,
+        ),
+        if (inDeco)
+          PlanChip(
+            label: context.l10n.divePlanner_label_tts,
+            value: minutes(outcome.ttsAtBottom),
+          )
+        else
+          PlanChip(
+            label: context.l10n.divePlanner_label_ndl,
+            value: minutes(outcome.ndlAtBottom.clamp(0, 1 << 30)),
+          ),
+        if (outcome.totalDecoSeconds > 0)
+          PlanChip(
+            label: context.l10n.divePlanner_label_deco,
+            value: minutes(outcome.totalDecoSeconds),
+          ),
+        PlanChip(
+          label: context.l10n.plannerCanvas_chip_cns(
+            outcome.cnsEnd.toStringAsFixed(0),
+          ),
+          tint: outcome.cnsEnd >= cnsThreshold ? Colors.orange : null,
+        ),
+        if (maxSeverity != null)
+          PlanChip(
+            label: context.l10n.plannerCanvas_chip_issues(
+              groupPlanIssues(outcome.issues).length,
+            ),
+            tint: planIssueSeverityColor(theme.colorScheme, maxSeverity),
+            onTap: onIssuesTap,
+          ),
+        const ContingencyPreviewChip(),
+        MissionIssuesChip(onTap: onIssuesTap),
+      ],
+    );
+  }
+}
+
+/// "Previewing: {label}" indicator with tap-to-clear; renders nothing unless
+/// a contingency (deviation or lost-gas) is selected. Every headline stat
+/// above switches to that contingency's own outcome while one is selected --
+/// losing a deco/stage/travel gas changes the whole deco schedule, not just
+/// the chart ghost -- so this makes clear the numbers are a "what if", not
+/// the live plan.
+///
+/// Gated on [selectedContingencyProvider], not on the raw selection ids: a
+/// selection can go stale (the tank was removed, or stopped being losable)
+/// while its id lingers, and the stats fall back to the live plan in that
+/// case. Reading the same provider the stats read keeps the chip from
+/// claiming a preview that is not in effect.
+class ContingencyPreviewChip extends ConsumerWidget {
+  const ContingencyPreviewChip({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final preview = ref.watch(selectedContingencyProvider);
+    if (preview == null) return const SizedBox.shrink();
+
+    final units = ref.watch(unitFormatterProvider);
+
+    final lostTank = preview.lostTank;
+    final String label;
+    if (lostTank != null) {
+      label = context.l10n.plannerCanvas_contingency_lostGas(
+        lostTank.gasMix.name,
+      );
+    } else {
+      // The plan's own deviation, else the diver's Settings default (#3552).
+      final resolved = ref.watch(resolvedPlanEngineConfigProvider);
+      final depth =
+          '+${units.formatDepth(resolved.deviationDepthDelta, decimals: 0)}';
+      final time = '+${resolved.deviationTimeMinutes}′';
+      label = switch (ref.watch(selectedDeviationProvider)) {
+        'deeper' => depth,
+        'longer' => time,
+        _ => '$depth $time',
+      };
+    }
+
+    return PlanChip(
+      label: context.l10n.plannerCanvas_contingency_previewing(label),
+      value: '✕',
+      tint: Theme.of(context).colorScheme.tertiary,
+      onTap: () {
+        ref.read(selectedDeviationProvider.notifier).select(null);
+        ref.read(selectedLostGasTankIdProvider.notifier).state = null;
+      },
+    );
+  }
+}
+
+/// Blocking DPV mission issues, visible from every tab. Hidden when the plan
+/// has no mission or the mission computes cleanly.
+class MissionIssuesChip extends ConsumerWidget {
+  const MissionIssuesChip({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final missionOn = ref.watch(
+      divePlanNotifierProvider.select((s) => s.mission != null),
+    );
+    // The computed outcome knows every blocking issue, including the plan
+    // engine's own; until it lands, or if it failed, the issues known
+    // without computing stand in, so the chip never waits on the isolate.
+    final known = ref.watch(missionBlockingIssuesProvider);
+    final result = ref.watch(missionOutcomeProvider);
+    // A previous outcome kept while a newer edit computes, or after it
+    // failed, describes an older mission: count what is known now.
+    final outcome = result.isLoading || result.hasError ? null : result.value;
+    if (!missionOn) return const SizedBox.shrink();
+    final blocking = outcome == null
+        ? known.length
+        : outcome.issues
+              .where((i) => i.severity == MissionIssueSeverity.blocking)
+              .length;
+    if (blocking == 0) return const SizedBox.shrink();
+    return PlanChip(
+      label: context.l10n.plannerMission_chip_issues(blocking),
+      tint: Theme.of(context).colorScheme.error,
+      onTap: onTap,
+    );
+  }
+}

@@ -1,0 +1,728 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric_palette.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/chart_options_dialog_rows.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/counterdiffusion_overlay.dart';
+import 'package:submersion/features/dive_log/presentation/utils/gas_switch_format.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/legend_candidates.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/o2_cell_readout.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_metric_colors.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_legend_config.dart';
+import 'package:submersion/core/constants/o2_cell_unit.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+/// Persistent dialog for chart toggle options.
+///
+/// Uses [Consumer] to watch [profileLegendProvider] so checkbox states
+/// update live without closing the dialog. Dismissed by tapping outside
+/// (the transparent barrier).
+class ChartOptionsDialog extends StatelessWidget {
+  final ProfileLegendConfig config;
+  final Offset anchorOffset;
+  final Size anchorSize;
+
+  const ChartOptionsDialog({
+    super.key,
+    required this.config,
+    required this.anchorOffset,
+    required this.anchorSize,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    final bottomInset = MediaQuery.of(context).viewPadding.bottom;
+    const edgePadding = 8.0;
+    const dialogMaxWidth = 280.0;
+
+    // Position below the button
+    final top = anchorOffset.dy + anchorSize.height + 4;
+
+    // Try to align the right edge of the dialog with the right edge of the
+    // button, but clamp so the dialog never overflows the screen edges. On a
+    // screen narrower than the dialog itself (dialogMaxWidth + 2 *
+    // edgePadding), maxRight would fall below edgePadding and clamp(min, max)
+    // throws for min > max -- floor it at edgePadding instead, same as
+    // ConstrainedBox already does for maxWidth via dialogMaxWidth.
+    final desiredRight = screenSize.width - anchorOffset.dx - anchorSize.width;
+    final maxRight = (screenSize.width - dialogMaxWidth - edgePadding).clamp(
+      edgePadding,
+      double.infinity,
+    );
+    final right = desiredRight.clamp(edgePadding, maxRight);
+
+    return Stack(
+      children: [
+        Positioned(
+          top: top,
+          right: right,
+          child: Material(
+            elevation: 8,
+            borderRadius: BorderRadius.circular(12),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: dialogMaxWidth,
+                // Floored at 0: a button anchored low enough on a short
+                // screen (or one already close to the bottom inset) would
+                // otherwise make this negative, which BoxConstraints rejects.
+                maxHeight: math.max(
+                  0,
+                  screenSize.height - top - edgePadding - bottomInset,
+                ),
+              ),
+              child: Consumer(
+                builder: (context, ref, _) {
+                  final legendState = ref.watch(profileLegendProvider);
+                  final legendNotifier = ref.read(
+                    profileLegendProvider.notifier,
+                  );
+                  final palette = ProfileMetricPalette(
+                    overrides: ref.watch(
+                      settingsProvider.select((s) => s.profileMetricColors),
+                    ),
+                    temperatureAuto: Theme.of(context).colorScheme.tertiary,
+                  );
+
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        ..._buildSections(
+                          context,
+                          palette: palette,
+                          legendState: legendState,
+                          legendNotifier: legendNotifier,
+                          // The unit is a viewing preference, not a per-dive
+                          // one: picking it here makes it the default for the
+                          // next dive too.
+                          onO2CellUnitChanged: (unit) {
+                            legendNotifier.setO2CellUnit(unit);
+                            ref
+                                .read(settingsProvider.notifier)
+                                .setO2CellUnit(unit);
+                          },
+                          // Like the O2 cell unit: a viewing preference that
+                          // carries over to the next dive (#4530).
+                          onCounterdiffusionShowAllChanged: (showAll) {
+                            legendNotifier.setCounterdiffusionShowAll(showAll);
+                            ref
+                                .read(settingsProvider.notifier)
+                                .setCounterdiffusionShowAll(showAll);
+                          },
+                        ),
+                        const _MetricColorsLink(),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _buildSections(
+    BuildContext context, {
+    required ProfileLegendState legendState,
+    required ProfileLegend legendNotifier,
+    required ValueChanged<O2CellUnit> onO2CellUnitChanged,
+    required ValueChanged<bool> onCounterdiffusionShowAllChanged,
+    required ProfileMetricPalette palette,
+  }) {
+    // A chosen pressure colour draws a single-tank dive's line and threshold
+    // markers (issue #3012); several tanks keep their gas colours.
+    final singleTankColor = palette.pressureLineColor(
+      pressureSeries: config.tankPressures?.length ?? 0,
+      tankCount: config.tanks?.length ?? 0,
+    );
+    final sections = <Widget>[];
+
+    // Overlays section
+    final overlayItems = <Widget>[
+      if (config.hasTemperatureData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_temp,
+          color: palette.colorOf(ProfileMetric.temperature),
+          isEnabled: legendState.showTemperature,
+          onTap: legendNotifier.toggleTemperature,
+        ),
+      if (config.hasPressureData && !config.hasMultiTankPressure)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_pressure,
+          color: palette.colorOf(ProfileMetric.pressure),
+          isEnabled: legendState.showPressure,
+          onTap: legendNotifier.togglePressure,
+        ),
+      if (config.hasEvents)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_events,
+          color: ProfileMetricColors.events,
+          isEnabled: legendState.showEvents,
+          onTap: legendNotifier.toggleEvents,
+        ),
+      if (config.hasSplitEvents)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_computedEvents,
+          color: Colors.amber.shade200,
+          isEnabled: legendState.showComputedEvents,
+          onTap: legendNotifier.toggleComputedEvents,
+        ),
+      if (config.hasAnnotations)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_annotations,
+          color: ProfileMetricColors.annotation,
+          isEnabled: legendState.showAnnotations,
+          onTap: legendNotifier.toggleAnnotations,
+        ),
+      if (config.hasPlannedProfile)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_plan,
+          color: ProfileMetricColors.plannedProfile,
+          isEnabled: legendState.showPlannedProfile,
+          onTap: legendNotifier.togglePlannedProfile,
+        ),
+      if (config.hasHeartRateData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_heartRate,
+          color: palette.colorOf(ProfileMetric.heartRate),
+          isEnabled: legendState.showHeartRate,
+          onTap: legendNotifier.toggleHeartRate,
+        ),
+      if (config.hasSacCurve)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_sacRate,
+          color: palette.colorOf(ProfileMetric.sac),
+          isEnabled: legendState.showSac,
+          onTap: legendNotifier.toggleSac,
+        ),
+      if (config.hasBuoyancy)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_buoyancy,
+          color: ProfileMetricColors.buoyancyBuoyant,
+          secondColor: ProfileMetricColors.buoyancyHeavy,
+          isEnabled: legendState.showBuoyancy,
+          onTap: legendNotifier.toggleBuoyancy,
+        ),
+      // The computer's Avelo values (#4664), offered on a dive that has them.
+      if (config.hasAveloBuoyancy)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_aveloBuoyancy,
+          color: palette.colorOf(ProfileMetric.aveloBuoyancy),
+          isEnabled: legendState.showAveloBuoyancy,
+          onTap: legendNotifier.toggleAveloBuoyancy,
+        ),
+      if (config.hasAveloGasRemaining)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_aveloGasRemaining,
+          color: palette.colorOf(ProfileMetric.aveloGasRemaining),
+          isEnabled: legendState.showAveloGasRemaining,
+          onTap: legendNotifier.toggleAveloGasRemaining,
+        ),
+      if (config.hasComputerRmv)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_computerRmv,
+          color: palette.colorOf(ProfileMetric.computerRmv),
+          isEnabled: legendState.showComputerRmv,
+          onTap: legendNotifier.toggleComputerRmv,
+        ),
+      if (config.hasAscentRates)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_ascentRate,
+          color: ProfileMetricColors.ascentRateColors,
+          isEnabled: legendState.showAscentRateColors,
+          onTap: legendNotifier.toggleAscentRateColors,
+        ),
+      if (config.hasAscentRates)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_ascentRateLine,
+          color: ProfileMetricColors.ascentRateLine,
+          isEnabled: legendState.showAscentRateLine,
+          onTap: legendNotifier.toggleAscentRateLine,
+        ),
+      if (config.hasGasData)
+        buildGasToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_showGas,
+          isEnabled: legendState.showGas,
+          onTap: legendNotifier.toggleGas,
+        ),
+    ];
+    if (overlayItems.isNotEmpty) {
+      sections.add(
+        buildOptionsSection(
+          context,
+          key: 'overlays',
+          title: context.l10n.diveLog_chartSection_overlays,
+          legendState: legendState,
+          legendNotifier: legendNotifier,
+          children: overlayItems,
+        ),
+      );
+    }
+
+    // Markers section
+    final markerItems = <Widget>[
+      if (config.hasMaxDepthMarker)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_maxDepth,
+          color: palette.colorOf(ProfileMetric.maxDepth),
+          isEnabled: legendState.showMaxDepthMarker,
+          onTap: legendNotifier.toggleMaxDepthMarker,
+        ),
+      if (config.hasPressureMarkers)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_pressureThresholds,
+          color: singleTankColor ?? ProfileMetricColors.pressureMarkers,
+          isEnabled: legendState.showPressureMarkers,
+          onTap: legendNotifier.togglePressureMarkers,
+        ),
+      if (config.hasGasSwitches)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_gasSwitches,
+          color: GasColors.nitrox,
+          isEnabled: legendState.showGasSwitchMarkers,
+          onTap: legendNotifier.toggleGasSwitchMarkers,
+        ),
+      if (config.hasLateGasSwitches)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_lateGasSwitches,
+          color: lateSwitchLegendColor,
+          isEnabled: legendState.showLateGasSwitches,
+          onTap: legendNotifier.toggleLateGasSwitches,
+        ),
+      if (config.hasCounterdiffusion)
+        buildToggleWithSource<bool>(
+          context,
+          label: context.l10n.diveLog_legend_label_counterdiffusion,
+          color: counterdiffusionIcdColor,
+          isEnabled: legendState.showCounterdiffusion,
+          onTap: legendNotifier.toggleCounterdiffusion,
+          currentSource: legendState.counterdiffusionShowAll,
+          onSourceChanged: onCounterdiffusionShowAllChanged,
+          segments: counterdiffusionSegments(context),
+        ),
+      if (config.hasPhotoMarkers)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_photoMarkers,
+          // Photo markers are painted in the theme's primary colour.
+          color: Theme.of(context).colorScheme.primary,
+          isEnabled: legendState.showPhotoMarkers,
+          onTap: legendNotifier.togglePhotoMarkers,
+        ),
+    ];
+    if (markerItems.isNotEmpty) {
+      sections.add(
+        buildOptionsSection(
+          context,
+          key: 'markers',
+          title: context.l10n.diveLog_chartSection_markers,
+          legendState: legendState,
+          legendNotifier: legendNotifier,
+          children: markerItems,
+        ),
+      );
+    }
+
+    // Tanks section (for gas-switch dives without multi-tank pressure traces).
+    // Same checkbox rows as every other section: unchecking a cylinder hides
+    // its gas-switch markers on the chart.
+    if (config.hasTankListSection && config.tanks != null) {
+      final sortedTanks = [...config.tanks!]
+        ..sort((a, b) => a.order.compareTo(b.order));
+      final tankItems = <Widget>[];
+
+      for (var i = 0; i < sortedTanks.length; i++) {
+        final tank = sortedTanks[i];
+        final color = GasColors.forGasMix(tank.gasMix);
+        final label = tankLegendLabel(context, tank, fallbackIndex: i + 1);
+
+        tankItems.add(
+          buildToggleItem(
+            context,
+            label: label,
+            color: color,
+            isEnabled: legendState.showTankPressure[tank.id] ?? true,
+            onTap: () => legendNotifier.toggleTankPressure(tank.id),
+            sourceColor: config.tankSourceColors?[tank.id],
+          ),
+        );
+      }
+
+      if (tankItems.isNotEmpty) {
+        sections.add(
+          buildOptionsSection(
+            context,
+            key: 'tanks',
+            title: context.l10n.diveLog_detail_section_cylinders,
+            legendState: legendState,
+            legendNotifier: legendNotifier,
+            children: tankItems,
+          ),
+        );
+      }
+    }
+
+    // Tank Pressures section
+    if (config.hasMultiTankPressure && config.tankPressures != null) {
+      final sortedTankIds = sortTankIdsByOrder(
+        config.tankPressures!.keys,
+        config.tanks,
+      );
+      final tankItems = <Widget>[];
+      for (var i = 0; i < sortedTankIds.length; i++) {
+        final tankId = sortedTankIds[i];
+        final tank = _getTankById(tankId);
+        final color =
+            singleTankColor ??
+            (tank != null
+                ? GasColors.forGasMix(tank.gasMix)
+                : tankFallbackColor(i));
+        final baseLabel = tank != null
+            ? tankLegendLabel(context, tank, fallbackIndex: i + 1)
+            : context.l10n.diveLog_tank_title(i + 1);
+        final label = config.estimatedTankIds.contains(tankId)
+            ? '$baseLabel ${context.l10n.diveLog_pressure_estimatedSuffix}'
+            : baseLabel;
+
+        tankItems.add(
+          buildToggleItem(
+            context,
+            label: label,
+            color: color,
+            isEnabled: legendState.isTankPressureVisible(tankId),
+            onTap: () => legendNotifier.toggleTankPressure(
+              tankId,
+              visibleByDefault: legendState.showPressure,
+            ),
+            sourceColor: config.tankSourceColors?[tankId],
+          ),
+        );
+      }
+      if (tankItems.isNotEmpty) {
+        sections.add(
+          buildOptionsSection(
+            context,
+            key: 'tankPressures',
+            title: context.l10n.diveLog_chartSection_tankPressures,
+            legendState: legendState,
+            legendNotifier: legendNotifier,
+            children: tankItems,
+          ),
+        );
+      }
+    }
+
+    // Decompression section
+    final decoItems = <Widget>[
+      if (config.hasDecoStopCurve)
+        buildToggleWithSource(
+          context,
+          label: context.l10n.diveLog_legend_label_decoStops,
+          color: ProfileMetricColors.decoStops,
+          isEnabled: legendState.showDecoStops,
+          onTap: legendNotifier.toggleDecoStops,
+          currentSource: legendState.decoStopSource,
+          onSourceChanged: legendNotifier.setDecoStopSource,
+          segments: sourceSegments(context),
+        ),
+      if (config.hasCeilingCurve)
+        // No source toggle: the ceiling line always shows the exact, continuous
+        // calculated curve. Every import stores only the computer's stepped stop
+        // depth, so a "computer" ceiling would duplicate the deco-stop band
+        // (issue #755). The Computer/Calculated comparison lives on the deco
+        // stops above.
+        buildToggleItem(
+          context,
+          // The row toggles every source's ceiling, so any one of them
+          // drawn against computer stops earns the label.
+          label: ceilingLegendLabel(
+            context,
+            calculated:
+                config.labelCeilingAsCalculated ||
+                config.overlays.any((o) => o.labelCeilingAsCalculated),
+          ),
+          color: palette.colorOf(ProfileMetric.ceiling),
+          isEnabled: legendState.showCeiling,
+          onTap: legendNotifier.toggleCeiling,
+        ),
+      if (config.hasNdlData)
+        buildToggleWithSource(
+          context,
+          label: context.l10n.diveLog_legend_label_ndl,
+          color: palette.colorOf(ProfileMetric.ndl),
+          isEnabled: legendState.showNdl,
+          onTap: legendNotifier.toggleNdl,
+          currentSource: legendState.ndlSource,
+          onSourceChanged: legendNotifier.setNdlSource,
+          segments: sourceSegments(context),
+        ),
+      if (config.hasTtsData)
+        buildToggleWithSource(
+          context,
+          label: context.l10n.diveLog_legend_label_tts,
+          color: palette.colorOf(ProfileMetric.tts),
+          isEnabled: legendState.showTts,
+          onTap: legendNotifier.toggleTts,
+          currentSource: legendState.ttsSource,
+          onSourceChanged: legendNotifier.setTtsSource,
+          segments: sourceSegments(context),
+        ),
+      if (config.hasGtrData)
+        buildToggleWithSource(
+          context,
+          label: context.l10n.diveLog_legend_label_gtr,
+          color: palette.colorOf(ProfileMetric.gtr),
+          isEnabled: legendState.showGtr,
+          onTap: legendNotifier.toggleGtr,
+          currentSource: legendState.gtrSource,
+          onSourceChanged: legendNotifier.setGtrSource,
+          segments: sourceSegments(context),
+        ),
+      if (config.hasCnsData)
+        buildToggleWithSource(
+          context,
+          label: context.l10n.diveLog_legend_label_cns,
+          color: palette.colorOf(ProfileMetric.cns),
+          isEnabled: legendState.showCns,
+          onTap: legendNotifier.toggleCns,
+          currentSource: legendState.cnsSource,
+          onSourceChanged: legendNotifier.setCnsSource,
+          segments: sourceSegments(context),
+        ),
+      if (config.hasOtuData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_otu,
+          color: palette.colorOf(ProfileMetric.otu),
+          isEnabled: legendState.showOtu,
+          onTap: legendNotifier.toggleOtu,
+        ),
+    ];
+    if (decoItems.isNotEmpty) {
+      sections.add(
+        buildOptionsSection(
+          context,
+          key: 'decompression',
+          title: context.l10n.diveLog_chartSection_decompression,
+          legendState: legendState,
+          legendNotifier: legendNotifier,
+          children: decoItems,
+        ),
+      );
+    }
+
+    // Gas Analysis section
+    final gasItems = <Widget>[
+      if (config.hasPpO2Data)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_ppO2,
+          color: palette.colorOf(ProfileMetric.ppO2),
+          isEnabled: legendState.showPpO2,
+          onTap: legendNotifier.togglePpO2,
+        ),
+      if (config.hasPpN2Data)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_ppN2,
+          color: palette.colorOf(ProfileMetric.ppN2),
+          isEnabled: legendState.showPpN2,
+          onTap: legendNotifier.togglePpN2,
+        ),
+      if (config.hasPpHeData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_ppHe,
+          color: palette.colorOf(ProfileMetric.ppHe),
+          isEnabled: legendState.showPpHe,
+          onTap: legendNotifier.togglePpHe,
+        ),
+      if (config.hasO2CellData)
+        if (config.hasBothO2CellUnits)
+          buildToggleWithSource(
+            context,
+            label: context.l10n.diveLog_legend_label_o2Cells,
+            color: o2CellColor(0),
+            isEnabled: legendState.showO2Cells,
+            onTap: legendNotifier.toggleO2Cells,
+            currentSource: legendState.o2CellUnit,
+            onSourceChanged: onO2CellUnitChanged,
+            segments: o2CellUnitSegments(context),
+          )
+        else
+          buildToggleItem(
+            context,
+            label: context.l10n.diveLog_legend_label_o2Cells,
+            // Cell 1's colour, so the swatch belongs to the same set as the
+            // lines.
+            color: o2CellColor(0),
+            isEnabled: legendState.showO2Cells,
+            onTap: legendNotifier.toggleO2Cells,
+          ),
+      if (config.hasModData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_mod,
+          color: palette.colorOf(ProfileMetric.mod),
+          isEnabled: legendState.showMod,
+          onTap: legendNotifier.toggleMod,
+        ),
+      if (config.hasDensityData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_gasDensity,
+          color: palette.colorOf(ProfileMetric.density),
+          isEnabled: legendState.showDensity,
+          onTap: legendNotifier.toggleDensity,
+        ),
+    ];
+    if (gasItems.isNotEmpty) {
+      sections.add(
+        buildOptionsSection(
+          context,
+          key: 'gasAnalysis',
+          title: context.l10n.diveLog_chartSection_gasAnalysis,
+          legendState: legendState,
+          legendNotifier: legendNotifier,
+          children: gasItems,
+        ),
+      );
+    }
+
+    // Other section
+    final otherItems = <Widget>[
+      if (config.hasGfData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_gfPercent,
+          color: palette.colorOf(ProfileMetric.gf),
+          isEnabled: legendState.showGf,
+          onTap: legendNotifier.toggleGf,
+        ),
+      if (config.hasSurfaceGfData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_surfaceGf,
+          color: palette.colorOf(ProfileMetric.surfaceGf),
+          isEnabled: legendState.showSurfaceGf,
+          onTap: legendNotifier.toggleSurfaceGf,
+        ),
+      if (config.hasMeanDepthData)
+        buildToggleItem(
+          context,
+          label: context.l10n.diveLog_legend_label_meanDepth,
+          color: palette.colorOf(ProfileMetric.meanDepth),
+          isEnabled: legendState.showMeanDepth,
+          onTap: legendNotifier.toggleMeanDepth,
+        ),
+    ];
+    if (otherItems.isNotEmpty) {
+      sections.add(
+        buildOptionsSection(
+          context,
+          key: 'other',
+          title: context.l10n.diveLog_chartSection_other,
+          legendState: legendState,
+          legendNotifier: legendNotifier,
+          children: otherItems,
+        ),
+      );
+    }
+
+    // Display section: rendering behaviour rather than series visibility, so
+    // it is always present and its items carry no series colour.
+    sections.add(
+      buildOptionsSection(
+        context,
+        key: 'display',
+        title: context.l10n.diveLog_chartSection_display,
+        legendState: legendState,
+        legendNotifier: legendNotifier,
+        children: [
+          buildBehaviorItem(
+            context,
+            label: context.l10n.diveLog_chartOption_metricsFollowViewport,
+            isEnabled: legendState.metricsFollowViewport,
+            onTap: legendNotifier.toggleMetricsFollowViewport,
+          ),
+          buildBehaviorItem(
+            context,
+            label: context.l10n.diveLog_chartOption_tooltipFollowsCursor,
+            isEnabled: legendState.tooltipFollowsCursor,
+            onTap: legendNotifier.toggleTooltipFollowsCursor,
+          ),
+        ],
+      ),
+    );
+
+    return sections;
+  }
+
+  /// Get tank by ID
+  DiveTank? _getTankById(String tankId) {
+    final tanks = config.tanks;
+    if (tanks == null) return null;
+    for (final tank in tanks) {
+      if (tank.id == tankId) return tank;
+    }
+    return null;
+  }
+}
+
+/// Opens Settings > Metric Colors (issue #3012). Sits below every section so
+/// it is visible without expanding one.
+class _MetricColorsLink extends StatelessWidget {
+  const _MetricColorsLink();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: TextButton.icon(
+          icon: const Icon(Icons.palette_outlined, size: 18),
+          label: Text(context.l10n.settings_appearance_metricColors),
+          onPressed: () {
+            // Capture the router before the pop unmounts this context.
+            final router = GoRouter.of(context);
+            Navigator.of(context).pop();
+            router.push('/settings/metric-colors');
+          },
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,456 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_clocks_card.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_schedule_dialogs.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/test_database.dart';
+
+/// The interval-override dialog's baseline control is an [InkWell] wrapping an
+/// [InputDecorator] labelled "Baseline date", so `find.text('Baseline date')`
+/// matches the decorator's floating label rather than anything tappable.
+/// Material paints a floating label through `_labelTransform` but hit-tests it
+/// at its unfloated offset, so a tap aimed at the label derives an offset that
+/// misses it and lands on the decoration instead. Target the [InkWell] that
+/// actually opens the date picker.
+Finder get _baselineField => find.ancestor(
+  of: find.text('Baseline date'),
+  matching: find.byType(InkWell),
+);
+
+/// The Service clocks card and the dialogs its open card's editor uses,
+/// against the real test database: the kind-picker sheet and the
+/// interval-override dialog read what is stored and hand what they make to
+/// the sitting (issue #4527, phase 3), writing nothing.
+void main() {
+  // formatDate resolves DateFormat against Intl.defaultLocale, a process
+  // global the app assigns from the diver's locale and a widget test never
+  // sets (MaterialApp.locale does not touch it). Pin it so the date strings
+  // asserted below do not rest on the machine default or a prior test.
+  late String? previousLocale;
+  setUp(() {
+    previousLocale = Intl.defaultLocale;
+    Intl.defaultLocale = 'en_US';
+  });
+  tearDown(() {
+    Intl.defaultLocale = previousLocale;
+  });
+
+  late SharedPreferences prefs;
+  late EquipmentRepository equipmentRepo;
+  late ServiceScheduleRepository scheduleRepo;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    await setUpTestDatabase();
+    equipmentRepo = EquipmentRepository();
+    scheduleRepo = ServiceScheduleRepository();
+
+    final diver = await DiverRepository().createDiver(
+      Diver(
+        id: '',
+        name: 'D',
+        isDefault: true,
+        createdAt: DateTime(2024),
+        updatedAt: DateTime(2024),
+      ),
+    );
+    await prefs.setString(currentDiverIdKey, diver.id);
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  Widget buildCard(
+    String equipmentId, {
+    EquipmentType type = EquipmentType.tank,
+  }) {
+    return ProviderScope(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      child: MaterialApp(
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: ServiceClocksCard(equipmentId: equipmentId),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<EquipmentItem> makeTank(WidgetTester tester) async {
+    late EquipmentItem tank;
+    await tester.runAsync(() async {
+      tank = await equipmentRepo.createEquipment(
+        const EquipmentItem(id: '', name: 'AL80', type: EquipmentType.tank),
+      );
+    });
+    return tank;
+  }
+
+  /// Opens the interval dialog on [equipmentId]'s [kindId] clock as stored,
+  /// as the clocks editor opens it; the list gets what its Save hands over.
+  Future<List<ServiceSchedule>> openOverride(
+    WidgetTester tester,
+    String equipmentId,
+    String kindId,
+  ) async {
+    final held = <ServiceSchedule>[];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    final schedules = await ref.read(
+                      serviceSchedulesForEquipmentProvider(equipmentId).future,
+                    );
+                    final kinds = await ref.read(
+                      allServiceKindsByIdProvider.future,
+                    );
+                    if (!context.mounted) return;
+                    await showScheduleOverrideDialog(
+                      context,
+                      ref,
+                      schedule: schedules.firstWhere(
+                        (s) => s.serviceKindId == kindId,
+                      ),
+                      kind: kinds[kindId]!,
+                      onHold: held.add,
+                    );
+                  },
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    return held;
+  }
+
+  /// The [kindId] clock of [equipmentId] as stored.
+  Future<ServiceSchedule> stored(
+    WidgetTester tester,
+    String equipmentId,
+    String kindId,
+  ) async {
+    late ServiceSchedule schedule;
+    await tester.runAsync(() async {
+      final schedules = await scheduleRepo.getSchedulesForEquipment(
+        equipmentId,
+      );
+      schedule = schedules.firstWhere((s) => s.serviceKindId == kindId);
+    });
+    return schedule;
+  }
+
+  testWidgets('override dialog holds intervals and anchor date', (
+    tester,
+  ) async {
+    final tank = await makeTank(tester);
+    final held = await openOverride(tester, tank.id, 'hydro');
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Interval (days)'),
+      '100',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Interval (dives)'),
+      '50',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Interval (hours)'),
+      '2.5',
+    );
+
+    // Pick today as the baseline date via the material date picker.
+    // v202 added five exposure fields above the baseline row; scroll it in.
+    await tester.ensureVisible(_baselineField);
+    await tester.tap(_baselineField);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final hydro = held.single;
+    expect(hydro.intervalDays, 100);
+    expect(hydro.intervalDives, 50);
+    expect(hydro.intervalHours, 2.5);
+    expect(hydro.anchorDate, isNotNull);
+    // A newly set baseline records when, so records logged before it
+    // cannot outrank it.
+    expect(hydro.anchorSetAt, isNotNull);
+    // Held, not written: the sitting writes it at Save.
+    expect((await stored(tester, tank.id, 'hydro')).intervalDays, isNull);
+  });
+
+  testWidgets('saving without touching the baseline keeps its set time', (
+    tester,
+  ) async {
+    // Re-stamping on every save would let a record logged between the
+    // baseline edit and an unrelated interval edit jump back in front.
+    final tank = await makeTank(tester);
+    final setAt = DateTime(2026, 1, 2, 3, 4);
+    await tester.runAsync(() async {
+      final schedules = await scheduleRepo.getSchedulesForEquipment(tank.id);
+      final hydro = schedules.firstWhere((s) => s.serviceKindId == 'hydro');
+      await scheduleRepo.updateSchedule(
+        hydro.withBaseline(DateTime(2024, 6, 1), now: setAt),
+      );
+    });
+    final held = await openOverride(tester, tank.id, 'hydro');
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Interval (days)'),
+      '100',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final hydro = held.single;
+    expect(hydro.intervalDays, 100);
+    expect(hydro.anchorDate, DateTime(2024, 6, 1));
+    expect(hydro.anchorSetAt, setAt);
+  });
+
+  testWidgets('re-picking a pre-update baseline on the same day stamps it', (
+    tester,
+  ) async {
+    // A baseline set before v213 has no set time, so the old rule (any
+    // record wins) governs it. The upgrade advice is "set it once more";
+    // picking the date it already shows must count as setting it.
+    final tank = await makeTank(tester);
+    await tester.runAsync(() async {
+      final schedules = await scheduleRepo.getSchedulesForEquipment(tank.id);
+      final hydro = schedules.firstWhere((s) => s.serviceKindId == 'hydro');
+      await scheduleRepo.updateSchedule(
+        hydro.copyWith(anchorDate: DateTime(2024, 6, 1)),
+      );
+    });
+    final held = await openOverride(tester, tank.id, 'hydro');
+    await tester.ensureVisible(_baselineField);
+    await tester.tap(_baselineField);
+    await tester.pumpAndSettle();
+    // The picker opens on the stored date; OK keeps it.
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final hydro = held.single;
+    expect(hydro.anchorDate, DateTime(2024, 6, 1));
+    expect(hydro.anchorSetAt, isNotNull);
+  });
+
+  testWidgets(
+    'saving the dialog moves a pre-update baseline onto the new rule',
+    (tester) async {
+      // The hint promises "logging a newer service clears it", which a
+      // baseline with no set time does not honour (any record wins, even a
+      // backdated one). The dialog only shows such a baseline while no
+      // service of the kind exists, so stamping it on save moves nothing now
+      // and makes the promise true from then on.
+      final tank = await makeTank(tester);
+      await tester.runAsync(() async {
+        final schedules = await scheduleRepo.getSchedulesForEquipment(tank.id);
+        final hydro = schedules.firstWhere((s) => s.serviceKindId == 'hydro');
+        await scheduleRepo.updateSchedule(
+          hydro.copyWith(anchorDate: DateTime(2024, 6, 1)),
+        );
+      });
+      final held = await openOverride(tester, tank.id, 'hydro');
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Interval (days)'),
+        '100',
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      final hydro = held.single;
+      expect(hydro.anchorDate, DateTime(2024, 6, 1));
+      expect(hydro.anchorSetAt, isNotNull);
+    },
+  );
+
+  testWidgets('the dialog leaves out a baseline a later service took over', (
+    tester,
+  ) async {
+    // A service that arrived by sync (or from an older build) takes the
+    // clock over without clearing the stored baseline. The dialog must not
+    // present a date the clock no longer counts from.
+    final tank = await makeTank(tester);
+    await tester.runAsync(() async {
+      final schedules = await scheduleRepo.getSchedulesForEquipment(tank.id);
+      final hydro = schedules.firstWhere((s) => s.serviceKindId == 'hydro');
+      await scheduleRepo.updateSchedule(
+        hydro.withBaseline(DateTime(2024, 6, 1), now: DateTime(2025)),
+      );
+      await ServiceRecordRepository().createRecord(
+        ServiceRecord(
+          id: '',
+          equipmentId: tank.id,
+          serviceCategory: ServiceCategory.inspection,
+          serviceKindId: 'hydro',
+          serviceDate: DateTime(2025, 3, 1),
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      );
+    });
+    final held = await openOverride(tester, tank.id, 'hydro');
+    await tester.ensureVisible(_baselineField);
+
+    expect(find.byTooltip('Clear baseline date'), findsNothing);
+    expect(find.text('Jun 1, 2024'), findsNothing);
+
+    // Saving keeps the hidden baseline stored, set time and all: deleting
+    // the service that took over must be able to bring it back.
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    final hydro = held.single;
+    expect(hydro.anchorDate, DateTime(2024, 6, 1));
+    expect(hydro.anchorSetAt, DateTime(2025));
+  });
+
+  testWidgets('override dialog clear button nulls the anchor date', (
+    tester,
+  ) async {
+    final tank = await makeTank(tester);
+    await tester.runAsync(() async {
+      final schedules = await scheduleRepo.getSchedulesForEquipment(tank.id);
+      final hydro = schedules.firstWhere((s) => s.serviceKindId == 'hydro');
+      await scheduleRepo.updateSchedule(
+        hydro.withBaseline(DateTime(2024, 6, 1), now: DateTime(2026)),
+      );
+    });
+    final held = await openOverride(tester, tank.id, 'hydro');
+
+    await tester.ensureVisible(find.byTooltip('Clear baseline date'));
+    await tester.tap(find.byTooltip('Clear baseline date'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final hydro = held.single;
+    expect(hydro.anchorDate, isNull);
+    expect(hydro.anchorSetAt, isNull);
+  });
+
+  testWidgets('edit dialog shows kind default hints for usage intervals', (
+    tester,
+  ) async {
+    late EquipmentItem reg;
+    await tester.runAsync(() async {
+      reg = await equipmentRepo.createEquipment(
+        const EquipmentItem(
+          id: '',
+          name: 'XTX50',
+          type: EquipmentType.regulator,
+        ),
+      );
+    });
+    await openOverride(tester, reg.id, 'regulator-service');
+
+    // Regulator service defaults: 365 days OR 100 dives -> both hints.
+    expect(find.text('Default: 365'), findsOneWidget);
+    expect(find.text('Default: 100'), findsOneWidget);
+  });
+
+  testWidgets('picker manage tile navigates to the service types page', (
+    tester,
+  ) async {
+    final tank = await makeTank(tester);
+    final router = GoRouter(
+      initialLocation: '/',
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (_, _) => Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => ElevatedButton(
+                onPressed: () => showServiceKindPicker(
+                  context,
+                  ref,
+                  equipmentId: tank.id,
+                  equipmentType: EquipmentType.tank,
+                  attachedKindIds: const {},
+                  onHold: (_) {},
+                ),
+                child: const Text('Add clock'),
+              ),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: '/equipment/service-types',
+          builder: (_, _) => const Scaffold(body: Text('MANAGE_TYPES_PAGE')),
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+        child: MaterialApp.router(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          routerConfig: router,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add clock'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage service types'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('MANAGE_TYPES_PAGE'), findsOneWidget);
+  });
+
+  testWidgets('item with no applicable kinds shows the empty state', (
+    tester,
+  ) async {
+    late EquipmentItem fins;
+    await tester.runAsync(() async {
+      fins = await equipmentRepo.createEquipment(
+        const EquipmentItem(id: '', name: 'Fins', type: EquipmentType.fins),
+      );
+    });
+    await tester.pumpWidget(buildCard(fins.id, type: EquipmentType.fins));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No service clocks'), findsOneWidget);
+  });
+}

@@ -1,0 +1,83 @@
+import 'dart:math' as math;
+
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+
+const double _earthRadiusMeters = 6371000.0;
+
+double _toRadians(double degrees) => degrees * math.pi / 180.0;
+
+/// [longitude] folded into (-180, 180], the range the app stores and
+/// compares longitudes in. Both ends of the seam land on 180.
+double normalizeLongitude(double longitude) {
+  // Dart's `%` is never negative for a positive divisor, so this is [0, 360).
+  final folded = (longitude + 180) % 360;
+  return folded == 0 ? 180 : folded - 180;
+}
+
+/// The signed number of degrees to travel east from [from] to reach [to]
+/// the short way round, in (-180, 180]. Negative means west; exactly half
+/// way round counts as east.
+double longitudeDelta(double from, double to) => normalizeLongitude(to - from);
+
+/// Great-circle distance between two points in meters (Haversine).
+double distanceMeters(GeoPoint a, GeoPoint b) {
+  final lat1 = _toRadians(a.latitude);
+  final lat2 = _toRadians(b.latitude);
+  final dLat = _toRadians(b.latitude - a.latitude);
+  final dLon = _toRadians(b.longitude - a.longitude);
+  final h =
+      math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(lat1) * math.cos(lat2) * math.sin(dLon / 2) * math.sin(dLon / 2);
+  final c = 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h));
+  return _earthRadiusMeters * c;
+}
+
+/// Initial (forward) bearing from [a] to [b] in degrees, normalized to 0-360.
+double initialBearingDegrees(GeoPoint a, GeoPoint b) {
+  final lat1 = _toRadians(a.latitude);
+  final lat2 = _toRadians(b.latitude);
+  final dLon = _toRadians(b.longitude - a.longitude);
+  final y = math.sin(dLon) * math.cos(lat2);
+  final x =
+      math.cos(lat1) * math.sin(lat2) -
+      math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
+  final bearing = math.atan2(y, x) * 180.0 / math.pi;
+  return (bearing + 360.0) % 360.0;
+}
+
+/// Meters per degree of longitude at [latitudeDeg], floored near the poles
+/// so callers never divide by — or scale a mesh with — a zero at
+/// extreme-but-valid coordinates (cos(90°) == 0). The floor only engages
+/// above ~89.4° latitude.
+double metersPerDegreeLongitude(double latitudeDeg) {
+  final cosLat = math.cos(latitudeDeg * math.pi / 180.0);
+  return 111320.0 * math.max(cosLat, 0.01);
+}
+
+/// Meters per degree of latitude, treated as locally constant (the true
+/// value varies ~110.6-111.7 km from equator to pole, but every consumer
+/// here only needs a flat local-tangent-plane approximation over
+/// city-to-region-sized areas). The single shared constant so a terrain
+/// mesh's own degree-to-meter conversion and any source grid reprojected
+/// into that mesh (e.g. swissBATHY3D's LV95 tiles) can never drift apart.
+const double metersPerDegreeLatitude = 110540.0;
+
+/// Offset of [to] relative to [from] in local east-north meters
+/// (distance + bearing decomposition — the same math the spatial scene
+/// uses for exit fixes).
+({double east, double north}) enuOffsetMeters(GeoPoint from, GeoPoint to) {
+  final d = distanceMeters(from, to);
+  if (d == 0) return (east: 0, north: 0);
+  final brg = initialBearingDegrees(from, to) * math.pi / 180.0;
+  return (east: d * math.sin(brg), north: d * math.cos(brg));
+}
+
+const List<String> _cardinals = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+/// Formats a bearing as zero-padded degrees + 8-point cardinal, e.g. "042° NE".
+String formatBearing(double degrees) {
+  final normalized = (degrees % 360 + 360) % 360;
+  final index = (((normalized + 22.5) % 360) ~/ 45);
+  final padded = normalized.round().toString().padLeft(3, '0');
+  return '$padded° ${_cardinals[index]}';
+}

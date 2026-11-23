@@ -2,29 +2,56 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/router/list_return_scope.dart';
+import 'package:submersion/core/router/pushed_route.dart';
+import 'package:submersion/core/router/section_navigation.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
+import 'package:submersion/features/trips/query/trip_query_entity.dart';
 import 'package:submersion/features/trips/domain/constants/trip_field.dart';
+import 'package:submersion/features/trips/presentation/helpers/trip_edit_navigation.dart';
+import 'package:submersion/features/trips/presentation/navigation/open_trip_list.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/table_selection_owner.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_list_content.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_summary_widget.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
-import 'package:submersion/features/trips/presentation/pages/trip_edit_page.dart';
+import 'package:submersion/features/trips/presentation/pages/trip_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_list_count_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
-class TripListPage extends ConsumerWidget {
-  const TripListPage({super.key});
+class TripListPage extends ConsumerStatefulWidget {
+  const TripListPage({super.key, this.returnTo});
+
+  /// Set when this list was pushed by `openTripList`: what to put back when
+  /// it goes away. Null for the Trips tab itself.
+  final TripListReturn? returnTo;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<TripListPage> createState() => _TripListPageState();
+}
+
+class _TripListPageState extends ConsumerState<TripListPage>
+    with TableSelectionOwner {
+  @override
+  Widget build(BuildContext context) =>
+      ListReturnScope(returnTo: widget.returnTo, child: _buildPage(context));
+
+  Widget _buildPage(BuildContext context) {
     final fab = FloatingActionButton.extended(
       onPressed: () {
         final isDesktop = ResponsiveBreakpoints.isMasterDetail(context);
@@ -32,15 +59,17 @@ class TripListPage extends ConsumerWidget {
         if (isDesktop && viewMode != ListViewMode.table) {
           final state = GoRouterState.of(context);
           final currentPath = state.uri.path;
-          context.go('$currentPath?mode=new');
+          context.goInPlace('$currentPath?mode=new');
         } else {
-          context.push('/trips/new');
+          openNewTrip(context);
         }
       },
       icon: const Icon(Icons.add),
       label: Text(context.l10n.trips_list_fab_addTrip),
       tooltip: context.l10n.trips_list_tooltip_addTrip,
     );
+
+    resetTableSelectionOffTable(tripListViewModeProvider);
 
     // Table mode: use shared TableModeLayout for full-width table with
     // optional detail pane.
@@ -49,55 +78,44 @@ class TripListPage extends ConsumerWidget {
       return FocusTraversalGroup(
         child: TableModeLayout(
           sectionKey: 'trips',
+          rememberedSelectedId: ref.watch(rememberedTripIdProvider),
           appBarTitle: context.l10n.nav_trips,
-          tableContent: const TripListContent(showAppBar: false),
+          appBarSubtitle: tripListCountLabel(context, ref),
+          tableContent: TripListContent(
+            showAppBar: false,
+            selectionController: tableSelection,
+          ),
           detailBuilder: (context, tripId) => TripDetailPage(
             tripId: tripId,
             embedded: true,
             onDeleted: () {
               final state = GoRouterState.of(context);
-              context.go(state.uri.path);
+              context.goInPlace(state.uri.path);
             },
           ),
           summaryBuilder: (context) => const TripSummaryWidget(),
-          editBuilder: (context, tripId, onSaved, onCancel) => TripEditPage(
-            tripId: tripId,
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
-          createBuilder: (context, onSaved, onCancel) => TripEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          editBuilder: _buildEditPane,
+          createBuilder: (context, onSaved, onCancel) =>
+              newTripPane(context, onSaved, onCancel),
           selectedId: ref.watch(highlightedTripIdProvider),
           onEntitySelected: (id) {
             ref.read(highlightedTripIdProvider.notifier).state = id;
           },
           columnSettingsAction: IconButton(
             icon: const Icon(Icons.view_column_outlined),
-            tooltip: 'Column settings',
-            onPressed: () {
-              final config = ref.read(tripTableConfigProvider);
-              final notifier = ref.read(tripTableConfigProvider.notifier);
-              showEntityTableColumnPicker<TripField>(
-                context,
-                config: config,
-                adapter: TripFieldAdapter.instance,
-                onToggleColumn: notifier.toggleColumn,
-                onReorderColumn: notifier.reorderColumn,
-                onTogglePin: notifier.togglePin,
-              );
-            },
+            tooltip: context.l10n.columnConfig_tooltip_columnSettings,
+            onPressed: () => showEntityTableColumnPicker<TripField>(
+              context,
+              configProvider: tripTableConfigProvider,
+              adapter: TripFieldAdapter.instance,
+            ),
           ),
           appBarActions: [
-            IconButton(
-              icon: const Icon(Icons.search, size: 20),
+            EntitySearchAction(
+              subject: QuerySubject.trips,
+              active: ref.watch(tripFilterProvider).query != null,
               tooltip: context.l10n.trips_list_tooltip_search,
-              onPressed: () {
-                showSearch(context: context, delegate: TripSearchDelegate());
-              },
+              compact: true,
             ),
             IconButton(
               icon: const Icon(Icons.sort, size: 20),
@@ -110,16 +128,31 @@ class TripListPage extends ConsumerWidget {
                   currentField: sort.field,
                   currentDirection: sort.direction,
                   fields: TripSortField.values,
-                  getFieldDisplayName: (field) => field.displayName,
+                  getFieldDisplayName: (field) =>
+                      field.localizedName(context.l10n),
                   getFieldIcon: (field) => field.icon,
                   onSortChanged: (field, direction) {
-                    ref.read(tripSortProvider.notifier).state = SortState(
-                      field: field,
-                      direction: direction,
-                    );
+                    ref
+                        .read(settingsProvider.notifier)
+                        .setTripSort(
+                          SortState(field: field, direction: direction),
+                        );
                   },
                 );
               },
+            ),
+            Consumer(
+              builder: (context, ref, _) => QueryFilterButton(
+                active: ref.watch(tripFilterProvider).query != null,
+                compact: true,
+                onPressed: () => showQueryFilterSheet(
+                  context,
+                  subject: QuerySubject.trips,
+                  root: tripQueryEntity,
+                  initial: ref.read(tripFilterProvider).query,
+                  onApply: setTripQuery,
+                ),
+              ),
             ),
             PopupMenuButton<String>(
               icon: const Icon(Icons.more_vert, size: 20),
@@ -128,12 +161,13 @@ class TripListPage extends ConsumerWidget {
                   final mode = ListViewMode.fromName(
                     value.replaceFirst('view_', ''),
                   );
-                  ref.read(tripListViewModeProvider.notifier).state = mode;
+                  ref.read(settingsProvider.notifier).setTripListViewMode(mode);
                 }
               },
               itemBuilder: (context) {
                 final currentMode = ref.read(tripListViewModeProvider);
                 return [
+                  ...tableSelectItemsEntries(context),
                   ...ListViewModeToggle.menuItems(
                     context,
                     currentMode: currentMode,
@@ -155,29 +189,26 @@ class TripListPage extends ConsumerWidget {
     // Desktop: Use master-detail layout
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
       return MasterDetailScaffold(
-        sectionId: 'trips',
+        sectionId: RecordListSection.trips,
+        rememberedSelectedId: ref.watch(rememberedTripIdProvider),
         masterBuilder: (context, onItemSelected, selectedId) => TripListContent(
           onItemSelected: onItemSelected,
           selectedId: selectedId,
           showAppBar: false,
+          showBackButton: isPushedRoute(context),
         ),
         detailBuilder: (context, tripId) => TripDetailPage(
           tripId: tripId,
           embedded: true,
           onDeleted: () {
             final state = GoRouterState.of(context);
-            context.go(state.uri.path);
+            context.goInPlace(state.uri.path);
           },
         ),
         summaryBuilder: (context) => const TripSummaryWidget(),
-        editBuilder: (context, tripId, onSaved, onCancel) => TripEditPage(
-          tripId: tripId,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
+        editBuilder: _buildEditPane,
         createBuilder: (context, onSaved, onCancel) =>
-            TripEditPage(embedded: true, onSaved: onSaved, onCancel: onCancel),
+            newTripPane(context, onSaved, onCancel),
         floatingActionButton: fab,
       );
     }
@@ -187,4 +218,25 @@ class TripListPage extends ConsumerWidget {
       child: TripListContent(showAppBar: true, floatingActionButton: fab),
     );
   }
+}
+
+/// The pane's edit, open at the section the URL names (#2880): the trip
+/// page opened unlocked (issue #4527).
+Widget _buildEditPane(
+  BuildContext context,
+  String tripId,
+  void Function(String savedId) onSaved,
+  VoidCallback onCancel,
+) {
+  final query = GoRouterState.of(context).uri.queryParameters;
+  return tripEditPane(
+    context,
+    tripId,
+    onSaved,
+    onCancel,
+    section: TripEditSection.fromQuery(query['section']),
+    noteDay: tripNoteDayFromQuery(query),
+    // A delete from the pane returns it to the list, as from view mode.
+    onDeleted: () => context.goInPlace(GoRouterState.of(context).uri.path),
+  );
 }

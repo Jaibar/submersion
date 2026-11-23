@@ -1,11 +1,27 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_color_picker.dart';
 import 'package:submersion/features/tags/presentation/pages/tag_manage_page.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_merge_sheet.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/shared/selection/selection_leading.dart';
+
+import '../../../../helpers/fab_clearance.dart';
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/selection_contract.dart';
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -20,8 +36,9 @@ final _testStats = [
       colorHex: '#EF4444',
       createdAt: DateTime(2024),
       updatedAt: DateTime(2024),
+      scopes: const {TagScope.dives},
     ),
-    diveCount: 12,
+    counts: const {TagScope.dives: 12},
   ),
   TagStatistic(
     tag: Tag(
@@ -31,8 +48,9 @@ final _testStats = [
       colorHex: '#3B82F6',
       createdAt: DateTime(2024),
       updatedAt: DateTime(2024),
+      scopes: const {TagScope.dives},
     ),
-    diveCount: 5,
+    counts: const {TagScope.dives: 5},
   ),
 ];
 
@@ -45,21 +63,55 @@ class _MockTagListNotifier extends StateNotifier<AsyncValue<List<Tag>>>
     implements TagListNotifier {
   _MockTagListNotifier(List<Tag> tags) : super(AsyncValue.data(tags));
 
+  /// What the bulk paths actually asked for, so an outcome assertion is
+  /// backed by real work rather than only by the bar disappearing.
+  final List<String> deleted = [];
+  final List<List<String>> bulkDeleted = [];
+  final List<Tag> added = [];
+  final List<Set<TagScope>?> widenedTo = [];
+  final List<Tag> updated = [];
+
   @override
   Future<void> refresh() async {}
   @override
-  Future<Tag> addTag(Tag tag) async => tag;
-  @override
-  Future<Tag> getOrCreateTag(String name, {String? colorHex}) async {
-    return Tag.create(id: 'new-tag', name: name, colorHex: colorHex);
+  Future<Tag> addTag(Tag tag, {Set<TagScope>? widenExistingTo}) async {
+    added.add(tag);
+    widenedTo.add(widenExistingTo);
+    // As the repository: a name a tag already holds returns that tag.
+    final key = tag.name.trim().toLowerCase();
+    for (final held in state.value ?? const <Tag>[]) {
+      if (held.name.trim().toLowerCase() == key) return held;
+    }
+    return tag;
   }
 
   @override
-  Future<void> updateTag(Tag tag) async {}
+  Future<Tag> getOrCreateTag(
+    String name, {
+    String? colorHex,
+    TagScope scope = TagScope.dives,
+  }) async {
+    // As the real one: a new tag is offered everywhere (#4407).
+    return Tag.create(
+      id: 'new-tag',
+      name: name,
+      colorHex: colorHex,
+      scopes: TagScope.everywhere,
+    );
+  }
+
   @override
-  Future<void> deleteTag(String id) async {}
+  Future<void> updateTag(Tag tag) async => updated.add(tag);
+
+  /// Colour-only writes, as (tag id, colour).
+  final List<(String, String?)> recoloured = [];
   @override
-  Future<void> deleteTags(List<String> ids) async {}
+  Future<void> setTagColor(String id, String? colorHex) async =>
+      recoloured.add((id, colorHex));
+  @override
+  Future<void> deleteTag(String id) async => deleted.add(id);
+  @override
+  Future<void> deleteTags(List<String> ids) async => bulkDeleted.add(ids);
   @override
   Future<void> mergeTags({
     required List<String> sourceTagIds,
@@ -77,8 +129,16 @@ class _MockTagListNotifier extends StateNotifier<AsyncValue<List<Tag>>>
 
 /// Mock TagRepository used only for [tagRepositoryProvider] overrides.
 class _MockTagRepository extends TagRepository {
+  _MockTagRepository({
+    this.mergedUsage = const {TagScope.dives: 0, TagScope.sites: 0},
+  });
+
+  /// What a bulk delete's preview reports for the selection.
+  final Map<TagScope, int> mergedUsage;
+
   @override
-  Future<int> getMergedDiveCount(List<String> tagIds) async => 0;
+  Future<Map<TagScope, int>> getMergedUsage(List<String> tagIds) async =>
+      mergedUsage;
 
   @override
   Future<int> getTagUsageCount(String tagId) async => 0;
@@ -88,10 +148,98 @@ class _MockTagRepository extends TagRepository {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A palette dot in a tag dialog's colour picker.
+Finder _dot(String hex) => find.byKey(ValueKey('tag-color-$hex'));
+
 List<Tag> _tagsFromStats(List<TagStatistic> stats) =>
     stats.map((s) => s.tag).toList();
 
-Widget _buildTestWidget({List<TagStatistic> stats = const []}) {
+/// A stat for a tag offered in [scopes] and used [counts] times per scope.
+TagStatistic _scopedStat(
+  String id,
+  String name,
+  Set<TagScope> scopes,
+  Map<TagScope, int> counts,
+) => TagStatistic(
+  tag: Tag(
+    id: id,
+    diverId: 'diver1',
+    name: name,
+    colorHex: '#F97316',
+    scopes: scopes,
+    createdAt: DateTime(2024),
+    updatedAt: DateTime(2024),
+  ),
+  counts: counts,
+);
+
+/// Moved to make the tag statistics reload while holding their previous
+/// value, the way a dependency change does in the app.
+final _statsReloadProvider = StateProvider<int>((ref) => 0);
+
+Widget _buildTestWidget({
+  List<TagStatistic> stats = const [],
+  _MockTagListNotifier? notifier,
+  TagRepository? repository,
+  FutureOr<List<TagStatistic>> Function(Ref ref)? loadStats,
+}) {
+  return ProviderScope(
+    overrides: [
+      tagStatisticsProvider.overrideWith(
+        loadStats ?? (ref) => Future.value(stats),
+      ),
+      tagListNotifierProvider.overrideWith(
+        (ref) => notifier ?? _MockTagListNotifier(_tagsFromStats(stats)),
+      ),
+      tagRepositoryProvider.overrideWithValue(
+        repository ?? _MockTagRepository(),
+      ),
+      settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    ],
+    child: const MaterialApp(
+      // flutter_test resolves against the HOST machine's locale list, so an
+      // unpinned MaterialApp renders translated on a non-English machine and
+      // every English literal here -- including the contract's "n selected" --
+      // stops matching.
+      locale: Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: TagManagePage(),
+    ),
+  );
+}
+
+/// Like [_buildTestWidget], but under a GoRouter with stub dive and site
+/// lists, so a test can prove a row tap does not navigate. [initialFilter]
+/// seeds the dive filter the diver had before opening Manage Tags.
+Widget _buildRoutedTestWidget({
+  required List<TagStatistic> stats,
+  DiveFilterState initialFilter = const DiveFilterState(),
+}) {
+  final router = GoRouter(
+    initialLocation: '/tags',
+    routes: [
+      GoRoute(
+        path: '/tags',
+        builder: (context, state) => const TagManagePage(),
+      ),
+      GoRoute(
+        path: '/dives',
+        builder: (context, state) =>
+            const Scaffold(body: Text('DIVES_LIST_PAGE')),
+      ),
+      GoRoute(
+        path: '/sites',
+        builder: (context, state) =>
+            const Scaffold(body: Text('SITES_LIST_PAGE')),
+      ),
+      GoRoute(
+        path: '/equipment',
+        builder: (context, state) =>
+            const Scaffold(body: Text('EQUIPMENT_LIST_PAGE')),
+      ),
+    ],
+  );
   return ProviderScope(
     overrides: [
       tagStatisticsProvider.overrideWith((ref) => Future.value(stats)),
@@ -99,11 +247,14 @@ Widget _buildTestWidget({List<TagStatistic> stats = const []}) {
         (ref) => _MockTagListNotifier(_tagsFromStats(stats)),
       ),
       tagRepositoryProvider.overrideWithValue(_MockTagRepository()),
+      settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+      diveFilterProvider.overrideWith((ref) => initialFilter),
     ],
-    child: const MaterialApp(
+    child: MaterialApp.router(
+      routerConfig: router,
+      locale: const Locale('en'),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: TagManagePage(),
     ),
   );
 }
@@ -113,6 +264,39 @@ Widget _buildTestWidget({List<TagStatistic> stats = const []}) {
 // ---------------------------------------------------------------------------
 
 void main() {
+  testWidgets(
+    'shows no auto-tag imports switch; it lives on Settings > Data (#3193)',
+    (tester) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SwitchListTile), findsNothing);
+      expect(find.text('Tag imports automatically'), findsNothing);
+    },
+  );
+
+  group('selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      await verifySelectionContract(
+        tester,
+        build: () => _buildTestWidget(stats: _testStats),
+        selectButton: find.byKey(const ValueKey('enter_selection')),
+        rowRoot: find.ancestor(
+          of: find.text('Night Dive'),
+          matching: find.byType(ListTile),
+        ),
+        firstRow: find.text('Night Dive'),
+        applyFilter: (tester) async {
+          // Type into the real search field. Tags previously hid this field
+          // during selection and never pruned, so a hidden tag stayed checked.
+          await tester.enterText(find.byType(TextField).first, 'Night');
+          await tester.pump();
+        },
+        visibleAfterFilter: 1,
+      );
+    });
+  });
+
   group('TagManagePage', () {
     testWidgets('renders tag list with names and usage counts', (tester) async {
       await tester.pumpWidget(_buildTestWidget(stats: _testStats));
@@ -120,9 +304,30 @@ void main() {
 
       expect(find.text('Night Dive'), findsOneWidget);
       expect(find.text('Photography'), findsOneWidget);
-      // Usage counts: "12 dives" and "5 dives"
-      expect(find.text('12 dives'), findsOneWidget);
-      expect(find.text('5 dives'), findsOneWidget);
+      // Usage counts, each on its own labelled line (#3746).
+      expect(find.text('Used on: 12 dives'), findsOneWidget);
+      expect(find.text('Used on: 5 dives'), findsOneWidget);
+    });
+
+    testWidgets('the last tag\'s edit button clears the Add Tag button', (
+      tester,
+    ) async {
+      final stats = [
+        for (var i = 0; i < 20; i++)
+          _scopedStat(
+            'tag$i',
+            'Tag $i',
+            const {TagScope.dives},
+            const {TagScope.dives: 1},
+          ),
+      ];
+      await tester.pumpWidget(_buildTestWidget(stats: stats));
+      await tester.pumpAndSettle();
+
+      await expectLastRowClearOfFab(
+        tester,
+        lastRow: find.byKey(const ValueKey('tag_edit_tag19')),
+      );
     });
 
     testWidgets('shows empty state when no tags exist', (tester) async {
@@ -151,18 +356,33 @@ void main() {
       expect(find.text('Photography'), findsNothing);
     });
 
-    testWidgets('tapping a tag opens edit dialog', (tester) async {
+    testWidgets('the edit button opens the edit dialog', (tester) async {
       await tester.pumpWidget(_buildTestWidget(stats: _testStats));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Night Dive'));
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag1')));
       await tester.pumpAndSettle();
 
-      // Edit dialog should appear
       expect(find.text('Edit Tag'), findsOneWidget);
       expect(find.text('Tag Name'), findsOneWidget);
       expect(find.text('Save'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
+      // The dialog edits the tag whose button was tapped.
+      expect(find.widgetWithText(TextField, 'Night Dive'), findsOneWidget);
+    });
+
+    testWidgets('the edit button is hidden while selecting', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('tag_edit_tag1')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+
+      // A row tap toggles the row during selection, so a second tap target
+      // inside the row that does something else would be a trap.
+      expect(find.byKey(const ValueKey('tag_edit_tag1')), findsNothing);
+      expect(find.text('Used on: 12 dives'), findsOneWidget);
     });
 
     testWidgets('FAB opens create dialog', (tester) async {
@@ -177,12 +397,13 @@ void main() {
       expect(find.text('Color'), findsOneWidget);
     });
 
-    testWidgets('long-press enters selection mode', (tester) async {
+    testWidgets('Select button enters selection mode', (tester) async {
       await tester.pumpWidget(_buildTestWidget(stats: _testStats));
       await tester.pumpAndSettle();
 
-      // Long press the first tag to enter selection mode
-      await tester.longPress(find.text('Night Dive'));
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
       await tester.pumpAndSettle();
 
       // Selection mode indicators: close button, "1 selected" text, checkboxes
@@ -194,18 +415,60 @@ void main() {
       expect(find.byType(FloatingActionButton), findsNothing);
     });
 
+    testWidgets('long-press on a tag does nothing outside selection', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Night Dive'));
+      await tester.pumpAndSettle();
+
+      // The edit button is the one way to edit a tag, and a long press must
+      // not become a way into multi-select either.
+      expect(find.text('Edit Tag'), findsNothing);
+      expect(find.text('1 selected'), findsNothing);
+      // Selection checkboxes only: the tag edit dialog has scope checkboxes
+      // of its own (issue #1765).
+      expect(
+        find.descendant(
+          of: find.byType(SelectionLeading),
+          matching: find.byType(Checkbox),
+        ),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('enter_selection')), findsOneWidget);
+    });
+
+    testWidgets('long-press while selecting toggles the row', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.longPress(find.text('Night Dive'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1 selected'), findsOneWidget);
+      expect(find.text('Edit Tag'), findsNothing);
+    });
+
     testWidgets('delete button shows confirmation with dive count', (
       tester,
     ) async {
       await tester.pumpWidget(_buildTestWidget(stats: _testStats));
       await tester.pumpAndSettle();
 
-      // Enter selection mode by long-pressing "Night Dive" (12 dives)
-      await tester.longPress(find.text('Night Dive'));
+      // Enter selection mode and check "Night Dive" (12 dives)
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
       await tester.pumpAndSettle();
 
-      // Tap the delete icon in the app bar
-      await tester.tap(find.byIcon(Icons.delete));
+      // Delete lives behind the selection bar's overflow menu.
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_delete')));
       await tester.pumpAndSettle();
 
       // Confirmation dialog should show the tag name and dive count
@@ -221,20 +484,16 @@ void main() {
       await tester.pumpAndSettle();
 
       // Enter selection mode with one tag
-      await tester.longPress(find.text('Night Dive'));
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
       await tester.pumpAndSettle();
 
-      // Find the merge IconButton and verify it is disabled
-      final mergeButton = find.byIcon(Icons.merge);
+      // Keyed by SelectionAppBar, so this no longer depends on which glyph
+      // merge happens to use.
+      final mergeButton = find.byKey(const ValueKey('selection_action_merge'));
       expect(mergeButton, findsOneWidget);
-
-      final iconButtonWidget = tester.widget<IconButton>(
-        find.ancestor(
-          of: find.byIcon(Icons.merge),
-          matching: find.byType(IconButton),
-        ),
-      );
-      expect(iconButtonWidget.onPressed, isNull);
+      expect(tester.widget<IconButton>(mergeButton).onPressed, isNull);
     });
 
     testWidgets('merge button enabled when 2 tags selected', (tester) async {
@@ -242,7 +501,9 @@ void main() {
       await tester.pumpAndSettle();
 
       // Enter selection mode with first tag
-      await tester.longPress(find.text('Night Dive'));
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
       await tester.pumpAndSettle();
 
       // Select second tag by tapping
@@ -252,13 +513,1447 @@ void main() {
       expect(find.text('2 selected'), findsOneWidget);
 
       // Now merge button should be enabled
-      final iconButtonWidget = tester.widget<IconButton>(
-        find.ancestor(
-          of: find.byIcon(Icons.merge),
-          matching: find.byType(IconButton),
-        ),
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('selection_action_merge')),
+            )
+            .onPressed,
+        isNotNull,
       );
-      expect(iconButtonWidget.onPressed, isNotNull);
     });
   });
+
+  group('a row tap stays on the page', () {
+    testWidgets('a row tap neither navigates nor edits', (tester) async {
+      await tester.pumpWidget(
+        _buildRoutedTestWidget(
+          stats: _testStats,
+          initialFilter: const DiveFilterState(siteId: 'site-1'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Night Dive'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('DIVES_LIST_PAGE'), findsNothing);
+      expect(find.text('Edit Tag'), findsNothing);
+      expect(find.text('1 selected'), findsNothing);
+      // The dive list filter is the diver's own and a tap here leaves it be.
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Night Dive')),
+      );
+      final filter = container.read(diveFilterProvider);
+      expect(filter.tagIds, isEmpty);
+      expect(filter.siteId, 'site-1');
+    });
+
+    group('a tag used on sites (issue #1765)', () {
+      TagStatistic siteStat({required bool forDives}) => TagStatistic(
+        tag: Tag(
+          id: 'site-tag',
+          name: 'To try',
+          createdAt: DateTime(2024),
+          updatedAt: DateTime(2024),
+          scopes: {if (forDives) TagScope.dives, TagScope.sites},
+        ),
+        counts: {TagScope.dives: forDives ? 2 : 0, TagScope.sites: 3},
+      );
+
+      Future<void> tapAndExpectStayPut(WidgetTester tester) async {
+        await tester.tap(find.text('To try'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('SITES_LIST_PAGE'), findsNothing);
+        expect(find.text('DIVES_LIST_PAGE'), findsNothing);
+        final container = ProviderScope.containerOf(
+          tester.element(find.text('To try')),
+        );
+        expect(container.read(siteFilterProvider).tagIds, isEmpty);
+        expect(container.read(diveFilterProvider).tagIds, isEmpty);
+      }
+
+      testWidgets('a sites-only tag row stays on the page', (tester) async {
+        await tester.pumpWidget(
+          _buildRoutedTestWidget(stats: [siteStat(forDives: false)]),
+        );
+        await tester.pumpAndSettle();
+
+        await tapAndExpectStayPut(tester);
+      });
+
+      testWidgets('a tag used on dives and sites stays on the page', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _buildRoutedTestWidget(stats: [siteStat(forDives: true)]),
+        );
+        await tester.pumpAndSettle();
+
+        await tapAndExpectStayPut(tester);
+      });
+    });
+
+    testWidgets('a row tap while selecting toggles it and stays put', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildRoutedTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1 selected'), findsOneWidget);
+      expect(find.text('DIVES_LIST_PAGE'), findsNothing);
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Night Dive')),
+      );
+      expect(container.read(diveFilterProvider).tagIds, isEmpty);
+    });
+
+    testWidgets('the edit button edits without leaving the page', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildRoutedTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag2')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Edit Tag'), findsOneWidget);
+      expect(find.text('DIVES_LIST_PAGE'), findsNothing);
+    });
+  });
+
+  group('a bulk action returns the diver to the normal list', () {
+    // #1262. This surface used to call _exitSelectionMode() inside each
+    // handler; the exit now travels back to SelectionAppBar as a
+    // BulkActionOutcome, so these cover the decision that replaced it.
+
+    Future<void> enterSelection(WidgetTester tester, List<String> names) async {
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      for (final name in names) {
+        await tester.tap(find.text(name));
+        await tester.pumpAndSettle();
+      }
+    }
+
+    /// Delete sits in the overflow on every surface, never inline.
+    Future<void> openDelete(WidgetTester tester) async {
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_delete')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('deleting several tags ends selection mode', (tester) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await enterSelection(tester, ['Night Dive', 'Photography']);
+      expect(find.text('2 selected'), findsOneWidget);
+
+      await openDelete(tester);
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.bulkDeleted, [
+        ['tag1', 'tag2'],
+      ]);
+      expect(
+        find.byKey(const ValueKey('selection_exit')),
+        findsNothing,
+        reason: 'a completed delete must return the diver to the tag list',
+      );
+    });
+
+    testWidgets('cancelling a multi-tag delete keeps the selection', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await enterSelection(tester, ['Night Dive', 'Photography']);
+      await openDelete(tester);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.bulkDeleted, isEmpty);
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+
+    testWidgets('deleting a single tag ends selection mode', (tester) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      // One checked row takes the single-tag branch, which names the tag and
+      // its dive count rather than counting a selection.
+      await enterSelection(tester, ['Night Dive']);
+      await openDelete(tester);
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.deleted, ['tag1']);
+      expect(find.byKey(const ValueKey('selection_exit')), findsNothing);
+    });
+
+    testWidgets('cancelling a single-tag delete keeps the selection', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await enterSelection(tester, ['Night Dive']);
+      await openDelete(tester);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.deleted, isEmpty);
+      expect(find.text('1 selected'), findsOneWidget);
+    });
+
+    testWidgets('dismissing the merge sheet keeps the selection', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      await enterSelection(tester, ['Night Dive', 'Photography']);
+      await tester.tap(find.byKey(const ValueKey('selection_action_merge')));
+      await tester.pumpAndSettle();
+      expect(find.byType(TagMergeSheet), findsOneWidget);
+
+      // Tapping the barrier dismisses the sheet with no result, which is the
+      // diver changing their mind rather than a merge.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TagMergeSheet), findsNothing);
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+  });
+
+  group('a tag dialog closes only once its save lands (#1907)', () {
+    // Save used to drop its write: create closed at once and edit's Future
+    // went unobserved, so a failure gave no feedback and reached the zone
+    // unattributed.
+
+    const errorText = 'Something went wrong. Please try again.';
+
+    // Inside the dialog, not a SnackBar: the page's SnackBar renders under
+    // the dialog's barrier, dimmed and out of reach.
+    final dialogError = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.text(errorText),
+    );
+
+    TextButton button(WidgetTester tester, String label) =>
+        tester.widget<TextButton>(find.widgetWithText(TextButton, label));
+
+    Future<void> openCreate(WidgetTester tester, String name) async {
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, name);
+    }
+
+    Future<void> openEdit(WidgetTester tester, String name) async {
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag1')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Night Dive'),
+        name,
+      );
+    }
+
+    testWidgets('a failed edit shows an error and keeps the edits', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: _testStats,
+          notifier: _FailingSaveTagListNotifier(_tagsFromStats(_testStats)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await openEdit(tester, 'Night Dive Renamed');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(dialogError, findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(find.text('Edit Tag'), findsOneWidget);
+      expect(
+        find.widgetWithText(TextField, 'Night Dive Renamed'),
+        findsOneWidget,
+      );
+      expect(button(tester, 'Save').onPressed, isNotNull, reason: 'retry');
+    });
+
+    testWidgets('a failed create shows an error and keeps the dialog open', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: _testStats,
+          notifier: _FailingSaveTagListNotifier(_tagsFromStats(_testStats)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'Wreck');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(dialogError, findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Wreck'), findsOneWidget);
+      expect(button(tester, 'Save').onPressed, isNotNull, reason: 'retry');
+    });
+
+    testWidgets('a create holds the dialog until the tag is saved', (
+      tester,
+    ) async {
+      final notifier = _GatedSaveTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'Wreck');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      // Mid-save: still open, and neither button can start a second write.
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(button(tester, 'Save').onPressed, isNull);
+      expect(button(tester, 'Cancel').onPressed, isNull);
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      notifier.gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(notifier.added.map((t) => t.name), ['Wreck']);
+      expect(find.text(errorText), findsNothing);
+    });
+
+    testWidgets('an edit disables both buttons until its save lands', (
+      tester,
+    ) async {
+      final notifier = _GatedSaveTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEdit(tester, 'Night Dive Renamed');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      expect(find.text('Edit Tag'), findsOneWidget);
+      expect(button(tester, 'Save').onPressed, isNull);
+      expect(button(tester, 'Cancel').onPressed, isNull);
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      notifier.gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(notifier.updated.map((t) => t.name), ['Night Dive Renamed']);
+    });
+
+    testWidgets('a new tag starts ticked for every scope (#4407)', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'Wreck');
+      for (final label in const [
+        'Use for dives',
+        'Use for sites',
+        'Use for equipment',
+        'Use for media',
+        'Use for documents',
+      ]) {
+        final box = tester.widget<CheckboxListTile>(
+          find.widgetWithText(CheckboxListTile, label),
+        );
+        expect(box.value, isTrue, reason: label);
+      }
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.added.single.scopes, TagScope.values.toSet());
+    });
+
+    group('a name an existing tag holds (#4407)', () {
+      const note =
+          'This tag already exists. Saving adds the ticked uses to it.';
+      const labels = [
+        'Use for dives',
+        'Use for sites',
+        'Use for equipment',
+        'Use for media',
+        'Use for documents',
+      ];
+      Set<String> ticked(WidgetTester tester) => {
+        for (final label in labels)
+          if (tester
+                  .widget<CheckboxListTile>(
+                    find.widgetWithText(CheckboxListTile, label),
+                  )
+                  .value ==
+              true)
+            label,
+      };
+
+      testWidgets('mirrors that tag\'s scopes and says so', (tester) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        // 'Night Dive' is a dives-only tag; the match ignores case and
+        // surrounding spaces, as the repository's does.
+        await openCreate(tester, ' night dive ');
+        await tester.pump();
+        expect(ticked(tester), {'Use for dives'});
+        expect(find.text(note), findsOneWidget);
+
+        await tester.tap(find.widgetWithText(TextButton, 'Save'));
+        await tester.pumpAndSettle();
+        // What was shown is what is saved: the tag stays dives-only.
+        expect(notifier.added.single.scopes, {TagScope.dives});
+      });
+
+      String? shownColor(WidgetTester tester) => tester
+          .widget<TagColorPicker>(find.byType(TagColorPicker))
+          .selectedColor;
+
+      testWidgets('mirrors its colour and saves only a picked one', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        // 'Night Dive' is drawn in #EF4444.
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        expect(shownColor(tester), '#EF4444');
+        await tester.tap(find.widgetWithText(TextButton, 'Save'));
+        await tester.pumpAndSettle();
+        expect(notifier.updated, isEmpty, reason: 'colour left as it was');
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        await tester.ensureVisible(_dot('#22C55E'));
+        await tester.tap(_dot('#22C55E'));
+        await tester.pump();
+        await tester.tap(find.widgetWithText(TextButton, 'Save'));
+        await tester.pumpAndSettle();
+        // Colour alone: a whole-tag update could reset scopes widened since.
+        expect(notifier.recoloured, [('tag1', '#22C55E')]);
+        expect(notifier.updated, isEmpty);
+      });
+
+      testWidgets('goes back to the default colour once the name stops '
+          'matching', (tester) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField).last, 'Night Dives');
+        await tester.pump();
+        expect(shownColor(tester), TagColors.predefined.first);
+      });
+
+      testWidgets('drops uses added to it once the name no longer matches', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        // Ticking sites adds it to the dives-only 'Night Dive'...
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        tester
+            .widget<CheckboxListTile>(
+              find.widgetWithText(CheckboxListTile, 'Use for sites'),
+            )
+            .onChanged!(true);
+        await tester.pump();
+        expect(ticked(tester), {'Use for dives', 'Use for sites'});
+
+        // ...so a new name is a new tag, offered everywhere, not narrowed
+        // to the uses meant for that one.
+        await tester.enterText(find.byType(TextField).last, 'Night Dives');
+        await tester.pump();
+        expect(ticked(tester), labels.toSet());
+      });
+
+      testWidgets('keeps boxes the user already changed', (tester) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(FloatingActionButton));
+        await tester.pumpAndSettle();
+        // Toggled through the box's own callback: the focused name field
+        // scrolls the dialog between frames, which makes taps flaky.
+        tester
+            .widget<CheckboxListTile>(
+              find.widgetWithText(CheckboxListTile, 'Use for sites'),
+            )
+            .onChanged!(false);
+        await tester.pump();
+        await tester.enterText(find.byType(TextField).last, 'Night Dive');
+        await tester.pump();
+
+        expect(ticked(tester), {...labels}..remove('Use for sites'));
+        expect(find.text(note), findsOneWidget);
+      });
+
+      testWidgets('goes back to every scope once the name stops matching', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField).last, 'Night Dives');
+        await tester.pump();
+
+        expect(ticked(tester), labels.toSet());
+        expect(find.text(note), findsNothing);
+      });
+
+      testWidgets('its own scopes cannot be unticked, as Save keeps them', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(FloatingActionButton));
+        await tester.pumpAndSettle();
+        // Unticked before the name matches a dives-only tag.
+        tester
+            .widget<CheckboxListTile>(
+              find.widgetWithText(CheckboxListTile, 'Use for dives'),
+            )
+            .onChanged!(false);
+        await tester.pump();
+        await tester.enterText(find.byType(TextField).last, 'Night Dive');
+        await tester.pump();
+
+        expect(ticked(tester), contains('Use for dives'));
+        final dives = tester.widget<CheckboxListTile>(
+          find.widgetWithText(CheckboxListTile, 'Use for dives'),
+        );
+        expect(dives.onChanged, isNull);
+      });
+
+      testWidgets('drops its scopes again once the name stops matching', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(FloatingActionButton));
+        await tester.pumpAndSettle();
+        tester
+            .widget<CheckboxListTile>(
+              find.widgetWithText(CheckboxListTile, 'Use for dives'),
+            )
+            .onChanged!(false);
+        await tester.pump();
+        await tester.enterText(find.byType(TextField).last, 'Night Dive');
+        await tester.pump();
+        expect(ticked(tester), contains('Use for dives'));
+
+        // The matched tag's dives were never the user's pick.
+        await tester.enterText(find.byType(TextField).last, 'Night Dives');
+        await tester.pump();
+        expect(ticked(tester), {...labels}..remove('Use for dives'));
+      });
+
+      testWidgets('untouched boxes widen nothing on Save', (tester) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        await tester.tap(find.widgetWithText(TextButton, 'Save'));
+        await tester.pumpAndSettle();
+
+        // Not even when the list had not loaded to show the match.
+        expect(notifier.widenedTo.single, isEmpty);
+      });
+
+      testWidgets('is found while the tag list reloads', (tester) async {
+        final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+        // The real notifier drops its value while it reloads after an add.
+        // ignore: invalid_use_of_protected_member
+        notifier.state = const AsyncValue.loading();
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+
+        expect(ticked(tester), {'Use for dives'});
+        expect(find.text(note), findsOneWidget);
+      });
+
+      testWidgets('is found when the tag list changes after typing', (
+        tester,
+      ) async {
+        final notifier = _MockTagListNotifier(const []);
+        await tester.pumpWidget(
+          _buildTestWidget(stats: _testStats, notifier: notifier),
+        );
+        await tester.pumpAndSettle();
+
+        await openCreate(tester, 'Night Dive');
+        await tester.pump();
+        expect(find.text(note), findsNothing);
+
+        // A sync (or the first load) brings the tag holding the name.
+        // ignore: invalid_use_of_protected_member
+        notifier.state = AsyncValue.data(_tagsFromStats(_testStats));
+        await tester.pump();
+
+        expect(ticked(tester), {'Use for dives'});
+        expect(find.text(note), findsOneWidget);
+      });
+    });
+
+    testWidgets('a create saves the chosen color and scope', (tester) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'To try');
+      await tester.ensureVisible(_dot('#22C55E'));
+      await tester.tap(_dot('#22C55E'));
+      // Every scope starts ticked (#4407); narrowing unticks the rest.
+      await tester.tap(find.widgetWithText(CheckboxListTile, 'Use for dives'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      final created = notifier.added.single;
+      expect(created.name, 'To try');
+      expect(created.colorHex, '#22C55E');
+      expect(created.appliesTo(TagScope.dives), isFalse);
+      expect(created.appliesTo(TagScope.sites), isTrue);
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('Cancel closes either dialog without saving', (tester) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'Wreck');
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+
+      await openEdit(tester, 'Night Dive Renamed');
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+
+      expect(notifier.added, isEmpty);
+      expect(notifier.updated, isEmpty);
+    });
+
+    testWidgets('a retry clears the error while it runs', (tester) async {
+      final notifier = _FailOnceTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEdit(tester, 'Night Dive Renamed');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(dialogError, findsOneWidget);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+      expect(dialogError, findsNothing, reason: 'the retry is under way');
+
+      notifier.gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(notifier.updated.map((t) => t.name), ['Night Dive Renamed']);
+    });
+
+    testWidgets('two taps in one frame save once', (tester) async {
+      final notifier = _GatedSaveTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openCreate(tester, 'Wreck');
+      // No pump between: the button still holds the callback built before
+      // saving flipped, so only a check inside the callback stops the second.
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      notifier.gate.complete();
+      await tester.pumpAndSettle();
+      expect(notifier.added.map((t) => t.name), ['Wreck']);
+    });
+
+    testWidgets('a save in flight cannot be dismissed, so a failure keeps '
+        'the edits', (tester) async {
+      final notifier = _GatedSaveTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEdit(tester, 'Night Dive Renamed');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      // The barrier, Escape and Back all ask the route before popping it.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+      await navigator.maybePop();
+      // Long enough for any dismissal to finish its exit animation.
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Edit Tag'), findsOneWidget);
+
+      notifier.gate.completeError(StateError('update failed'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(dialogError, findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(
+        find.widgetWithText(TextField, 'Night Dive Renamed'),
+        findsOneWidget,
+      );
+
+      // Once the save has settled the dialog dismisses as usual.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit Tag'), findsNothing);
+    });
+
+    testWidgets('an edit writes the values the diver saved, not later ones', (
+      tester,
+    ) async {
+      // Turning dives off asks for usage first; hold that read open to act
+      // in the gap between tapping Save and the write.
+      final repository = _GatedUsageTagRepository();
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: _testStats,
+          notifier: notifier,
+          repository: repository,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag1')));
+      await tester.pumpAndSettle();
+      // The colour swatches are chips rather than dots (issue #2269), so the
+      // scope editor below them can sit past the dialog's fold.
+      final sites = find.widgetWithText(CheckboxListTile, 'Use for sites');
+      final dives = find.widgetWithText(CheckboxListTile, 'Use for dives');
+      await tester.ensureVisible(sites);
+      await tester.tap(sites);
+      await tester.ensureVisible(dives);
+      await tester.tap(dives);
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      // Mid-save edits the confirmation never saw.
+      await tester.ensureVisible(_dot('#22C55E'));
+      await tester.tap(_dot('#22C55E'));
+      await tester.tap(find.widgetWithText(CheckboxListTile, 'Use for dives'));
+      await tester.pump();
+
+      repository.usage.complete(const {TagScope.dives: 0, TagScope.sites: 0});
+      await tester.pumpAndSettle();
+
+      final saved = notifier.updated.single;
+      expect(saved.colorHex, '#EF4444');
+      expect(saved.appliesTo(TagScope.dives), isFalse);
+      expect(saved.appliesTo(TagScope.sites), isTrue);
+    });
+  });
+
+  group('deleting from the edit dialog (#1889)', () {
+    // Delete was reachable only through selection mode, which divers did not
+    // find. The editor now offers it too, behind the same confirmation.
+
+    final confirmation = find.widgetWithText(AlertDialog, 'Delete Tag?');
+
+    Finder confirmationButton(String label) => find.descendant(
+      of: confirmation,
+      matching: find.widgetWithText(TextButton, label),
+    );
+
+    Future<void> openEditor(WidgetTester tester, String tagId) async {
+      await tester.tap(find.byKey(ValueKey('tag_edit_$tagId')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'the edit dialog offers Delete and the create dialog does not',
+      (tester) async {
+        await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+        await tester.pumpAndSettle();
+
+        await openEditor(tester, 'tag1');
+        expect(find.byKey(const ValueKey('tag_edit_delete')), findsOneWidget);
+        await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+        await tester.pumpAndSettle();
+
+        // There is nothing to delete before the tag exists.
+        await tester.tap(find.byType(FloatingActionButton));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('tag_edit_delete')), findsNothing);
+      },
+    );
+
+    testWidgets('confirming deletes the tag and closes both dialogs', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEditor(tester, 'tag1');
+      await tester.tap(find.byKey(const ValueKey('tag_edit_delete')));
+      await tester.pumpAndSettle();
+
+      // The same confirmation as selection mode: the tag and its dive count.
+      expect(confirmation, findsOneWidget);
+      expect(
+        find.descendant(
+          of: confirmation,
+          matching: find.textContaining('Night Dive'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: confirmation,
+          matching: find.textContaining('12 dives'),
+        ),
+        findsOneWidget,
+      );
+      expect(notifier.deleted, isEmpty, reason: 'nothing is deleted unasked');
+
+      await tester.tap(confirmationButton('Delete'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.deleted, ['tag1']);
+      expect(notifier.updated, isEmpty, reason: 'Delete must not save first');
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('cancelling returns to the editor with unsaved edits intact', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEditor(tester, 'tag2');
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Photography'),
+        'Macro Photography',
+      );
+      await tester.ensureVisible(_dot('#22C55E'));
+      await tester.tap(_dot('#22C55E'));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('tag_edit_delete')));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: confirmation,
+          matching: find.textContaining('5 dives'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(confirmationButton('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.deleted, isEmpty);
+      expect(confirmation, findsNothing);
+      expect(find.text('Edit Tag'), findsOneWidget);
+      expect(
+        find.widgetWithText(TextField, 'Macro Photography'),
+        findsOneWidget,
+      );
+
+      // Saving now proves both pieces of editor state survived, the color as
+      // well as the name.
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(notifier.updated.single.name, 'Macro Photography');
+      expect(notifier.updated.single.colorHex, '#22C55E');
+    });
+
+    testWidgets('a failed delete is logged, not left as an uncaught error', (
+      tester,
+    ) async {
+      final notifier = _FailingDeleteTagListNotifier(
+        _tagsFromStats(_testStats),
+      );
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEditor(tester, 'tag1');
+      await tester.tap(find.byKey(const ValueKey('tag_edit_delete')));
+      await tester.pumpAndSettle();
+      await tester.tap(confirmationButton('Delete'));
+      await tester.pumpAndSettle();
+
+      // onPressed cannot await, so the delete must carry its own listener,
+      // as the selection bar's dispatch does. Unlistened, the failure would
+      // surface here as an uncaught error.
+      expect(tester.takeException(), isNull);
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('Delete is disabled while a save is in flight', (tester) async {
+      // A delete started mid-save would race the write it interrupts (#1907
+      // disables Cancel for the same reason).
+      final notifier = _GatedSaveTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await openEditor(tester, 'tag1');
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pump();
+
+      final delete = find.byKey(const ValueKey('tag_edit_delete'));
+      expect(tester.widget<TextButton>(delete).onPressed, isNull);
+
+      notifier.gate.complete();
+      await tester.pumpAndSettle();
+      expect(notifier.deleted, isEmpty);
+    });
+  });
+
+  group('delete confirmations name sites as well as dives (#1902)', () {
+    // Since #1849 a tag can be used only on sites, and deleting it drops it
+    // from every site (site_tags cascades), but the confirmations counted
+    // only dives and so promised a sites-only tag would lose nothing.
+
+    final sitesOnlyStat = TagStatistic(
+      tag: Tag(
+        id: 'tag3',
+        diverId: 'diver1',
+        name: 'To try',
+        colorHex: '#F97316',
+        scopes: const {TagScope.sites},
+        createdAt: DateTime(2024),
+        updatedAt: DateTime(2024),
+      ),
+      counts: const {TagScope.dives: 0, TagScope.sites: 3},
+    );
+
+    testWidgets('a sites-only tag names its sites', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(stats: [..._testStats, sitesOnlyStat]),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag3')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('tag_edit_delete')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          '"To try" will be removed from 3 sites. This cannot be undone.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a bulk delete names both dives and sites', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: [..._testStats, sitesOnlyStat],
+          repository: _MockTagRepository(
+            mergedUsage: const {TagScope.dives: 12, TagScope.sites: 3},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
+      await tester.tap(find.text('To try'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_delete')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'These tags will be removed from:\n'
+          '• 12 dives\n'
+          '• 3 sites\n'
+          'This cannot be undone.',
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('the equipment scope (#1942)', () {
+    const d = TagScope.dives;
+    const s = TagScope.sites;
+    const e = TagScope.equipment;
+    final kit = _scopedStat('kit', 'Travel kit', const {e}, const {e: 2});
+
+    testWidgets('a row names every scope and its usage in each', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: [
+            _scopedStat(
+              'all',
+              'Everywhere',
+              const {d, s, e},
+              const {d: 12, s: 3, e: 5},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('For: Dives · Sites · Equipment'), findsOneWidget);
+      expect(
+        find.text('Used on: 12 dives, 3 sites, 5 equipment items'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an equipment tag row stays on the page', (tester) async {
+      await tester.pumpWidget(_buildRoutedTestWidget(stats: [kit]));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Travel kit'));
+      await tester.pumpAndSettle();
+
+      // Rows are inert outside selection (#1888), whatever the scope.
+      expect(find.text('EQUIPMENT_LIST_PAGE'), findsNothing);
+      expect(find.text('Edit Tag'), findsNothing);
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Travel kit')),
+      );
+      expect(container.read(equipmentFilterProvider).tagIds, isEmpty);
+    });
+
+    testWidgets('a create can offer a tag for equipment only', (tester) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, 'Rental');
+      // Every scope starts ticked (#4407): untick all but equipment.
+      for (final label in const [
+        'Use for dives',
+        'Use for sites',
+        'Use for media',
+        'Use for documents',
+      ]) {
+        final box = find.widgetWithText(CheckboxListTile, label);
+        await tester.ensureVisible(box);
+        await tester.tap(box);
+      }
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(notifier.added.single.scopes, {e});
+    });
+
+    testWidgets('widening a tag to equipment saves without asking', (
+      tester,
+    ) async {
+      final notifier = _MockTagListNotifier(_tagsFromStats(_testStats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: _testStats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag1')));
+      await tester.pumpAndSettle();
+      final useForEquipment = find.widgetWithText(
+        CheckboxListTile,
+        'Use for equipment',
+      );
+      await tester.ensureVisible(useForEquipment);
+      await tester.tap(useForEquipment);
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove tag from existing items?'), findsNothing);
+      expect(notifier.updated.single.scopes, {d, e});
+    });
+
+    testWidgets('a bulk delete names dives, sites and equipment', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: [..._testStats, kit],
+          repository: _MockTagRepository(
+            mergedUsage: const {d: 12, s: 3, e: 2},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Night Dive'));
+      await tester.tap(find.text('Travel kit'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_overflow')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_delete')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'These tags will be removed from:\n'
+          '• 12 dives\n'
+          '• 3 sites\n'
+          '• 2 equipment items\n'
+          'This cannot be undone.',
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+  group('the edit dialog keeps the stored color (#4384)', () {
+    TagStatistic stat(String? colorHex) => TagStatistic(
+      tag: Tag(
+        id: 'tag1',
+        diverId: 'diver1',
+        name: 'Night Dive',
+        colorHex: colorHex,
+        createdAt: DateTime(2024),
+        updatedAt: DateTime(2024),
+        scopes: const {TagScope.dives},
+      ),
+      counts: const {TagScope.dives: 3},
+    );
+
+    Future<_MockTagListNotifier> openEditOn(
+      WidgetTester tester,
+      String? colorHex,
+    ) async {
+      final stats = [stat(colorHex)];
+      final notifier = _MockTagListNotifier(_tagsFromStats(stats));
+      await tester.pumpWidget(
+        _buildTestWidget(stats: stats, notifier: notifier),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('tag_edit_tag1')));
+      await tester.pumpAndSettle();
+      return notifier;
+    }
+
+    Future<void> save(WidgetTester tester) async {
+      await tester.tap(find.widgetWithText(TextButton, 'Save'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('renaming a tag with no color leaves it with none', (
+      tester,
+    ) async {
+      final notifier = await openEditOn(tester, null);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Night Dive'),
+        'Night',
+      );
+      await save(tester);
+      expect(notifier.updated.single.name, 'Night');
+      expect(notifier.updated.single.colorHex, isNull);
+    });
+
+    testWidgets('a palette color in another casing is saved as it was', (
+      tester,
+    ) async {
+      final notifier = await openEditOn(tester, '#3b82f6');
+      await save(tester);
+      expect(notifier.updated.single.colorHex, '#3b82f6');
+    });
+
+    testWidgets('an imported code off the palette is saved as it was', (
+      tester,
+    ) async {
+      final notifier = await openEditOn(tester, 'FF0000');
+      await save(tester);
+      expect(notifier.updated.single.colorHex, 'FF0000');
+    });
+
+    testWidgets('an unreadable stored code is saved as it was', (tester) async {
+      final notifier = await openEditOn(tester, 'red');
+      await save(tester);
+      expect(notifier.updated.single.colorHex, 'red');
+    });
+
+    testWidgets('choosing Blue for a tag with no color saves Blue', (
+      tester,
+    ) async {
+      final notifier = await openEditOn(tester, null);
+      await tester.ensureVisible(_dot('#3B82F6'));
+      await tester.tap(_dot('#3B82F6'));
+      await tester.pump();
+      await save(tester);
+      expect(notifier.updated.single.colorHex, '#3B82F6');
+    });
+  });
+
+  group('a row shows the tag as the app shows it', () {
+    // The row's leading dot used to be a solid CircleAvatar of the stored
+    // hex, which is the exact spot issue #2254 measured as disagreeing with
+    // every chip in the app. Settings now offers the same chip the rest of
+    // the app paints, so there is nothing left claiming the raw hex is what
+    // a tag looks like (issue #2269).
+    testWidgets('renders each tag as its chip', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TagChip), findsNWidgets(_testStats.length));
+    });
+
+    testWidgets('keeps no solid dot of the stored colour', (tester) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CircleAvatar), findsNothing);
+    });
+
+    testWidgets('paints the chip in the tint, not the stored hex', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      final fill = tester
+          .widget<Material>(
+            find
+                .descendant(
+                  of: find.byType(TagChip).first,
+                  matching: find.byType(Material),
+                )
+                .first,
+          )
+          .color;
+
+      expect(fill, isNot(_testStats.first.tag.color));
+      expect(fill?.a, 1.0);
+    });
+
+    testWidgets('names the tag exactly once in the row', (tester) async {
+      // The chip carries the name, so the ListTile title must not repeat it.
+      await tester.pumpWidget(_buildTestWidget(stats: _testStats));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Night Dive'), findsOneWidget);
+    });
+  });
+
+  group('a reload holding its previous value', () {
+    testWidgets('keeps the checks', (tester) async {
+      await tester.pumpWidget(
+        _buildTestWidget(
+          stats: _testStats,
+          loadStats: (ref) {
+            ref.watch(_statsReloadProvider);
+            return Future.delayed(
+              const Duration(milliseconds: 50),
+              () => _testStats,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('enter_selection')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('selection_select_all')));
+      await tester.pumpAndSettle();
+      expect(find.text('2 selected'), findsOneWidget);
+
+      ProviderScope.containerOf(
+        tester.element(find.byType(TagManagePage)),
+      ).read(_statsReloadProvider.notifier).state++;
+      // Two frames inside the reload: one builds, the next runs the prune.
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('2 selected'), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(find.text('2 selected'), findsOneWidget);
+    });
+  });
+}
+
+/// A notifier whose single-tag delete fails, as a repository or sync failure
+/// would.
+class _FailingDeleteTagListNotifier extends _MockTagListNotifier {
+  _FailingDeleteTagListNotifier(super.tags);
+
+  @override
+  Future<void> deleteTag(String id) async =>
+      throw StateError('delete failed for $id');
+}
+
+/// A notifier whose first edit save fails and whose second waits on [gate],
+/// so a test can watch a retry while it is in flight.
+class _FailOnceTagListNotifier extends _MockTagListNotifier {
+  _FailOnceTagListNotifier(super.tags);
+
+  final Completer<void> gate = Completer<void>();
+  bool _failed = false;
+
+  @override
+  Future<void> updateTag(Tag tag) async {
+    if (!_failed) {
+      _failed = true;
+      throw StateError('update failed for ${tag.id}');
+    }
+    updated.add(tag);
+    await gate.future;
+  }
+}
+
+/// A repository whose usage read waits on [usage], so a test can act while
+/// the narrowing check is in flight.
+class _GatedUsageTagRepository extends _MockTagRepository {
+  final Completer<Map<TagScope, int>> usage = Completer();
+
+  @override
+  Future<Map<TagScope, int>> getTagUsage(String tagId) => usage.future;
+}
+
+/// A notifier whose saves fail, as a database or sync failure would.
+class _FailingSaveTagListNotifier extends _MockTagListNotifier {
+  _FailingSaveTagListNotifier(super.tags);
+
+  @override
+  Future<Tag> addTag(Tag tag, {Set<TagScope>? widenExistingTo}) async =>
+      throw StateError('create failed for ${tag.name}');
+
+  @override
+  Future<void> updateTag(Tag tag) async =>
+      throw StateError('update failed for ${tag.id}');
+}
+
+/// A notifier whose saves wait on [gate], so a test can act mid-save.
+class _GatedSaveTagListNotifier extends _MockTagListNotifier {
+  _GatedSaveTagListNotifier(super.tags);
+
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<Tag> addTag(Tag tag, {Set<TagScope>? widenExistingTo}) async {
+    added.add(tag);
+    await gate.future;
+    return tag;
+  }
+
+  @override
+  Future<void> updateTag(Tag tag) async {
+    updated.add(tag);
+    await gate.future;
+  }
 }

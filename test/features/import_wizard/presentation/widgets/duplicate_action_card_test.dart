@@ -5,6 +5,7 @@ import 'package:submersion/features/dive_import/domain/services/dive_matcher.dar
 import 'package:submersion/features/import_wizard/domain/models/duplicate_action.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/duplicate_action_card.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +32,9 @@ const _testItem = EntityItem(
 
 Widget _buildCard({required DuplicateActionCard card}) {
   return MaterialApp(
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    locale: const Locale('en'),
     home: Scaffold(body: SingleChildScrollView(child: card)),
   );
 }
@@ -130,11 +134,46 @@ class _RebuildableCardHostState extends State<_RebuildableCardHost> {
 // ---------------------------------------------------------------------------
 
 void main() {
+  group('DuplicateActionCard - a download that fits two drafts (#637)', () {
+    testWidgets('asks which draft it fills, and offers no merge', (
+      tester,
+    ) async {
+      var chose = 0;
+      await tester.pumpWidget(
+        _buildCard(
+          card: DuplicateActionCard(
+            item: _testItem,
+            matchResult: const DiveMatchResult(
+              diveId: 'd1',
+              score: 1,
+              timeDifferenceMs: 0,
+              fillCandidates: ['d1', 'd2'],
+            ),
+            selectedAction: null,
+            availableActions: DuplicateAction.values.toSet(),
+            onActionChanged: (_) {},
+            existingDiveId: 'd1',
+            isPending: true,
+            onChangeFillTarget: () => chose++,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.text('Fits 2 drafts. Choose the one it fills.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Choose draft'));
+      expect(chose, 1);
+    });
+  });
+
   group('DuplicateActionCard - collapsed state', () {
     testWidgets('renders item title and subtitle', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(_buildCard(card: _makeCard()));
       await tester.pump();
@@ -146,7 +185,7 @@ void main() {
     testWidgets('renders match percentage text', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(_buildCard(card: _makeCard()));
       await tester.pump();
@@ -159,7 +198,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(card: _makeCard(matchResult: _likelyMatchResult)),
@@ -179,7 +218,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(card: _makeCard(matchResult: _possibleMatchResult)),
@@ -195,7 +234,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(card: _makeCard(selectedAction: DuplicateAction.skip)),
@@ -210,7 +249,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -227,7 +266,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -242,7 +281,7 @@ void main() {
     testWidgets('expand chevron is visible in collapsed state', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(_buildCard(card: _makeCard()));
       await tester.pump();
@@ -256,7 +295,7 @@ void main() {
     testWidgets('tapping chevron area toggles expanded state', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(_buildCard(card: _makeCard()));
       await tester.pump();
@@ -276,7 +315,7 @@ void main() {
     testWidgets('tapping expanded chevron collapses the card', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(_buildCard(card: _makeCard()));
       await tester.pump();
@@ -297,7 +336,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       // Item with no diveData
       const item = EntityItem(title: 'Some Site', subtitle: '10 m · 30 min');
@@ -322,7 +361,7 @@ void main() {
       (tester) async {
         tester.view.physicalSize = const Size(800, 600);
         tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.reset);
 
         await tester.pumpWidget(
           _buildCard(
@@ -348,13 +387,16 @@ void main() {
       (tester) async {
         tester.view.physicalSize = const Size(800, 600);
         tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.reset);
 
         final notifier = ValueNotifier<DuplicateAction?>(null);
         addTearDown(notifier.dispose);
 
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Scaffold(
               body: SingleChildScrollView(
                 child: _RebuildableCardHost(
@@ -388,13 +430,16 @@ void main() {
       (tester) async {
         tester.view.physicalSize = const Size(800, 600);
         tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.reset);
 
         final notifier = ValueNotifier<DuplicateAction?>(DuplicateAction.skip);
         addTearDown(notifier.dispose);
 
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: const Locale('en'),
             home: Scaffold(
               body: SingleChildScrollView(
                 child: _RebuildableCardHost(
@@ -428,7 +473,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -448,7 +493,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -468,7 +513,7 @@ void main() {
       (tester) async {
         tester.view.physicalSize = const Size(800, 600);
         tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.reset);
 
         await tester.pumpWidget(
           _buildCard(
@@ -489,7 +534,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -521,7 +566,7 @@ void main() {
     ) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(
@@ -538,7 +583,7 @@ void main() {
     testWidgets('no action badge when selectedAction is null', (tester) async {
       tester.view.physicalSize = const Size(800, 600);
       tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _buildCard(card: _makeCardNullable(selectedAction: null)),
@@ -550,6 +595,39 @@ void main() {
       expect(find.text('IMPORT'), findsNothing);
       expect(find.text('CONSOLIDATE'), findsNothing);
       expect(find.text('REPLACE'), findsNothing);
+    });
+  });
+
+  group('a draft fill (#637)', () {
+    const draftFill = DiveMatchResult(
+      diveId: 'draft-1',
+      score: 1,
+      timeDifferenceMs: 0,
+      fillTarget: FillTarget(diveId: 'draft-1', kind: FillTargetKind.draft),
+    );
+
+    testWidgets('says Fill draft and names the draft it fills', (tester) async {
+      await tester.pumpWidget(
+        _buildCard(
+          card: DuplicateActionCard(
+            item: _testItem,
+            matchResult: draftFill,
+            selectedAction: DuplicateAction.fillPlanned,
+            availableActions: DuplicateAction.values.toSet(),
+            onActionChanged: (_) {},
+            existingDiveId: 'draft-1',
+            plannedDiveLabel: 'Draft from 10:02 to 10:54',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Fill draft'), findsWidgets);
+      expect(find.text('Fill planned dive'), findsNothing);
+      expect(
+        find.text('Fills draft: Draft from 10:02 to 10:54'),
+        findsOneWidget,
+      );
     });
   });
 }

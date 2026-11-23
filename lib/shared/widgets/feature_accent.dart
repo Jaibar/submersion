@@ -1,0 +1,161 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/feature_accent_colors.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
+import 'package:submersion/shared/widgets/title_with_subtitle.dart';
+import 'package:submersion/shared/models/subtitle_text.dart';
+
+/// The three user-toggleable surfaces that can show feature accent colors.
+enum AccentSurface { nav, header, list }
+
+/// Resolves the accent color for [featureId] on [surface], or null when the
+/// surface's toggle is off or the palette has no entry. Callers treat null as
+/// "use the ambient color", so every failure mode degrades to the appearance
+/// the app had before accents existed.
+Color? resolveFeatureAccent(
+  BuildContext context,
+  WidgetRef ref, {
+  required AccentSurface surface,
+  required String featureId,
+}) {
+  final enabled = switch (surface) {
+    AccentSurface.nav => ref.watch(accentNavIconsProvider),
+    AccentSurface.header => ref.watch(accentSectionHeadersProvider),
+    AccentSurface.list => ref.watch(accentListIconsProvider),
+  };
+  if (!enabled) return null;
+  return Theme.of(context).extension<FeatureAccentColors>()?.of(featureId);
+}
+
+/// An [Icon] tinted with its feature's accent color when the surface's toggle
+/// is enabled; otherwise identical to a plain [Icon].
+class FeatureAccentIcon extends ConsumerWidget {
+  const FeatureAccentIcon(
+    this.icon, {
+    super.key,
+    required this.featureId,
+    required this.surface,
+    this.size,
+  });
+
+  final IconData icon;
+  final String featureId;
+  final AccentSurface surface;
+  final double? size;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = resolveFeatureAccent(
+      context,
+      ref,
+      surface: surface,
+      featureId: featureId,
+    );
+    return Icon(icon, color: color, size: size);
+  }
+}
+
+/// An app-bar title that prefixes the feature's filled nav icon, accent
+/// tinted, when the section-headers toggle is on; plain [Text] otherwise.
+///
+/// Takes a pre-localized [title] so this shared widget never resolves l10n
+/// itself -- consumers keep their own strings and their tests need no extra
+/// localization delegates.
+class FeatureAppBarTitle extends ConsumerWidget {
+  const FeatureAppBarTitle({
+    super.key,
+    required this.featureId,
+    required this.title,
+    this.style,
+    this.subtitle,
+  }) : child = null;
+
+  /// A title that is itself a widget, such as a header whose title doubles as
+  /// a section switcher.
+  ///
+  /// The accent icon still leads it, so a header like that keeps the same look
+  /// as every other titled pane when section headers are on. The [child] owns
+  /// its own text styling and overflow.
+  const FeatureAppBarTitle.custom({
+    super.key,
+    required this.featureId,
+    required Widget this.child,
+    this.subtitle,
+  }) : title = '',
+       style = null;
+
+  final String featureId;
+  final String title;
+
+  /// Replaces the title text when set; see [FeatureAppBarTitle.custom].
+  final Widget? child;
+
+  /// Applied to the title text in both states. Compact app bars style their
+  /// own title, so it has to survive the accent wrapping unchanged.
+  final TextStyle? style;
+
+  /// A second, muted line under the title, such as a list's entry count
+  /// ("34 of 812 dives"). Pre-localized like [title]; null adds no line.
+  final SubtitleText? subtitle;
+
+  /// A title is a single line that ellipsises, never a paragraph.
+  ///
+  /// The master pane is a fixed 440px, so a long single-token title competing
+  /// with the pane's trailing icons can be squeezed to a few dozen logical
+  /// pixels. Left to wrap, "Certifications" broke mid-word and grew the bar's
+  /// height; the accent branch made it worse, since the icon and its gap take
+  /// 32px out of that budget before the text gets any.
+  Widget _titleText() =>
+      child ??
+      Text(
+        title,
+        style: style,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        softWrap: false,
+      );
+
+  Widget _titleBlock() =>
+      TitleWithSubtitle(title: _titleText(), subtitle: subtitle);
+
+  /// Header icons for sections that kept their own headers but share a nav
+  /// entry with another section: Certifications and Courses are tabs of
+  /// Training (#3437), and Photos/Videos and Documents are tabs of Media
+  /// (#3631).
+  static const Map<String, IconData> _sharedEntrySectionIcons = {
+    'certifications': Icons.card_membership,
+    'courses': Icons.school,
+    'media': Icons.photo_library,
+    'documents': Icons.folder_copy,
+  };
+
+  static IconData? _headerIcon(String featureId) {
+    for (final candidate in kNavDestinations) {
+      if (candidate.id == featureId) return candidate.selectedIcon;
+    }
+    return _sharedEntrySectionIcons[featureId];
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = resolveFeatureAccent(
+      context,
+      ref,
+      surface: AccentSurface.header,
+      featureId: featureId,
+    );
+    final icon = color == null ? null : _headerIcon(featureId);
+    if (color == null || icon == null) return _titleBlock();
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: color),
+        const SizedBox(width: 8),
+        Flexible(child: _titleBlock()),
+      ],
+    );
+  }
+}

@@ -1,0 +1,141 @@
+import 'package:flutter/material.dart';
+
+/// Curated per-feature-area accent colors, exposed as a [ThemeExtension] so
+/// lookups resolve against the active theme brightness and animate across
+/// theme changes. Keys are the stable `NavDestination.id` strings, plus
+/// `settings-<sectionId>` entries for the settings root sections, plus
+/// `connections` for the Connections explorer (reached from Insights rather
+/// than the nav), plus `connections-buddy` for buddy nodes on its map. A
+/// missing key means "no accent" -- callers fall back to the ambient icon
+/// color.
+class FeatureAccentColors extends ThemeExtension<FeatureAccentColors> {
+  const FeatureAccentColors({required this.colors});
+
+  final Map<String, Color> colors;
+
+  Color? of(String featureId) => colors[featureId];
+
+  /// The palette [theme] carries, or the built-in one for its brightness
+  /// when the theme has no extension.
+  static FeatureAccentColors resolve(ThemeData theme) =>
+      theme.extension<FeatureAccentColors>() ??
+      (theme.brightness == Brightness.dark ? dark : light);
+
+  static const FeatureAccentColors light = FeatureAccentColors(
+    colors: {
+      'dashboard': Color(0xFF0077B6),
+      'dives': Color(0xFF1976D2),
+      'sites': Color(0xFF388E3C),
+      'trips': Color(0xFF7B1FA2),
+      // Pink is the hue no other nav destination wears: teal is Insights,
+      // and Search sits in the same rail.
+      'search': Color(0xFFC2185B),
+      'media': Color(0xFF6A1B9A),
+      // Lime is the one hue the other nav accents leave free: green is
+      // sites and teal is statistics, so a kelp tone keeps Species
+      // distinguishable from both at icon size.
+      'species': Color(0xFF827717),
+      // Orange and amber are the two hues that go illegible first on a light
+      // surface, so these are deepened past their Material 700 shades to keep
+      // every light-mode accent at or above the 3:1 WCAG contrast ratio for
+      // graphical objects.
+      'equipment': Color(0xFFE65100),
+      // A muted sage: the crimson pink this replaced read as an alert on
+      // every buddy card (#3584). Its low saturation is what keeps it apart
+      // from the vivid sites green at icon size, and it is deep enough to
+      // read at 4.5:1 as the small stat text and as the initials on their
+      // 15% tint of itself on every preset's buddy card.
+      'buddies': Color(0xFF40674C),
+      'dive-centers': Color(0xFF6D4C41),
+      'certifications': Color(0xFFB45309),
+      'documents': Color(0xFF1565C0),
+      'courses': Color(0xFF303F9F),
+      'insights': Color(0xFF00796B),
+      'connections': Color(0xFF00838F),
+      // Buddy nodes on the Connections map. The app-wide sage above sits
+      // next to the sites green, and Who dives where (the map Connections
+      // opens on) draws exactly those two kinds; pink is the hue no other
+      // kind on the map uses (#3679).
+      'connections-buddy': Color(0xFFAD1457),
+      'planning': Color(0xFF512DA8),
+      'transfer': Color(0xFF0097A7),
+      'tracks': Color(0xFFD32F2F),
+      'settings': Color(0xFF455A64),
+      // Settings root sections: identical to the colors previously hardcoded
+      // on settingsSections so the root page look does not change.
+      'settings-about': Color(0xFF607D8B),
+      'settings-appearance': Color(0xFFE91E63),
+      'settings-data': Color(0xFF4CAF50),
+      'settings-dataSources': Color(0xFFF44336),
+      'settings-decompression': Color(0xFF673AB7),
+      'settings-profile': Color(0xFF2196F3),
+      'settings-safety': Color(0xFFFF5252),
+      'settings-manage': Color(0xFF3F51B5),
+      'settings-network': Color(0xFF8D6E63),
+      'settings-notifications': Color(0xFFFF9800),
+      'settings-sharedData': Color(0xFF00BCD4),
+      'settings-units': Color(0xFF009688),
+      'settings-debug': Color(0xFF9E9E9E),
+    },
+  );
+
+  static const FeatureAccentColors dark = FeatureAccentColors(
+    colors: {
+      'dashboard': Color(0xFF48CAE4),
+      'dives': Color(0xFF64B5F6),
+      'sites': Color(0xFF81C784),
+      'trips': Color(0xFFBA68C8),
+      'search': Color(0xFFF06292),
+      'media': Color(0xFFCE93D8),
+      'species': Color(0xFFDCE775),
+      'equipment': Color(0xFFFFB74D),
+      'buddies': Color(0xFFA5C8AE),
+      'dive-centers': Color(0xFFBCAAA4),
+      'certifications': Color(0xFFFFD54F),
+      'documents': Color(0xFF90CAF9),
+      'courses': Color(0xFF7986CB),
+      'insights': Color(0xFF4DB6AC),
+      'connections': Color(0xFF4DD0E1),
+      'connections-buddy': Color(0xFFF48FB1),
+      'planning': Color(0xFF9575CD),
+      'transfer': Color(0xFF4DD0E1),
+      'tracks': Color(0xFFE57373),
+      'settings': Color(0xFF90A4AE),
+      'settings-about': Color(0xFF90A4AE),
+      'settings-appearance': Color(0xFFF06292),
+      'settings-data': Color(0xFF81C784),
+      'settings-dataSources': Color(0xFFE57373),
+      'settings-decompression': Color(0xFF9575CD),
+      'settings-profile': Color(0xFF64B5F6),
+      'settings-safety': Color(0xFFFF8A80),
+      'settings-manage': Color(0xFF7986CB),
+      'settings-network': Color(0xFFBCAAA4),
+      'settings-notifications': Color(0xFFFFB74D),
+      'settings-sharedData': Color(0xFF4DD0E1),
+      'settings-units': Color(0xFF4DB6AC),
+      'settings-debug': Color(0xFFBDBDBD),
+    },
+  );
+
+  @override
+  FeatureAccentColors copyWith({Map<String, Color>? colors}) {
+    return FeatureAccentColors(colors: colors ?? this.colors);
+  }
+
+  @override
+  FeatureAccentColors lerp(
+    ThemeExtension<FeatureAccentColors>? other,
+    double t,
+  ) {
+    if (other is! FeatureAccentColors) return this;
+    final keys = {...colors.keys, ...other.colors.keys};
+    return FeatureAccentColors(
+      colors: {
+        for (final key in keys)
+          key:
+              Color.lerp(colors[key], other.colors[key], t) ??
+              (other.colors[key] ?? colors[key]!),
+      },
+    );
+  }
+}

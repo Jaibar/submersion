@@ -1,4 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:equatable/equatable.dart';
+
+import 'package:submersion/core/constants/enums.dart';
+
+import 'package:submersion/features/documents/domain/entities/document.dart';
 
 /// Emergency contact information
 class EmergencyContact extends Equatable {
@@ -29,7 +35,81 @@ class DiverInsurance extends Equatable {
   final String? policyNumber;
   final DateTime? expiryDate;
 
-  const DiverInsurance({this.provider, this.policyNumber, this.expiryDate});
+  /// The insurer's 24-hour dive emergency assistance line. This is the number
+  /// an insured diver is meant to call first: their own assistance provider
+  /// authorises the evacuation and coordinates the chamber referral, which is
+  /// the role the emergency card otherwise attributes to the regional diver
+  /// hotline. Exposed as [assistanceLine].
+  final String? emergencyPhone;
+
+  /// The insurer's general or office line, exposed as [officeLine]. For most
+  /// providers this answers during business hours only, so it is never what
+  /// the emergency card leads with: an unanswered number at 2am is worse
+  /// than the regional hotline, which does answer.
+  final String? phone;
+
+  const DiverInsurance({
+    this.provider,
+    this.policyNumber,
+    this.expiryDate,
+    this.emergencyPhone,
+    this.phone,
+  });
+
+  /// The read model of a primary insurance document (issue #2613): the
+  /// insurer is the document's issuer, falling back to its title.
+  factory DiverInsurance.fromDocument(Document document) => DiverInsurance(
+    provider: _presentOrNull(document.issuer) ?? _presentOrNull(document.title),
+    policyNumber: document.referenceNumber,
+    expiryDate: document.expiryDate,
+    emergencyPhone: document.emergencyPhone,
+    phone: document.phone,
+  );
+
+  /// Trims a stored value and reports a blank one as absent. An emptied text
+  /// field round-trips through the database as `''` on some paths: a blank
+  /// number would fail to dial silently at the very worst moment, and a blank
+  /// policy number would print an empty "Policy" line on the emergency card.
+  ///
+  /// Every getter below goes through this, so "is it there?" gets one answer
+  /// across the card, the export, and the persistence gates.
+  static String? _presentOrNull(String? value) {
+    final trimmed = value?.trim();
+    return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+  }
+
+  /// The 24-hour assistance line, ready to dial, or null if not recorded.
+  /// This is the only insurer number the emergency card will lead with.
+  String? get assistanceLine => _presentOrNull(emergencyPhone);
+
+  /// The office line, ready to dial, or null if not recorded.
+  String? get officeLine => _presentOrNull(phone);
+
+  /// The insurer's name, ready to display, or null if not recorded.
+  String? get providerLabel => _presentOrNull(provider);
+
+  /// The policy number, ready to display, or null if not recorded.
+  String? get policyLabel => _presentOrNull(policyNumber);
+
+  /// An insurer number to dial at all, preferring the assistance line. Used to
+  /// decide whether the insurance block has anything to show; deciding what
+  /// the card *leads* with is [assistanceLine]'s job, because a number that
+  /// only answers in business hours must not be presented as a first call.
+  String? get callNumber => assistanceLine ?? officeLine;
+
+  /// Whether the diver recorded any insurer number at all.
+  bool get hasCallNumber => callNumber != null;
+
+  /// Whether the diver recorded anything at all under insurance.
+  ///
+  /// Persistence and export must key off this rather than [provider]: a policy
+  /// number or an assistance line can be saved without ever naming the
+  /// insurer, and gating on the name alone silently drops the rest.
+  bool get hasAnyDetail =>
+      providerLabel != null ||
+      policyLabel != null ||
+      expiryDate != null ||
+      hasCallNumber;
 
   bool get isExpired {
     if (expiryDate == null) return false;
@@ -42,22 +122,36 @@ class DiverInsurance extends Equatable {
     return expiryDate!.isBefore(thirtyDaysFromNow) && !isExpired;
   }
 
-  bool get isValid => provider != null && provider!.isNotEmpty && !isExpired;
+  /// Goes through [providerLabel] so a whitespace-only provider is "not
+  /// recorded" here too. Every presence question about insurance has to give
+  /// the same answer, or the dashboard calls a policy valid that the emergency
+  /// card refuses to show.
+  bool get isValid => providerLabel != null && !isExpired;
 
   DiverInsurance copyWith({
     String? provider,
     String? policyNumber,
     DateTime? expiryDate,
+    String? emergencyPhone,
+    String? phone,
   }) {
     return DiverInsurance(
       provider: provider ?? this.provider,
       policyNumber: policyNumber ?? this.policyNumber,
       expiryDate: expiryDate ?? this.expiryDate,
+      emergencyPhone: emergencyPhone ?? this.emergencyPhone,
+      phone: phone ?? this.phone,
     );
   }
 
   @override
-  List<Object?> get props => [provider, policyNumber, expiryDate];
+  List<Object?> get props => [
+    provider,
+    policyNumber,
+    expiryDate,
+    emergencyPhone,
+    phone,
+  ];
 }
 
 /// Diver profile entity
@@ -67,6 +161,9 @@ class Diver extends Equatable {
   final String? email;
   final String? phone;
   final String? photoPath;
+
+  /// Profile photo: a 512x512 square JPEG. Supersedes [photoPath].
+  final Uint8List? photo;
   final EmergencyContact emergencyContact;
   final EmergencyContact emergencyContact2;
   final String medicalNotes;
@@ -79,6 +176,21 @@ class Diver extends Equatable {
   final bool isDefault;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final int? priorDiveCount;
+  final int? priorDiveTimeSeconds;
+  final DateTime? divingSince;
+
+  /// Buddy card swap (issue #3728): a handle the diver may share on their
+  /// card, and their share choices as JSON (null means the defaults).
+  final String? socialHandle;
+  final String? buddyCardShare;
+
+  /// Body composition inputs (issue #4525), used only to estimate body fat
+  /// for the weight prediction. Both optional; null means not given.
+  final DiverSex? sex;
+
+  /// Year of birth, e.g. 1984.
+  final int? birthYear;
 
   const Diver({
     required this.id,
@@ -86,6 +198,7 @@ class Diver extends Equatable {
     this.email,
     this.phone,
     this.photoPath,
+    this.photo,
     this.emergencyContact = const EmergencyContact(),
     this.emergencyContact2 = const EmergencyContact(),
     this.medicalNotes = '',
@@ -98,6 +211,13 @@ class Diver extends Equatable {
     this.isDefault = false,
     required this.createdAt,
     required this.updatedAt,
+    this.priorDiveCount,
+    this.priorDiveTimeSeconds,
+    this.divingSince,
+    this.socialHandle,
+    this.buddyCardShare,
+    this.sex,
+    this.birthYear,
   });
 
   /// Get initials for avatar display
@@ -141,44 +261,107 @@ class Diver extends Equatable {
   bool get hasMedicalClearance =>
       medicalClearanceExpiryDate != null && !isMedicalClearanceExpired;
 
+  /// Sentinel marking a `copyWith` parameter as "not provided". Lets callers
+  /// distinguish omitting a nullable field (keep the current value) from
+  /// passing `null` (clear it) — plain `value ?? this.value` cannot express a
+  /// clear. Nullable fields take `Object?` params defaulting to [_unset];
+  /// [_resolve] routes them to keep / clear / set accordingly.
+  static const Object _unset = Object();
+
+  /// Resolves a sentinel-defaulted `copyWith` parameter: [current] when the
+  /// field was omitted ([value] is [_unset]), otherwise the new [value].
+  /// Because `Object?` params give up compile-time type checking, this asserts
+  /// the runtime type in debug builds (the `as T` cast still guards release).
+  static T _resolve<T>(Object? value, T current, String field) {
+    if (identical(value, _unset)) return current;
+    assert(
+      value is T,
+      'Diver.copyWith($field) expected $T or omission, got ${value.runtimeType}',
+    );
+    return value as T;
+  }
+
   Diver copyWith({
     String? id,
     String? name,
-    String? email,
-    String? phone,
-    String? photoPath,
+    Object? email = _unset,
+    Object? phone = _unset,
+    Object? photoPath = _unset,
+    Object? photo = _unset,
     EmergencyContact? emergencyContact,
     EmergencyContact? emergencyContact2,
     String? medicalNotes,
-    String? bloodType,
-    String? allergies,
-    String? medications,
-    DateTime? medicalClearanceExpiryDate,
+    Object? bloodType = _unset,
+    Object? allergies = _unset,
+    Object? medications = _unset,
+    Object? medicalClearanceExpiryDate = _unset,
     DiverInsurance? insurance,
     String? notes,
     bool? isDefault,
     DateTime? createdAt,
     DateTime? updatedAt,
+    Object? priorDiveCount = _unset,
+    Object? priorDiveTimeSeconds = _unset,
+    Object? divingSince = _unset,
+    Object? socialHandle = _unset,
+    Object? buddyCardShare = _unset,
+    Object? sex = _unset,
+    Object? birthYear = _unset,
   }) {
     return Diver(
       id: id ?? this.id,
       name: name ?? this.name,
-      email: email ?? this.email,
-      phone: phone ?? this.phone,
-      photoPath: photoPath ?? this.photoPath,
+      email: _resolve<String?>(email, this.email, 'email'),
+      phone: _resolve<String?>(phone, this.phone, 'phone'),
+      photoPath: _resolve<String?>(photoPath, this.photoPath, 'photoPath'),
+      photo: _resolve<Uint8List?>(photo, this.photo, 'photo'),
       emergencyContact: emergencyContact ?? this.emergencyContact,
       emergencyContact2: emergencyContact2 ?? this.emergencyContact2,
       medicalNotes: medicalNotes ?? this.medicalNotes,
-      bloodType: bloodType ?? this.bloodType,
-      allergies: allergies ?? this.allergies,
-      medications: medications ?? this.medications,
-      medicalClearanceExpiryDate:
-          medicalClearanceExpiryDate ?? this.medicalClearanceExpiryDate,
+      bloodType: _resolve<String?>(bloodType, this.bloodType, 'bloodType'),
+      allergies: _resolve<String?>(allergies, this.allergies, 'allergies'),
+      medications: _resolve<String?>(
+        medications,
+        this.medications,
+        'medications',
+      ),
+      medicalClearanceExpiryDate: _resolve<DateTime?>(
+        medicalClearanceExpiryDate,
+        this.medicalClearanceExpiryDate,
+        'medicalClearanceExpiryDate',
+      ),
       insurance: insurance ?? this.insurance,
       notes: notes ?? this.notes,
       isDefault: isDefault ?? this.isDefault,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      priorDiveCount: _resolve<int?>(
+        priorDiveCount,
+        this.priorDiveCount,
+        'priorDiveCount',
+      ),
+      priorDiveTimeSeconds: _resolve<int?>(
+        priorDiveTimeSeconds,
+        this.priorDiveTimeSeconds,
+        'priorDiveTimeSeconds',
+      ),
+      divingSince: _resolve<DateTime?>(
+        divingSince,
+        this.divingSince,
+        'divingSince',
+      ),
+      socialHandle: _resolve<String?>(
+        socialHandle,
+        this.socialHandle,
+        'socialHandle',
+      ),
+      buddyCardShare: _resolve<String?>(
+        buddyCardShare,
+        this.buddyCardShare,
+        'buddyCardShare',
+      ),
+      sex: _resolve<DiverSex?>(sex, this.sex, 'sex'),
+      birthYear: _resolve<int?>(birthYear, this.birthYear, 'birthYear'),
     );
   }
 
@@ -189,6 +372,7 @@ class Diver extends Equatable {
     email,
     phone,
     photoPath,
+    photo,
     emergencyContact,
     emergencyContact2,
     medicalNotes,
@@ -201,5 +385,12 @@ class Diver extends Equatable {
     isDefault,
     createdAt,
     updatedAt,
+    priorDiveCount,
+    priorDiveTimeSeconds,
+    divingSince,
+    socialHandle,
+    buddyCardShare,
+    sex,
+    birthYear,
   ];
 }

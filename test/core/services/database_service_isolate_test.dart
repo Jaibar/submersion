@@ -1,0 +1,1188 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/database/database_version_exception.dart';
+import 'package:submersion/core/services/database_location_service.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/restore_source_missing_exception.dart';
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart'
+    as domain;
+
+import '../../helpers/fake_path_provider.dart';
+
+class _FakeLocation implements DatabaseLocationService {
+  _FakeLocation(this.path);
+  final String path;
+
+  @override
+  Future<String> getDatabasePath() async => path;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Routes getApplicationDocumentsDirectory to a temp dir so paths that fall
+/// back to the default location (e.g. restore -> initialize()) resolve inside
+/// the test sandbox.
+class _FakePathProvider extends PathProviderPlatform
+    with MockPlatformInterfaceMixin {
+  _FakePathProvider(this.docsPath);
+  final String docsPath;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => docsPath;
+}
+
+/// Arranges what a restore that never settled leaves behind: the diver's
+/// original at `.pre-restore`, a database this build rejects (one schema too
+/// new) at the live path, and, unless [withMarker] is false (a build without
+/// the journal), the restore-pending marker. The database must be closed.
+void _strandOriginal(String dbPath, {bool withMarker = true}) {
+  _moveAside(dbPath);
+  final rejected = sqlite3.sqlite3.open(dbPath);
+  rejected.execute('CREATE TABLE placeholder (x)');
+  rejected.execute(
+    'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+  );
+  rejected.close();
+  if (withMarker) {
+    File(
+      '$dbPath.restore-pending',
+    ).writeAsStringSync('{"startedAt":"2026-09-13T10:00:00.000Z"}');
+  }
+}
+
+/// Moves the closed database at [dbPath] and its sidecars to `.pre-restore`,
+/// leaving the live path empty.
+void _moveAside(String dbPath) {
+  File(dbPath).renameSync('$dbPath.pre-restore');
+  for (final suffix in ['-wal', '-shm']) {
+    final sidecar = File('$dbPath$suffix');
+    if (sidecar.existsSync()) sidecar.renameSync('$dbPath.pre-restore$suffix');
+  }
+}
+
+/// Main files of every quarantined copy named `<db><infix>...`, excluding
+/// their sidecars.
+List<String> _quarantinedCopies(String dbPath, String infix) {
+  final prefix = '${p.basename(dbPath)}$infix';
+  return Directory(p.dirname(dbPath))
+      .listSync()
+      .whereType<File>()
+      .map((f) => f.path)
+      .where(
+        (path) =>
+            p.basename(path).startsWith(prefix) &&
+            !path.endsWith('-wal') &&
+            !path.endsWith('-shm'),
+      )
+      .toList();
+}
+
+/// Diver names stored in the database file at [path].
+List<String> _diverNames(String path) {
+  final raw = sqlite3.sqlite3.open(path);
+  try {
+    return raw
+        .select('SELECT name FROM divers')
+        .map((row) => row['name'] as String)
+        .toList();
+  } finally {
+    raw.close();
+  }
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late Directory tempDir;
+  late String dbPath;
+
+  setUp(() async {
+    tempDir = await Directory.systemTemp.createTemp('ws5-isolate-test');
+    dbPath = p.join(tempDir.path, 'submersion.db');
+    useFakePathProvider(_FakePathProvider(tempDir.path));
+    DatabaseService.instance.resetForTesting();
+  });
+
+  tearDown(() async {
+    // Strict close so any open handle is definitely released before we
+    // delete the temp dir — a non-strict close could swallow a timeout and
+    // leave a handle open, making delete flaky (notably on Windows). The
+    // reset + delete still run even if the close throws.
+    try {
+      await DatabaseService.instance.close(strict: true);
+    } finally {
+      DatabaseService.instance.resetForTesting();
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  test(
+    'fresh database opens on the background executor and self-heals',
+    () async {
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(dbPath),
+      );
+      expect(
+        DatabaseService.instance.lastOpenMode,
+        DatabaseOpenMode.background,
+      );
+
+      final db = DatabaseService.instance.database;
+      final one = await db.customSelect('SELECT 1 AS v').getSingle();
+      expect(one.read<int>('v'), 1);
+
+      // beforeOpen ran through the remote executor: the built-in dive-type
+      // seed (re-asserted on every open) is present.
+      final diveTypes = await db
+          .customSelect('SELECT COUNT(*) AS c FROM dive_types')
+          .getSingle();
+      expect(diveTypes.read<int>('c'), greaterThan(0));
+
+      final version = await db.customSelect('PRAGMA user_version').getSingle();
+      expect(version.data.values.first, AppDatabase.currentSchemaVersion);
+    },
+  );
+
+  test('pending migration runs on the synchronous executor first, then '
+      'reopens in background', () async {
+    // Seed a current-schema file, then rewind user_version by one so the
+    // next open sees a pending upgrade ladder.
+    final seed = AppDatabase(NativeDatabase(File(dbPath)));
+    await seed.customSelect('SELECT 1').get();
+    await seed.close();
+    final raw = sqlite3.sqlite3.open(dbPath);
+    raw.execute(
+      'PRAGMA user_version = ${AppDatabase.currentSchemaVersion - 1}',
+    );
+    raw.close();
+
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(dbPath),
+    );
+    expect(
+      DatabaseService.instance.lastOpenMode,
+      DatabaseOpenMode.migrationThenBackground,
+    );
+
+    final db = DatabaseService.instance.database;
+    final version = await db.customSelect('PRAGMA user_version').getSingle();
+    expect(version.data.values.first, AppDatabase.currentSchemaVersion);
+    final one = await db.customSelect('SELECT 1 AS v').getSingle();
+    expect(one.read<int>('v'), 1);
+  });
+
+  test(
+    'a database newer than the app is rejected before any Drift open',
+    () async {
+      // Seed a current-schema file, then bump user_version PAST the app's
+      // version. _openDatabase's single synchronous getStoredSchemaVersion
+      // read (raw sqlite3) trips the newer-than-app guard and throws before
+      // any Drift executor — migrator or background — opens the file.
+      final seed = AppDatabase(NativeDatabase(File(dbPath)));
+      await seed.customSelect('SELECT 1').get();
+      await seed.close();
+      final raw = sqlite3.sqlite3.open(dbPath);
+      raw.execute(
+        'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+      );
+      raw.close();
+
+      await expectLater(
+        DatabaseService.instance.initialize(
+          locationService: _FakeLocation(dbPath),
+        ),
+        throwsA(isA<DatabaseVersionMismatchException>()),
+      );
+    },
+  );
+
+  test('reinitializeAtPath reopens on the background executor', () async {
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(dbPath),
+    );
+
+    final otherPath = p.join(tempDir.path, 'other.db');
+    await DatabaseService.instance.reinitializeAtPath(otherPath);
+
+    expect(DatabaseService.instance.lastOpenMode, DatabaseOpenMode.background);
+    final one = await DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .getSingle();
+    expect(one.read<int>('v'), 1);
+  });
+
+  test(
+    'resetDatabase backs up, closes strictly, and recreates the db',
+    () async {
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(dbPath),
+      );
+      // Force the background executor to actually materialize the file so
+      // resetDatabase's pre-close backup has something to copy.
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'reset-backup.db');
+
+      await DatabaseService.instance.resetDatabase(backupPath: backupPath);
+
+      expect(File(backupPath).existsSync(), isTrue);
+      // A fresh db still re-seeds the built-in dive types through the
+      // background executor.
+      final diveTypes = await DatabaseService.instance.database
+          .customSelect('SELECT COUNT(*) AS c FROM dive_types')
+          .getSingle();
+      expect(diveTypes.read<int>('c'), greaterThan(0));
+    },
+  );
+
+  test('resetDatabase wipes user rows (divers), not just re-seeds', () async {
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(dbPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Old Profile', createdAt: now, updatedAt: now),
+    );
+    expect(await DiverRepository().getAllDivers(), isNotEmpty);
+
+    final backupPath = p.join(tempDir.path, 'reset-backup.db');
+    await DatabaseService.instance.resetDatabase(backupPath: backupPath);
+
+    // After a reset the old profiles must be gone.
+    expect(await DiverRepository().getAllDivers(), isEmpty);
+  });
+
+  test('wiping the app clears the log', () async {
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(dbPath),
+    );
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Old Profile', createdAt: now, updatedAt: now),
+    );
+    Future<int> events() async {
+      final row = await DatabaseService.instance.database
+          .customSelect('SELECT COUNT(*) AS c FROM change_log_events')
+          .getSingle();
+      return row.read<int>('c');
+    }
+
+    expect(await events(), greaterThan(0));
+
+    await DatabaseService.instance.resetDatabase(
+      backupPath: p.join(tempDir.path, 'reset-backup.db'),
+    );
+
+    expect(await events(), 0);
+  });
+
+  test('a failing migration ladder closes the migrator and rethrows', () async {
+    // Seed a current-schema file, then rewind user_version far back so the
+    // upgrade ladder replays historical steps. An early unguarded addColumn
+    // hits an already-present column ("duplicate column name"), so the
+    // synchronous migrator throws — exercising _openDatabase's best-effort
+    // migrator close + rethrow on the migration-failure path.
+    final seed = AppDatabase(NativeDatabase(File(dbPath)));
+    await seed.customSelect('SELECT 1').get();
+    await seed.close();
+    final raw = sqlite3.sqlite3.open(dbPath);
+    raw.execute('PRAGMA user_version = 58');
+    raw.close();
+
+    await expectLater(
+      DatabaseService.instance.initialize(
+        locationService: _FakeLocation(dbPath),
+      ),
+      throwsA(isA<sqlite3.SqliteException>()),
+    );
+  });
+
+  test('reinitializeAtPath waits for a sync merging before it closes the '
+      'open database (issue #3798)', () async {
+    addTearDown(SyncCoordinator.reset);
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(dbPath),
+    );
+    final original = DatabaseService.instance.database;
+    final merging = Completer<void>();
+    final sync = SyncCoordinator.run(() => merging.future);
+
+    final otherPath = p.join(tempDir.path, 'other.db');
+    var reopened = false;
+    final reinit = DatabaseService.instance
+        .reinitializeAtPath(otherPath)
+        .then((_) => reopened = true);
+    await Future<void>.delayed(const Duration(seconds: 1));
+
+    expect(reopened, isFalse);
+    expect(DatabaseService.instance.databaseOrNull, same(original));
+    expect(File(otherPath).existsSync(), isFalse);
+
+    merging.complete();
+    await sync;
+    await reinit;
+    expect(await DatabaseService.instance.databasePath, otherPath);
+  });
+
+  test('resetDatabase waits for a sync merging before it closes the '
+      'database (issue #3798)', () async {
+    addTearDown(SyncCoordinator.reset);
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    final original = DatabaseService.instance.database;
+    final merging = Completer<void>();
+    final sync = SyncCoordinator.run(() => merging.future);
+
+    var reset = false;
+    final resetting = DatabaseService.instance
+        .resetDatabase(backupPath: p.join(tempDir.path, 'pre-reset.db'))
+        .then((_) => reset = true);
+    await Future<void>.delayed(const Duration(seconds: 1));
+
+    expect(reset, isFalse);
+    expect(DatabaseService.instance.databaseOrNull, same(original));
+
+    merging.complete();
+    await sync;
+    await resetting;
+    expect(DatabaseService.instance.databaseOrNull, isNot(same(original)));
+  });
+
+  test('restore waits for a sync merging before it touches the live '
+      'database (issue #3798)', () async {
+    addTearDown(SyncCoordinator.reset);
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    final original = DatabaseService.instance.database;
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final merging = Completer<void>();
+    final sync = SyncCoordinator.run(() => merging.future);
+
+    var restored = false;
+    final restore = DatabaseService.instance
+        .restore(backupPath)
+        .then((_) => restored = true);
+    await Future<void>.delayed(const Duration(seconds: 1));
+
+    expect(restored, isFalse);
+    expect(DatabaseService.instance.databaseOrNull, same(original));
+
+    merging.complete();
+    await sync;
+    await restore;
+    expect(DatabaseService.instance.databaseOrNull, isNot(same(original)));
+  });
+
+  test('restore closes strictly, copies the backup, and reopens', () async {
+    // restore() reopens through initialize()'s default-path resolution, so
+    // seed at the default layout (docs/Submersion/submersion.db) — mocked to
+    // live under the temp dir — to keep source and destination aligned.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final one = await DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .getSingle();
+    expect(one.read<int>('v'), 1);
+  });
+
+  test('restore stages the backup BEFORE closing the live database', () async {
+    // Regression guard: a restore must copy the (potentially large) backup to
+    // a staging file while the live database is still open, so the window
+    // where the database is unavailable never spans the slow copy. Otherwise a
+    // provider rebuild during the copy hits a null database and caches a fatal
+    // "Database not initialized" error (the DiveCenters red-screen bug).
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+
+    // The seam fires the instant the DB is closed (the unavailable window
+    // opens). By then the staged copy must already exist.
+    var stagingExistedAtWindowOpen = false;
+    DatabaseService.instance.debugOnRestoreWindowOpen = (stagingPath) {
+      stagingExistedAtWindowOpen = File(stagingPath).existsSync();
+    };
+
+    await DatabaseService.instance.restore(backupPath);
+
+    expect(
+      stagingExistedAtWindowOpen,
+      isTrue,
+      reason: 'backup must be staged before the DB is closed',
+    );
+    // The restored DB is fully usable, and no staging file is left behind.
+    final one = await DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .getSingle();
+    expect(one.read<int>('v'), 1);
+    expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+  });
+
+  test(
+    'a failed swap rolls back to the original database (no data loss)',
+    () async {
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+
+      // Written AFTER the backup so the live database is distinguishable from the
+      // backup copy: this row must survive a failed restore.
+      final now = DateTime.now();
+      await DiverRepository().createDiver(
+        domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+      );
+
+      // Sabotage the swap: delete the staged file the instant the window opens,
+      // so moving it into place fails and the rollback path runs.
+      DatabaseService.instance.debugOnRestoreWindowOpen = (stagingPath) {
+        File(stagingPath).deleteSync();
+      };
+
+      await expectLater(
+        DatabaseService.instance.restore(backupPath),
+        throwsA(anything),
+      );
+
+      // The original database is reopened and its post-backup row survived.
+      final divers = await DiverRepository().getAllDivers();
+      expect(divers.map((d) => d.name), contains('Keep Me'));
+      // No swap temp files are left behind.
+      expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+      expect(File('$defaultPath.pre-restore').existsSync(), isFalse);
+      expect(File('$defaultPath.restore-pending').existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'a cleanup failure during swap rollback still reopens the database',
+    () async {
+      // Regression guard: the rollback catch block used to delete the
+      // orphaned staging file with a call that could itself throw (e.g. a
+      // cloud-sync provider transiently locking it) and skip initialize(),
+      // leaving the app with no open database until restart. That cleanup
+      // must be best-effort.
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+
+      final now = DateTime.now();
+      await DiverRepository().createDiver(
+        domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+      );
+
+      // Sabotage the swap (as in the sibling test above), and also make the
+      // rollback's own staging-file cleanup fail.
+      DatabaseService.instance.debugOnRestoreWindowOpen = (stagingPath) {
+        File(stagingPath).deleteSync();
+        DatabaseService.instance.debugFailDeleteFor = {stagingPath};
+      };
+
+      await expectLater(
+        DatabaseService.instance.restore(backupPath),
+        throwsA(anything),
+      );
+
+      // The database must still be open and usable, with the original data
+      // intact, despite the cleanup failure.
+      final divers = await DiverRepository().getAllDivers();
+      expect(divers.map((d) => d.name), contains('Keep Me'));
+    },
+  );
+
+  test('an unmarked leftover beside a fresh empty database is kept, not '
+      'deleted (#1924)', () async {
+    // The state a build before the journal left: its swap-failure rollback
+    // could not put the original back, so the next launch found no live file
+    // and created a fresh, empty database there. The diver's only copy sits
+    // at .pre-restore with no marker, beside a live file that opens cleanly.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Original', createdAt: now, updatedAt: now),
+    );
+    await DatabaseService.instance.close(strict: true);
+    _moveAside(defaultPath);
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    expect(await DiverRepository().getAllDivers(), isEmpty);
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final kept = _quarantinedCopies(defaultPath, '.pre-restore.');
+    expect(kept, hasLength(1), reason: 'the original must be kept aside');
+    expect(_diverNames(kept.single), contains('Original'));
+    expect(File('$defaultPath.pre-restore').existsSync(), isFalse);
+  });
+
+  group('a failed restore into a location that holds no database (#2177)', () {
+    // The startup "dive log not found" screen offers a restore into a folder
+    // whose dive log is missing, with nothing open. Rolling back must not
+    // leave an empty database there: the next launch would find a file and
+    // open it as the diver's dive log.
+    late String missingPath;
+    late String backupPath;
+
+    setUp(() async {
+      final sourcePath = p.join(tempDir.path, 'source', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(sourcePath),
+      );
+      backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+      await DatabaseService.instance.close(strict: true);
+      DatabaseService.instance.resetForTesting();
+
+      missingPath = p.join(tempDir.path, 'lost', 'submersion.db');
+      await Directory(p.dirname(missingPath)).create();
+      DatabaseService.instance.adoptLocationService(_FakeLocation(missingPath));
+    });
+
+    test('a failed swap leaves the path empty', () async {
+      DatabaseService.instance.debugOnRestoreWindowOpen = (stagingPath) {
+        File(stagingPath).deleteSync();
+      };
+
+      await expectLater(
+        DatabaseService.instance.restore(backupPath),
+        throwsA(anything),
+      );
+
+      expect(File(missingPath).existsSync(), isFalse);
+    });
+
+    test('a restore into a folder that is gone recreates it, as opening '
+        'a new dive log there would', () async {
+      await Directory(p.dirname(missingPath)).delete(recursive: true);
+
+      await DatabaseService.instance.restore(backupPath);
+
+      expect(File(missingPath).existsSync(), isTrue);
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+    });
+
+    test('a rejected newer-schema file leaves the path empty', () async {
+      final raw = sqlite3.sqlite3.open(backupPath);
+      raw.execute(
+        'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+      );
+      raw.close();
+
+      await expectLater(
+        DatabaseService.instance.restore(backupPath),
+        throwsA(isA<DatabaseVersionMismatchException>()),
+      );
+
+      expect(File(missingPath).existsSync(), isFalse);
+    });
+  });
+
+  test('a newer-schema file rejected at the post-swap reopen rolls back '
+      '(no data loss)', () async {
+    // The sibling test above covers a failed SWAP, which the rename's own
+    // catch already handled. This covers the REOPEN: the version guard
+    // fires after the new file is live, which left the app with no working
+    // database until issue #1089.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+
+    // Written AFTER the backup, so this row proves the ORIGINAL database
+    // came back rather than the restored copy.
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+    );
+
+    // Stamp the backup with a schema this build cannot open. The file is a
+    // genuine Submersion database in every other respect, so it swaps in
+    // cleanly and only fails at the reopen.
+    final raw = sqlite3.sqlite3.open(backupPath);
+    raw.execute(
+      'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+    );
+    raw.close();
+
+    await expectLater(
+      DatabaseService.instance.restore(backupPath),
+      throwsA(isA<DatabaseVersionMismatchException>()),
+    );
+
+    // THE FIX: the pre-restore database is back, open, and intact.
+    final divers = await DiverRepository().getAllDivers();
+    expect(
+      divers.map((d) => d.name),
+      contains('Keep Me'),
+      reason:
+          'the guard fired after the swap; without rollback the app is '
+          'left with the unopenable file live and no database',
+    );
+    expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+    expect(File('$defaultPath.pre-restore').existsSync(), isFalse);
+    expect(File('$defaultPath.restore-pending').existsSync(), isFalse);
+  });
+
+  test('a newer-schema rollback never puts the original back beside a '
+      'journal it could not remove', () async {
+    // SQLite replays whatever -wal sits beside a database file, and WAL frames
+    // carry no identity of the database they came from. The pre-restore copy
+    // normally has no -wal of its own (a clean close checkpoints it away), so
+    // nothing would overwrite a leftover journal of the rejected file. If
+    // removing that journal fails, the rollback must stop with the original
+    // untouched at .pre-restore rather than pair it with a foreign journal.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+
+    final raw = sqlite3.sqlite3.open(backupPath);
+    raw.execute(
+      'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+    );
+    raw.close();
+
+    // The seam raises before the existence check, which is exactly how a
+    // present-but-locked journal looks to the rollback. The swap never deletes
+    // this path (it only moves an existing -wal aside), so the first delete of
+    // it is the rollback's own.
+    DatabaseService.instance.debugFailDeleteFor = {'$defaultPath-wal'};
+
+    await expectLater(
+      DatabaseService.instance.restore(backupPath),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(
+      File('$defaultPath.pre-restore').existsSync(),
+      isTrue,
+      reason:
+          'the original must stay aside, not be moved next to a journal '
+          'that belongs to the rejected file',
+    );
+  });
+
+  test(
+    'a failed swap rolls back the WAL sidecar too, not just the main file',
+    () async {
+      // The main database is opened from two isolates, so `close(strict:true)`
+      // is not always the LAST close: a second connection keeps the -wal alive
+      // with committed rows still in it. Deleting the sidecar at that point
+      // would leave the .pre-restore copy incomplete, and the rollback below
+      // would put back a database missing its newest data.
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      // Force the lazy open so the database file exists before it is backed up.
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+
+      // Written AFTER the backup, so this row can only come from the original
+      // database, and only survives if its WAL sidecar did.
+      final now = DateTime.now();
+      await DiverRepository().createDiver(
+        domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+      );
+
+      // Stand in for the headless isolate: a second connection that outlives
+      // the restore's close, so SQLite cannot checkpoint the -wal away.
+      final sibling = DatabaseService.openRaw(defaultPath);
+      addTearDown(sibling.close);
+      sibling.select('SELECT 1');
+
+      // Sabotage the swap so the rollback path runs.
+      DatabaseService.instance.debugOnRestoreWindowOpen = (stagingPath) {
+        expect(
+          File('$defaultPath-wal').existsSync(),
+          isTrue,
+          reason:
+              'the sibling connection should have kept the -wal from being '
+              'checkpointed away by the close, or this proves nothing',
+        );
+        File(stagingPath).deleteSync();
+      };
+
+      await expectLater(
+        DatabaseService.instance.restore(backupPath),
+        throwsA(anything),
+      );
+
+      final divers = await DiverRepository().getAllDivers();
+      expect(
+        divers.map((d) => d.name),
+        contains('Keep Me'),
+        reason:
+            'the row was WAL-resident; dropping the sidecar on the way aside '
+            'would have lost it',
+      );
+      expect(File('$defaultPath.pre-restore').existsSync(), isFalse);
+      expect(File('$defaultPath.pre-restore-wal').existsSync(), isFalse);
+      expect(File('$defaultPath.pre-restore-shm').existsSync(), isFalse);
+    },
+  );
+
+  test('a restore keeps a stranded original instead of deleting it '
+      '(#1901)', () async {
+    // The startup downgrade restore runs in exactly this state: the rejected
+    // file live, nothing open, and the diver's ONLY copy at .pre-restore. The
+    // swap used to start by deleting that copy as a "stale leftover".
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Original', createdAt: now, updatedAt: now),
+    );
+    await DatabaseService.instance.close(strict: true);
+    _strandOriginal(defaultPath);
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final kept = _quarantinedCopies(defaultPath, '.pre-restore.');
+    expect(kept, hasLength(1), reason: 'the original must be kept aside');
+    expect(_diverNames(kept.single), contains('Original'));
+    // The restore itself still happened.
+    final divers = await DiverRepository().getAllDivers();
+    expect(divers.map((d) => d.name), isNot(contains('Original')));
+    expect(File('$defaultPath.restore-pending').existsSync(), isFalse);
+  });
+
+  test('a stranded original from a build without the journal is kept too, '
+      'through the live-file probe', () async {
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Original', createdAt: now, updatedAt: now),
+    );
+    await DatabaseService.instance.close(strict: true);
+    _strandOriginal(defaultPath, withMarker: false);
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final kept = _quarantinedCopies(defaultPath, '.pre-restore.');
+    expect(kept, hasLength(1));
+    expect(_diverNames(kept.single), contains('Original'));
+  });
+
+  test('a newer-schema rollback that stops leaves the journal open, and the '
+      'next restore keeps the original', () async {
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final validBackup = p.join(tempDir.path, 'valid.db');
+    await DatabaseService.instance.backup(validBackup);
+    final newerBackup = p.join(tempDir.path, 'newer.db');
+    File(validBackup).copySync(newerBackup);
+    final raw = sqlite3.sqlite3.open(newerBackup);
+    raw.execute(
+      'PRAGMA user_version = ${AppDatabase.currentSchemaVersion + 1}',
+    );
+    raw.close();
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+    );
+
+    // Every delete the newer-schema rollback could start with fails, so it
+    // stops with the original aside. On main the first strict delete is the
+    // live file; after #1856 it is the -wal. Failing all three covers both.
+    DatabaseService.instance.debugFailDeleteFor = {
+      defaultPath,
+      '$defaultPath-wal',
+      '$defaultPath-shm',
+    };
+    await expectLater(
+      DatabaseService.instance.restore(newerBackup),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(File('$defaultPath.pre-restore').existsSync(), isTrue);
+    expect(
+      File('$defaultPath.restore-pending').existsSync(),
+      isTrue,
+      reason: 'the original is stranded, so the restore never settled',
+    );
+
+    DatabaseService.instance.debugFailDeleteFor = null;
+    await DatabaseService.instance.restore(validBackup);
+
+    final kept = _quarantinedCopies(defaultPath, '.pre-restore.');
+    expect(kept, hasLength(1));
+    expect(_diverNames(kept.single), contains('Keep Me'));
+  });
+
+  test('a missing-source sweep leaves a possibly precious .pre-restore '
+      'alone', () async {
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    File('$defaultPath.pre-restore').writeAsStringSync('the only copy');
+    File('$defaultPath.restore-pending').writeAsStringSync('{}');
+    File('$defaultPath.restore-staging').writeAsStringSync('stale');
+
+    await expectLater(
+      DatabaseService.instance.restore(p.join(tempDir.path, 'missing.db')),
+      throwsA(isA<RestoreSourceMissingException>()),
+    );
+
+    expect(
+      File('$defaultPath.pre-restore').readAsStringSync(),
+      'the only copy',
+    );
+    expect(File('$defaultPath.restore-pending').existsSync(), isTrue);
+    expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+  });
+
+  test('a leftover that cannot be moved aside aborts the restore before '
+      'the database closes', () async {
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(id: '', name: 'Keep Me', createdAt: now, updatedAt: now),
+    );
+    // An unmarked leftover is moved to a timestamped name, never deleted.
+    // A directory already sitting at that name makes the move fail, as a
+    // file lock that outlasts the restore would. The quarantine's collision
+    // check does not step past it to `-1`: it probes with File.existsSync,
+    // which is false for a directory, so the rename targets the directory
+    // and throws.
+    final asidePath = '$defaultPath.pre-restore';
+    File(asidePath).writeAsStringSync('stale');
+    DatabaseService.instance.debugClock = () =>
+        DateTime.utc(2026, 9, 13, 10, 30, 5);
+    Directory('$asidePath.20260913T103005Z').createSync();
+    var windowOpened = false;
+    DatabaseService.instance.debugOnRestoreWindowOpen = (_) =>
+        windowOpened = true;
+
+    await expectLater(
+      DatabaseService.instance.restore(backupPath),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(
+      windowOpened,
+      isFalse,
+      reason: 'the leftover must be settled while the database is still open',
+    );
+    final divers = await DiverRepository().getAllDivers();
+    expect(divers.map((d) => d.name), contains('Keep Me'));
+    expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+    expect(File('$defaultPath.restore-pending').existsSync(), isFalse);
+    expect(File(asidePath).readAsStringSync(), 'stale');
+  });
+
+  test(
+    'the journal is open during the swap and settled after success',
+    () async {
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+      var markerDuringWindow = false;
+      DatabaseService.instance.debugOnRestoreWindowOpen = (_) {
+        markerDuringWindow = File('$defaultPath.restore-pending').existsSync();
+      };
+
+      await DatabaseService.instance.restore(backupPath);
+
+      expect(markerDuringWindow, isTrue);
+      expect(File('$defaultPath.restore-pending').existsSync(), isFalse);
+    },
+  );
+
+  test('a marker that cannot be cleared does not fail a restore that '
+      'succeeded', () async {
+    // The failure direction the journal promises: a stuck marker costs one
+    // unnecessary recovery prompt at the next launch, never a restore that
+    // already worked or a database left closed.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+    final now = DateTime.now();
+    await DiverRepository().createDiver(
+      domain.Diver(
+        id: '',
+        name: 'After Backup',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    DatabaseService.instance.debugFailDeleteFor = {
+      '$defaultPath.restore-pending',
+    };
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final divers = await DiverRepository().getAllDivers();
+    expect(
+      divers.map((d) => d.name),
+      isNot(contains('After Backup')),
+      reason: 'the backup was restored and is open',
+    );
+    expect(File('$defaultPath.restore-pending').existsSync(), isTrue);
+  });
+
+  test(
+    'the restore window seam is one-shot and does not leak across restores',
+    () async {
+      // The service is a singleton, so a seam left set by one restore must not
+      // fire on the next. restore() captures+clears it, so it fires exactly once.
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      final backupPath = p.join(tempDir.path, 'backup.db');
+      await DatabaseService.instance.backup(backupPath);
+
+      var fireCount = 0;
+      DatabaseService.instance.debugOnRestoreWindowOpen = (_) => fireCount++;
+
+      await DatabaseService.instance.restore(backupPath);
+      await DatabaseService.instance.restore(backupPath);
+
+      expect(fireCount, 1);
+    },
+  );
+
+  test('a missing-source restore sweeps the staging file but keeps an unmarked '
+      '.pre-restore (#1924)', () async {
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+
+    // A staging copy a prior restore left behind is pure garbage and must
+    // not accumulate on disk. An unmarked .pre-restore is not: nothing
+    // proves it is not the diver's only copy, so the sweep leaves it for
+    // the next real restore to move aside.
+    File('$defaultPath.pre-restore').writeAsStringSync('stale');
+    File('$defaultPath.restore-staging').writeAsStringSync('stale');
+
+    // A restore pointed at a missing file swaps nothing in and reports
+    // that (issue #1344), but still sweeps the temps on the way out.
+    await expectLater(
+      DatabaseService.instance.restore(p.join(tempDir.path, 'missing.db')),
+      throwsA(isA<RestoreSourceMissingException>()),
+    );
+
+    expect(File('$defaultPath.pre-restore').readAsStringSync(), 'stale');
+    expect(File('$defaultPath.restore-staging').existsSync(), isFalse);
+    // The live database was never touched.
+    final one = await DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .getSingle();
+    expect(one.read<int>('v'), 1);
+  });
+
+  test('restore succeeds while a watch() subscription is paused', () async {
+    // Riverpod 3 auto-pauses the streams of providers nobody is listening to,
+    // and drift's graceful close() awaits streamQueries.close(), which hangs
+    // while ANY watch() subscription is paused. In a real session there is
+    // almost always at least one paused watch stream (any previously visited
+    // page), so a strict close that trusts the graceful close with a throwing
+    // timeout makes restore fail with TimeoutException until retried.
+    final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+    await DatabaseService.instance.initialize(
+      locationService: _FakeLocation(defaultPath),
+    );
+    await DatabaseService.instance.database
+        .customSelect('SELECT 1')
+        .getSingle();
+    final backupPath = p.join(tempDir.path, 'backup.db');
+    await DatabaseService.instance.backup(backupPath);
+
+    // Simulate Riverpod's auto-pause: subscribe to a watch() stream, then
+    // pause the subscription and leave it paused across the restore.
+    final subscription = DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .watch()
+        .listen((_) {});
+    subscription.pause();
+    addTearDown(() async {
+      try {
+        await subscription.cancel();
+      } catch (_) {
+        // The stream's database was closed by the restore; a cancel error
+        // here is irrelevant to the assertion.
+      }
+    });
+
+    await DatabaseService.instance.restore(backupPath);
+
+    final one = await DatabaseService.instance.database
+        .customSelect('SELECT 1 AS v')
+        .getSingle();
+    expect(one.read<int>('v'), 1);
+  });
+
+  test(
+    'restore with a missing backup file throws and leaves the live DB open',
+    () async {
+      // Issue #1344. A restore pointed at a nonexistent file must NOT close
+      // the database (that would open an unavailable window for nothing), but
+      // it must not pass for a completed restore either: a caller has to be
+      // able to tell "nothing happened" from "restored an empty library". So
+      // the live database stays queryable throughout AND the call fails with
+      // a typed exception naming the missing source.
+      final defaultPath = p.join(tempDir.path, 'Submersion', 'submersion.db');
+      await DatabaseService.instance.initialize(
+        locationService: _FakeLocation(defaultPath),
+      );
+      await DatabaseService.instance.database
+          .customSelect('SELECT 1')
+          .getSingle();
+      // A temp file stranded by an earlier restore is still swept on the way
+      // out, exactly as the silent no-op used to do.
+      final stranded = File('$defaultPath.restore-staging');
+      await stranded.writeAsString('stale');
+
+      var windowOpened = false;
+      DatabaseService.instance.debugOnRestoreWindowOpen = (_) =>
+          windowOpened = true;
+
+      final missingPath = p.join(tempDir.path, 'nope.db');
+      await expectLater(
+        DatabaseService.instance.restore(missingPath),
+        throwsA(
+          isA<RestoreSourceMissingException>()
+              .having((e) => e.backupPath, 'backupPath', missingPath)
+              // Two callers (startup recovery, settings export) render '$e'
+              // to the user unlocalized, so the text must read as a sentence
+              // that names the file, not as a class name.
+              .having(
+                (e) => '$e',
+                'toString',
+                allOf(
+                  contains(missingPath),
+                  contains('Nothing was restored'),
+                  isNot(contains('Exception')),
+                ),
+              ),
+        ),
+      );
+
+      expect(windowOpened, isFalse);
+      expect(stranded.existsSync(), isFalse);
+      final one = await DatabaseService.instance.database
+          .customSelect('SELECT 1 AS v')
+          .getSingle();
+      expect(one.read<int>('v'), 1);
+    },
+  );
+}

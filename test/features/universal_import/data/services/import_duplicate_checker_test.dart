@@ -1,6 +1,11 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/domain/entities/custom_certification_agency.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
@@ -9,10 +14,14 @@ import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/universal_import/data/csv/extractors/gear_extractor.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/data/parsers/macdive_xml_parser.dart';
 import 'package:submersion/features/dive_import/domain/services/dive_matcher.dart';
 import 'package:submersion/features/universal_import/data/services/import_duplicate_checker.dart';
+
+import '../../../../helpers/dive_match_records.dart';
 
 void main() {
   const checker = ImportDuplicateChecker();
@@ -29,10 +38,13 @@ void main() {
     List<Certification> certifications = const [],
     List<Tag> tags = const [],
     List<DiveTypeEntity> diveTypes = const [],
+    Map<String, String> existingSourceUuidByDiveId = const {},
+    bool checkIntraBatch = false,
+    bool checkWithinFile = false,
   }) {
     return checker.check(
       payload: payload ?? const ImportPayload(entities: {}),
-      existingDives: dives,
+      existingDives: dives.map(diveMatchRecordOf).toList(),
       existingSites: sites,
       existingTrips: trips,
       existingEquipment: equipment,
@@ -41,6 +53,9 @@ void main() {
       existingCertifications: certifications,
       existingTags: tags,
       existingDiveTypes: diveTypes,
+      existingSourceUuidByDiveId: existingSourceUuidByDiveId,
+      checkIntraBatch: checkIntraBatch,
+      checkWithinFile: checkWithinFile,
     );
   }
 
@@ -183,6 +198,32 @@ void main() {
       expect(result.duplicates[ImportEntityType.sites], {0});
     });
 
+    test(
+      'matches the namesake in the same place, not the last one (#4015)',
+      () {
+        final result = checkWith(
+          payload: const ImportPayload(
+            entities: {
+              ImportEntityType.sites: [
+                {'name': 'Blue Hole', 'country': 'Egypt'},
+                {'name': 'Blue Hole', 'country': 'Belize'},
+                {'name': 'Blue Hole'},
+              ],
+            },
+          ),
+          sites: [
+            const DiveSite(id: 'e', name: 'Blue Hole', country: 'Egypt'),
+            const DiveSite(id: 'b', name: 'Blue Hole', country: 'Belize'),
+          ],
+        );
+
+        final matches = result.entityMatches[ImportEntityType.sites]!;
+        expect(matches[0]!.existingId, 'e');
+        expect(matches[1]!.existingId, 'b');
+        expect(matches[2]!.existingId, 'b');
+      },
+    );
+
     test('finds by lat/lon proximity within 100m', () {
       final result = checkWith(
         payload: const ImportPayload(
@@ -273,6 +314,176 @@ void main() {
 
       expect(result.duplicates[ImportEntityType.equipment], {0});
     });
+
+    // `other` means the type was unknown when the row was stored (older
+    // importers left MacDive XML and CSV gear unclassified), so it cannot
+    // tell two same-named items apart and must not force a twin.
+    test('a stored `other` item matches a classified import by name', () {
+      final result = checkWith(
+        payload: const ImportPayload(
+          entities: {
+            ImportEntityType.equipment: [
+              {'name': 'Hog Wing', 'type': 'bcd'},
+            ],
+          },
+        ),
+        equipment: [
+          const EquipmentItem(
+            id: 'legacy',
+            name: 'Hog Wing',
+            type: EquipmentType.other,
+          ),
+        ],
+      );
+
+      expect(result.duplicates[ImportEntityType.equipment], {0});
+      expect(
+        result.entityMatches[ImportEntityType.equipment]![0]!.existingId,
+        'legacy',
+      );
+    });
+
+    test('an unclassified import matches a stored item by name', () {
+      final result = checkWith(
+        payload: const ImportPayload(
+          entities: {
+            ImportEntityType.equipment: [
+              {'name': 'Hog Wing', 'type': 'other'},
+              {'name': 'Hog Wing'},
+            ],
+          },
+        ),
+        equipment: [
+          const EquipmentItem(
+            id: 'reclassified',
+            name: 'Hog Wing',
+            type: EquipmentType.bcd,
+          ),
+        ],
+      );
+
+      expect(result.duplicates[ImportEntityType.equipment], {0, 1});
+    });
+
+    test('an import type the importer cannot parse counts as `other`', () {
+      // The importer stores a type that names no EquipmentType as `other`
+      // (CSV emitted 'exposure_suit' before #1883), so the checker must read
+      // it the same way.
+      final result = checkWith(
+        payload: const ImportPayload(
+          entities: {
+            ImportEntityType.equipment: [
+              {'name': 'Trilam', 'type': 'exposure_suit'},
+            ],
+          },
+        ),
+        equipment: [
+          const EquipmentItem(
+            id: '1',
+            name: 'Trilam',
+            type: EquipmentType.drysuit,
+          ),
+        ],
+      );
+
+      expect(result.duplicates[ImportEntityType.equipment], {0});
+    });
+
+    // A suit typed from its name meets the stored suit on the exact key, so a
+    // same-named `other` row left by an older CSV import does not claim it.
+    test(
+      'a re-imported CSV suit matches its stored suit, not an `other` twin',
+      () {
+        final reimported = GearExtractor().extractFromRows([
+          {'suit': '7mm Wetsuit'},
+        ]);
+
+        final result = checkWith(
+          payload: ImportPayload(
+            entities: {ImportEntityType.equipment: reimported},
+          ),
+          equipment: [
+            const EquipmentItem(
+              id: 'legacy',
+              name: '7mm Wetsuit',
+              type: EquipmentType.other,
+            ),
+            const EquipmentItem(
+              id: 'suit',
+              name: '7mm Wetsuit',
+              type: EquipmentType.wetsuit,
+            ),
+          ],
+        );
+
+        expect(
+          result.entityMatches[ImportEntityType.equipment]![0]!.existingId,
+          'suit',
+        );
+      },
+    );
+
+    test('an exact name + type match wins over an `other` match', () {
+      final result = checkWith(
+        payload: const ImportPayload(
+          entities: {
+            ImportEntityType.equipment: [
+              {'name': 'Primary', 'type': 'light'},
+            ],
+          },
+        ),
+        equipment: [
+          const EquipmentItem(
+            id: 'unknown',
+            name: 'Primary',
+            type: EquipmentType.other,
+          ),
+          const EquipmentItem(
+            id: 'exact',
+            name: 'Primary',
+            type: EquipmentType.light,
+          ),
+        ],
+      );
+
+      expect(
+        result.entityMatches[ImportEntityType.equipment]![0]!.existingId,
+        'exact',
+      );
+    });
+
+    // The key is name|type, so a raw MacDive XML type ("BCD - Wing") never
+    // matched the classified type the first import stored, and every
+    // re-import created a twin.
+    test('re-imported MacDive XML gear matches the stored item', () async {
+      const xml = '''<?xml version="1.0"?>
+<dives><units>Metric</units><schema>2.2.0</schema>
+  <dive>
+    <date>2024-01-01 09:00:00</date><identifier>d1</identifier>
+    <maxDepth>20</maxDepth><duration>1800</duration>
+    <gear>
+      <item><type>BCD - Wing</type><name>Hog Wing</name></item>
+    </gear>
+    <samples/>
+  </dive>
+</dives>''';
+      final payload = await const MacDiveXmlParser().parse(
+        Uint8List.fromList(utf8.encode(xml)),
+      );
+
+      final result = checkWith(
+        payload: payload,
+        equipment: [
+          const EquipmentItem(
+            id: '1',
+            name: 'Hog Wing',
+            type: EquipmentType.bcd,
+          ),
+        ],
+      );
+
+      expect(result.duplicates[ImportEntityType.equipment], {0});
+    });
   });
 
   group('Certification duplicates', () {
@@ -290,11 +501,56 @@ void main() {
           Certification(
             id: '1',
             name: 'Open Water',
-            agency: CertificationAgency.padi,
+            agency: CertificationAgency.padi.name,
             createdAt: now,
             updatedAt: now,
           ),
         ],
+      );
+
+      expect(result.duplicates[ImportEntityType.certifications], {0});
+    });
+
+    test('a custom agency matches by its name on re-import (issue #690)', () {
+      final catalog = CertificationCatalog(
+        agencies: [
+          CustomCertificationAgency(
+            id: 'club-x-id',
+            diverId: 'a',
+            name: 'Club X',
+            colorArgb: 0xFF3B82F6,
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ],
+      );
+      final result = checker.check(
+        payload: const ImportPayload(
+          entities: {
+            ImportEntityType.certifications: [
+              {'name': 'Club Diver', 'agency': 'Club X'},
+              {'name': 'Club Diver', 'agency': 'Club Y'},
+            ],
+          },
+        ),
+        existingDives: const [],
+        existingSites: const [],
+        existingTrips: const [],
+        existingEquipment: const [],
+        existingBuddies: const [],
+        existingDiveCenters: const [],
+        existingCertifications: [
+          Certification(
+            id: '1',
+            name: 'Club Diver',
+            agency: 'club-x-id',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ],
+        existingTags: const [],
+        existingDiveTypes: const [],
+        certificationCatalog: catalog,
       );
 
       expect(result.duplicates[ImportEntityType.certifications], {0});
@@ -450,6 +706,263 @@ void main() {
 
       expect(result.diveMatches, contains(0));
     });
+
+    test('content (fuzzy) match leaves matchedExistingSource false', () {
+      final diveTime = DateTime(2024, 1, 15, 10, 0);
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': diveTime,
+                'maxDepth': 18.0,
+                'runtime': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: diveTime.add(const Duration(minutes: 2)),
+            maxDepth: 18.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+      );
+
+      final match = result.diveMatchFor(0);
+      expect(match, isNotNull);
+      expect(match!.matchedExistingSource, isFalse);
+    });
+
+    test('does not match a dive far apart in time even with identical '
+        'depth and duration', () {
+      // ScubaBoard regression at the checker level: months apart, same depth,
+      // same duration. Only the DiveMatcher time-gate keeps this from being
+      // flagged as a possible duplicate.
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2024, 3, 15, 10, 0),
+                'maxDepth': 18.0,
+                'runtime': const Duration(minutes: 47),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: DateTime(2024, 6, 20, 14, 0),
+            maxDepth: 18.0,
+            bottomTime: const Duration(minutes: 47),
+          ),
+        ],
+      );
+
+      expect(result.diveMatches, isEmpty);
+    });
+  });
+
+  group('Dive duplicates (source_uuid)', () {
+    test(
+      'first-pass source_uuid match takes precedence over content match',
+      () {
+        // Content would NOT fuzzy-match (different date, different depth),
+        // but matching source_uuid should still flag as a match.
+        final result = checkWith(
+          payload: ImportPayload(
+            entities: {
+              ImportEntityType.dives: [
+                {
+                  'sourceUuid': 'XYZ',
+                  'dateTime': DateTime(2020, 1, 1, 8, 0),
+                  'maxDepth': 10.0,
+                  'runtime': const Duration(minutes: 20),
+                },
+              ],
+            },
+          ),
+          dives: [
+            Dive(
+              id: 'existing-1',
+              dateTime: DateTime(2024, 6, 1, 10, 0),
+              maxDepth: 25.0,
+              bottomTime: const Duration(minutes: 45),
+            ),
+          ],
+          existingSourceUuidByDiveId: const {'existing-1': 'XYZ'},
+        );
+
+        expect(result.diveMatches, contains(0));
+        expect(result.diveMatches[0]!.diveId, 'existing-1');
+        // UUID match is a certainty, reflected by a probable-duplicate score.
+        expect(result.diveMatches[0]!.isProbable, isTrue);
+      },
+    );
+
+    test('null source_uuid falls through to content fuzzy matching', () {
+      final diveTime = DateTime(2024, 6, 1, 10, 0);
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                // No sourceUuid at all.
+                'dateTime': diveTime,
+                'maxDepth': 25.0,
+                'runtime': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: diveTime,
+            maxDepth: 25.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+        // Existing dive also has no source_uuid.
+        existingSourceUuidByDiveId: const {},
+      );
+
+      expect(result.diveMatches, contains(0));
+      expect(result.diveMatches[0]!.diveId, 'existing-1');
+    });
+
+    test('mismatched source_uuid with matching content still matches '
+        '(content path wins)', () {
+      // UUIDs differ, but content is identical. UUIDs must NOT veto a
+      // content match — they only upgrade likely matches to certain ones.
+      final diveTime = DateTime(2024, 6, 1, 10, 0);
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'sourceUuid': 'B',
+                'dateTime': diveTime,
+                'maxDepth': 25.0,
+                'runtime': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: diveTime,
+            maxDepth: 25.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+        existingSourceUuidByDiveId: const {'existing-1': 'A'},
+      );
+
+      expect(result.diveMatches, contains(0));
+      expect(result.diveMatches[0]!.diveId, 'existing-1');
+    });
+
+    test(
+      'incoming source_uuid with no existing match falls through to content',
+      () {
+        // Incoming carries a UUID but no existing dive has it. Content should
+        // still match if it's close enough.
+        final diveTime = DateTime(2024, 6, 1, 10, 0);
+        final result = checkWith(
+          payload: ImportPayload(
+            entities: {
+              ImportEntityType.dives: [
+                {
+                  'sourceUuid': 'ORPHAN',
+                  'dateTime': diveTime,
+                  'maxDepth': 25.0,
+                  'runtime': const Duration(minutes: 45),
+                },
+              ],
+            },
+          ),
+          dives: [
+            Dive(
+              id: 'existing-1',
+              dateTime: diveTime,
+              maxDepth: 25.0,
+              bottomTime: const Duration(minutes: 45),
+            ),
+          ],
+          existingSourceUuidByDiveId: const {'existing-1': 'DIFFERENT'},
+        );
+
+        expect(result.diveMatches, contains(0));
+        expect(result.diveMatches[0]!.diveId, 'existing-1');
+      },
+    );
+
+    test('empty string source_uuid is treated as null', () {
+      // Defensive: empty strings must not collide with each other.
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'sourceUuid': '',
+                'dateTime': DateTime(2020, 1, 1, 8, 0),
+                'maxDepth': 10.0,
+                'runtime': const Duration(minutes: 20),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: DateTime(2024, 6, 1, 10, 0),
+            maxDepth: 25.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+        existingSourceUuidByDiveId: const {'existing-1': ''},
+      );
+
+      // No UUID match (both empty), and content doesn't match either.
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('source_uuid match flags matchedExistingSource so it defaults '
+        'to skip', () {
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'sourceUuid': 'XYZ',
+                'dateTime': DateTime(2024, 1, 15, 10, 0),
+                'maxDepth': 18.0,
+                'runtime': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: DateTime(2024, 1, 15, 10, 0),
+            maxDepth: 18.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+        existingSourceUuidByDiveId: const {'existing-1': 'XYZ'},
+      );
+
+      final match = result.diveMatchFor(0);
+      expect(match, isNotNull);
+      expect(match!.matchedExistingSource, isTrue);
+    });
   });
 
   group('Empty payload', () {
@@ -520,6 +1033,259 @@ void main() {
       expect(result.duplicates[ImportEntityType.trips], {0});
       expect(result.duplicates[ImportEntityType.buddies], {0});
       expect(result.diveMatches, contains(0));
+    });
+  });
+
+  group('Intra-batch dive duplicates', () {
+    test('flags the later of two in-batch dives matching by sourceUuid', () {
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 1, 1, 9),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+                'sourceUuid': 'uuid-1',
+                '_sourceFile': 'a.fit',
+              },
+              {
+                'dateTime': DateTime(2026, 1, 1, 9),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+                'sourceUuid': 'uuid-1',
+                '_sourceFile': 'b.uddf',
+              },
+            ],
+          },
+        ),
+        checkIntraBatch: true,
+      );
+
+      expect(result.diveMatches, hasLength(1));
+      final match = result.diveMatches[1]!;
+      expect(match.inBatchIndex, 0);
+      expect(match.diveId, '');
+      expect(match.score, 1.0);
+      expect(match.siteName, 'a.fit');
+    });
+
+    test('flags the later of two in-batch dives matching fuzzily', () {
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 1, 1, 9, 0),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+              {
+                'dateTime': DateTime(2026, 1, 1, 9, 1), // 1 min apart
+                'maxDepth': 18.2,
+                'duration': const Duration(minutes: 44),
+              },
+            ],
+          },
+        ),
+        checkIntraBatch: true,
+      );
+
+      expect(result.diveMatches.keys, [1]);
+      expect(result.diveMatches[1]!.inBatchIndex, 0);
+    });
+
+    test('does not flag far-apart in-batch dives (time gate respected)', () {
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 1, 1, 9),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+              {
+                'dateTime': DateTime(2026, 3, 1, 9), // months apart
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        checkIntraBatch: true,
+      );
+
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('checkIntraBatch=false (default) preserves existing behavior', () {
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': DateTime(2026, 1, 1, 9),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+              {
+                'dateTime': DateTime(2026, 1, 1, 9),
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+      );
+
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('in-batch duplicate is not double-reported against the database', () {
+      final diveTime = DateTime(2026, 1, 1, 9);
+      final result = checkWith(
+        payload: ImportPayload(
+          entities: {
+            ImportEntityType.dives: [
+              {
+                'dateTime': diveTime,
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+              {
+                'dateTime': diveTime,
+                'maxDepth': 18.0,
+                'duration': const Duration(minutes: 45),
+              },
+            ],
+          },
+        ),
+        dives: [
+          Dive(
+            id: 'existing-1',
+            dateTime: diveTime,
+            maxDepth: 18.0,
+            bottomTime: const Duration(minutes: 45),
+          ),
+        ],
+        checkIntraBatch: true,
+      );
+
+      // Dive 1 is an in-batch duplicate of dive 0; dive 0 matches the DB.
+      expect(result.diveMatches, hasLength(2));
+      expect(result.diveMatches[1]!.inBatchIndex, 0);
+      expect(result.diveMatches[1]!.diveId, '');
+      expect(result.diveMatches[0]!.inBatchIndex, isNull);
+      expect(result.diveMatches[0]!.diveId, 'existing-1');
+    });
+  });
+
+  group('Within-file dive duplicates (#3110)', () {
+    Map<String, dynamic> dive(
+      DateTime at, {
+      double depth = 18.4,
+      int minutes = 41,
+      Map<String, dynamic> extra = const {},
+    }) => {
+      'dateTime': at,
+      'maxDepth': depth,
+      'duration': Duration(minutes: minutes),
+      ...extra,
+    };
+
+    final start = DateTime.utc(2026, 8, 1, 10, 15);
+
+    ImportDuplicateResult checkFile(List<Map<String, dynamic>> dives) =>
+        checkWith(
+          payload: ImportPayload(entities: {ImportEntityType.dives: dives}),
+          checkWithinFile: true,
+        );
+
+    test('the same dive twice in one file is flagged', () {
+      final result = checkFile([dive(start), dive(start, depth: 18.3)]);
+      expect(result.diveMatches.keys, [1]);
+      expect(result.diveMatches[1]!.inBatchIndex, 0);
+      expect(result.diveMatches[1]!.diveId, '');
+    });
+
+    test('the copy with less data is flagged, the richer one kept', () {
+      final result = checkFile([
+        dive(start),
+        dive(
+          start,
+          extra: {
+            'site': {'uddfId': 's1'},
+            'buddyRefs': ['Sam'],
+          },
+        ),
+      ]);
+      expect(result.diveMatches.keys, [0]);
+      expect(result.diveMatches[0]!.inBatchIndex, 1);
+    });
+
+    test('copies a second apart across a minute boundary are one dive', () {
+      // Two dives cannot start a second apart, so with the same depth and
+      // duration these are one dive logged twice, whichever minute each
+      // clock put it in.
+      final result = checkFile([
+        dive(DateTime.utc(2026, 8, 1, 10, 15, 59)),
+        dive(DateTime.utc(2026, 8, 1, 10, 16)),
+      ]);
+      expect(result.diveMatches.keys, [1]);
+    });
+
+    test('of three copies the richest is kept, the others point at it', () {
+      final result = checkFile([
+        dive(start),
+        dive(start, extra: {'notes': 'medium'}),
+        dive(start, extra: {'notes': 'rich', 'rating': 4}),
+      ]);
+      expect(result.diveMatches.keys, unorderedEquals([0, 1]));
+      expect(result.diveMatches[0]!.inBatchIndex, 2);
+      expect(result.diveMatches[1]!.inBatchIndex, 2);
+    });
+
+    test('dives a full minute apart are not flagged', () {
+      final result = checkFile([
+        dive(start),
+        dive(start.add(const Duration(minutes: 1))),
+      ]);
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('dives minutes apart in one file are not flagged', () {
+      // Two real dives can share a depth and length; within one file only
+      // starts under a minute apart make them one dive.
+      final result = checkFile([
+        dive(start),
+        dive(start.add(const Duration(minutes: 3))),
+      ]);
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('a different depth or duration at the same minute is not flagged', () {
+      final result = checkFile([
+        dive(start),
+        dive(start, depth: 25),
+        dive(start.add(const Duration(days: 1))),
+        dive(start.add(const Duration(days: 1)), minutes: 55),
+      ]);
+      expect(result.diveMatches, isEmpty);
+    });
+
+    test('pairs are found throughout the file, not only adjacent rows', () {
+      final other = start.add(const Duration(days: 30));
+      final result = checkFile([
+        dive(start),
+        dive(other),
+        dive(start.add(const Duration(days: 2))),
+        dive(other),
+        dive(start),
+      ]);
+      expect(result.diveMatches.keys, unorderedEquals([3, 4]));
+      expect(result.diveMatches[3]!.inBatchIndex, 1);
+      expect(result.diveMatches[4]!.inBatchIndex, 0);
     });
   });
 }

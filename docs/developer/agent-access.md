@@ -1,0 +1,756 @@
+# Agent access (MCP server)
+
+Agent access lets an AI agent on the same desktop machine read and change the
+diver's logbook through the Model Context Protocol. The
+design is `docs/design/specs/2026-11-01-mcp-server-design.md`; this page is
+the map of the code and the rules it keeps.
+
+Agent access exists on macOS, Windows and Linux: `agentAccessAvailableProvider`
+gates both the settings entry point (Settings > Data > Advanced > Data tools >
+Agent access) and the listener itself, so a persisted "enabled" setting starts
+nothing on a build without it. The user page is `docs/user/agent-access.md`.
+
+## Where the code lives
+
+Everything is under `lib/features/agent_access/`:
+
+| Path | Responsibility |
+| --- | --- |
+| `domain/agent_access_settings.dart` | Per-device settings value type and the default port (47831) |
+| `domain/agent_tool.dart` | The `AgentTool` interface and `AgentToolContext`; tools never see the protocol package |
+| `domain/agent_tool_error.dart` | `AgentToolErrorCode` and `AgentToolException`, the only way a tool refuses |
+| `data/agent_access_preferences.dart` | SharedPreferences wrapper (never synced diver settings) |
+| `data/agent_access_token_store.dart` | Bearer token in secure storage: 32 random bytes, base64url |
+| `data/agent_tool_gate.dart` | Demo mode, app lock and database-available checks, run before every tool |
+| `data/diver_context.dart` | Resolves the profile a call acts as: settings, unit prefs, name index |
+| `data/root_scope.dart` | The SQL fragment that limits a query root to what one diver may see |
+| `data/service_status_overlay.dart` | The named diver's service verdicts, as a CTE that shadows the cache table |
+| `data/records/` | The record catalogue: scopes, the reader, the repository bundle |
+| `data/records/families/` | One file per family of entities, each returning its catalogue entries |
+| `data/documents/` | JSON mappers per family, metric with unit-named keys, and `document_dates.dart` |
+| `data/sql/` | The SQL window: the denied set, the bytecode guard, the worker and its runner |
+| `data/writes/` | The write catalogue: change sets, field codecs, the planner, the plan store and the applier |
+| `data/writes/families/` | One file per family of writable entities, each going through its repository or service |
+| `data/tools/` | `list_divers`, `query`, `get_records`, `list_records`, `sql_query`, `compute_plan`, `preview_changes`, `apply_changes`, `revert_operation`, and the registry |
+| `data/planning/` | `compute_plan`'s request parser, the series it builds in memory, and its result document |
+| `data/resources/` | `submersion://query-language`, `submersion://units` and `submersion://schema` |
+| `data/server/` | The loopback listener, the bearer check, and the adapter onto `mcp_dart` |
+| `presentation/providers/` | Settings notifier, token store, status stream, lifecycle controller |
+| `presentation/pages/`, `presentation/widgets/` | The settings page, status card and client snippets |
+
+## Adding a tool
+
+1. Implement `AgentTool`: a `name`, an English `description` written for an
+   agent, an `inputSchema` as a plain JSON Schema map, and `call(args,
+   context)`. Resolve the diver with `DiverContextLoader` and read the
+   database from `context.db`, never from a cached handle.
+2. Refuse with `AgentToolException`; pick an existing `AgentToolErrorCode`
+   or add one with a snake_case `wire` name.
+3. Register it in `AgentToolRegistry.standard`.
+4. Emit metric values with the unit in the key (`max_depth_m`,
+   `water_temp_c`, `start_pressure_bar`, `weight_kg`) and dates through
+   `document_dates.dart` (see The date rule). A tool that emits times puts
+   `kDocumentDateRule` in its description.
+5. Test it against a real in-memory database (`setUpTestDatabase()`), and
+   add an end-to-end case to `agent_access_server_e2e_test.dart` when the
+   tool changes what a client can observe.
+
+`buildMcpServer` wraps every tool: the gate runs first, the result becomes
+`CallToolResult` with the JSON in both a text block and `structuredContent`,
+and any `AgentToolException` becomes an `isError` result carrying
+`{"error": <wire code>, "message": ..., "details": ...}`. On the 2026
+protocol the SDK drops `structuredContent` from error results, so clients
+read the text block for errors.
+
+## Adding an entity
+
+Every entity an agent can read is one entry in the catalogue. To add one:
+
+1. Write its mapper in the family's file under `data/documents/`: metric,
+   unit-named keys, never bytes, no `created_at` or `updated_at`, and no
+   column the SQL window denies.
+2. Add a `RecordEntity<T>` to the family under `data/records/families/`: the
+   wire `name`, the `table`, a `scope`, a `load`, the `document`, and
+   `summaryKeys`. Give it a `parentColumn` when `parent_id` makes sense, and
+   `blocks` for children a caller asks for by name. A child whose repository
+   only reads by parent is a `childEntity`, which wires the read by id.
+3. Copy `scope` from the repository's own list method, so the agent sees what
+   the app shows that profile: `owned`, `ownedOrNull`, `ownedOrBuiltIn`,
+   `ownedNullOrBuiltIn`, `ownedOrShared`, `rootScope`, `viaParent`, `everyone`,
+   or a small function when the rule is its own. A family test pins the entry
+   against that list method.
+4. Add a repository to `RecordRepositories` if it needs a new one. Keep it
+   `late final`, because the bundle is built per request.
+
+A block that lists rows another entity governs passes them through
+`RecordReader.keepVisible` with that entity's scope, so a block never shows a
+row the entity itself would refuse.
+
+`record_catalog_guard_test.dart` fails on a tracked table with no decision: a
+new table must be an entity, a link, folded into a parent, or listed as
+unexposed with a reason. Every read in a family test also runs through
+`expectCleanDocument`, which refuses a credential key, a device-local key or
+bytes anywhere in a result.
+
+`diver_settings` is the one document built from a Drift row. The table has over
+two hundred columns and no domain shape, so `settingsDocument` drops the
+device-local and bookkeeping columns and renames the dimensioned ones from
+`kSettingUnitKeys`. A new `REAL` column must join that map or
+`kUnitlessSettings`, or the guard fails.
+
+## The planner
+
+`compute_plan` computes a dive or a series of up to ten with the planner's
+own code and writes nothing (issue #4203). It never has a planner of its own:
+
+- **Inputs** are read with the `dive_plans` write family's codecs
+  (`writes/families/dive_plan_fields.dart`), so the plan fields of
+  `resolved_inputs` save unchanged through `dive_plans`. Its
+  `surface_interval_s` and `carries_from_tank` are `compute_plan`'s own, and
+  `dive_plans` refuses them. A first dive saved that way is the plan that
+  was computed; a later one saves without what it carried in. `bottom` is
+  the planner's simple plan: a descent at the plan's or the diver's rate,
+  then `time_s` at depth, on the first tank, or a loop's first diluent.
+- **A series** is built as an unsaved `StoredSeries` (`storedSeriesFor`) and
+  computed by `computeSeriesFromStored`, the path a saved series opens by.
+  A later dive takes the dive before's mode, settings and tanks for any it
+  leaves out, as a dive the planner adds copies them. Tanks carry from the
+  same place when taken, else from the same cylinder (the planner's
+  `sameCylinder`: size, working pressure and gas, the only link it carries a
+  pressure across), unless `carries_from_tank` says otherwise. A later dive's
+  `start_date_time` is taken only when the first dive has one or the series
+  follows a logged dive, since the planner has no other clock to measure it
+  from.
+- **Settings** are the named diver's, through `planEngineConfigFromSettings`.
+  `effective_settings` says for each value whether the plan, the diver's
+  Settings or the planner's default set it; values from Settings are never
+  written into `resolved_inputs`, so a saved plan keeps following Settings.
+  Every value it marks as one a plan can set is an input, so an agent can
+  override any of them. That includes the ascent rate bands and the
+  problem-solving allowance (`problem_solving_minutes` at the deepest point on
+  bottom SAC times `sac_factor`), reported per tank as
+  `problem_solving_litres` and not included in `litres_used` (#4475).
+  Minimum gas is checked against `bottom_end_pressure_bar`, the cylinder as
+  the diver leaves the deepest point: under `min_gas_ascent_bar` is critical,
+  under `min_gas_bar` a warning.
+- **Following a logged dive** reads it through the planner's
+  `seriesFollowProvider`, injected as a `SeriesFollowReader` and wrapped in
+  `loggedDivesOnly`, so the carry-in is the planner's own and a planned entry
+  is never followed.
+- **What a dive carried in** includes `tissue_loading`: the tissues from
+  `startStateForPlan`, the state the engine starts the dive from, so after
+  the surface interval has off-gassed them. It names the leading compartment
+  by percent of the surface M-value, as the app's tissue card ranks them, the
+  surface gradient factor, and each compartment's N2 and He.
+
+Every answer carries the planner's caveat in the app's language, and the
+description tells the agent to pass on every issue.
+
+### Planned dives
+
+`planned_dives` (`{delete_removed, move_dived_link}`) is an effect field of
+`dive_plan_series` and `dive_plans`, on create and update, so "save it and put
+it in my log" is one change (`writes/families/planned_dives_effect.dart`). It
+runs the planner's own `PlannedDivesWriter`, as "Create / Update planned
+dives" does: a dive with no entry gets a planned one, a planned entry is
+rewritten in place, a dived one is left alone.
+
+- **Preview.** The saved plan is computed as the planner opens it
+  (`computeStoredSeries` / `computeStoredPlan`) with the owner's settings and
+  decided by the writer, without writing. The item lists new entries in
+  `also_creates`, rewritten ones in `also_changes`, and removed entries it
+  deletes in `also_reaches`, with what goes with each as a delete of the dive
+  counts it (its tanks, profile, documents and media). An update also lists each dive's outcome in the
+  indirect field `planned_dive_entries` (`create`, `update`, `skip_dived`,
+  `delete_removed`, `keep_removed`, with the entry's id). That list is part of
+  the footprint, so an entry dived between preview and apply makes the plan
+  stale. A create has no such list: a new plan or series has no entries yet,
+  so every dive gets one, and `also_creates` counts them. (A create's item
+  carries only the record's own fields, as `createDefaults` fills them.)
+- **What stays current.** The footprint holds what the preview shows: the
+  plan's own record and each entry's outcome, plus a hidden `basis` naming
+  whose log a new entry goes into, so a profile switch between preview and
+  apply makes a plan in no series stale. The profile each entry gets is
+  computed again at apply with the owner's settings as they are then, as the
+  planner's own "Update planned dives" does, so a settings change in between
+  does not make the plan stale.
+- **Cost.** The refusal and the side effects of one change share one
+  computation through the preview's `PlanningPass`, which the planner closes
+  once the preview is made, so the apply's stale check always computes
+  afresh.
+- **Refusals.** A series whose first dive has no `start_date_time`; a dive
+  with no segments or a critical warning; a single plan linked to a dived dive
+  without `move_dived_link`; a plan in a series (the series writes them all);
+  a copy; and a change set where an earlier change writes the plan, links a
+  dive to any plan (which takes it off another), or writes the log: a dive or
+  any record that belongs to one. The planner counts those in
+  `SetSoFar.touched`, a child under its parent, so no entity list is kept by
+  hand. The other way round, the effect names the entries it rewrites or
+  deletes in `SideEffects.rewrites`, and a later change in the set to one of
+  them, or to a record that belongs to one, is refused: it would be planned
+  against values the apply replaces.
+- **Owner.** A series' entries belong to its diver and are computed with that
+  diver's settings; a plan in no series, or a series with no diver, uses the
+  active diver's, as the planner does.
+- **Removed dives.** Only the dives the same update drops through `plan_ids`.
+  Their planned entries are deleted with `delete_removed`, else kept unlinked;
+  a dived one always stays.
+- **Revert.** The writes run inside the apply's transaction, and a write that
+  fails part way is rethrown, so nothing is left half written. The change log
+  records profile series updates for any `agent` operation
+  (`changeLogSeriesUpdateSources`), so a rewritten entry gets its old samples
+  back. The planner's own "Update planned dives" files its entries, the plan's
+  save and the links as one entry labelled `update_planned_dives`, one of
+  `changeLogSeriesUpdateLabels`, so reverting it restores the samples too. A
+  revert does not count a link it takes back itself as a use, so the plan's
+  new link does not keep the new entry.
+
+### Recall
+
+A saved plan stores inputs, not results, so recalling one computes it again
+(`data/planning/plan_recall.dart`).
+
+- **Where each dive stands.** `PlanLogState.of` (planner domain) is the one
+  rule: no entry is `planned`, an entry still planned is `logged_as_planned`,
+  any other is `dived`. `PlannedDivesWriter` decides by it, and the
+  `dive_plans` document and each dive of a `dive_plan_series` document carry
+  it as `log_state` with `linked_dive_id` (`planLogFields`). Only the linked
+  dives' `is_planned` flags are read, in one batch per read
+  (`loggedEntryFlags` in `records/families/plan_record_loads.dart`), so the
+  field is always there, not a block. A link to a dive no longer in the log
+  reads as `planned` with no link; a write still compares against the
+  stored link, so clearing it is a change. `list_records` shows a plan's
+  `log_state`.
+- **`compute_plan` by id.** `plan_id` (a plan in no series) or `series_id`,
+  never with `dives` or `follow_dive_id`. A plan in a series is refused,
+  naming its series, since its carry-in depends on the dives before it. It
+  computes through `computeStoredSeries` / `computeStoredPlan`, as the planner
+  opens a saved plan: with the diver's Settings as they are now, the followed
+  dive as it is in the log now (`followed_dive_in_log` says whether it still
+  is), and each dived dive taken as dived for the dives after it. The answer
+  says so in `recall_note`.
+- **Whose Settings.** `diver_id` if given, else a series' own diver while
+  that profile exists, else the active diver, as the planned dives action
+  chooses.
+- **`overrides`** takes the `planSettingFields` only, written over every dive
+  for that one computation; a null clears the plan's own value so Settings
+  decide. Nothing is saved. Given without an id it is refused, not ignored.
+- **`resolved_inputs`** for a recalled dive is the saved plan read back as
+  `compute_plan` inputs (`stored_plan_inputs.dart`), from its `dive_plans`
+  document: its own settings, tanks, segments, and its start or its
+  interval as the series calculator times it (the default interval when it
+  stores none, and no start on a series without a clock), with
+  `carries_from_tank` (none for a pinned tank, which keeps its own
+  pressure). Given back as `dives`, with `follow_dive_id` set to
+  `followed_dive_id` for a series that still follows its logged dive, the
+  same object computes the same schedule again, with two exceptions. A
+  dived dive's successors carry in what the log says it left, which inputs
+  cannot say, so they compute again only as planned. A plan's settings that
+  `compute_plan` does not take (stop minimums, deco ppO2 bands, setpoints, a
+  segment's mode override)
+  still compute the recall but are not in it, as the tool description says;
+  the `dive_plans` document has them.
+
+## Writes
+
+A write takes two calls. `preview_changes` reads and diffs, and `apply_changes`
+runs the plan it stored. The preview never opens a transaction: a rolled back
+one would still fire triggers and tick streams, and
+`write_planner_test.dart` counts both to prove it.
+
+Apply checks the plan is still true, asks the diver when the setting is on,
+then checks again inside `SyncCoordinator.run`, because the dialog can stay
+open for five minutes. It then opens `ChangeLogScope.run` with source `agent`,
+and inside that one transaction around every operation. A refusal rolls back
+everything. The settler files other divers' records under `operation:diver`,
+so one apply can return several operation ids, each revertable alone. A
+scope that cannot open a change log entry carries on for a diver's own save,
+but an apply checks for its entry before the first write and refuses without
+one, so every agent change can be reverted. A plan also keeps the database
+it was previewed on, so a restored logbook with the same rows refuses it.
+
+A plan with a blocked item gets no `plan_id`, so a diver is never asked to
+allow something that cannot run. The dialog raises and focuses the window, so Allow
+arms only after `kAgentWriteAllowDelay`, and a click meant for another window
+cannot answer it. Deny is live at once. A plan is single use and lasts 15 minutes.
+Plans live in `agentWritePlanStoreProvider`, not in the registry, because the
+protocol builds a server per request.
+
+A version marker is `updated_at` plus the current ids of each relation the
+plan changes, since a link can change without touching its parent row. A record
+a plan links to gets a marker too, so one that goes away refuses the plan. A
+marker also carries a footprint of what the plan worked out from rows with no
+version of their own, a delete's reach or a site's types, and apply works it
+out again, so a child added since the preview refuses the plan as well.
+
+What a plan lists is what a write does. An entity reports what an update does
+beyond what it names through `sideEffects`: a site link snaps on water type,
+entry and exit methods and dive types, a visibility band clears the measured
+values, and a moved dive takes its entry and exit times along. A field the set
+names is written after the snap and wins, even if it equals the current value.
+A field whose write does something even when it equals the row is listed in
+`effectFields`, as a dive's `visibility` is, so the plan cannot drop it as
+unchanged.
+
+`deleteReach` reports what a delete takes with it. `records` holds what has a
+life of its own, such as documents, media and certifications, and `parts` the
+rows that only exist as part of the record, such as a dive's tanks. `unlinked`
+holds what stays but loses its link, and `linkedDives` the dives that do,
+including another profile's. The dialog shows all of that without being opened
+except `parts`, which it keeps under the details, since a dive with a profile
+has many. `countCascaded` and `countUnlinked` read these from the schema's
+foreign keys, so a table added later is counted without anyone remembering to.
+
+A child entry, such as a tank, belongs to another record and says so in
+`parent`. A create names the parent in the parent's field, `dive_id` for a
+tank, and takes the parent's owner; a `diver_id` naming anyone else is
+blocked, and the field cannot change afterwards, so moving a tank is a delete
+and a create. A child has no `updated_at` of its own, so its parent's marks
+it: every write path for a dive's tanks, weights and sightings stamps the
+dive. The marker also compares the child's own document, because a sync merge
+can change the child row alone. A change to a child whose parent the same set
+deletes is blocked, as the delete takes the child with it. After an apply,
+the dives of the children it changed are refreshed as edited dives are. A
+parent with no owner, as an old dive can be, takes the profile a create names.
+
+A child item carries its parent's title and date, so the dialog says which dive
+a tank change is on, and an untitled record is named by its kind, never by its
+id. `displayContext` lists document values a change may leave alone but the
+dialog needs to show it, such as the working pressure that says what a tank's
+size holds for an imperial diver.
+
+A field that holds an id uses `FieldCodec.reference`, and the planner checks
+it as it checks a relation's links, and names what it points at so the dialog
+shows a dive's or a species' name. A reference into a table with no
+`updated_at`, such as `species`, is marked by whether the row still exists.
+
+A marker's `readFootprint` lives as long as the plan, up to 15 minutes, so it
+must not capture the preview pass: the pass holds the database strongly, and a
+plan keeps only a weak reference to it, so a restored logbook is not kept
+alive. Read through a top-level function and copy what the closure needs into
+locals first.
+
+The change log covers rows in this database, and a rollback covers them too.
+What neither can take back is a blob that has left the media store. A blob
+delete is queued as an intent that waits for a drain and does nothing if its
+row has come back, so a rollback or revert before the drain loses nothing.
+Dive and site deletes pass `holdRemoteMedia`, so a coordinator wired to start
+the worker would still wait.
+
+### Catalogs and merges
+
+The diver's catalogs are writable as records of their own: `tags`,
+`dive_types`, `dive_roles`, `site_types`, `species`, `centers` with their
+`center_gear_notes`, `custom_agencies`, `custom_levels`, `tank_presets`,
+`weight_presets` and `cylinder_configs`. Each keeps the rules its own screen
+keeps, and blocks in the preview what the repository would otherwise do
+quietly:
+
+- A built-in dive type, role or site type is a constant of the app, so only
+  its visibility can change. A built-in species can be edited but not
+  deleted, and nor can a species, dive type, role, agency or level in use.
+- A tag name is unique per diver, trimmed and ignoring case. The app reuses
+  the old tag on a clash, so a writer would merge two tags without saying so;
+  the plan blocks it as `duplicate_record` instead. Turning a tag's scope off
+  unlinks it from that scope's records, which the plan lists.
+- A custom agency or level name must be free, checked by the same
+  `agencyNameTaken` and `levelNameTaken` the repository's own saves call. A
+  level's `agency_id` may name a built-in agency, which has no row.
+- A tank preset's internal name follows its display name, as the editor sets
+  it.
+
+A weight preset's `entries` and a cylinder config's `items` are written whole
+through `ObjectListCodec`, which compares a list as canonical JSON, so an
+unchanged list is no change. A read lists them only on request, so the entry
+fills them in through `stored`. A cylinder keeps the id of the one at its
+place before, and gas goes in as fractions and is stored as percent.
+
+Two relations join sites: `tags`, whose tags must apply to sites, and
+`expected_species`.
+
+A delete can name `merge_into` instead of going alone. The survivor takes the
+record's links, the plan's JSON lists them under `moved_to_merge_target` and
+the dialog says which record it merges into. What the merge changes on the
+survivor itself, such as the scopes a tag gains, comes back from `mergeReach`
+in `DeleteReach.survivor` and is listed as indirect field changes on the
+merge's item. Only `tags` can merge so far: an entry opts in with
+`mergeable`, `mergeReach` and `merge`. The planner blocks a merge into the
+record itself, into a record that is gone or another profile's, into one the
+same set deletes, beside an update that changes links to the same entity, and
+beside an update of a survivor field the merge changes. Several merges into
+one survivor are counted one after another through `mergedBefore`. The
+survivor is marked, so one that changes after the preview refuses the plan.
+
+A plan lists what is stored, not what was sent. A name the repository trims
+uses `FieldCodec.text(trim: true)`, and a number its column keeps to fewer
+places uses `FieldCodec.number(fractionDigits:)`, so an unchanged value
+compares equal. A create naming `sort_order` 0 is blocked where the
+repository reads 0 as "after the last".
+
+Two rules look past a single change. `uniqueKey` returns a `UniqueClaim`: what no two records
+of one owner may share, such as a tag's folded name, and whether the claim
+is shared, as a shared agency's name is taken for every profile. The planner
+blocks a second claim within one set, which `refuse` cannot see in the
+database: a shared claim clashes with any other, an unshared one with a
+shared claim or the same owner's. A merge's `DeleteReach.basis` carries the
+exact links it moves, so a link that moves after the preview refuses the
+plan even when the counts stay the same.
+`WriteCheck.soFar` carries what the changes earlier in the set delete, write
+and unlink, counting only those the plan keeps, since a set applies in
+order. A rule that reads stored rows counts them too: a site may take a tag
+the set first opens to sites, a tag may take a name an earlier rename frees,
+and a dive type or species whose dives or sightings the set first removes
+may be deleted.
+
+### Gear
+
+Gear is writable as `equipment`, `equipment_sets`, `equipment_locations`,
+`equipment_location_moves` (a child of the item) and `equipment_components`
+(a child of the assembly). An item is saved whole, as the edit page saves
+it, through one function, `nextItem`, that the plan's side effects and the
+save both use:
+
+- `is_active` follows `status` (retired, sold and wanted are out of the
+  kit) and is not writable; leaving `wanted` fills an empty purchase date,
+  as Mark purchased does.
+- A type change drops the built-in attributes and the fitting the new type
+  has no place for. `attributes` is the whole list; the app's own system
+  attributes are left out and kept by the save.
+- A part fits only a type that holds it (`parentTypesFor`, shared with the
+  edit page), so a chain of fitted parts cannot loop.
+- `last_service_date` and `service_interval_days` are legacy, with no
+  editor, and are not writable.
+- `tags` and `shared_with` are relations, written through `replaceTags` and
+  `setShares`. An ownerless item cannot be shared.
+
+Two reports say what a write does beyond its record. `alsoCreates` names the
+rows a create adds alongside it, such as the service clocks an item's type
+attaches (`autoAttachKindsFor`, the list `autoAttachForEquipment` uses), and
+`SideEffects.touched` the rows of other records an update rewrites, such as
+the dive computer a device item's rename renames, the service clocks an
+inspection date anchors, or the set a new default takes the flag from. The
+dialog shows both as "Also adds" and "Also changes", and the plan's JSON as
+`also_creates` and `also_changes`. A share change also lists the ownership
+events it writes. The diver allows what the preview lists, so the applier
+asks each create's `alsoCreates` again before it writes and refuses the plan
+as stale when the answer moved; an `alsoCreates` must read only what a later
+change would also change.
+
+Work that must run after the commit, outside the apply's transaction, goes in
+`WritableEntry.afterApply`: a transmitter item's serial change rescans its
+dives there, since a scan scheduled inside the transaction is lost when it
+closes. A failure there is logged and leaves the apply in place.
+
+A set's default, figure and geofences go through `setAsDefault`,
+`setShowFigure` and the geofence writes; a new set becomes the default by an
+update once it exists. A set takes only members in the kit, as the set editor
+offers them, counting status changes earlier in the set; a part is fitted
+only to an item in the kit, by the same count (`inKitSoFar`). A place a move
+names is archived, never deleted, counting the moves the set deletes or moves
+elsewhere, and no move goes to an archived place. A Dive center place stands
+for a center (`dive_center_id`) and a Person place for a buddy (`buddy_id`);
+a kind change drops the link the new kind does not hold, as the place dialog
+does. A part's `sort_order` is its place in the assembly, not the stored
+number, which a removal leaves with gaps. A component that would make an item
+part of itself is blocked before `addComponent` would throw. Status shortcuts, bulk share and move shortcuts,
+and the inner steps of an item delete are in the coverage guard's `exempt`
+map.
+
+The service ledger is writable as `service_kinds`, `service_schedules` (an
+item's clocks, children of the item) and `service_records` (its history, also
+children). A built-in service type is the app's: the service types page lets a
+diver hide one in Settings but never edit or delete it, so an update or a
+delete of one is refused. A clock is one per type on an item, of a type that
+fits the item's type, is not another profile's custom type and is not a
+built-in the owner hid, never on wanted gear, and with an interval to count; a
+baseline it names is stamped as picked, as the clock's dialog stamps it. A new
+record takes the category and prices the log service dialog fills in
+(`resolveDefaultServiceCategory`, `resolveDefaultServiceCost`, then the
+diver's default currency). The record repository keeps the item's
+`last_service_date`, so a record's create, edit or delete lists the item under
+"Also changes" when it moves that date; a create writes the record's day as it
+is, even an older one (issue #4201). Clock and record writes re-arm the item's
+service reminders after the apply through a `GearReminderRefresh` callback the
+provider layer builds, as the record notifier does; it does nothing while
+reminders are off, and a failure there is logged. A revert does not call it,
+so reminders catch up at the next app start.
+
+An equipment create that names only `replaces_equipment_id` goes through
+`replaceChild`, as the children card's Replace does: the new part copies the
+old one's name, type, make and spec into its place, the old one is retired,
+and the plan lists both. Only a part fitted to an item in the kit, as the set
+leaves it, is replaced, once per set, and a part the set changes earlier is
+replaced in a set of its own. `afterApply` gets every change of its entity the
+apply wrote, each with the record's id and its parent, so work for one item
+runs once. `createTouched` and `DeleteReach.touched` let a create or a delete
+list the rows of other records it rewrites, as `SideEffects.touched` does for
+an update. `createDefaults` names what a create fills in that it does not name,
+as a form prefills it (a record's category, price and currency, an item's
+currency): the plan lists those values as indirect changes and the apply
+writes them as listed. `markAsServiced` is exempt: a legacy field with no
+caller in the app.
+
+### Adding a writable entity
+
+1. Add a `WritableEntry` under `data/writes/families/` and list it in
+   `WriteCatalog`. Its `name` and field keys are the read catalogue's, so a
+   document can be edited and sent back.
+2. Write through a repository or service, never a table. Most `copyWith`
+   methods use `??` and cannot clear a field, and rebuilding a whole entity
+   loses any field the mapper forgets, so use a partial companion
+   (`BulkDiveEditService`, `BuddyRepository.updateFields`) or clear flags
+   (`DiveSite.copyWith`).
+3. Add a test that every key in `fields` reaches its column, and read each
+   value back through the document.
+4. Implement `refuse` for what the repository would quietly ignore.
+   `updateSite` keeps a library's values and reports success, so
+   `SiteWrites.refuse` blocks that case in the preview.
+5. Implement `sideEffects` and `deleteReach` for anything the write path does
+   beyond the columns it was given, or a diver allows a change they cannot see.
+   Read a repository's delete for what it clears by hand: `countCascaded` sees
+   the schema, not that code. A dive's delete also reclaims stored import
+   files no other dive uses, which no foreign key shows. A record that goes
+   only once everything holding it goes, such as an import file several
+   dives share or a photo of a dive and its site, depends on what else the
+   set deletes: read `alongside` and count it on one item, so the dialog's
+   totals add up.
+   A relation whose write copies values from its target, as a dive's site
+   does, sets `copiesTarget`, so it cannot follow a change to that target
+   earlier in the same set: the plan works out the copy from the target as it
+   stands, and the write would copy the changed one.
+6. Implement `deletedDocumentOwners` with every owner a delete takes documents
+   from, so a refused plan can arm their reminders again. A buddy's lists their
+   certifications too.
+7. Hold remote media on any delete that cascades to it.
+8. For a record that belongs to another, return a `ChildOf` from `parent`
+   and list its parent field in `fields` as a `FieldCodec.reference`. List
+   any other field a create sets and an update may not change in
+   `createOnly`, as a sighting's species. Write one row at a time: a
+   repository's bulk replace re-inserts every sibling under a fresh id.
+9. If a change also writes the parent, as an annotation's create rewrites
+   its dive's Notes, list those kinds in `writesParent`: the planner blocks
+   them beside an update of that parent. Say what an agent must know beyond
+   the fields in `note`, which the `preview_changes` description carries.
+   Write through the service the app's own screen uses, as gas switches go
+   through `DiverGasSwitchWriter`, so the agent's change does what the
+   diver's does.
+10. Move the repository's methods from
+   `test/architecture/agent_write_coverage_baseline.txt` to `covered` in
+   `agent_write_coverage_test.dart`. That guard fails on a new repository
+   write no entity reaches, and on a baseline line that has gone. A write
+   that changes no record a diver keeps, such as a setting, a cache, a
+   backup or a dismissed finding, goes in the same file's `exempt` map
+   instead, as `path:method` or `path:*` for a whole repository, with the
+   reason. A shortcut that does what a covered method does, as
+   `createFromWeights` does, belongs there too.
+
+### Every family
+
+Every repository write is an agent write or exempt with a reason, and
+`agent_write_coverage_test.dart` keeps it so: its baseline is empty, and a new
+write fails the guard until it is covered or exempt. The writers, one family
+per file under `data/writes/families/`:
+
+- Logbook: dives (with buddy roles and the trip link), tanks, weights,
+  sightings, custom fields, gas switches, annotations, scenarios, safety
+  finding dismissals, media.
+- Places and people: sites (types, sharing, hiding, features, merges),
+  buddies (merges), dive centers and their gear notes, divers and weight
+  entries.
+- Gear: equipment, sets, locations and moves, components, service kinds,
+  schedules and records, check-ins, cylinder fills and passports,
+  transmitters, dive computer settings and merges.
+- Trips: trips (dives, packed gear, sharing, hiding), liveaboard details,
+  itinerary days, the cylinder board and its fills, checklists with their
+  sections and items.
+- Training: certifications, currency rules, settings and events, courses and
+  requirements.
+- Catalogs: tags, dive types, roles, site types, species, agencies and
+  levels, presets, cylinder configs, checklist and pre-dive templates.
+- Planning and views: pre-dive runs and their items, dive plans and series,
+  rules, saved queries, connection maps, documents, smart albums, GPS tracks
+  and routes, incidents and emergency chambers.
+
+The exemptions, each grouped with its reason in the guard: inner steps a
+covered write runs; imports, devices and derived values; bulk shortcuts for a
+write made record by record; profile samples; settings and view state; device
+storage, credentials and sync bookkeeping; media attached in the app; planned
+dives the planner makes; profile delete and merge (decided against, 2026-11-04);
+and a trip removal path that does not mark the dive for sync.
+
+### Known limits
+
+- Many MCP clients time out a request after about a minute, which is shorter
+  than the dialog. The server keeps asking, so a later Allow applies a change
+  the agent reported as failed. While that dialog is open a second apply
+  answers `confirmation_pending`, so a retry cannot queue the same change, and
+  the `apply_changes` description tells agents to read the records first.
+- The plain `DiveRepository` and `SiteRepository` the tools use never start
+  the media worker, so `holdRemoteMedia` changes nothing there: an intent
+  drains when anything next starts the worker, and a revert after that
+  re-queues the upload through `repairRestoredMedia`.
+- A change set cannot refer to a record it creates. Linking a new buddy to a
+  dive takes two applies.
+
+## The date rule
+
+Each key's suffix says what kind of date it holds, and `document_dates.dart`
+has the only three formatters. Pick by how the value is stored, not by how it
+reads: a repository that reads with `isUtc: true` usually holds a wall clock.
+
+| Key | Meaning | Formatter |
+| --- | --- | --- |
+| `date_time`, `*_time` | Local wall clock of the dive or event, with a nominal `Z`; do not shift it | `wallClock` |
+| `*_date` | A calendar date, `2025-03-14` | `calendarDate` |
+| `*_at` | A true instant in UTC | `instant` |
+
+`calendarDate` reads the value as held and never goes through `toUtc()`:
+most of these are stored as local midnight, so a shift would move them to the
+day before.
+
+`wallClock` asserts that its value is flagged UTC, because the right conversion
+depends on where a local-flagged value came from. A Drift `dateTime()` column
+written from a wall clock reads back local-flagged and needs `toUtc()`. A local
+`DateTime` whose digits are the wall clock, such as a plan's start, needs
+`asWallClockUtc`.
+
+## Service status in queries
+
+`serviceDue` and `nextServiceDue` compile against `equipment_service_status`,
+a local cache that holds the active diver's verdicts only. `query` does not
+read it. `serviceStatusOverlay` evaluates the named diver's clocks through
+`evaluateServiceClocksForItems`, the same batch the notification scheduler
+uses, and returns a CTE named after the cache. SQLite resolves that name first,
+so the compiled SQL runs unchanged, the answer is right for any profile, and
+the service cache is never written. It is why `awaitQueryCachesIfRead` is not
+used for it here: that helper can only answer for the active diver.
+
+## Deco status in queries
+
+`deco` reads the recorded deco signal first and, for a dive that records none,
+the computed verdict in `dive_deco_status` (#4461). Unlike the service cache,
+that table holds verdicts for any profile, so `query` brings it up to date
+before it runs, through `prepareQueryCachesFor`: the active diver's from the
+writer pass behind the dive list's deco filter, another profile's judged in a
+throwaway container pinned to that profile's settings. That preparation is the
+one write a `query` call can make, and it touches only this local cache, which
+never syncs.
+
+## The SQL window
+
+`sql_query` runs one statement on a connection of its own, opened read-only
+with `PRAGMA query_only` on a worker isolate and closed when the call ends.
+Nothing holds a handle between calls, so a restore, a storage move or an
+encryption change needs no handling: the runner reads the path and key on each
+call. The runner is a static on the controller rather than part of the
+per-request server, because its busy flag has to outlast a request and a scope
+rebuild, as a statement that cannot be stopped does.
+
+Read-only says nothing about credentials, so a statement is inspected before
+it steps. The bundled SQLite is built with `OMIT_AUTHORIZATION` and
+`OMIT_PROGRESS_CALLBACK`, so there is no authorizer to ask. `EXPLAIN` is the
+engine's view that remains: by then views, CTEs and subqueries have been
+flattened, so every read shows up as an `OpenRead` of a root page, and
+`SqlReadCatalog` maps root pages through `sqlite_schema`. `inspectSqlProgram`
+fails closed:
+
+- An unknown root, a root in another database and any virtual table refuse.
+  That last one covers `pragma_*` and `json_each`, because `VOpen` carries only
+  a pointer and they cannot be told apart.
+- A denied column refuses at its `Column` step, and an index holding one
+  refuses when it opens, because a seek compares the value with no `Column`
+  step at all.
+- `ATTACH`, `BEGIN` and `PRAGMA` all report read-only, so `sqlLeadingKeyword`
+  allows only `SELECT`, `WITH` and `VALUES`. It is the only text check, and it
+  is an allowlist. Never add a check that looks for a table name in the text.
+
+Classifying a table: a table the change log policy excludes must go in
+`kSqlDeniedTables` or `kSqlReadableExcludedTables`, and a test fails until it
+does. A table the policy does not know is refused at runtime. A new credential
+column goes in `changeLogCredentialColumns`, which the window reads too. A
+column the log should keep recording but an agent should not see goes in
+`kSqlDeniedColumns` directly, as `manifest_url`, `url` and `entry_key` do: any
+of them can carry an access token. An expression or partial index on such a table stays readable
+unless its own definition names a denied column. A statement SQLite would
+answer from a refused index is refused too, and the refusal says to write
+`NOT INDEXED` after the table name.
+
+`submersion://schema` comes from the live schema, so it cannot drift. Its notes
+come from the comments in `lib/core/database/tables/`, because Drift keeps no
+descriptions at runtime. After changing a table, run
+`dart run tool/generate_sql_column_notes.dart`; a test fails until the
+generated file matches.
+
+SQLite builds a value inside its own step, so only its own limit can bound the
+memory; the result size cap applies later and protects the reply, not the
+process. `sql_value_limit.dart` sets `SQLITE_LIMIT_LENGTH` through
+`sqlite3_limit`, bound directly because the package does not bind it. That
+works where the library exports the symbol, as on macOS. The package's Linux
+build exports only the functions it binds, so there the call answers false and
+a statement can still build a value of up to a gigabyte. The Windows build marks
+every API function `dllexport`, so it should work there, but nobody has run it.
+
+A statement that stays inside one native step cannot be stopped: `Isolate.kill`
+acts only when the step returns. The call answers with `still_running`, and
+later calls answer `sql_busy` until the worker ends. Until then the statement
+costs more than its thread: it holds a read snapshot, so the WAL cannot reset
+past it, a recursive `UNION` or a sort keeps growing its temporary storage, and
+on Windows its open file can block a restore or a storage move.
+`sqlite3_interrupt` through FFI would fix this, but it needs a test on all three
+desktop platforms and CI runs Linux only.
+
+## Security rules and their tests
+
+All four hold on every request and each has a test in
+`test/features/agent_access/data/server/`:
+
+| Rule | Where | Test |
+| --- | --- | --- |
+| Bind `127.0.0.1` only | `AgentAccessServer.start` | `server is bound to the IPv4 loopback address only` |
+| `Host` must be `localhost`, `127.0.0.1` or `::1` | `mcp_dart` DNS rebinding protection, allowlist set by the server | `refuses a foreign Host header` |
+| `Origin`, when present, must be a loopback origin | same | `refuses a non-loopback Origin` |
+| `Authorization: Bearer <token>` on every request, `initialize` included | `RequestAuthenticator`, constant-time compare | the three token tests |
+
+Without OAuth metadata the package answers a failed token check with 403.
+Regenerating the token applies to the next request; the server reads the
+token through a function.
+
+## Error codes
+
+| Wire code | Meaning |
+| --- | --- |
+| `demo_mode` | The sample logbook is open; every tool refuses |
+| `app_locked` | App Lock is engaged |
+| `database_unavailable` | A restore or storage move has the database swapped out |
+| `invalid_argument` | An argument the schema allows but the tool cannot use |
+| `parse_error` | Query language parse or validation failure, with offset and suggestions |
+| `unknown_diver` | `diver_id` names no profile on this device |
+| `not_found` | No such tool or record |
+| `too_many_ids` | More ids than `get_records` accepts in one call |
+| `sql_refused` | `sql_query` would read something denied, or is not one read-only statement; names the table or column |
+| `sql_error` | SQLite rejected the statement, with its message |
+| `sql_busy` | An earlier `sql_query` statement is still running and cannot be stopped |
+| `internal` | Anything else; the exception type only, never a message that could leak data |
+
+Arguments the schema itself rejects (a wrong type, an unknown property, a
+value outside an enum) are refused by the SDK before the tool runs, as a
+JSON-RPC error rather than a tool error.
+
+## Lifecycle
+
+`agentAccessControllerProvider` is read once from the app root on desktop.
+It starts the listener when the setting is on, stops it when off, and
+restarts it on a port change. `AgentAccessServer` is process-wide: a start
+waits for any pending stop, so `restartApp` (which rebuilds the provider
+scope at once) never collides with the old listener on the port. A bind
+failure sets `AgentAccessStatus.error` and the settings page shows it; the
+app keeps running.
+
+The server factory runs per MCP session, and per request on the stateless
+2026 protocol, so it must stay cheap and must not touch the database.
+
+## Status
+
+Shipped: the read tools, `compute_plan`, the write core (`preview_changes`, `apply_changes`,
+`revert_operation`, the confirmation dialog, change log source `agent`) and
+write coverage for every family, kept whole by the guard above.

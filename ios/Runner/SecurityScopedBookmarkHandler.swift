@@ -20,10 +20,14 @@ class SecurityScopedBookmarkHandler: NSObject, UIDocumentPickerDelegate {
     /// Pending result callback for folder picker
     private var pendingPickerResult: FlutterResult?
 
-    init(messenger: FlutterBinaryMessenger) {
+    /// Owned by the engine; its view controller presents the folder picker.
+    private weak var registrar: FlutterPluginRegistrar?
+
+    init(registrar: FlutterPluginRegistrar) {
+        self.registrar = registrar
         channel = FlutterMethodChannel(
             name: "app.submersion/security_scoped_bookmark",
-            binaryMessenger: messenger
+            binaryMessenger: registrar.messenger()
         )
         super.init()
 
@@ -72,6 +76,23 @@ class SecurityScopedBookmarkHandler: NSObject, UIDocumentPickerDelegate {
         case "pickFolderWithSecurityScope":
             pickFolderWithSecurityScope(result: result)
 
+        case "iCloudDownloadStatus":
+            guard let args = call.arguments as? [String: Any],
+                  let path = args["path"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing path argument", details: nil))
+                return
+            }
+            result(iCloudDownloadStatus(path: path))
+
+        case "downloadICloudItem":
+            guard let args = call.arguments as? [String: Any],
+                  let path = args["path"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing path argument", details: nil))
+                return
+            }
+            let timeoutSeconds = args["timeoutSeconds"] as? Int ?? 60
+            downloadICloudItem(path: path, timeoutSeconds: timeoutSeconds, result: result)
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -84,7 +105,9 @@ class SecurityScopedBookmarkHandler: NSObject, UIDocumentPickerDelegate {
     /// - path: The folder path
     /// - bookmarkData: The bookmark data for persistent access
     private func pickFolderWithSecurityScope(result: @escaping FlutterResult) {
-        guard let viewController = UIApplication.shared.windows.first?.rootViewController else {
+        // The engine's FlutterViewController, found through the registrar rather
+        // than UIApplication.windows, which spans every connected scene.
+        guard let viewController = registrar?.viewController else {
             result(FlutterError(code: "NO_VIEW_CONTROLLER", message: "Could not find root view controller", details: nil))
             return
         }
@@ -93,12 +116,7 @@ class SecurityScopedBookmarkHandler: NSObject, UIDocumentPickerDelegate {
         pendingPickerResult = result
 
         // Create document picker for folders
-        let documentPicker: UIDocumentPickerViewController
-        if #available(iOS 14.0, *) {
-            documentPicker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
-        } else {
-            documentPicker = UIDocumentPickerViewController(documentTypes: ["public.folder"], in: .open)
-        }
+        let documentPicker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
 
         documentPicker.delegate = self
         documentPicker.allowsMultipleSelection = false
@@ -314,6 +332,120 @@ class SecurityScopedBookmarkHandler: NSObject, UIDocumentPickerDelegate {
         } catch {
             result(false)
         }
+    }
+
+    // MARK: - iCloud
+
+    /// Reports whether the file at `path` is in iCloud and whether its contents are on this
+    /// device: "notUbiquitous", "downloaded" or "notDownloaded". Nil when the resource values
+    /// cannot be read, which Dart treats as unknown. Never starts a download.
+    ///
+    /// Needed because macOS Sonoma and later evict an iCloud file in place: it keeps its name
+    /// and loses its contents, so from Dart it looks present until a read fails (issue #2177).
+    private func iCloudDownloadStatus(path: String) -> String? {
+        let url = URL(fileURLWithPath: path)
+        guard let values = try? url.resourceValues(
+            forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        ) else {
+            return nil
+        }
+        guard values.isUbiquitousItem == true else { return "notUbiquitous" }
+        let status = values.ubiquitousItemDownloadingStatus
+        if status == .notDownloaded { return "notDownloaded" }
+        if status == .current || status == .downloaded { return "downloaded" }
+        return nil
+    }
+
+    /// Replies owed for downloads still under way, by path, each with its own id so its
+    /// deadline can answer it alone. Touched only on the main thread.
+    private var downloadWaiters: [String: [(id: UUID, result: FlutterResult)]] = [:]
+
+    /// Paths with a coordinated read under way. A second request for the same path waits on
+    /// that read instead of starting another: a read blocked on an evicted file cannot be
+    /// interrupted, so fresh reads would only pile up behind it. Main thread only.
+    private var downloadsInFlight: Set<String> = []
+
+    /// Asks iCloud for the contents of the file at `path`, and replies true once they are on
+    /// this device, or false when the download fails or `timeoutSeconds` pass. Each caller
+    /// is answered exactly once, on the main thread, by its own deadline at the latest, even
+    /// while the read itself is still blocked.
+    ///
+    /// A coordinated read is what makes the system fetch a ubiquitous item before handing it
+    /// over, and it works for an item reached through a bookmark or a picker, where
+    /// startDownloadingUbiquitousItem alone may be refused. It blocks until the item is here,
+    /// so it runs off the main thread.
+    private func downloadICloudItem(path: String, timeoutSeconds: Int, result: @escaping FlutterResult) {
+        let id = UUID()
+        downloadWaiters[path, default: []].append((id: id, result: result))
+        let deadline = DispatchTime.now() + .seconds(max(timeoutSeconds, 1))
+        DispatchQueue.main.asyncAfter(deadline: deadline) { [weak self] in
+            self?.answerDownloadWaiter(path: path, id: id, downloaded: false)
+        }
+        guard !downloadsInFlight.contains(path) else { return }
+        downloadsInFlight.insert(path)
+
+        let url = URL(fileURLWithPath: path)
+        // Harmless when refused or when the item is already here. Where it is allowed, it
+        // starts the transfer before the coordinated read below waits on it. The item's own
+        // URL is the documented argument; the placeholder's URL is tried only if that is
+        // refused, for systems that still leave `.name.icloud` in its place.
+        do {
+            try FileManager.default.startDownloadingUbiquitousItem(at: url)
+        } catch {
+            let placeholder = url.deletingLastPathComponent()
+                .appendingPathComponent(".\(url.lastPathComponent).icloud")
+            try? FileManager.default.startDownloadingUbiquitousItem(at: placeholder)
+        }
+
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        // A read still waiting for coordination when this fires returns with a cancellation
+        // error. One already inside the accessor runs on, and the waiters' own deadlines
+        // answer for it.
+        queue.asyncAfter(deadline: deadline) {
+            coordinator.cancel()
+        }
+        queue.async {
+            var coordinationError: NSError?
+            var downloaded = false
+            coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readURL in
+                // Reading a byte is what makes an evicted file's contents arrive, whether or
+                // not the coordination fetched them already, so the status is read after it.
+                // An evicted file still exists by name, so presence alone proves nothing, and
+                // neither does an unknown status: only an explicit answer that the contents
+                // are local counts.
+                let readable = Self.readsFirstByte(of: readURL)
+                let status = self.iCloudDownloadStatus(path: readURL.path)
+                downloaded = readable && (status == "downloaded" || status == "notUbiquitous")
+            }
+            let succeeded = coordinationError == nil && downloaded
+            DispatchQueue.main.async {
+                self.downloadsInFlight.remove(path)
+                self.answerAllDownloadWaiters(path: path, downloaded: succeeded)
+            }
+        }
+    }
+
+    /// Answers one caller of `downloadICloudItem`, if it has not been answered yet.
+    private func answerDownloadWaiter(path: String, id: UUID, downloaded: Bool) {
+        guard var waiters = downloadWaiters[path],
+              let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        downloadWaiters[path] = waiters.isEmpty ? nil : waiters
+        waiter.result(downloaded)
+    }
+
+    /// Answers every caller still waiting on the download of `path`.
+    private func answerAllDownloadWaiters(path: String, downloaded: Bool) {
+        let waiters = downloadWaiters.removeValue(forKey: path) ?? []
+        waiters.forEach { $0.result(downloaded) }
+    }
+
+    /// True when the first byte of the file at `url` can be read.
+    private static func readsFirstByte(of url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 1))?.isEmpty == false
     }
 
     /// Call this when the app is terminating to clean up resources.

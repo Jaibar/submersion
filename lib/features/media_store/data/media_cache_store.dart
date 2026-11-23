@@ -1,0 +1,513 @@
+import 'dart:io';
+
+import 'package:clock/clock.dart';
+import 'package:drift/drift.dart';
+import 'package:path/path.dart' as p;
+
+import 'package:submersion/core/database/local_cache_database.dart';
+import 'package:submersion/features/media/data/media_cache_settings.dart';
+
+enum MediaCacheKind { original, thumb, rendition }
+
+/// Content-addressed local cache for store-fetched media (spec section 10).
+/// The pools live under [root]; bookkeeping lives in media_cache_entries.
+/// Separate pools with independent caps so bulk original downloads can never
+/// evict the thumbnails that keep grids rendering.
+///
+/// On a phone the OS may empty [root] at any time, since it is the OS cache
+/// directory (issue #3341), and the index does not hear about it. Reads already
+/// treat a missing file as a miss. A pool that has gone entirely is noticed
+/// at the next [put] or [totalBytes]; [dropMissingEntries] finds the rest.
+/// Work in progress sits under a separate scratch root, out of the OS's reach.
+///
+/// The thumbnail pool also holds the thumbnails this device makes of its own
+/// local photo files (issue #3337), keyed by a hash of the file's location
+/// rather than of its content. See `LocalThumbnailCache`.
+class MediaCacheStore {
+  MediaCacheStore({
+    required LocalCacheDatabase database,
+    required Directory root,
+    Directory? scratchRoot,
+    this.originalsCapBytes = 2 * 1024 * 1024 * 1024,
+    this.thumbsCapBytes = kDefaultDiskCacheMb * 1024 * 1024,
+    this.renditionsCapBytes = 1 * 1024 * 1024 * 1024,
+    this.thumbsCapSource,
+  }) : _db = database,
+       _root = root,
+       _scratchRoot = scratchRoot ?? root;
+
+  final LocalCacheDatabase _db;
+  final Directory _root;
+
+  /// Holds staging and transcode, which are work in progress rather than
+  /// cache. The same directory as [_root] unless the caller separates them.
+  final Directory _scratchRoot;
+  final int originalsCapBytes;
+  final int thumbsCapBytes;
+  final int renditionsCapBytes;
+
+  /// The thumbnail cap as it stands when eviction runs, in place of
+  /// [thumbsCapBytes]. The cap is a setting the diver can change, and stores
+  /// are long-lived (the upload runtime keeps one for its whole life), so a
+  /// cap captured at construction would go on evicting to the old size.
+  final int Function()? thumbsCapSource;
+
+  /// Extension every thumbnail is stored under. Thumbnails are always JPEG,
+  /// whatever the source, which is what makes [peekThumb]'s path computable
+  /// without the index.
+  static const String thumbExtension = 'jpg';
+
+  /// Thumbnail hits not yet written to the index, per database: key to the
+  /// time of the latest hit. Shared by every store over one database, since
+  /// the store that serves a hit is rarely the one that next evicts. Lost on
+  /// exit, which only makes the LRU order slightly stale.
+  static final Expando<Map<String, int>> _pendingTouches = Expando();
+
+  Map<String, int> get _touches => _pendingTouches[_db] ??= <String, int>{};
+
+  /// Process-wide, not per store. A store is built per use, so a counter of
+  /// its own always read 1, leaving the clock as the only thing telling two
+  /// staging files apart, and the clock does not tick between two calls made
+  /// in the same instant. Two thumbnails staged at one path came out as one
+  /// picture filed under both photos.
+  static int _stagingCounter = 0;
+
+  String _kindName(MediaCacheKind kind) => switch (kind) {
+    MediaCacheKind.original => 'original',
+    MediaCacheKind.thumb => 'thumb',
+    MediaCacheKind.rendition => 'rendition',
+  };
+
+  /// The directory under [_root] that holds [kind]'s pool.
+  String _poolDirName(MediaCacheKind kind) => switch (kind) {
+    MediaCacheKind.original => 'originals',
+    MediaCacheKind.thumb => 'thumbs',
+    MediaCacheKind.rendition => 'renditions',
+  };
+
+  String _relativePath(
+    String contentHash,
+    MediaCacheKind kind, {
+    String? extension,
+  }) => p.join(
+    _poolDirName(kind),
+    contentHash.substring(0, 2),
+    extension == null || extension.isEmpty
+        ? contentHash
+        : '$contentHash.$extension',
+  );
+
+  /// The cached thumbnail stored under [key], or null on a miss, without
+  /// touching the database (issue #3337).
+  ///
+  /// [get] costs an index read and a write per hit, and a gallery asks for a
+  /// thumbnail every time a tile scrolls into view. A thumbnail's path is a
+  /// pure function of its key, so one stat answers instead. The hit is noted
+  /// in memory and written to the index in one batch by [flushTouches], which
+  /// runs before any eviction, the only reader of that order.
+  ///
+  /// Finds only thumbnails stored with [thumbExtension]. Entries from before
+  /// that was universal have no extension; [get] still finds those.
+  Future<File?> peekThumb(String key) async {
+    // The layout shards on the first two characters; [get] answers the rest.
+    if (key.length < 2) return null;
+    final file = File(
+      p.join(
+        _root.path,
+        _relativePath(key, MediaCacheKind.thumb, extension: thumbExtension),
+      ),
+    );
+    try {
+      if (!await file.exists()) return null;
+    } on FileSystemException {
+      return null;
+    }
+    _touches[key] = DateTime.now().millisecondsSinceEpoch;
+    return file;
+  }
+
+  /// Writes the hits [peekThumb] noted to the index, as one batch.
+  Future<void> flushTouches() async {
+    final touches = _touches;
+    if (touches.isEmpty) return;
+    final pending = Map.of(touches);
+    touches.clear();
+    await _db.batch((batch) {
+      for (final MapEntry(key: key, value: at) in pending.entries) {
+        batch.update(
+          _db.mediaCacheEntries,
+          MediaCacheEntriesCompanion(lastAccessedAt: Value(at)),
+          where: (t) =>
+              t.contentHash.equals(key) &
+              t.kind.equals(_kindName(MediaCacheKind.thumb)),
+        );
+      }
+    });
+  }
+
+  /// Removes the entry for [contentHash], file and index row. A no-op when
+  /// there is none.
+  Future<void> remove(String contentHash, MediaCacheKind kind) async {
+    final indexed = await _relativePathOf(contentHash, kind);
+    final paths = {
+      ?indexed,
+      // A thumbnail's file can outlive its index row (the row is written
+      // after the file), and [peekThumb] goes by the file alone.
+      if (kind == MediaCacheKind.thumb)
+        _relativePath(contentHash, kind, extension: thumbExtension),
+    };
+    for (final relative in paths) {
+      await _bestEffortDelete(File(p.join(_root.path, relative)));
+    }
+    if (kind == MediaCacheKind.thumb) _touches.remove(contentHash);
+    if (indexed != null) await _deleteEntry(contentHash, kind);
+  }
+
+  /// Cached file for [contentHash], or null on a miss. A hit refreshes the
+  /// LRU timestamp; a dangling index row (file deleted externally) is
+  /// removed and reported as a miss.
+  Future<File?> get(
+    String contentHash,
+    MediaCacheKind kind, {
+    DateTime? freshAfter,
+  }) async {
+    final row =
+        await (_db.select(_db.mediaCacheEntries)..where(
+              (t) =>
+                  t.contentHash.equals(contentHash) &
+                  t.kind.equals(_kindName(kind)),
+            ))
+            .getSingleOrNull();
+    if (row == null) return null;
+    if (freshAfter != null &&
+        (row.sourceVersion == null ||
+            row.sourceVersion! < freshAfter.millisecondsSinceEpoch)) {
+      // Stale: the store object carries a newer version than the one we
+      // cached (or we cached it before the version token was tracked).
+      // Both sides are the uploading device's remoteCompressedUploadedAt
+      // stamp, so this comparison is immune to local clock skew -- unlike a
+      // local createdAt wall-clock, which could strand or thrash the cache.
+      final stale = File(p.join(_root.path, row.relativePath));
+      if (await stale.exists()) await stale.delete();
+      await _deleteEntry(contentHash, kind);
+      return null;
+    }
+    final file = File(p.join(_root.path, row.relativePath));
+    if (!await file.exists()) {
+      await _deleteEntry(contentHash, kind);
+      return null;
+    }
+    await (_db.update(_db.mediaCacheEntries)..where(
+          (t) =>
+              t.contentHash.equals(contentHash) &
+              t.kind.equals(_kindName(kind)),
+        ))
+        .write(
+          MediaCacheEntriesCompanion(
+            lastAccessedAt: Value(DateTime.now().millisecondsSinceEpoch),
+          ),
+        );
+    return file;
+  }
+
+  /// Moves [source] into the cache under [contentHash] and indexes it.
+  ///
+  /// [sourceVersion] records the authoritative store-object version these
+  /// bytes were fetched for (a rendition's synced remoteCompressedUploadedAt,
+  /// epoch millis) so [get]'s freshAfter check can detect an overwrite
+  /// without relying on this device's wall clock.
+  ///
+  /// [extension] (no leading dot) is appended to the content-addressed
+  /// filename. Content addressing has no use for it, but AVFoundation does:
+  /// `VideoPlayerController.file` reaches a bare `AVURLAsset`, which infers
+  /// the container format from the path extension alone and fails with
+  /// "Cannot Open" (-11828) on an extensionless file. Photos are unaffected
+  /// because `Image.file` sniffs the bytes. Callers pass the same extension
+  /// the store object was keyed with, so the cached name mirrors the remote
+  /// one. Omitting it keeps the historical extensionless layout.
+  Future<File> put(
+    String contentHash,
+    MediaCacheKind kind,
+    File source, {
+    int? sourceVersion,
+    String? extension,
+  }) async {
+    // Before anything recreates the pool's directory, which would hide a purge
+    // from every later read of the total.
+    await _forgetPoolIfGone(kind);
+    final relative = _relativePath(contentHash, kind, extension: extension);
+    // The index is keyed {contentHash, kind}, and relativePath used to be a
+    // pure function of that key, so an overwrite always rewrote the same
+    // path. Now that the caller supplies the extension, two rows over
+    // identical bytes can ask for different names (extensionFor is not
+    // injective over content, and a video's name can fall back to its local
+    // path). Note the superseded path before insertOnConflictUpdate forgets
+    // it: nothing would reference that file afterwards, and eviction only
+    // walks the index, so it would occupy disk forever without counting
+    // against any cap.
+    final superseded = await _relativePathOf(contentHash, kind);
+    final dest = File(p.join(_root.path, relative));
+    await dest.parent.create(recursive: true);
+    try {
+      await source.rename(dest.path);
+    } on FileSystemException {
+      // Cross-device rename fallback.
+      await source.copy(dest.path);
+      await source.delete();
+    }
+    final size = await dest.length();
+    final now = clock.now().millisecondsSinceEpoch;
+    await _db
+        .into(_db.mediaCacheEntries)
+        .insertOnConflictUpdate(
+          MediaCacheEntriesCompanion.insert(
+            contentHash: contentHash,
+            kind: _kindName(kind),
+            relativePath: relative,
+            sizeBytes: size,
+            lastAccessedAt: now,
+            createdAt: now,
+            sourceVersion: Value(sourceVersion),
+          ),
+        );
+    if (superseded != null && superseded != relative) {
+      await _bestEffortDelete(File(p.join(_root.path, superseded)));
+    }
+    await evictIfNeeded();
+    return dest;
+  }
+
+  /// The path currently indexed for [contentHash]/[kind], or null when there
+  /// is no entry.
+  Future<String?> _relativePathOf(
+    String contentHash,
+    MediaCacheKind kind,
+  ) async {
+    final row =
+        await (_db.select(_db.mediaCacheEntries)..where(
+              (t) =>
+                  t.contentHash.equals(contentHash) &
+                  t.kind.equals(_kindName(kind)),
+            ))
+            .getSingleOrNull();
+    return row?.relativePath;
+  }
+
+  /// Removing a superseded file is housekeeping: the new copy is already in
+  /// place and indexed, so a failure here must not turn a good put into an
+  /// error.
+  Future<void> _bestEffortDelete(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } on FileSystemException {
+      // Leaves one stale file behind; the next put for this key retries.
+    }
+  }
+
+  /// A unique temp file under the scratch root, for downloads and pipeline
+  /// staging. Same volume as the cache, so put() can use a cheap rename.
+  Future<File> stagingFile() async {
+    final dir = Directory(p.join(_scratchRoot.path, 'staging'));
+    await dir.create(recursive: true);
+    _stagingCounter += 1;
+    return File(
+      p.join(
+        dir.path,
+        // The pid keeps a second process on the same cache apart too.
+        'stage_${DateTime.now().microsecondsSinceEpoch}'
+        '_${pid}_$_stagingCounter',
+      ),
+    );
+  }
+
+  /// Deterministic transcode output path (spec section 8):
+  /// `<scratch root>/transcode/<hash>_<level>.mp4`. Engines write `<path>.tmp` and
+  /// rename, so an existing file here is always a COMPLETE rendition; it
+  /// survives upload retries and app restarts and is removed only via
+  /// [deleteTranscodeArtifacts] on markDone.
+  Future<File> transcodeFile(String contentHash, String levelName) async {
+    final dir = Directory(p.join(_scratchRoot.path, 'transcode'));
+    await dir.create(recursive: true);
+    return File(p.join(dir.path, '${contentHash}_$levelName.mp4'));
+  }
+
+  /// Removes every transcode artifact for [contentHash]: all levels'
+  /// renditions plus any .tmp debris. Best-effort.
+  Future<void> deleteTranscodeArtifacts(String contentHash) async {
+    final dir = Directory(p.join(_scratchRoot.path, 'transcode'));
+    try {
+      if (!await dir.exists()) return;
+      await for (final entity in dir.list()) {
+        if (entity is File &&
+            p.basename(entity.path).startsWith('${contentHash}_')) {
+          try {
+            await entity.delete();
+          } on FileSystemException {
+            // A single locked/vanished file must not abort the sweep.
+          }
+        }
+      }
+    } on FileSystemException {
+      // exists()/list() can race with other writers or hit a permission
+      // error; this cleanup is best-effort and must never surface (it now
+      // runs after markDone, where throwing would flip a committed upload).
+    }
+  }
+
+  /// [kind]'s size according to the index, in bytes.
+  ///
+  /// Not purely a read: a pool whose directory has gone loses its rows here,
+  /// so that a purge shows up as soon as anything asks how big the pool is.
+  Future<int> totalBytes(MediaCacheKind kind) async {
+    final total = await _indexedBytes(kind);
+    if (total == 0 || !await _forgetPoolIfGone(kind)) return total;
+    return _indexedBytes(kind);
+  }
+
+  Future<int> _indexedBytes(MediaCacheKind kind) async {
+    final sum = _db.mediaCacheEntries.sizeBytes.sum();
+    final query = _db.selectOnly(_db.mediaCacheEntries)
+      ..addColumns([sum])
+      ..where(_db.mediaCacheEntries.kind.equals(_kindName(kind)));
+    final row = await query.getSingle();
+    return row.read(sum) ?? 0;
+  }
+
+  /// Removes [kind]'s rows if its directory has gone, and says whether it did.
+  ///
+  /// A single stat, so it is cheap enough for [put], which every new thumbnail
+  /// goes through. A pool at its cap is the normal state of a large library, so
+  /// checking files row by row on that path is not an option. Doubt keeps the
+  /// rows: a read that fails is not evidence of a purge.
+  ///
+  /// Rows written since the look at the directory are spared. Several puts run
+  /// at once, and one can recreate the pool and file its row while another is
+  /// on its way here having seen the pool gone. A row stamped in the same
+  /// millisecond could be either, so it is spared too; if dead, the next look
+  /// or the daily sweep takes it.
+  Future<bool> _forgetPoolIfGone(MediaCacheKind kind) async {
+    final checkedAt = clock.now().millisecondsSinceEpoch;
+    final pool = Directory(p.join(_root.path, _poolDirName(kind)));
+    try {
+      if (await pool.exists()) return false;
+    } on FileSystemException {
+      return false;
+    }
+    if (kind == MediaCacheKind.thumb) _touches.clear();
+    await (_db.delete(_db.mediaCacheEntries)..where(
+          (t) =>
+              t.kind.equals(_kindName(kind)) &
+              t.createdAt.isSmallerThanValue(checkedAt),
+        ))
+        .go();
+    return true;
+  }
+
+  /// Removes every row whose file has gone, across all pools, and returns how
+  /// many. For a partial purge, where the OS took some files and left the
+  /// directories, which nothing else can see.
+  ///
+  /// One stat per row, so this is for a background pass. It pages by key
+  /// rather than by offset because it deletes as it goes, and a row removed
+  /// from an earlier page would shift the offset past one not yet checked.
+  ///
+  /// Rows written since the pass began are spared: a [put] can land between
+  /// a key being found dead and its row being deleted, and losing that row
+  /// would leave an original on disk that nothing can serve or evict. A row
+  /// stamped in the same millisecond could be either, so it is spared too; if
+  /// dead, the next pass takes it.
+  Future<int> dropMissingEntries({int pageSize = 500}) async {
+    final entries = _db.mediaCacheEntries;
+    final startedAt = clock.now().millisecondsSinceEpoch;
+    var dropped = 0;
+    for (final kind in MediaCacheKind.values) {
+      final kindName = _kindName(kind);
+      var after = '';
+      while (true) {
+        final query = _db.selectOnly(entries)
+          ..addColumns([entries.contentHash, entries.relativePath])
+          ..where(
+            entries.kind.equals(kindName) &
+                entries.contentHash.isBiggerThanValue(after),
+          )
+          ..orderBy([OrderingTerm.asc(entries.contentHash)])
+          ..limit(pageSize);
+        final rows = await query.get();
+        if (rows.isEmpty) break;
+        final dead = <String>[];
+        for (final row in rows) {
+          final file = File(
+            p.join(_root.path, row.read(entries.relativePath)!),
+          );
+          if (!await file.exists()) dead.add(row.read(entries.contentHash)!);
+        }
+        if (dead.isNotEmpty) {
+          dropped +=
+              await (_db.delete(entries)..where(
+                    (t) =>
+                        t.kind.equals(kindName) &
+                        t.contentHash.isIn(dead) &
+                        t.createdAt.isSmallerThanValue(startedAt),
+                  ))
+                  .go();
+        }
+        after = rows.last.read(entries.contentHash)!;
+      }
+    }
+    return dropped;
+  }
+
+  /// Empties [kind]'s pool: every file in it, indexed or not, and its index
+  /// rows. The other pools are left alone.
+  Future<void> clear(MediaCacheKind kind) async {
+    if (kind == MediaCacheKind.thumb) _touches.clear();
+    await (_db.delete(
+      _db.mediaCacheEntries,
+    )..where((t) => t.kind.equals(_kindName(kind)))).go();
+    // The directory rather than the indexed paths: a file can be on disk
+    // with no row (written, then the app closed before it was indexed).
+    final pool = Directory(p.join(_root.path, _poolDirName(kind)));
+    try {
+      if (await pool.exists()) await pool.delete(recursive: true);
+    } on FileSystemException {
+      // A file held open elsewhere survives; the rest is gone and the index
+      // no longer points at it.
+    }
+  }
+
+  Future<void> evictIfNeeded() async {
+    await flushTouches();
+    await _evictPool(MediaCacheKind.original, originalsCapBytes);
+    await _evictPool(
+      MediaCacheKind.thumb,
+      thumbsCapSource?.call() ?? thumbsCapBytes,
+    );
+    await _evictPool(MediaCacheKind.rendition, renditionsCapBytes);
+  }
+
+  Future<void> _evictPool(MediaCacheKind kind, int capBytes) async {
+    var total = await totalBytes(kind);
+    if (total <= capBytes) return;
+    final rows =
+        await (_db.select(_db.mediaCacheEntries)
+              ..where((t) => t.kind.equals(_kindName(kind)))
+              ..orderBy([(t) => OrderingTerm.asc(t.lastAccessedAt)]))
+            .get();
+    for (final row in rows) {
+      if (total <= capBytes) break;
+      final file = File(p.join(_root.path, row.relativePath));
+      if (await file.exists()) await file.delete();
+      await _deleteEntry(row.contentHash, kind);
+      total -= row.sizeBytes;
+    }
+  }
+
+  Future<void> _deleteEntry(String contentHash, MediaCacheKind kind) async {
+    await (_db.delete(_db.mediaCacheEntries)..where(
+          (t) =>
+              t.contentHash.equals(contentHash) &
+              t.kind.equals(_kindName(kind)),
+        ))
+        .go();
+  }
+}

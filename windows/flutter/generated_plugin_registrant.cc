@@ -6,25 +6,42 @@
 
 #include "generated_plugin_registrant.h"
 
+#include <app_links/app_links_plugin_c_api.h>
 #include <auto_updater_windows/auto_updater_windows_plugin_c_api.h>
+#include <connectivity_plus/connectivity_plus_windows_plugin.h>
 #include <desktop_drop/desktop_drop_plugin.h>
+#include <desktop_webview_window/desktop_webview_window_plugin.h>
 #include <file_selector_windows/file_selector_windows.h>
 #include <flutter_secure_storage_windows/flutter_secure_storage_windows_plugin.h>
 #include <gal/gal_plugin_c_api.h>
 #include <geolocator_windows/geolocator_windows.h>
 #include <libdivecomputer_plugin/libdivecomputer_plugin_c_api.h>
+#include <local_auth_windows/local_auth_plugin.h>
 #include <objectbox_flutter_libs/objectbox_flutter_libs_plugin.h>
 #include <permission_handler_windows/permission_handler_windows_plugin.h>
 #include <printing/printing_plugin.h>
+#include <screen_retriever_windows/screen_retriever_windows_plugin_c_api.h>
 #include <share_plus/share_plus_windows_plugin_c_api.h>
-#include <sqlite3_flutter_libs/sqlite3_flutter_libs_plugin.h>
+#include <submersion_ocr/submersion_ocr_plugin_c_api.h>
+#include <submersion_transcoder/submersion_transcoder_plugin_c_api.h>
+#include <submersion_vision/submersion_vision_plugin_c_api.h>
+#include <universal_ble/universal_ble_plugin_c_api.h>
 #include <url_launcher_windows/url_launcher_windows.h>
+#include <video_player_win/video_player_win_plugin_c_api.h>
+#include <window_manager/window_manager_plugin.h>
+#include <window_to_front/window_to_front_plugin.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
+  AppLinksPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("AppLinksPluginCApi"));
   AutoUpdaterWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("AutoUpdaterWindowsPluginCApi"));
+  ConnectivityPlusWindowsPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("ConnectivityPlusWindowsPlugin"));
   DesktopDropPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
+  DesktopWebviewWindowPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("DesktopWebviewWindowPlugin"));
   FileSelectorWindowsRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FileSelectorWindows"));
   FlutterSecureStorageWindowsPluginRegisterWithRegistrar(
@@ -35,16 +52,32 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("GeolocatorWindows"));
   LibdivecomputerPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("LibdivecomputerPluginCApi"));
+  LocalAuthPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("LocalAuthPlugin"));
   ObjectboxFlutterLibsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("ObjectboxFlutterLibsPlugin"));
   PermissionHandlerWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("PermissionHandlerWindowsPlugin"));
   PrintingPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("PrintingPlugin"));
+  ScreenRetrieverWindowsPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("ScreenRetrieverWindowsPluginCApi"));
   SharePlusWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("SharePlusWindowsPluginCApi"));
-  Sqlite3FlutterLibsPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("Sqlite3FlutterLibsPlugin"));
+  SubmersionOcrPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("SubmersionOcrPluginCApi"));
+  SubmersionTranscoderPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("SubmersionTranscoderPluginCApi"));
+  SubmersionVisionPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("SubmersionVisionPluginCApi"));
+  UniversalBlePluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("UniversalBlePluginCApi"));
   UrlLauncherWindowsRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("UrlLauncherWindows"));
+  VideoPlayerWinPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("VideoPlayerWinPluginCApi"));
+  WindowManagerPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("WindowManagerPlugin"));
+  WindowToFrontPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("WindowToFrontPlugin"));
 }

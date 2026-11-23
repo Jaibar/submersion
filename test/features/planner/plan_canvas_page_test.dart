@@ -1,0 +1,684 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/plan_tank_list.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/segment_list.dart';
+import 'package:submersion/features/dive_planner/presentation/widgets/setup/plan_deco_section.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/presentation/pages/plan_canvas_page.dart';
+import 'package:submersion/features/planner/presentation/chart/plan_profile_chart.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_editor_pane.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_results_pane.dart';
+import 'package:submersion/features/planner/presentation/panes/plan_setup_accordion.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_results_providers.dart';
+import 'package:submersion/features/planner/presentation/widgets/contingency_chips.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_chart_readouts.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_status_chips.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/core/data/visibility/item_sharing.dart';
+import 'package:submersion/core/data/visibility/shared_item_policy.dart';
+import 'package:submersion/features/divers/data/repositories/item_shares_repository.dart';
+
+import '../../helpers/planner_results.dart';
+import '../../helpers/mock_providers.dart';
+import '../../helpers/test_app.dart';
+import '../../helpers/test_database.dart';
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier() : super(const AppSettings());
+
+  @override
+  Future<void> setMapStyle(MapStyle style) async =>
+      state = state.copyWith(mapStyle: style);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void main() {
+  setUp(() async {
+    await setUpTestDatabase();
+  });
+
+  tearDown(() {
+    DatabaseService.instance.resetForTesting();
+  });
+
+  // Convert to Dive creates the dive through the dive list notifier, which
+  // reads the current diver; the real provider needs SharedPreferences.
+  Widget harness({String? diverId, List<dynamic> extra = const []}) => testApp(
+    overrides: [
+      ...plannerResultsInline(),
+      ...extra,
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+      currentDiverIdProvider.overrideWith((ref) {
+        final notifier = MockCurrentDiverIdNotifier();
+        if (diverId != null) notifier.setCurrentDiver(diverId);
+        return notifier;
+      }),
+    ],
+    locale: const Locale('en'),
+    child: const PlanCanvasPage(),
+  );
+
+  Future<void> setSize(WidgetTester tester, Size size) async {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+  }
+
+  void seed(WidgetTester tester) {
+    ProviderScope.containerOf(tester.element(find.byType(PlanCanvasPage)))
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+  }
+
+  testWidgets('with nothing beneath it the planner shows no back arrow', (
+    tester,
+  ) async {
+    // Opened as a nav shortcut (#2936) the planner is the only page, and a
+    // back arrow there would do nothing.
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BackButton), findsNothing);
+  });
+
+  testWidgets('phone layout shows chart, readouts, tab deck, no chip rows', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PlanProfileChart), findsOneWidget);
+    expect(find.byType(PlanChartReadouts), findsOneWidget);
+    expect(find.byType(PlanStatusChips), findsNothing);
+    expect(find.text('Base'), findsOneWidget);
+    expect(find.byType(ContingencyChips), findsOneWidget);
+    // The deck opens on Tanks: gas is chosen before the profile that
+    // breathes it.
+    expect(find.byType(PlanTankList), findsOneWidget);
+    expect(find.byType(SegmentList), findsNothing);
+    expect(find.byType(DraggableScrollableSheet), findsNothing);
+  });
+
+  testWidgets('phone tabs switch between tanks, plan, setup, results', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Plan'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SegmentList), findsOneWidget);
+
+    await tester.tap(find.text('Tanks'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanTankList), findsOneWidget);
+
+    await tester.tap(find.text('Setup'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanSetupAccordion), findsOneWidget);
+
+    await tester.tap(find.text('Results'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanResultsPane), findsOneWidget);
+  });
+
+  testWidgets('phone deck reads Tanks, Plan, Setup, Results left to right', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    // Scoped to the deck: "Tanks" also appears as the section header of the
+    // tab body, which is the Tanks pane by default.
+    final xs = <String, double>{
+      for (final label in ['Tanks', 'Plan', 'Setup', 'Results'])
+        label: tester
+            .getTopLeft(
+              find.descendant(
+                of: find.byType(SegmentedButton<int>),
+                matching: find.text(label),
+              ),
+            )
+            .dx,
+    };
+    expect(xs['Tanks']!, lessThan(xs['Plan']!));
+    expect(xs['Plan']!, lessThan(xs['Setup']!));
+    expect(xs['Setup']!, lessThan(xs['Results']!));
+  });
+
+  testWidgets('wide layout shows three panes and no draggable sheet', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(1400, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PlanEditorPane), findsOneWidget);
+    expect(find.byType(PlanResultsPane), findsOneWidget);
+    expect(find.byType(PlanProfileChart), findsOneWidget);
+    expect(find.byType(DraggableScrollableSheet), findsNothing);
+  });
+
+  testWidgets('editor pane collapses and expands via the chevron', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(1400, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Collapse panel').first);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanEditorPane), findsNothing);
+
+    await tester.tap(find.byTooltip('Expand panel').first);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanEditorPane), findsOneWidget);
+  });
+
+  testWidgets('middle width keeps the editor visible; results are revealed '
+      'by the chevron', (tester) async {
+    await setSize(tester, const Size(1000, 800));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PlanEditorPane), findsOneWidget);
+    expect(find.byType(PlanResultsPane), findsNothing);
+
+    await tester.tap(find.byTooltip('Expand panel').last);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanResultsPane), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Collapse panel').last);
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanResultsPane), findsNothing);
+  });
+
+  testWidgets('save action clears the dirty flag', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+    expect(container.read(divePlanNotifierProvider).isDirty, isTrue);
+
+    await tester.tap(find.byIcon(Icons.save));
+    await tester.pumpAndSettle();
+
+    // The first save of a never-persisted plan is gated on the name dialog.
+    // Confirming it lets the save through; see plan_canvas_first_save_test.dart
+    // for the gate's own coverage.
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(container.read(divePlanNotifierProvider).isDirty, isFalse);
+  });
+
+  Future<void> openMenu(WidgetTester tester, String label) async {
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label).last);
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('quick-plan menu opens the simple-plan dialog', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+    await openMenu(tester, 'Quick Plan');
+    expect(find.byType(AlertDialog), findsOneWidget);
+  });
+
+  testWidgets('saved menu opens the saved-plans sheet', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+    await openMenu(tester, 'Saved plans');
+    expect(find.text('No saved plans yet'), findsOneWidget);
+  });
+
+  testWidgets('settings menu focuses the setup tab on phone', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+    await openMenu(tester, 'Plan Settings');
+    expect(find.byType(PlanSetupAccordion), findsOneWidget);
+  });
+
+  testWidgets('reset menu shows a confirm dialog and clears the plan', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 30, bottomTimeMinutes: 20);
+    await tester.pumpAndSettle();
+    expect(container.read(divePlanNotifierProvider).segments, isNotEmpty);
+
+    await openMenu(tester, 'Reset Plan');
+    expect(find.byType(AlertDialog), findsOneWidget);
+    await tester.tap(find.text('Reset').last);
+    await tester.pumpAndSettle();
+    expect(container.read(divePlanNotifierProvider).segments, isEmpty);
+  });
+
+  testWidgets('convert menu surfaces a message', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+    await openMenu(tester, 'Create planned dive');
+    expect(find.byType(SnackBar), findsOneWidget);
+  });
+
+  Future<String> createDiver(WidgetTester tester, String id) async {
+    final diver = await tester.runAsync(() {
+      final now = DateTime.now();
+      return DiverRepository().createDiver(
+        Diver(id: id, name: id, createdAt: now, updatedAt: now),
+      );
+    });
+    return diver!.id;
+  }
+
+  Future<String> createSite(
+    WidgetTester tester, {
+    required String? ownerId,
+    bool isShared = false,
+  }) async {
+    final site = await tester.runAsync(
+      () => SiteRepository().createSite(
+        DiveSite(
+          id: '',
+          name: 'Blue Hole',
+          diverId: ownerId,
+          isShared: isShared,
+        ),
+      ),
+    );
+    return site!.id;
+  }
+
+  /// Converts a plan at [siteId] while [diverId] is the current diver, and
+  /// returns that diver's dives: what their dive list reads (every dive when
+  /// there is no current diver).
+  Future<List<Dive>> convertAt(
+    WidgetTester tester, {
+    required String? diverId,
+    required String siteId,
+  }) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness(diverId: diverId));
+    seed(tester);
+    ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    ).read(divePlanNotifierProvider.notifier).updateSite(siteId);
+    await tester.pumpAndSettle();
+
+    await openMenu(tester, 'Create planned dive');
+    expect(find.byType(SnackBar), findsOneWidget);
+
+    final listed = await tester.runAsync(
+      () => DiveRepository().getAllDives(diverId: diverId),
+    );
+    return listed!;
+  }
+
+  testWidgets('convert logs the dive for the current diver at the plan site', (
+    tester,
+  ) async {
+    final diverId = await createDiver(tester, 'convert-diver');
+    final siteId = await createSite(tester, ownerId: diverId);
+
+    // The dive list reads the current diver's dives only, so a dive written
+    // without a diver never shows up there.
+    final listed = await convertAt(tester, diverId: diverId, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.isPlanned, isTrue);
+    expect(listed.single.site?.id, siteId);
+  });
+
+  testWidgets('convert logs the live plan when the chart shows bailout', (
+    tester,
+  ) async {
+    final diverId = await createDiver(tester, 'convert-diver');
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness(diverId: diverId));
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    container.read(divePlanNotifierProvider.notifier)
+      ..addSimplePlan(maxDepth: 30, bottomTimeMinutes: 25)
+      ..updateMode(domain.PlanMode.ccr)
+      ..addTank(
+        const DiveTank(
+          id: 'bo',
+          volume: 11.1,
+          startPressure: 207,
+          gasMix: GasMix(o2: 32),
+          role: TankRole.bailout,
+        ),
+      );
+    await tester.pumpAndSettle();
+    expect(container.read(planOutcomeProvider).isDiveable, isTrue);
+    final live = container.read(planCanvasSeriesProvider).profile;
+
+    container.read(chartDisplayModeProvider.notifier).state =
+        ChartDisplayMode.bailout;
+    await tester.pumpAndSettle();
+    // The two pictures differ, so this can tell which one was logged.
+    expect([
+      for (final point in container.read(planCanvasSeriesProvider).profile)
+        (point.timeSeconds, point.depth),
+    ], isNot([for (final point in live) (point.timeSeconds, point.depth)]));
+
+    await openMenu(tester, 'Create planned dive');
+    expect(find.byType(SnackBar), findsOneWidget);
+
+    final logged = await tester.runAsync(() async {
+      final dives = await DiveRepository().getAllDives(diverId: diverId);
+      return DiveRepository().getDiveById(dives.single.id);
+    });
+    // Sampled every 10 seconds, with every corner of the live plan kept.
+    expect([
+      for (final point in logged!.profile) point.timestamp,
+    ], containsAll([for (final point in live) point.timeSeconds.round()]));
+  });
+
+  testWidgets('convert leaves off a site private to another diver', (
+    tester,
+  ) async {
+    final diverId = await createDiver(tester, 'convert-diver');
+    final ownerId = await createDiver(tester, 'site-owner');
+    final siteId = await createSite(tester, ownerId: ownerId);
+
+    // Saved plans are not diver-scoped, so a plan can name a site the
+    // current diver cannot see; the new dive must not expose it.
+    final listed = await convertAt(tester, diverId: diverId, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.site, isNull);
+  });
+
+  testWidgets('convert keeps a site another diver shares', (tester) async {
+    final diverId = await createDiver(tester, 'convert-diver');
+    final ownerId = await createDiver(tester, 'site-owner');
+    final siteId = await createSite(tester, ownerId: ownerId, isShared: true);
+
+    final listed = await convertAt(tester, diverId: diverId, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.site?.id, siteId);
+  });
+
+  testWidgets('convert keeps a site another diver shares with this diver by '
+      'name (issue #2151)', (tester) async {
+    final diverId = await createDiver(tester, 'convert-diver');
+    final ownerId = await createDiver(tester, 'site-owner');
+    final siteId = await createSite(tester, ownerId: ownerId);
+    await tester.runAsync(
+      () => ItemSharesRepository().setSharing(
+        SharedItemKind.site,
+        siteId,
+        ItemSharing(profileIds: {diverId}),
+        actingDiverId: ownerId,
+      ),
+    );
+
+    final listed = await convertAt(tester, diverId: diverId, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.site?.id, siteId);
+  });
+
+  testWidgets('with no current diver, convert leaves off a private site', (
+    tester,
+  ) async {
+    final ownerId = await createDiver(tester, 'site-owner');
+    final siteId = await createSite(tester, ownerId: ownerId);
+
+    // No current diver (a fresh start before the stored id resolves) leaves
+    // the dive unowned, where every all-divers read would show the site.
+    final listed = await convertAt(tester, diverId: null, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.site, isNull);
+  });
+
+  testWidgets('with no current diver, convert keeps an unowned site', (
+    tester,
+  ) async {
+    // A logbook with no diver profiles: its sites belong to no one.
+    final siteId = await createSite(tester, ownerId: null);
+
+    final listed = await convertAt(tester, diverId: null, siteId: siteId);
+    expect(listed, hasLength(1));
+    expect(listed.single.site?.id, siteId);
+  });
+
+  testWidgets('convert rechecks the plan once the site lookup lands', (
+    tester,
+  ) async {
+    final lookup = Completer<DiveSite?>();
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(
+      harness(extra: [siteProvider.overrideWith((ref, id) => lookup.future)]),
+    );
+    final notifier = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    ).read(divePlanNotifierProvider.notifier);
+    seed(tester);
+    notifier.updateSite('pending-site');
+    await tester.pumpAndSettle();
+
+    // Convert while the plan is valid, then make it invalid (a deep air
+    // plan trips a critical gas-density issue) before the lookup resolves.
+    await openMenu(tester, 'Create planned dive');
+    notifier.addSimplePlan(maxDepth: 50, bottomTimeMinutes: 25);
+    lookup.complete(null);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Cannot convert: plan has critical warnings'),
+      findsOneWidget,
+    );
+    final dives = await tester.runAsync(() => DiveRepository().getAllDives());
+    expect(dives, isEmpty);
+  });
+
+  testWidgets('tapping the title renames the plan', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('New Dive Plan'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      'Reef wall',
+    );
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+
+    expect(container.read(divePlanNotifierProvider).name, 'Reef wall');
+  });
+
+  testWidgets('wide issues chip scrolls the results pane without leaking', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(1400, 900));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    // A deep air plan trips a critical gas-density issue, so an issues chip
+    // renders and the tap has a target.
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 50, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+
+    final issuesChip = find.textContaining('issue');
+    expect(issuesChip, findsWidgets);
+    await tester.tap(issuesChip.first);
+    await tester.pumpAndSettle();
+    // No exception = the hoisted controller is wired and disposed by the page.
+  });
+
+  testWidgets('GF header chip expands the deco section', (tester) async {
+    await setSize(tester, const Size(1400, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+    // Header chip shows the diver's GF settings (AppSettings default 50/85).
+    await tester.tap(find.text('50/85'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanDecoSection), findsOneWidget);
+  });
+
+  testWidgets('phone chart height is 30% of body, clamped to a 160 floor', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+    // Body = 900 - 56 appbar = 844; 30% = 253.2; chart padding eats 16.
+    expect(
+      tester.getSize(find.byType(PlanProfileChart)).height,
+      closeTo(253.2 - 16, 0.5),
+    );
+  });
+
+  testWidgets('short viewport pins the chart to the 160 px floor', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(420, 560));
+    await tester.pumpWidget(harness());
+    seed(tester);
+    await tester.pumpAndSettle();
+    // Body = 560 - 56 = 504; 30% = 151.2 -> clamped to 160; minus padding.
+    expect(
+      tester.getSize(find.byType(PlanProfileChart)).height,
+      closeTo(160.0 - 16, 0.5),
+    );
+  });
+
+  testWidgets('phone issues pill switches to the Results tab', (tester) async {
+    await setSize(tester, const Size(420, 900));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    // Deep air plan trips a critical gas-density issue (see the wide issues
+    // chip test) so the pill renders.
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 50, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.textContaining('issue'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlanResultsPane), findsOneWidget);
+  });
+
+  testWidgets('no overflow at SE-class size with a deco-heavy plan', (
+    tester,
+  ) async {
+    await setSize(tester, const Size(320, 568));
+    await tester.pumpWidget(harness());
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PlanCanvasPage)),
+    );
+    container
+        .read(divePlanNotifierProvider.notifier)
+        .addSimplePlan(maxDepth: 50, bottomTimeMinutes: 25);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('fullscreen chart action pushes over the canvas', (tester) async {
+    await setSize(tester, const Size(400, 800));
+
+    final router = GoRouter(
+      initialLocation: '/planning/dive-planner',
+      routes: [
+        GoRoute(
+          path: '/planning/dive-planner',
+          builder: (_, _) => const PlanCanvasPage(),
+          routes: [
+            GoRoute(
+              path: 'chart',
+              builder: (_, _) => const Text('fullscreen chart'),
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+
+    await tester.pumpWidget(
+      testAppRouter(
+        router: router,
+        overrides: [
+          ...plannerResultsInline(),
+          settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+        ],
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    seed(tester);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.open_in_full));
+    await tester.pumpAndSettle();
+
+    // PUSH, not go: the canvas stays on the stack with its state, so back
+    // returns to it instead of closing the app (#647).
+    expect(find.text('fullscreen chart'), findsOneWidget);
+    expect(router.routerDelegate.canPop(), isTrue);
+  });
+}

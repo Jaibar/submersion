@@ -73,7 +73,7 @@ The `MainScaffold` widget provides:
 | `/equipment` | EquipmentListPage | Gear inventory |
 | `/buddies` | BuddyListPage | Dive buddies |
 | `/planning` | PlanningPage | Planning hub |
-| `/statistics` | StatisticsPage | Analytics |
+| `/insights` | InsightsPage | Insights |
 | `/records` | RecordsPage | Personal records |
 | `/transfer` | TransferPage | Import/Export hub |
 | `/settings` | SettingsPage | Configuration |
@@ -85,9 +85,9 @@ Each primary route has nested routes for CRUD:
 ```
 
 /dives
-├── /dives/new           → Create dive
-├── /dives/:diveId       → View dive detail
-└── /dives/:diveId/edit  → Edit dive
+├── /dives/new           → New dive (the dive page, unlocked)
+├── /dives/:diveId       → View dive detail (?mode=edit opens it unlocked)
+└── /dives/:diveId/edit  → Redirects to /dives/:diveId?mode=edit
 
 ```text
 ### Route Example
@@ -103,21 +103,22 @@ GoRoute(
     GoRoute(
       path: 'new',
       name: 'newDive',
-      builder: (context, state) => const DiveEditPage(),
+      builder: (context, state) => newDivePage(state),
     ),
     GoRoute(
       path: ':diveId',
       name: 'diveDetail',
       builder: (context, state) => DiveDetailPage(
         diveId: state.pathParameters['diveId']!,
+        openUnlocked: state.uri.queryParameters['mode'] == 'edit',
       ),
       routes: [
+        // The old edit address opens the record page unlocked.
         GoRoute(
           path: 'edit',
           name: 'editDive',
-          builder: (context, state) => DiveEditPage(
-            diveId: state.pathParameters['diveId'],
-          ),
+          redirect: (context, state) =>
+              '/dives/${state.pathParameters['diveId']}?mode=edit',
         ),
       ],
     ),
@@ -138,10 +139,10 @@ GoRoute(
 |------|------|--------|
 | `/dives` | dives | DiveListPage |
 | `/dives/activity` | diveActivity | DiveActivityMapPage |
-| `/dives/new` | newDive | DiveEditPage |
+| `/dives/new` | newDive | DiveDetailPage.newDive |
 | `/dives/search` | diveSearch | DiveSearchPage |
 | `/dives/:diveId` | diveDetail | DiveDetailPage |
-| `/dives/:diveId/edit` | editDive | DiveEditPage |
+| `/dives/:diveId/edit` | editDive | Redirect to `/dives/:diveId?mode=edit` |
 | `/dives/:diveId/edit-profile` | editProfile | ProfileEditorPage |
 
 ### Sites
@@ -151,31 +152,32 @@ GoRoute(
 | `/sites` | sites | SiteListPage |
 | `/sites/map` | sitesMap | SiteMapPage |
 | `/sites/import` | importSite | SiteImportPage |
-| `/sites/new` | newSite | SiteEditPage |
+| `/sites/new` | newSite | SiteDetailPage (a new site, unlocked) |
+| `/sites/merge` | mergeSite | SiteMergePage |
 | `/sites/:siteId` | siteDetail | SiteDetailPage |
-| `/sites/:siteId/edit` | editSite | SiteEditPage |
+| `/sites/:siteId/edit` | editSite | Redirects to `/sites/:siteId?mode=edit` (the page unlocked) |
 
 ### Equipment
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/equipment` | equipment | EquipmentListPage |
-| `/equipment/new` | newEquipment | EquipmentEditPage |
+| `/equipment/new` | newEquipment | EquipmentDetailPage (a new item, unlocked) |
 | `/equipment/sets` | equipmentSets | EquipmentSetListPage |
-| `/equipment/sets/new` | newEquipmentSet | EquipmentSetEditPage |
+| `/equipment/sets/new` | newEquipmentSet | EquipmentSetDetailPage (a new set, unlocked) |
 | `/equipment/sets/:setId` | equipmentSetDetail | EquipmentSetDetailPage |
-| `/equipment/sets/:setId/edit` | editEquipmentSet | EquipmentSetEditPage |
+| `/equipment/sets/:setId/edit` | editEquipmentSet | Redirects to `/equipment/sets/:setId?mode=edit` (the page unlocked) |
 | `/equipment/:equipmentId` | equipmentDetail | EquipmentDetailPage |
-| `/equipment/:equipmentId/edit` | editEquipment | EquipmentEditPage |
+| `/equipment/:equipmentId/edit` | editEquipment | Redirects to `/equipment/:equipmentId?mode=edit` (the page unlocked) |
 
 ### Buddies
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/buddies` | buddies | BuddyListPage |
-| `/buddies/new` | newBuddy | BuddyEditPage |
+| `/buddies/new` | newBuddy | BuddyDetailPage (a new buddy, unlocked) |
 | `/buddies/:buddyId` | buddyDetail | BuddyDetailPage |
-| `/buddies/:buddyId/edit` | editBuddy | BuddyEditPage |
+| `/buddies/:buddyId/edit` | editBuddy | Redirects to `/buddies/:buddyId?mode=edit` (the page unlocked) |
 
 ### Divers
 
@@ -192,18 +194,18 @@ GoRoute(
 |------|------|--------|
 | `/certifications` | certifications | CertificationListPage |
 | `/certifications/wallet` | certificationWallet | CertificationWalletPage |
-| `/certifications/new` | newCertification | CertificationEditPage |
+| `/certifications/new` | newCertification | CertificationDetailPage (a new certification, unlocked) |
 | `/certifications/:certificationId` | certificationDetail | CertificationDetailPage |
-| `/certifications/:certificationId/edit` | editCertification | CertificationEditPage |
+| `/certifications/:certificationId/edit` | editCertification | Redirects to `/certifications/:certificationId?mode=edit` (the page unlocked) |
 
 ### Courses
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/courses` | courses | CourseListPage |
-| `/courses/new` | newCourse | CourseEditPage |
+| `/courses/new` | newCourse | CourseDetailPage (a new course, unlocked) |
 | `/courses/:courseId` | courseDetail | CourseDetailPage |
-| `/courses/:courseId/edit` | editCourse | CourseEditPage |
+| `/courses/:courseId/edit` | editCourse | Redirects to `/courses/:courseId?mode=edit` (the page unlocked) |
 
 ### Dive Centers
 
@@ -212,18 +214,18 @@ GoRoute(
 | `/dive-centers` | diveCenters | DiveCenterListPage |
 | `/dive-centers/map` | diveCentersMap | DiveCenterMapPage |
 | `/dive-centers/import` | importDiveCenter | DiveCenterImportPage |
-| `/dive-centers/new` | newDiveCenter | DiveCenterEditPage |
+| `/dive-centers/new` | newDiveCenter | DiveCenterDetailPage (a new dive centre, unlocked) |
 | `/dive-centers/:centerId` | diveCenterDetail | DiveCenterDetailPage |
-| `/dive-centers/:centerId/edit` | editDiveCenter | DiveCenterEditPage |
+| `/dive-centers/:centerId/edit` | editDiveCenter | Redirects to `/dive-centers/:centerId?mode=edit` (the page unlocked) |
 
 ### Trips
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/trips` | trips | TripListPage |
-| `/trips/new` | newTrip | TripEditPage |
+| `/trips/new` | newTrip | TripDetailPage (a new trip, unlocked) |
 | `/trips/:tripId` | tripDetail | TripDetailPage |
-| `/trips/:tripId/edit` | editTrip | TripEditPage |
+| `/trips/:tripId/edit` | editTrip | Redirects to `/trips/:tripId?mode=edit`, keeping `section` and `noteDay` (the page unlocked at that card) |
 | `/trips/:tripId/gallery` | tripGallery | TripGalleryPage |
 
 ### Planning
@@ -238,20 +240,20 @@ GoRoute(
 | `/planning/weight-calculator` | weightCalculator | WeightCalculatorPage |
 | `/planning/surface-interval` | surfaceInterval | SurfaceIntervalToolPage |
 
-### Statistics
+### Insights
 
 | Path | Name | Screen |
 |------|------|--------|
-| `/statistics` | statistics | StatisticsPage |
-| `/statistics/gas` | statisticsGas | StatisticsGasPage |
-| `/statistics/progression` | statisticsProgression | StatisticsProgressionPage |
-| `/statistics/conditions` | statisticsConditions | StatisticsConditionsPage |
-| `/statistics/social` | statisticsSocial | StatisticsSocialPage |
-| `/statistics/geographic` | statisticsGeographic | StatisticsGeographicPage |
-| `/statistics/marine-life` | statisticsMarineLife | StatisticsMarineLifePage |
-| `/statistics/time-patterns` | statisticsTimePatterns | StatisticsTimePatternsPage |
-| `/statistics/equipment` | statisticsEquipment | StatisticsEquipmentPage |
-| `/statistics/profile` | statisticsProfile | StatisticsProfilePage |
+| `/insights` | insights | InsightsPage |
+| `/insights/gas` | insightsGas | InsightsGasPage |
+| `/insights/progression` | insightsProgression | InsightsProgressionPage |
+| `/insights/conditions` | insightsConditions | InsightsConditionsPage |
+| `/insights/social` | insightsSocial | InsightsSocialPage |
+| `/insights/geographic` | insightsGeographic | InsightsGeographicPage |
+| `/insights/marine-life` | insightsMarineLife | InsightsMarineLifePage |
+| `/insights/time-patterns` | insightsTimePatterns | InsightsTimePatternsPage |
+| `/insights/equipment` | insightsEquipment | InsightsEquipmentPage |
+| `/insights/profile` | insightsProfile | InsightsProfilePage |
 
 ### Records
 
@@ -307,9 +309,9 @@ GoRoute(
 | Path | Name | Screen |
 |------|------|--------|
 | `/species` | speciesManage | SpeciesManagePage |
-| `/species/new` | newSpecies | SpeciesEditPage |
+| `/species/new` | newSpecies | SpeciesDetailPage (a new species, unlocked) |
 | `/species/:speciesId` | speciesDetail | SpeciesDetailPage |
-| `/species/:speciesId/edit` | editSpecies | SpeciesEditPage |
+| `/species/:speciesId/edit` | editSpecies | Redirects to `/species/:speciesId?mode=edit` (the page unlocked) |
 
 ### Tags
 
@@ -330,24 +332,58 @@ GoRoute(
 
 | Path | Name | Screen |
 |------|------|--------|
-| `/welcome` | welcome | WelcomePage |
+| `/welcome` | welcome | SetupWizardPage (first-run mode) |
+| `/settings/setup-assistant` | setupAssistant | SetupWizardPage (re-entry mode) |
 
 ## Navigation Patterns
 
 ### Programmatic Navigation
 
 ```dart
-// Named route
-context.goNamed('diveDetail', pathParameters: {'diveId': dive.id});
+// Switch top-level section (RESETS the stack - see below)
+context.go('/dives');
 
-// Path-based
-context.go('/dives/${dive.id}');
-
-// Push (adds to stack)
-context.push('/dives/new');
+// Open a detail page from wherever the user is (KEEPS the stack)
+context.push('/dives/${dive.id}');
+context.pushNamed('diveDetail', pathParameters: {'diveId': dive.id});
 
 // Pop (go back)
 context.pop();
+```text
+### `go` vs `push` - pick deliberately
+
+`go` is **declarative**: it discards the current stack and rebuilds it from
+the target location. Because most detail routes are *children* (`/dives/:diveId`
+is nested under `/dives`), `go` also materializes the ancestor, so the stack
+becomes `[dive list, dive detail]` and Back lands the user on a list they never
+visited - with the section they came from, and its filters and scroll position,
+gone.
+
+| Use | When |
+|-----|------|
+| `context.go(...)` | Switching top-level sections (bottom nav / rail, numbered shortcuts). Resetting the stack is the point. |
+| `context.push(...)` | Opening a detail or sub-page from anywhere. The originating section must stay underneath. |
+| `context.pushReplacement(...)` | The current page should be replaced, not returned to - e.g. landing on a newly created dive from `/dives/new`. |
+| `context.pop()` | Finishing a pushed page (Save, Delete). Do NOT `go` to a list instead. |
+
+`push` is not idempotent the way `go` is: a repeated tap or a navigation loop
+can stack duplicate copies of the same page. For jump-off points that a user
+can hit twice, use `context.pushOrReturnTo(...)` from
+`lib/core/router/section_navigation.dart`, which pushes only when the target is
+not already on the stack and otherwise walks back to it.
+
+The pattern below is the specific bug to avoid - it discards the caller's
+section every time:
+
+```dart
+// WRONG - rebuilds the stack from /dives
+Navigator.of(context).pop();
+context.go('/dives/search');
+
+// RIGHT - capture the router first, then push over the caller
+final router = GoRouter.of(context);
+Navigator.of(context).pop();
+router.push('/dives/search');
 ```text
 ### Passing Data
 
@@ -371,12 +407,12 @@ For edit screens that need to return data:
 
 ```dart
 // In edit page
-context.pop(savedDive);
+context.pop(savedBuddy);
 
 // In calling page
-final result = await context.push<Dive>('/dives/new');
+final result = await context.push<Buddy>('/buddies/new');
 if (result != null) {
-  // Handle saved dive
+  // Handle saved buddy
 }
 ```text
 ## NoTransitionPage
@@ -394,7 +430,10 @@ This provides instant transitions between main tabs, matching platform conventio
 
 ### First-Run Guard
 
-The router redirects to onboarding if no divers exist:
+The router redirects to the setup wizard if no divers exist. The wizard
+offers a fresh-start path (profile, units, appearance, backup and sync) and
+an existing-data path (restore a backup, connect cloud sync, or open an
+existing storage folder):
 
 ```dart
 redirect: (context, state) async {

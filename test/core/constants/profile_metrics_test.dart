@@ -35,11 +35,15 @@ void main() {
         ceilingActual: MetricDataSource.calculated,
         ttsActual: MetricDataSource.computer,
         cnsActual: MetricDataSource.calculated,
+        decoStopActual: MetricDataSource.calculated,
+        gtrActual: MetricDataSource.computer,
       );
       expect(info.ndlActual, MetricDataSource.computer);
+      expect(info.gtrActual, MetricDataSource.computer);
       expect(info.ceilingActual, MetricDataSource.calculated);
       expect(info.ttsActual, MetricDataSource.computer);
       expect(info.cnsActual, MetricDataSource.calculated);
+      expect(info.decoStopActual, MetricDataSource.calculated);
     });
 
     test('all-calculated convenience works', () {
@@ -48,8 +52,73 @@ void main() {
         ceilingActual: MetricDataSource.calculated,
         ttsActual: MetricDataSource.calculated,
         cnsActual: MetricDataSource.calculated,
+        decoStopActual: MetricDataSource.calculated,
+        gtrActual: MetricDataSource.calculated,
       );
       expect(info.ndlActual, MetricDataSource.calculated);
+      expect(info.gtrActual, MetricDataSource.calculated);
+    });
+  });
+
+  group('ProfileRightAxisMetric.gtr', () {
+    test('is a gas-analysis metric measured in minutes', () {
+      const gtr = ProfileRightAxisMetric.gtr;
+      expect(gtr.category, ProfileMetricCategory.gasAnalysis);
+      expect(gtr.unitSuffix, 'min');
+      expect(gtr.shortName, 'GTR');
+      expect(gtr.color, isNotNull);
+    });
+
+    test('is not in the automatic fallback chain', () {
+      // Fallbacks are for metrics nearly every dive has; GTR needs an
+      // air-integrated pressure track.
+      expect(
+        ProfileRightAxisMetric.fallbackPriority,
+        isNot(contains(ProfileRightAxisMetric.gtr)),
+      );
+    });
+  });
+
+  group('ProfileRightAxisMetric.ascentRate', () {
+    test('has expected display metadata', () {
+      const metric = ProfileRightAxisMetric.ascentRate;
+      expect(metric.displayName, 'Ascent Rate');
+      expect(metric.shortName, 'Rate');
+      expect(metric.category, ProfileMetricCategory.primary);
+    });
+
+    test('is excluded from the auto fallback chain', () {
+      // Ascent rate must never auto-claim the right axis; it is opt-in only.
+      expect(
+        ProfileRightAxisMetric.fallbackPriority,
+        isNot(contains(ProfileRightAxisMetric.ascentRate)),
+      );
+    });
+  });
+
+  group('ProfileRightAxisMetric.o2CellMv', () {
+    test('is a gas-analysis metric measured in millivolts', () {
+      const metric = ProfileRightAxisMetric.o2CellMv;
+      expect(metric.category, ProfileMetricCategory.gasAnalysis);
+      expect(metric.unitSuffix, 'mV');
+      expect(metric.displayName, isNotEmpty);
+      expect(metric.shortName, isNotEmpty);
+    });
+
+    test('is excluded from the auto fallback chain', () {
+      // Diagnostic metric: joining the chain would auto-select it on CCR dives
+      // whenever the preferred metric has no data.
+      expect(
+        ProfileRightAxisMetric.fallbackPriority,
+        isNot(contains(ProfileRightAxisMetric.o2CellMv)),
+      );
+    });
+
+    test('appears in the gas analysis category listing', () {
+      expect(
+        ProfileMetricCategory.gasAnalysis.metrics,
+        contains(ProfileRightAxisMetric.o2CellMv),
+      );
     });
   });
 }

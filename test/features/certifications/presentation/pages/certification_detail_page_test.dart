@@ -1,23 +1,30 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_detail_page.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
+import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../support/clipboard_recorder.dart';
 
 void main() {
   group('CertificationDetailPage desktop redirect', () {
     final certification = Certification(
       id: 'cert-1',
       name: 'Open Water Diver',
-      agency: CertificationAgency.padi,
+      agency: CertificationAgency.padi.name,
       notes: '',
       createdAt: DateTime(2026, 1, 1),
       updatedAt: DateTime(2026, 1, 1),
@@ -130,6 +137,595 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('CERTIFICATION_LIST_PAGE'), findsNothing);
+    });
+  });
+
+  group(
+    'CertificationDetailPage instructor section with cleared snapshot text',
+    () {
+      final buddy = Buddy(
+        id: 'buddy-1',
+        name: 'Alice Instructor',
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+      );
+
+      final certificationWithIdOnly = Certification(
+        id: 'cert-2',
+        name: 'Advanced Open Water',
+        agency: CertificationAgency.padi.name,
+        notes: '',
+        instructorId: buddy.id,
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+      );
+
+      Future<void> pumpDetail(
+        WidgetTester tester,
+        List<dynamic> overrides,
+      ) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: overrides.cast(),
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: CertificationDetailPage(
+                certificationId: 'cert-2',
+                embedded: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets(
+        'shows the linked buddy name when snapshot text is null but instructorId resolves',
+        (tester) async {
+          final overrides = await getBaseOverrides();
+
+          await pumpDetail(tester, [
+            ...overrides,
+            certificationByIdProvider(
+              certificationWithIdOnly.id,
+            ).overrideWith((ref) async => certificationWithIdOnly),
+            courseForCertificationProvider(
+              certificationWithIdOnly.id,
+            ).overrideWith((ref) async => null),
+            buddyByIdProvider(buddy.id).overrideWith((ref) async => buddy),
+          ]);
+
+          expect(find.text('Alice Instructor'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'hides the instructor section when instructorId does not resolve to a buddy',
+        (tester) async {
+          final overrides = await getBaseOverrides();
+
+          await pumpDetail(tester, [
+            ...overrides,
+            certificationByIdProvider(
+              certificationWithIdOnly.id,
+            ).overrideWith((ref) async => certificationWithIdOnly),
+            courseForCertificationProvider(
+              certificationWithIdOnly.id,
+            ).overrideWith((ref) async => null),
+            buddyByIdProvider(buddy.id).overrideWith((ref) async => null),
+          ]);
+
+          final context = tester.element(find.byType(CertificationDetailPage));
+          expect(
+            find.text(
+              AppLocalizations.of(
+                context,
+              ).certifications_detail_sectionTitle_instructor,
+            ),
+            findsNothing,
+          );
+        },
+      );
+
+      testWidgets(
+        'falls back to a plain (non-tappable) row when the snapshot name is '
+        'present but the linked buddy does not resolve',
+        (tester) async {
+          final overrides = await getBaseOverrides();
+          final certWithText = certificationWithIdOnly.copyWith(
+            instructorName: 'Jane Snapshot',
+          );
+
+          await pumpDetail(tester, [
+            ...overrides,
+            certificationByIdProvider(
+              certWithText.id,
+            ).overrideWith((ref) async => certWithText),
+            courseForCertificationProvider(
+              certWithText.id,
+            ).overrideWith((ref) async => null),
+            buddyByIdProvider(buddy.id).overrideWith((ref) async => null),
+          ]);
+
+          expect(find.text('Jane Snapshot'), findsOneWidget);
+          // Unresolved link renders the plain row: no chevron affordance.
+          expect(find.byIcon(Icons.chevron_right), findsNothing);
+        },
+      );
+
+      Future<void> pumpDetailWithRouter(
+        WidgetTester tester,
+        List<dynamic> overrides, {
+        required bool embedded,
+      }) async {
+        final router = GoRouter(
+          initialLocation: '/detail',
+          routes: [
+            GoRoute(
+              path: '/detail',
+              builder: (context, state) => CertificationDetailPage(
+                certificationId: 'cert-2',
+                embedded: embedded,
+              ),
+            ),
+            GoRoute(
+              path: '/buddies',
+              builder: (context, state) => const Text('BUDDIES_LIST_MARKER'),
+            ),
+            GoRoute(
+              path: '/buddies/:buddyId',
+              builder: (context, state) => const Text('BUDDY_DETAIL_MARKER'),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: overrides.cast(),
+            child: MaterialApp.router(
+              routerConfig: router,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      for (final (embedded, marker) in [
+        (true, 'BUDDIES_LIST_MARKER'),
+        (false, 'BUDDY_DETAIL_MARKER'),
+      ]) {
+        testWidgets(
+          'tapping the linked instructor row (embedded: $embedded) navigates '
+          'to the buddy',
+          (tester) async {
+            final overrides = await getBaseOverrides();
+
+            await pumpDetailWithRouter(tester, [
+              ...overrides,
+              certificationByIdProvider(
+                certificationWithIdOnly.id,
+              ).overrideWith((ref) async => certificationWithIdOnly),
+              courseForCertificationProvider(
+                certificationWithIdOnly.id,
+              ).overrideWith((ref) async => null),
+              buddyByIdProvider(buddy.id).overrideWith((ref) async => buddy),
+            ], embedded: embedded);
+
+            await tester.ensureVisible(find.text('Alice Instructor'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Alice Instructor'));
+            await tester.pumpAndSettle();
+            expect(find.text(marker), findsOneWidget);
+          },
+        );
+      }
+    },
+  );
+
+  group('copying identifiers (issue #3362)', () {
+    final cert = Certification(
+      id: 'cert-copy',
+      name: 'Advanced Adventurer',
+      agency: CertificationAgency.ssi.name,
+      cardNumber: '2204198700453318762-AOW',
+      instructorNumber: '484921',
+      notes: '',
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 1, 1),
+    );
+
+    Future<void> pumpPage(WidgetTester tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 1200);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            certificationByIdProvider(
+              cert.id,
+            ).overrideWith((ref) async => cert),
+            courseForCertificationProvider(
+              cert.id,
+            ).overrideWith((ref) async => null),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CertificationDetailPage(certificationId: cert.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a long press on the card number copies it, with a message', (
+      tester,
+    ) async {
+      final calls = recordClipboardCalls();
+      await pumpPage(tester);
+
+      await tester.longPress(find.text('2204198700453318762-AOW'));
+      await tester.pump();
+
+      expect(copiedText(calls), '2204198700453318762-AOW');
+      expect(find.text('Copied to clipboard'), findsOneWidget);
+    });
+
+    testWidgets('only the card and instructor numbers offer a copy button', (
+      tester,
+    ) async {
+      final calls = recordClipboardCalls();
+      await pumpPage(tester);
+
+      final buttons = find.byTooltip('Copy');
+      expect(buttons, findsNWidgets(2));
+
+      await tester.tap(buttons.last);
+      await tester.pump();
+      expect(copiedText(calls), '484921');
+    });
+  });
+
+  group('duplicate-name suppression', () {
+    Future<void> pumpCert(WidgetTester tester, Certification cert) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            certificationByIdProvider(
+              cert.id,
+            ).overrideWith((ref) async => cert),
+            courseForCertificationProvider(
+              cert.id,
+            ).overrideWith((ref) async => null),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CertificationDetailPage(
+              certificationId: cert.id,
+              embedded: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Certification make(String id, String name) => Certification(
+      id: id,
+      name: name,
+      agency: CertificationAgency.padi.name,
+      level: CertificationLevel.openWater.name,
+      notes: '',
+      createdAt: DateTime(2024),
+      updatedAt: DateTime(2024),
+    );
+
+    testWidgets('a derived name renders one identifying row, not two', (
+      tester,
+    ) async {
+      await pumpCert(tester, make('d1', 'PADI : Open Water'));
+
+      // The Certification row is present, the redundant Title row is not, and
+      // the legacy stored string is never shown verbatim.
+      expect(find.text('Certification'), findsOneWidget);
+      expect(find.text('Title'), findsNothing);
+      expect(find.text('PADI : Open Water'), findsNothing);
+    });
+
+    testWidgets('a custom name renders both rows', (tester) async {
+      await pumpCert(tester, make('d2', 'Bali OW w/ Made'));
+
+      // The custom name is the page's title as well as its Title row, so it
+      // appears more than once; what matters is that the Certification row
+      // still carries the level separately.
+      expect(find.text('Bali OW w/ Made'), findsWidgets);
+      expect(find.text('Title'), findsOneWidget);
+      expect(find.text('Open Water'), findsOneWidget);
+    });
+  });
+
+  group('every detail row', () {
+    // A certification with every optional field set, so each row the page
+    // can show is rendered through the shared detail row.
+    final cert = Certification(
+      id: 'full-1',
+      name: 'Bali OW w/ Made',
+      agency: CertificationAgency.padi.name,
+      level: CertificationLevel.openWater.name,
+      additionalCredentials: const [
+        CertificationCredential(agency: 'ssi', level: 'advancedOpenWater'),
+      ],
+      cardNumber: '123456789',
+      expiryDate: DateTime(2020, 1, 1),
+      instructorName: 'Ana Ruiz',
+      instructorNumber: 'IN-4417',
+      notes: '',
+      createdAt: DateTime(2024),
+      updatedAt: DateTime(2024),
+    );
+    final course = Course(
+      id: 'course-1',
+      diverId: 'diver-1',
+      name: 'Open Water Course',
+      agency: CertificationAgency.padi.name,
+      startDate: DateTime(2019, 6, 1),
+      instructorName: 'Made Wirawan',
+      createdAt: DateTime(2019),
+      updatedAt: DateTime(2019),
+    );
+
+    Finder row(bool Function(String label) matches) => find.byWidgetPredicate(
+      (w) => w is Semantics && matches(w.properties.label ?? ''),
+    );
+
+    testWidgets('shows each optional field as a label and value', (
+      tester,
+    ) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            certificationByIdProvider(
+              cert.id,
+            ).overrideWith((ref) async => cert),
+            courseForCertificationProvider(
+              cert.id,
+            ).overrideWith((ref) async => course),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CertificationDetailPage(
+              certificationId: cert.id,
+              embedded: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(row((l) => l == 'Card Number: 123456789'), findsOneWidget);
+      expect(
+        row((l) => l == 'Also recognized as: SSI Advanced Open Water'),
+        findsOneWidget,
+      );
+      expect(row((l) => l == 'Name: Ana Ruiz'), findsOneWidget);
+      expect(row((l) => l == 'Instructor #: IN-4417'), findsOneWidget);
+      expect(row((l) => l == 'Instructor: Made Wirawan'), findsOneWidget);
+
+      // A lapsed expiry date is tinted red.
+      final expiry = row((l) => l.startsWith('Expiry Date: '));
+      expect(expiry, findsOneWidget);
+      final expiryValue = tester.widget<Text>(
+        find.descendant(of: expiry, matching: find.byType(Text)).last,
+      );
+      expect(expiryValue.style?.color, Colors.red);
+    });
+  });
+
+  group('detail rows on a phone-width screen', () {
+    // Issue #2695: a long certification name took the row's width and
+    // squeezed its label onto several lines (or overflowed the row).
+    const longName = 'CCR Normoxic Plus 70m MOD2';
+
+    Future<void> pumpOnPhone(WidgetTester tester, Certification cert) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(375, 812);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            certificationByIdProvider(
+              cert.id,
+            ).overrideWith((ref) async => cert),
+            courseForCertificationProvider(
+              cert.id,
+            ).overrideWith((ref) async => null),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CertificationDetailPage(certificationId: cert.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Finder inRow(String label, String value, Finder matching) =>
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is Semantics && w.properties.label == '$label: $value',
+          ),
+          matching: matching,
+        );
+
+    testWidgets('a long name wraps while the Title label stays on one line', (
+      tester,
+    ) async {
+      await pumpOnPhone(
+        tester,
+        Certification(
+          id: 'long-1',
+          name: longName,
+          agency: CertificationAgency.padi.name,
+          level: CertificationLevel.openWater.name,
+          notes: '',
+          createdAt: DateTime(2024),
+          updatedAt: DateTime(2024),
+        ),
+      );
+
+      // A single-line label in the same card is the height to match.
+      final oneLine = tester.getSize(find.text('Agency')).height;
+      final label = inRow('Title', longName, find.text('Title'));
+      final value = inRow('Title', longName, find.text(longName));
+
+      expect(tester.getSize(label).height, oneLine);
+      expect(tester.getSize(value).height, greaterThan(oneLine));
+      // The wrapped value keeps clear of the label rather than crowding it.
+      expect(
+        tester.getTopLeft(value).dx,
+        greaterThan(tester.getTopRight(label).dx),
+      );
+    });
+  });
+
+  group('CertificationDetailPage card photos', () {
+    // A valid 1x1 transparent PNG, so the image decoder has real bytes.
+    final onePixelPng = base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA'
+      'hKmMIQAAAABJRU5ErkJggg==',
+    );
+
+    Future<void> pumpCert(WidgetTester tester, Certification cert) async {
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            certificationByIdProvider(
+              cert.id,
+            ).overrideWith((ref) async => cert),
+            courseForCertificationProvider(
+              cert.id,
+            ).overrideWith((ref) async => null),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CertificationDetailPage(
+              certificationId: cert.id,
+              embedded: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Certification makeWithPhotos({
+      Uint8List? photoFront,
+      Uint8List? photoBack,
+    }) => Certification(
+      id: 'photo-1',
+      name: 'Open Water Diver',
+      agency: CertificationAgency.padi.name,
+      photoFront: photoFront,
+      photoBack: photoBack,
+      notes: '',
+      createdAt: DateTime(2024),
+      updatedAt: DateTime(2024),
+    );
+
+    testWidgets('shows no card-photos section when neither photo is set', (
+      tester,
+    ) async {
+      await pumpCert(tester, makeWithPhotos());
+
+      expect(find.text('Card Photos'), findsNothing);
+    });
+
+    testWidgets('stacks front above back full-width, not side by side', (
+      tester,
+    ) async {
+      await pumpCert(
+        tester,
+        makeWithPhotos(photoFront: onePixelPng, photoBack: onePixelPng),
+      );
+
+      expect(find.text('Card Photos'), findsOneWidget);
+      expect(find.text('Front'), findsOneWidget);
+      expect(find.text('Back'), findsOneWidget);
+
+      final frontCenter = tester.getCenter(find.text('Front'));
+      final backCenter = tester.getCenter(find.text('Back'));
+
+      // Stacked: same horizontal position, back strictly below front. Side
+      // by side (the pre-#966 layout) would put them at the same height with
+      // different x instead.
+      expect(backCenter.dy, greaterThan(frontCenter.dy));
+      expect(backCenter.dx, closeTo(frontCenter.dx, 1));
+    });
+
+    testWidgets('renders each thumbnail uncropped (BoxFit.contain) at the '
+        'card aspect ratio', (tester) async {
+      await pumpCert(tester, makeWithPhotos(photoFront: onePixelPng));
+
+      final aspectRatios = tester
+          .widgetList<AspectRatio>(find.byType(AspectRatio))
+          .where((w) => w.aspectRatio == 1.586)
+          .toList();
+      expect(aspectRatios, isNotEmpty);
+
+      final images = tester.widgetList<Image>(find.byType(Image));
+      expect(images.any((img) => img.fit == BoxFit.contain), isTrue);
+    });
+
+    testWidgets('tapping the front thumbnail opens the fullscreen photo '
+        'viewer', (tester) async {
+      await pumpCert(tester, makeWithPhotos(photoFront: onePixelPng));
+
+      // The tap target is the photo itself, not its caption below it: find
+      // the (only) front thumbnail by its card-aspect-ratio box, not by text.
+      final finder = find.byWidgetPredicate(
+        (w) => w is AspectRatio && w.aspectRatio == 1.586,
+      );
+      await tester.ensureVisible(finder);
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+    });
+
+    testWidgets('shows only the front thumbnail when there is no back '
+        'photo', (tester) async {
+      await pumpCert(tester, makeWithPhotos(photoFront: onePixelPng));
+
+      expect(find.text('Front'), findsOneWidget);
+      expect(find.text('Back'), findsNothing);
     });
   });
 }

@@ -1,0 +1,528 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/theme/full_themes/tropical_theme.dart';
+import 'package:submersion/features/checklists/data/repositories/checklist_template_repository.dart';
+import 'package:submersion/features/checklists/domain/entities/checklist_template.dart';
+import 'package:submersion/features/checklists/presentation/pages/checklist_template_edit_page.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/test_app.dart';
+import '../../../../helpers/test_database.dart';
+
+/// Renders [ChecklistTemplateEditPage] with [sharedPreferencesProvider]
+/// overridden and the active diver resolved to [_diverId]: Save resolves
+/// the diver first, and a new template is created under it.
+Widget _appWithPrefs(SharedPreferences prefs, Widget child) {
+  return ProviderScope(
+    overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      validatedCurrentDiverIdProvider.overrideWith((ref) async => _diverId),
+    ],
+    child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(body: child),
+    ),
+  );
+}
+
+const _diverId = 'd1';
+
+/// The diver a new template is created under.
+Future<void> _seedDiver() => DatabaseService.instance.database.customStatement(
+  "INSERT INTO divers (id, name, created_at, updated_at) "
+  "VALUES ('$_diverId', 'Diver', 1, 1)",
+);
+
+/// The open item dialog's Cancel, never the editor bar's.
+Finder dialogCancel() => find.descendant(
+  of: find.byType(AlertDialog),
+  matching: find.widgetWithText(TextButton, 'Cancel'),
+);
+
+/// Finds the first TextFormField inside the open AlertDialog (the item's
+/// title field), never the page's own name/description fields.
+Finder dialogTitleField() => find
+    .descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextFormField),
+    )
+    .first;
+
+void main() {
+  testWidgets('adding an item to an existing template does not throw', (
+    tester,
+  ) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    final repo = ChecklistTemplateRepository();
+    final created = await repo.createTemplate(
+      ChecklistTemplate(
+        id: '',
+        name: 'Packing',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    await repo.saveItems(created.id, [
+      ChecklistTemplateItem(
+        id: '',
+        templateId: created.id,
+        title: 'Wetsuit',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+      ChecklistTemplateItem(
+        id: '',
+        templateId: created.id,
+        title: 'Fins',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    ]);
+
+    await tester.pumpWidget(
+      testApp(child: ChecklistTemplateEditPage(templateId: created.id)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Wetsuit'), findsOneWidget);
+    expect(find.text('Fins'), findsOneWidget);
+
+    // Open the add-item dialog, fill the title, confirm. The dialog owns
+    // ephemeral controllers; disposing them at the wrong time throws
+    // "TextEditingController used after being disposed" (or trips the
+    // InheritedElement _dependents assertion) during the exit animation.
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogTitleField(), 'Mask');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Mask'), findsOneWidget);
+  });
+
+  testWidgets('cancelling the item dialog does not throw', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    await tester.pumpWidget(testApp(child: const ChecklistTemplateEditPage()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogTitleField(), 'Discarded');
+    await tester.tap(dialogCancel());
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Discarded'), findsNothing);
+  });
+
+  testWidgets('editing an existing item updates its title', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    final repo = ChecklistTemplateRepository();
+    final created = await repo.createTemplate(
+      ChecklistTemplate(
+        id: '',
+        name: 'Packing',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    await repo.saveItems(created.id, [
+      ChecklistTemplateItem(
+        id: '',
+        templateId: created.id,
+        title: 'Wetsuit',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    ]);
+
+    await tester.pumpWidget(
+      testApp(child: ChecklistTemplateEditPage(templateId: created.id)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Wetsuit'));
+    await tester.pumpAndSettle();
+    // Dialog pre-fills the existing title.
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Wetsuit'),
+      ),
+      findsOneWidget,
+    );
+    await tester.enterText(dialogTitleField(), 'Drysuit');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Drysuit'), findsOneWidget);
+    expect(find.text('Wetsuit'), findsNothing);
+  });
+
+  testWidgets('the page titles itself for add versus edit', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    await tester.pumpWidget(
+      testApp(
+        child: const ChecklistTemplateEditPage(),
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppBar, 'Add Template'), findsOneWidget);
+
+    final repo = ChecklistTemplateRepository();
+    final created = await repo.createTemplate(
+      ChecklistTemplate(
+        id: '',
+        name: 'Packing',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+
+    await tester.pumpWidget(
+      testApp(
+        child: ChecklistTemplateEditPage(templateId: created.id),
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppBar, 'Edit Template'), findsOneWidget);
+  });
+
+  testWidgets('the item dialog titles itself for add versus edit', (
+    tester,
+  ) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    final repo = ChecklistTemplateRepository();
+    final created = await repo.createTemplate(
+      ChecklistTemplate(
+        id: '',
+        name: 'Packing',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    await repo.saveItems(created.id, [
+      ChecklistTemplateItem(
+        id: '',
+        templateId: created.id,
+        title: 'Wetsuit',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    ]);
+
+    await tester.pumpWidget(
+      testApp(
+        child: ChecklistTemplateEditPage(templateId: created.id),
+        locale: const Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Tapping an existing row edits it, so the dialog must not say "Add item".
+    // Scoped to the dialog because the page itself carries an "Add item"
+    // button underneath it.
+    await tester.tap(find.text('Wetsuit'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Edit item'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(dialogCancel());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Add item'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('saving a new template with items persists them via the '
+      'repository', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+    await _seedDiver();
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      _appWithPrefs(prefs, const ChecklistTemplateEditPage()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'Egypt prep',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Description'),
+      'Liveaboard packing',
+    );
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogTitleField(), 'Mask');
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    final repo = ChecklistTemplateRepository();
+    final all = await repo.getAllTemplates();
+    expect(all, hasLength(1));
+    expect(all.single.name, 'Egypt prep');
+    expect(all.single.description, 'Liveaboard packing');
+    final items = await repo.getItemsForTemplate(all.single.id);
+    expect(items.single.title, 'Mask');
+  });
+
+  testWidgets('empty template name fails validation and does not save', (
+    tester,
+  ) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      _appWithPrefs(prefs, const ChecklistTemplateEditPage()),
+    );
+    await tester.pumpAndSettle();
+
+    // An untouched form has nothing to save: a description makes it a
+    // change, so Save runs the checks.
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Description'),
+      'No name yet',
+    );
+    await tester.pump();
+    await tester.tap(find.widgetWithText(TextButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Name is required'), findsOneWidget);
+    final repo = ChecklistTemplateRepository();
+    expect(await repo.getAllTemplates(), isEmpty);
+  });
+
+  testWidgets('an invalid due offset shows a validation error in the item '
+      'dialog', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    await tester.pumpWidget(testApp(child: const ChecklistTemplateEditPage()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogTitleField(), 'Book flights');
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Days before trip start'),
+      '-3',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter 0 or more days'), findsOneWidget);
+    // Dialog stays open on validation failure -- nothing was added.
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    await tester.tap(dialogCancel());
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an empty item title shows a validation error in the item '
+      'dialog', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    await tester.pumpWidget(testApp(child: const ChecklistTemplateEditPage()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Title is required'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    await tester.tap(dialogCancel());
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('deleting an item removes it from the list', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    final repo = ChecklistTemplateRepository();
+    final created = await repo.createTemplate(
+      ChecklistTemplate(
+        id: '',
+        name: 'Packing',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    final section = await repo.createSection(
+      templateId: created.id,
+      title: 'Gear',
+    );
+    await repo.saveItems(created.id, [
+      ChecklistTemplateItem(
+        id: '',
+        templateId: created.id,
+        title: 'Wetsuit',
+        sectionId: section.id,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    ]);
+
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      _appWithPrefs(prefs, ChecklistTemplateEditPage(templateId: created.id)),
+    );
+    await tester.pumpAndSettle();
+
+    // The section header renders above its items.
+    expect(find.text('Gear'), findsOneWidget);
+
+    // The section's own delete icon comes first, the item's last.
+    await tester.tap(find.byIcon(Icons.delete_outline).last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Wetsuit'), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Save'));
+    await tester.pumpAndSettle();
+    expect(await repo.getItemsForTemplate(created.id), isEmpty);
+  });
+
+  testWidgets('the item dialog carries over its section, notes, and due '
+      'offset fields', (tester) async {
+    await setUpTestDatabase();
+    addTearDown(tearDownTestDatabase);
+
+    await tester.pumpWidget(testApp(child: const ChecklistTemplateEditPage()));
+    await tester.pumpAndSettle();
+
+    // A section must exist before it can be picked in the item dialog --
+    // sections are managed via the editor's own "Add section", not typed
+    // free text in the item dialog.
+    await tester.tap(find.widgetWithText(TextButton, 'Add section'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'New section'),
+      'Bookings',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Add item'));
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogTitleField(), 'Book flights');
+    await tester.tap(find.text('No section'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Bookings').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Notes'),
+      'window seat',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Days before trip start'),
+      '60',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'OK'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Book flights'), findsOneWidget);
+
+    // Re-open the item to confirm the fields round-tripped.
+    await tester.tap(find.text('Book flights'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('window seat'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: find.byType(AlertDialog), matching: find.text('60')),
+      findsOneWidget,
+    );
+    await tester.tap(dialogCancel());
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'the Save action stays visible on the tropical app bar when creating a '
+    'new template (#1231)',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: tropicalLight,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: const ChecklistTemplateEditPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final style = tester
+          .renderObject<RenderParagraph>(find.text('Save'))
+          .text
+          .style;
+      expect(style?.color, isNotNull);
+      expect(
+        style!.color,
+        isNot(tropicalLight.appBarTheme.backgroundColor),
+        reason:
+            'a bare TextButton paints colorScheme.primary, which this theme '
+            'sets to its own app bar background, so the diver sees no Save '
+            'button at all',
+      );
+    },
+  );
+}

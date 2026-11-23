@@ -33,6 +33,11 @@ class TankPreset {
 class TankPresets {
   TankPresets._();
 
+  /// The start pressure the dive planner gives a cylinder nothing else
+  /// fills: its default tank, a new tank in the tank dialog, and a saved
+  /// cylinder that has neither a start nor a working pressure (#3603).
+  static const double planFillPressureBar = 200.0;
+
   // Aluminum tanks (common in US)
   // Working pressures use exact PSI-to-bar conversions (1 psi = 1/14.5038 bar)
   // so displayed values round correctly in both bar and PSI.
@@ -64,6 +69,16 @@ class TankPresets {
     material: TankMaterial.aluminum,
     description: 'Aluminum 80 cu ft (most common)',
     ratedCapacityCuft: 77.4,
+  );
+
+  static const al100 = TankPreset(
+    name: 'al100',
+    displayName: 'AL100',
+    volumeLiters: 13.1,
+    workingPressureBar: 227.527, // 3300 psi
+    material: TankMaterial.aluminum,
+    description: 'Aluminum 100 cu ft',
+    ratedCapacityCuft: 100.0,
   );
 
   // High pressure steel tanks
@@ -158,7 +173,7 @@ class TankPresets {
   );
 
   /// All available presets grouped by category
-  static const List<TankPreset> aluminum = [al80, al63, al40];
+  static const List<TankPreset> aluminum = [al100, al80, al63, al40];
   static const List<TankPreset> hpSteel = [hp120, hp100, hp80];
   static const List<TankPreset> lpSteel = [lp85];
   static const List<TankPreset> metric = [steel15, steel12, steel10];
@@ -166,6 +181,7 @@ class TankPresets {
 
   /// All available presets
   static const List<TankPreset> all = [
+    al100,
     al80,
     al63,
     al40,
@@ -191,13 +207,74 @@ class TankPresets {
 
   /// Match a preset by volume and working pressure within tolerance.
   /// Returns the matching preset (with ratedCapacityCuft) or null.
+  ///
+  /// Specs alone cannot always identify one preset: an AL40 and an AL40 Stage
+  /// are both 5.7 L at 206.843 bar with a 40 cuft rating, differing only in
+  /// how they are rigged. Ties resolve to the first entry in [all], so the
+  /// plain cylinder wins over its stage variant. Callers that know which one
+  /// they hold should pass the slug instead of relying on this.
+  ///
+  /// That tie-break is only safe while indistinguishable presets agree on
+  /// everything a caller reads from the result. Two invariants hold it:
+  /// `tank_presets_test.dart` pins the AL40 tie, and `tank_catalog_test.dart`
+  /// asserts that any two presets [matchAnyBySpecs] cannot tell apart share
+  /// the same `kTankCatalog` row, so buoyancy never depends on list order.
   static TankPreset? matchBySpecs(
     double volumeLiters,
     double workingPressureBar,
   ) {
     for (final preset in all) {
       if (preset.ratedCapacityCuft != null &&
-          (preset.volumeLiters - volumeLiters).abs() < 0.2 &&
+          _matchesSpecs(preset, volumeLiters, workingPressureBar)) {
+        return preset;
+      }
+    }
+    return null;
+  }
+
+  /// [matchBySpecs] over every preset, rated or not, so the metric steel
+  /// cylinders (10, 12 and 15 L at 200 bar) resolve too. Buoyancy uses this
+  /// to find a tank's catalog row (#3686); [matchBySpecs] stays rated-only
+  /// because its callers read the cuft rating off the result.
+  ///
+  /// A known [material] must agree with the preset: a size match fills in a
+  /// missing material but never overrides one the diver set. Ties resolve to
+  /// the first entry in [all], as in [matchBySpecs].
+  static TankPreset? matchAnyBySpecs(
+    double volumeLiters,
+    double workingPressureBar, {
+    TankMaterial? material,
+  }) {
+    for (final preset in all) {
+      if ((material == null || preset.material == material) &&
+          _matchesSpecs(preset, volumeLiters, workingPressureBar)) {
+        return preset;
+      }
+    }
+    return null;
+  }
+
+  static bool _matchesSpecs(
+    TankPreset preset,
+    double volumeLiters,
+    double workingPressureBar,
+  ) =>
+      (preset.volumeLiters - volumeLiters).abs() < 0.2 &&
+      (preset.workingPressureBar - workingPressureBar).abs() < 2.0;
+
+  /// The inverse of reading [TankPreset.ratedCapacityCuft] off
+  /// [matchBySpecs]: the first preset rated at [ratedCuft] (within 0.05, the
+  /// rounding of a one-decimal CSV value) whose working pressure is within
+  /// 2 bar of [workingPressureBar]. Used to turn an imperial CSV's rated
+  /// capacity back into the cylinder's physical volume.
+  static TankPreset? matchByCapacity(
+    double ratedCuft,
+    double workingPressureBar,
+  ) {
+    for (final preset in all) {
+      final rated = preset.ratedCapacityCuft;
+      if (rated != null &&
+          (rated - ratedCuft).abs() < 0.05 &&
           (preset.workingPressureBar - workingPressureBar).abs() < 2.0) {
         return preset;
       }

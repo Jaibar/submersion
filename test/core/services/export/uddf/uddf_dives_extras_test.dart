@@ -1,0 +1,324 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/services/export/models/uddf_export_options.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dives_extras.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show TankPressurePoint;
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_roles/data/repositories/dive_role_repository.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_classification_repository.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_component_repository.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_component.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
+import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
+import 'package:submersion/features/marine_life/domain/entities/species.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
+import 'package:submersion/features/site_types/data/repositories/site_type_repository.dart';
+import 'package:submersion/features/site_types/presentation/providers/site_type_providers.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank_pressure_export.dart';
+
+import '../../../../helpers/tank_pressure_export_fixtures.dart';
+
+final _epoch = DateTime(2024, 1, 1);
+final _row = BuddyWithRole(
+  buddy: Buddy(id: 'b1', name: 'Joe', createdAt: _epoch, updatedAt: _epoch),
+  roles: [
+    DiveRole(
+      id: DiveRole.buddyId,
+      name: 'Buddy',
+      createdAt: _epoch,
+      updatedAt: _epoch,
+    ),
+  ],
+);
+final _role = DiveRole(
+  id: 'role-photo',
+  diverId: 'diver-1',
+  name: 'Photographer',
+  createdAt: _epoch,
+  updatedAt: _epoch,
+);
+final _component = EquipmentComponent(
+  id: 'c1',
+  parentEquipmentId: 'reg',
+  componentEquipmentId: 'first',
+  createdAt: _epoch,
+  updatedAt: _epoch,
+);
+
+class _Buddies extends Fake implements BuddyRepository {
+  final calls = <List<String>>[];
+
+  @override
+  Future<Map<String, List<BuddyWithRole>>> getBuddiesForDivesWithCertifications(
+    List<String> diveIds,
+  ) async {
+    calls.add(diveIds);
+    return {
+      'd1': [_row],
+    };
+  }
+}
+
+class _Components extends Fake implements EquipmentComponentRepository {
+  final calls = <List<String>>[];
+
+  @override
+  Future<List<EquipmentComponent>> getComponentsForDives(
+    List<String> diveIds,
+  ) async {
+    calls.add(diveIds);
+    return [_component];
+  }
+}
+
+/// Site classification with nothing classified (issue #1765).
+class _Classification extends Fake implements SiteClassificationRepository {
+  final siteQueries = <List<String>>[];
+
+  @override
+  Future<List<String>> getSiteIdsForDives(List<String> diveIds) async {
+    siteQueries.add(diveIds);
+    return const [];
+  }
+
+  @override
+  Future<Map<String, List<String>>> getTypeIdsBySite(
+    List<String> siteIds,
+  ) async => const {};
+
+  @override
+  Future<Map<String, List<String>>> getTagIdsBySite(
+    List<String> siteIds,
+  ) async => const {};
+
+  @override
+  Future<Map<String, List<Tag>>> getTagsBySite({List<String>? siteIds}) async =>
+      const {};
+}
+
+class _SiteTypes extends Fake implements SiteTypeRepository {}
+
+class _Roles extends Fake implements DiveRoleRepository {
+  final calls = <String?>[];
+
+  @override
+  Future<List<DiveRole>> getAllDiveRoles({String? diverId}) async {
+    calls.add(diverId);
+    return [_role];
+  }
+}
+
+final _pressures = {
+  'd1': testPressureExport({
+    'tank-a': const [
+      TankPressurePoint(tankId: 'tank-a', timestamp: 0, pressure: 200.0),
+    ],
+  }),
+};
+
+final _switches = {
+  'd1': [
+    GasSwitchWithTank(
+      gasSwitch: GasSwitch(
+        id: 'switch-1',
+        diveId: 'd1',
+        timestamp: 30,
+        tankId: 'tank-a',
+        createdAt: DateTime.utc(2026),
+      ),
+      tankName: 'Stage',
+      gasMix: 'EAN50',
+      o2Fraction: 0.5,
+    ),
+  ],
+};
+
+class _Dives extends Fake implements DiveRepository {
+  final calls = <List<String>>[];
+
+  @override
+  Future<Map<String, List<GasSwitchWithTank>>> getGasSwitchesForDives(
+    List<String> diveIds,
+  ) async {
+    calls.add(diveIds);
+    return _switches;
+  }
+}
+
+class _TankPressures extends Fake implements TankPressureRepository {
+  final calls = <List<String>>[];
+
+  @override
+  Future<Map<String, DiveTankPressureExport>> getTankPressuresForDives(
+    List<String> diveIds,
+  ) async {
+    calls.add(diveIds);
+    return _pressures;
+  }
+}
+
+const _dragon = Species(
+  id: 'sp-1',
+  commonName: 'Blue Dragon',
+  category: SpeciesCategory.invertebrate,
+);
+
+class _Species extends Fake implements SpeciesRepository {
+  final calls = <List<String>>[];
+
+  @override
+  Future<List<Species>> getSpeciesSightedOnDives(List<String> diveIds) async {
+    calls.add(diveIds);
+    return const [_dragon];
+  }
+}
+
+void main() {
+  test('fetches participants and components by default', () async {
+    final buddies = _Buddies();
+    final components = _Components();
+    final extras = await resolveDivesExtras(
+      buddies,
+      components,
+      _Roles(),
+      'diver-1',
+      ['d1'],
+      const UddfExportOptions(),
+    );
+    expect(buddies.calls, [
+      ['d1'],
+    ]);
+    expect(components.calls, [
+      ['d1'],
+    ]);
+    expect(extras.diveBuddies['d1'], [_row]);
+    expect(extras.components, [_component]);
+  });
+
+  test('queries nothing a checkbox left out', () async {
+    final buddies = _Buddies();
+    final components = _Components();
+    final extras = await resolveDivesExtras(
+      buddies,
+      components,
+      _Roles(),
+      'diver-1',
+      ['d1'],
+      const UddfExportOptions(includeParticipants: false, includeGear: false),
+    );
+    expect(buddies.calls, isEmpty);
+    expect(components.calls, isEmpty);
+    expect(extras.diveBuddies, isEmpty);
+    expect(extras.components, isEmpty);
+  });
+
+  test('fetches the diver\'s own roles whatever the checkboxes', () async {
+    // Every dive writes its diver's role, participants or not, so the file
+    // must be able to define a custom one either way.
+    final roles = _Roles();
+    final extras = await resolveDivesExtras(
+      _Buddies(),
+      _Components(),
+      roles,
+      'diver-1',
+      ['d1'],
+      const UddfExportOptions(includeParticipants: false, includeGear: false),
+    );
+    expect(roles.calls, ['diver-1']);
+    expect(extras.diveRoles, [_role]);
+  });
+
+  test('fetches the dives\' gas switches whatever the checkboxes', () async {
+    // The dive's own record too; a switch names a tank, not a participant
+    // or a piece of gear (issue #3966).
+    final dives = _Dives();
+    final extras = await resolveDivesExtras(
+      _Buddies(),
+      _Components(),
+      _Roles(),
+      'diver-1',
+      ['d1'],
+      const UddfExportOptions(includeParticipants: false, includeGear: false),
+      dives: dives,
+    );
+    expect(dives.calls, [
+      ['d1'],
+    ]);
+    expect(extras.diveGasSwitches, _switches);
+  });
+
+  test('fetches the species the dives\' sightings name (#4578)', () async {
+    final species = _Species();
+    final extras = await resolveDivesExtras(
+      _Buddies(),
+      _Components(),
+      _Roles(),
+      'diver-1',
+      ['d1'],
+      const UddfExportOptions(includeParticipants: false, includeGear: false),
+      species: species,
+    );
+    expect(species.calls, [
+      ['d1'],
+    ]);
+    expect(extras.species, [_dragon]);
+  });
+
+  test('the provider reads every repository for the active diver', () async {
+    final roles = _Roles();
+    final species = _Species();
+    final pressures = _TankPressures();
+    final dives = _Dives();
+    final classification = _Classification();
+    final container = ProviderContainer(
+      overrides: [
+        buddyRepositoryProvider.overrideWithValue(_Buddies()),
+        equipmentComponentRepositoryProvider.overrideWithValue(_Components()),
+        diveRoleRepositoryProvider.overrideWithValue(roles),
+        tankPressureRepositoryProvider.overrideWithValue(pressures),
+        diveRepositoryProvider.overrideWithValue(dives),
+        validatedCurrentDiverIdProvider.overrideWith((ref) async => 'diver-1'),
+        siteClassificationRepositoryProvider.overrideWithValue(classification),
+        siteTypeRepositoryProvider.overrideWithValue(_SiteTypes()),
+        speciesRepositoryProvider.overrideWithValue(species),
+      ],
+    );
+    addTearDown(container.dispose);
+    final extras = await container.read(uddfDivesExtrasFetchProvider)([
+      'd1',
+    ], const UddfExportOptions());
+    expect(extras.diveBuddies['d1'], [_row]);
+    expect(extras.components, [_component]);
+    expect(roles.calls, ['diver-1']);
+    expect(extras.diveRoles, [_role]);
+    // The tank pressures grow with the recordings, so the export reads them
+    // a run of dives at a time with the samples instead (issue #4249).
+    expect(pressures.calls, isEmpty);
+    expect(extras.diveGasSwitches, _switches);
+    expect(classification.siteQueries, [
+      ['d1'],
+    ]);
+    expect(extras.species, [_dragon]);
+  });
+
+  test('empty holds nothing', () {
+    const extras = UddfDivesExtras.empty();
+    expect(extras.diveBuddies, isEmpty);
+    expect(extras.components, isEmpty);
+    expect(extras.diveRoles, isEmpty);
+    expect(extras.species, isEmpty);
+  });
+}

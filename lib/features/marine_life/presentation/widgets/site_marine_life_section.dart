@@ -1,27 +1,44 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/marine_life/presentation/species_display.dart';
+import 'package:submersion/features/marine_life/presentation/utils/species_category_icon.dart';
+import 'package:submersion/features/reef/presentation/widgets/nearby_species_tier.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart';
 import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
-import 'package:submersion/features/marine_life/presentation/widgets/species_picker_dialog.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_header.dart';
 
-/// Section widget displaying marine life at a dive site
+/// The marine life at a dive site, shown only: the site page's Marine life
+/// card, whose pencil edits the expected species in a sitting (issue #4527,
+/// phase 2), the one way to change them.
 class SiteMarineLifeSection extends ConsumerWidget {
   final String siteId;
-  final bool readOnly;
+
+  /// When present, a "Recorded nearby" tier is shown from online sources.
+  final GeoPoint? location;
+
+  /// The expected species to show in place of those stored: a sitting's,
+  /// once the diver has changed them (issue #4527).
+  final List<SiteSpeciesEntry>? species;
 
   const SiteMarineLifeSection({
     super.key,
     required this.siteId,
-    this.readOnly = false,
+    this.location,
+    this.species,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final spottedAsync = ref.watch(siteSpottedSpeciesProvider(siteId));
-    final expectedAsync = ref.watch(siteExpectedSpeciesProvider(siteId));
+    final held = species;
+    final expectedAsync = held != null
+        ? AsyncValue.data(held)
+        : ref.watch(siteExpectedSpeciesProvider(siteId));
 
     return Card(
       child: Padding(
@@ -34,6 +51,16 @@ class SiteMarineLifeSection extends ConsumerWidget {
             _buildSpottedSection(context, ref, spottedAsync),
             const SizedBox(height: 16),
             _buildExpectedSection(context, ref, expectedAsync),
+            if (location != null) ...[
+              const SizedBox(height: 16),
+              // Shown only, as on the species map: a species opens its
+              // page, and adding one is the unlocked card's (plan 7).
+              NearbySpeciesTier(
+                siteId: siteId,
+                location: location!,
+                onSpeciesTap: (id) => context.push('/species/$id'),
+              ),
+            ],
           ],
         ),
       ),
@@ -42,16 +69,10 @@ class SiteMarineLifeSection extends ConsumerWidget {
 
   Widget _buildHeader(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-
-    return Row(
-      children: [
-        Icon(Icons.water, size: 20, color: colorScheme.primary),
-        const SizedBox(width: 8),
-        Text(
-          context.l10n.marineLife_siteSection_title,
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-      ],
+    // The pencil, while the page is unlocked (issue #4527).
+    return RecordCardHeader(
+      title: context.l10n.marineLife_siteSection_title,
+      leading: Icon(Icons.water, size: 20, color: colorScheme.primary),
     );
   }
 
@@ -99,7 +120,11 @@ class SiteMarineLifeSection extends ConsumerWidget {
                   .map(
                     (s) => _SpeciesChipData(
                       id: s.speciesId,
-                      name: s.speciesName,
+                      name: localizedSpeciesName(
+                        context.l10n,
+                        s.speciesId,
+                        s.speciesName,
+                      ),
                       category: s.category,
                       count: s.sightingCount,
                     ),
@@ -149,14 +174,6 @@ class SiteMarineLifeSection extends ConsumerWidget {
                 ),
               ),
             ),
-            if (!readOnly)
-              IconButton(
-                icon: Icon(Icons.edit, size: 18, color: colorScheme.primary),
-                visualDensity: VisualDensity.compact,
-                tooltip:
-                    context.l10n.marineLife_siteSection_editExpectedTooltip,
-                onPressed: () => _showSpeciesPicker(context, ref),
-              ),
           ],
         ),
         const SizedBox(height: 8),
@@ -177,7 +194,11 @@ class SiteMarineLifeSection extends ConsumerWidget {
                   .map(
                     (s) => _SpeciesChipData(
                       id: s.speciesId,
-                      name: s.speciesName,
+                      name: localizedSpeciesName(
+                        context.l10n,
+                        s.speciesId,
+                        s.speciesName,
+                      ),
                       category: s.category,
                     ),
                   )
@@ -222,7 +243,7 @@ class SiteMarineLifeSection extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                entry.key.displayName,
+                entry.key.localizedName(context.l10n),
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),
@@ -244,7 +265,7 @@ class SiteMarineLifeSection extends ConsumerWidget {
                     child: Chip(
                       avatar: ExcludeSemantics(
                         child: Icon(
-                          _getCategoryIcon(s.category),
+                          iconForSpeciesCategory(s.category),
                           size: 16,
                           color: _getCategoryColor(s.category),
                         ),
@@ -267,47 +288,6 @@ class SiteMarineLifeSection extends ConsumerWidget {
         );
       }).toList(),
     );
-  }
-
-  Future<void> _showSpeciesPicker(BuildContext context, WidgetRef ref) async {
-    final expected = ref.read(siteExpectedSpeciesProvider(siteId)).valueOrNull;
-    final selectedIds = expected?.map((e) => e.speciesId).toSet() ?? {};
-
-    final result = await showDialog<Set<String>>(
-      context: context,
-      builder: (context) => SpeciesPickerDialog(initialSelection: selectedIds),
-    );
-
-    if (result != null) {
-      final notifier = ref.read(
-        siteExpectedSpeciesNotifierProvider(siteId).notifier,
-      );
-      await notifier.setSpecies(result.toList());
-      ref.invalidate(siteExpectedSpeciesProvider(siteId));
-    }
-  }
-
-  IconData _getCategoryIcon(SpeciesCategory category) {
-    switch (category) {
-      case SpeciesCategory.fish:
-        return Icons.water;
-      case SpeciesCategory.shark:
-        return Icons.water;
-      case SpeciesCategory.ray:
-        return Icons.water;
-      case SpeciesCategory.mammal:
-        return Icons.water;
-      case SpeciesCategory.turtle:
-        return Icons.water;
-      case SpeciesCategory.invertebrate:
-        return Icons.bug_report;
-      case SpeciesCategory.coral:
-        return Icons.park;
-      case SpeciesCategory.plant:
-        return Icons.grass;
-      case SpeciesCategory.other:
-        return Icons.pets;
-    }
   }
 
   Color _getCategoryColor(SpeciesCategory category) {

@@ -1,29 +1,45 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:fit_tool/fit_tool.dart';
 // ignore: implementation_imports
 import 'package:fit_tool/src/utils/logger.dart' as fit_log;
 import 'package:logger/logger.dart' show Level, Logger;
+import 'package:submersion/core/utils/time_weighted_mean.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_constants.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_device_mapper.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_gas_extractor.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_gas_switch_extractor.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_profile_extractor.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_raw_field_reader.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_summary_extractor.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_tank_extractor.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_time_resolver.dart';
+import 'package:submersion/features/dive_import/data/services/fit/fit_tissue_snapshot.dart';
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart';
 
 /// Garmin FIT sport codes that represent dive activities.
 const _diveSports = {Sport.diving};
 
-/// Parses Garmin FIT binary files into [ImportedDive] entities.
+/// The manufacturer a FIT `file_id.manufacturer` code names, for the codes
+/// whose dive computers Submersion imports. Null for any other code, which
+/// leaves the computer's manufacturer blank as before (issue #3106).
+String? fitManufacturerName(int? id) => switch (id) {
+  1 => 'Garmin',
+  23 => 'Suunto',
+  _ => null,
+};
+
+/// Parses Garmin FIT binary files into enriched [ImportedDive] entities.
 ///
-/// Extracts dive-specific data from FIT activity files:
-/// - Session: sport type, start/end time, GPS coordinates
-/// - Records: depth, temperature, heart rate time series
-/// - FileId: device serial number for dedup sourceId generation
-///
-/// Returns null for non-dive activities, corrupt files, or empty data.
+/// Orchestrates focused extractors (see `fit/`) to pull depth/temp/HR samples,
+/// recorded deco (ceiling/TTS/NDL/CNS), air-integration tanks + pressure series,
+/// gas mixes, GPS, and dive-level summary fields. Returns null for non-dive
+/// activities and corrupt files. A dive with no depth samples still parses,
+/// with an empty profile.
 class FitParserService {
   const FitParserService();
 
-  /// Parse a single FIT file into an [ImportedDive].
-  ///
-  /// Returns null if the file is not a dive activity, is corrupt,
-  /// or contains no usable dive data.
   Future<ImportedDive?> parseFitFile(
     Uint8List bytes, {
     String? fileName,
@@ -31,8 +47,6 @@ class FitParserService {
     if (bytes.isEmpty) return null;
 
     // Suppress verbose warnings from fit_tool's outdated FIT SDK profile.
-    // The library logs a warning for every unknown field in newer Garmin
-    // firmware, but these fields are irrelevant to dive data extraction.
     fit_log.logger = Logger(level: Level.error);
 
     final FitFile fitFile;
@@ -47,96 +61,138 @@ class FitParserService {
         .whereType<Message>()
         .toList();
 
-    // Extract key messages
-    final session = _findSession(messages);
+    final session = _firstOfType<SessionMessage>(messages);
     if (session == null) return null;
-
-    // Verify this is a dive activity
     if (!_isDiveActivity(session)) return null;
 
-    final fileId = _findFileId(messages);
-    final records = _extractRecords(messages);
+    final sessionStartMs = session.startTime;
+    if (sessionStartMs == null) return null;
 
-    // Build profile samples
-    final startTimeMs = session.startTime;
-    if (startTimeMs == null) return null;
+    final records = messages.whereType<RecordMessage>().toList();
+    // May be empty: a dive logged without a recorded profile still imports,
+    // with its depth taken from the dive summary (#1605).
+    final samples = FitProfileExtractor.extract(records);
 
-    // FIT timestamps are UTC. Convert to local wall-clock time, then
-    // re-interpret as UTC (wall-time-as-UTC convention) so the displayed
-    // dive time reflects the local time at the dive site.
-    final localStart = DateTime.fromMillisecondsSinceEpoch(startTimeMs);
-    final startTime = DateTime.utc(
-      localStart.year,
-      localStart.month,
-      localStart.day,
-      localStart.hour,
-      localStart.minute,
-      localStart.second,
+    final fileId = _firstOfType<FileIdMessage>(messages);
+    final activity = _firstOfType<ActivityMessage>(messages);
+    final settings = _firstOfType<DiveSettingsMessage>(messages);
+    final diveSummary = _bestDiveSummary(messages);
+
+    final tankData = FitTankExtractor.extract(messages);
+    // Drop air-integration summaries with no real pressure (a configured-but-
+    // unused transmitter reports all-zero start/end).
+    final realTanks = tankData.tanks
+        .where(
+          (t) => (t.startPressureBar ?? 0) > 0 || (t.endPressureBar ?? 0) > 0,
+        )
+        .toList();
+    final gases = FitGasExtractor.extract(messages);
+    final summary = FitSummaryExtractor.extract(
+      summary: diveSummary,
+      session: session,
+      settings: settings,
     );
 
-    // Use raw UTC epoch for profile offset calculations (both record
-    // timestamps and startTimeMs are in the same UTC time base).
-    final profile = _buildProfile(records, startTimeMs);
+    // Wall-clock start (local time stored as UTC, per the app convention).
+    // FitTimeResolver normalizes the mixed timestamp bases fit_tool returns.
+    final startTime = FitTimeResolver.wallClockStart(
+      utcStartMs: sessionStartMs,
+      localStartMs: null,
+      utcTimestampMs: activity?.timestamp,
+      localTimestampMs: activity?.localTimestamp,
+    );
 
-    // Compute summary stats from records
-    final depths = records.map((r) => r.depth).whereType<double>().toList();
-
-    if (depths.isEmpty) return null;
-
-    final maxDepth = depths.reduce((a, b) => a > b ? a : b);
-    final avgDepth = depths.reduce((a, b) => a + b) / depths.length;
-
-    // Temperature stats
-    final temperatures = records
-        .map((r) => r.temperature)
-        .whereType<int>()
-        .map((t) => t.toDouble())
-        .toList();
-
-    final double? minTemperature;
-    final double? maxTemperature;
-    if (temperatures.isNotEmpty) {
-      minTemperature = temperatures.reduce((a, b) => a < b ? a : b);
-      maxTemperature = temperatures.reduce((a, b) => a > b ? a : b);
-    } else {
-      minTemperature = null;
-      maxTemperature = null;
-    }
-
-    // Heart rate stats
-    final heartRates = records
-        .map((r) => r.heartRate)
-        .whereType<int>()
-        .toList();
-
-    final double? avgHeartRate;
-    if (heartRates.isNotEmpty) {
-      avgHeartRate = heartRates.reduce((a, b) => a + b) / heartRates.length;
-    } else {
-      avgHeartRate = null;
-    }
-
-    // End time from session
     final totalElapsed = session.totalElapsedTime;
     final Duration elapsed;
     if (totalElapsed != null) {
       elapsed = Duration(seconds: totalElapsed.round());
     } else {
-      final endMs = session.timestamp ?? startTimeMs;
-      elapsed = Duration(milliseconds: endMs - startTimeMs);
+      final endMs = session.timestamp ?? sessionStartMs;
+      elapsed = Duration(milliseconds: endMs - sessionStartMs);
     }
     final endTime = startTime.add(elapsed);
 
-    // GPS from session
-    final latitude = session.startPositionLat;
-    final longitude = session.startPositionLong;
+    // Profile (relative offsets use the raw UTC start; tank pressures merged in).
+    final profile = _buildProfile(
+      samples,
+      sessionStartMs,
+      tankData.pressures,
+      realTanks,
+    );
 
-    // Source ID for deduplication (use raw UTC epoch for stability)
-    final serialNumber = fileId?.serialNumber ?? 0;
-    final sourceId = 'garmin-$serialNumber-$startTimeMs';
+    // Summary stats derived from the samples. Without any, the dive summary's
+    // own depths are all there is; a dive that recorded no depth anywhere
+    // imports at 0 m for the diver to correct.
+    final depths = samples.map((s) => s.depth).toList();
+    final maxDepth = depths.isEmpty
+        ? (diveSummary?.maxDepth ?? 0.0)
+        : depths.reduce(math.max);
+    final avgDepth =
+        timeWeightedMean(
+          samples,
+          time: (s) => s.timestampMs,
+          value: (s) => s.depth,
+        ) ??
+        diveSummary?.avgDepth;
+
+    final temps = samples
+        .map((s) => s.temperature)
+        .whereType<double>()
+        .toList();
+    final minTemperature = temps.isEmpty ? null : temps.reduce(math.min);
+    final maxTemperature = temps.isEmpty ? null : temps.reduce(math.max);
+
+    final heartRates = samples
+        .map((s) => s.heartRate)
+        .whereType<int>()
+        .toList();
+    final avgHeartRate = heartRates.isEmpty
+        ? null
+        : heartRates.reduce((a, b) => a + b) / heartRates.length;
+
+    // Entry GPS: the session's start position, when the device already had a
+    // GPS fix at the moment logging began. Many dive computers haven't
+    // acquired one yet at that point (diver already descending, wrist
+    // underwater, cold start), so fall back to the first record carrying a
+    // fix -- still close enough to the entry point to be useful, and far
+    // better than leaving the dive without any location at all.
+    var entryLat = summary.entryLat;
+    var entryLong = summary.entryLong;
+    if (entryLat == null || entryLong == null) {
+      for (final r in records) {
+        final lat = r.positionLat;
+        final long = r.positionLong;
+        if (lat != null && long != null) {
+          entryLat = lat;
+          entryLong = long;
+          break;
+        }
+      }
+    }
+
+    final (exitLat, exitLong) = _exitPosition(bytes, messages, records);
+
+    final tanks = _buildImportedTanks(realTanks, gases);
+    final gasSwitches = _buildGasSwitches(
+      FitGasSwitchExtractor.extract(messages),
+      gases,
+      samples,
+      sessionStartMs,
+    );
+
+    final serial = fileId?.serialNumber ?? 0;
+    final sourceId = 'garmin-$serial-$sessionStartMs';
+    final manufacturerName = fitManufacturerName(fileId?.manufacturer);
+    final model = FitDeviceMapper.modelFor(
+      manufacturer: fileId?.manufacturer,
+      manufacturerName: manufacturerName,
+      product: fileId?.garminProduct ?? fileId?.product,
+      productName: fileId?.productName,
+    );
 
     return ImportedDive(
       sourceId: sourceId,
+      sourceUuid: sourceId,
       source: ImportSource.garmin,
       startTime: startTime,
       endTime: endTime,
@@ -145,8 +201,26 @@ class FitParserService {
       minTemperature: minTemperature,
       maxTemperature: maxTemperature,
       avgHeartRate: avgHeartRate,
-      latitude: latitude,
-      longitude: longitude,
+      latitude: entryLat,
+      longitude: entryLong,
+      exitLatitude: exitLat,
+      exitLongitude: exitLong,
+      diveNumber: summary.diveNumber,
+      bottomTimeSeconds: summary.bottomTime?.inSeconds,
+      surfaceIntervalSeconds: summary.surfaceInterval?.inSeconds,
+      cnsStart: summary.cnsStart,
+      cnsEnd: summary.cnsEnd,
+      computerTissue: fitTissueSnapshot(summary),
+      otu: summary.otu,
+      waterType: summary.waterType,
+      decoModel: summary.decoModel,
+      gfLow: summary.gfLow,
+      gfHigh: summary.gfHigh,
+      computerManufacturer: manufacturerName,
+      computerModel: model,
+      computerSerial: serial != 0 ? '$serial' : null,
+      tanks: tanks,
+      gasSwitches: gasSwitches,
       profile: profile,
       sourceFileName: fileName,
       sourceFileFormat: 'fit',
@@ -154,39 +228,80 @@ class FitParserService {
   }
 
   /// Parse multiple FIT files, returning only valid dive activities.
-  ///
-  /// Non-dive files and corrupt files are silently filtered out.
   Future<List<ImportedDive>> parseFitFiles(
     List<Uint8List> fileBytes, {
     List<String>? fileNames,
   }) async {
     final results = <ImportedDive>[];
-
     for (var i = 0; i < fileBytes.length; i++) {
       final fileName = (fileNames != null && i < fileNames.length)
           ? fileNames[i]
           : null;
       final dive = await parseFitFile(fileBytes[i], fileName: fileName);
-      if (dive != null) {
-        results.add(dive);
-      }
+      if (dive != null) results.add(dive);
     }
-
     return results;
   }
 
-  SessionMessage? _findSession(List<Message> messages) {
-    for (final msg in messages) {
-      if (msg is SessionMessage) return msg;
+  /// Exit GPS, from the first source that has a full fix:
+  ///
+  /// 1. `session.end_position_lat/long`, which a Garmin watch fills in from the
+  ///    fix it takes after surfacing. fit_tool drops these fields, so they are
+  ///    read off the raw bytes (issue #1797).
+  /// 2. The last lap's end position.
+  /// 3. The last record carrying a fix. Records logged underwater have none,
+  ///    so this only helps when the watch kept logging at the surface.
+  (double?, double?) _exitPosition(
+    Uint8List bytes,
+    List<Message> messages,
+    List<RecordMessage> records,
+  ) {
+    final sessionEnd = FitRawFieldReader.firstSint32Fields(
+      bytes,
+      globalId: FitConstants.sessionMsg,
+      fieldIds: const {
+        FitConstants.sessionEndPositionLat,
+        FitConstants.sessionEndPositionLong,
+      },
+    );
+    final endLat = sessionEnd?[FitConstants.sessionEndPositionLat];
+    final endLong = sessionEnd?[FitConstants.sessionEndPositionLong];
+    if (endLat != null && endLong != null) {
+      return (
+        endLat * FitConstants.semicircleToDegrees,
+        endLong * FitConstants.semicircleToDegrees,
+      );
+    }
+
+    for (final lap in messages.whereType<LapMessage>().toList().reversed) {
+      final lat = lap.endPositionLat;
+      final long = lap.endPositionLong;
+      if (lat != null && long != null) return (lat, long);
+    }
+
+    for (final r in records.reversed) {
+      final lat = r.positionLat;
+      final long = r.positionLong;
+      if (lat != null && long != null) return (lat, long);
+    }
+    return (null, null);
+  }
+
+  T? _firstOfType<T extends Message>(List<Message> messages) {
+    for (final m in messages) {
+      if (m is T) return m;
     }
     return null;
   }
 
-  FileIdMessage? _findFileId(List<Message> messages) {
-    for (final msg in messages) {
-      if (msg is FileIdMessage) return msg;
+  /// Prefers the dive summary that carries a dive number (the one referencing
+  /// the session); falls back to the first if none do.
+  DiveSummaryMessage? _bestDiveSummary(List<Message> messages) {
+    final summaries = messages.whereType<DiveSummaryMessage>().toList();
+    for (final s in summaries) {
+      if (s.diveNumber != null) return s;
     }
-    return null;
+    return summaries.isEmpty ? null : summaries.first;
   }
 
   bool _isDiveActivity(SessionMessage session) {
@@ -195,35 +310,122 @@ class FitParserService {
     return _diveSports.contains(sport);
   }
 
-  List<RecordMessage> _extractRecords(List<Message> messages) {
-    return messages.whereType<RecordMessage>().toList();
-  }
-
   List<ImportedProfileSample> _buildProfile(
-    List<RecordMessage> records,
-    int startTimeMs,
+    List<FitSample> samples,
+    int startMs,
+    List<FitTankPressureSample> pressures,
+    List<FitTank> tanks,
   ) {
-    final samples = <ImportedProfileSample>[];
-
-    for (final record in records) {
-      final depth = record.depth;
-      if (depth == null) continue;
-
-      final timestampMs = record.timestamp;
-      final timeSeconds = timestampMs != null
-          ? ((timestampMs - startTimeMs) / 1000).round()
-          : 0;
-
-      samples.add(
-        ImportedProfileSample(
-          timeSeconds: timeSeconds < 0 ? 0 : timeSeconds,
-          depth: depth,
-          temperature: record.temperature?.toDouble(),
-          heartRate: record.heartRate,
+    final orderBySensor = <int, int>{
+      for (var i = 0; i < tanks.length; i++) tanks[i].sensorId: i,
+    };
+    // Bucket tank pressures by their whole-second offset from dive start, so
+    // they can be attached to the contemporaneous depth sample.
+    final pressuresByRelSec = <int, List<ImportedTankPressureSample>>{};
+    for (final p in pressures) {
+      final order = orderBySensor[p.sensorId];
+      if (order == null) continue;
+      final relSec = ((p.timestampMs - startMs) / 1000).round();
+      (pressuresByRelSec[relSec] ??= []).add(
+        ImportedTankPressureSample(
+          tankIndex: order,
+          pressureBar: p.pressureBar,
         ),
       );
     }
 
-    return samples;
+    return samples.map((s) {
+      final relSec = ((s.timestampMs - startMs) / 1000).round();
+      return ImportedProfileSample(
+        timeSeconds: relSec < 0 ? 0 : relSec,
+        depth: s.depth,
+        temperature: s.temperature,
+        heartRate: s.heartRate,
+        cns: s.cns,
+        n2Load: s.n2Load,
+        ndlSeconds: s.ndlSeconds,
+        ttsSeconds: s.ttsSeconds,
+        ceiling: s.ceiling,
+        tankPressures: pressuresByRelSec[relSec],
+      );
+    }).toList();
+  }
+
+  /// Maps gas-switch events onto tank indices, attaching the depth of the
+  /// nearest profile sample. The event's data field holds the dive_gas
+  /// message index, which is the position in [gases] (sorted by index) and
+  /// therefore the tank order used by [_buildImportedTanks].
+  List<ImportedGasSwitch> _buildGasSwitches(
+    List<FitGasSwitchEvent> events,
+    List<FitGas> gases,
+    List<FitSample> samples,
+    int startMs,
+  ) {
+    final tankIndexByGasIndex = <int, int>{
+      for (var i = 0; i < gases.length; i++) gases[i].index: i,
+    };
+    final switches = <ImportedGasSwitch>[];
+    // Events and samples are both timestamp-ordered, so the nearest-sample
+    // cursor only ever advances: one O(events + samples) sweep overall.
+    var sampleIdx = 0;
+    for (final event in events) {
+      final tankIndex = tankIndexByGasIndex[event.gasIndex];
+      if (tankIndex == null) continue;
+
+      double? depth;
+      if (samples.isNotEmpty) {
+        while (sampleIdx + 1 < samples.length &&
+            (samples[sampleIdx + 1].timestampMs - event.timestampMs).abs() <=
+                (samples[sampleIdx].timestampMs - event.timestampMs).abs()) {
+          sampleIdx++;
+        }
+        depth = samples[sampleIdx].depth;
+      }
+
+      final relSec = ((event.timestampMs - startMs) / 1000).round();
+      switches.add(
+        ImportedGasSwitch(
+          timeSeconds: relSec < 0 ? 0 : relSec,
+          tankIndex: tankIndex,
+          depth: depth,
+        ),
+      );
+    }
+    return switches;
+  }
+
+  /// Builds the tank list, pairing air-integration pressure (when present) with
+  /// gas mixes by order, and ensuring every enabled gas is represented even
+  /// without a transmitter (or when there are more gases than transmitters).
+  List<ImportedTank> _buildImportedTanks(
+    List<FitTank> realTanks,
+    List<FitGas> gases,
+  ) {
+    final count = realTanks.length > gases.length
+        ? realTanks.length
+        : gases.length;
+    return [
+      for (var i = 0; i < count; i++)
+        ImportedTank(
+          order: i,
+          startPressureBar: i < realTanks.length
+              ? realTanks[i].startPressureBar
+              : null,
+          endPressureBar: i < realTanks.length
+              ? realTanks[i].endPressureBar
+              : null,
+          volumeUsedLiters: i < realTanks.length
+              ? realTanks[i].volumeUsedLiters
+              : null,
+          volumeLiters: i < realTanks.length
+              ? realTanks[i].cylinderVolumeLiters
+              : null,
+          transmitterSerial: i < realTanks.length
+              ? realTanks[i].transmitterSerial
+              : null,
+          o2Percent: i < gases.length ? gases[i].o2Percent : null,
+          hePercent: i < gases.length ? gases[i].hePercent : null,
+        ),
+    ];
   }
 }

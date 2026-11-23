@@ -1,12 +1,36 @@
 import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/constants/gas_model.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/domain/services/dive_participant_names.dart';
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
+import 'package:submersion/core/utils/gas_compressibility.dart';
+import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
 
 /// Extension providing raw value extraction from [Dive] and [DiveSummary]
 /// entities for each [DiveField].
 extension DiveFieldExtractor on DiveField {
   /// Extract the raw value for this field from a full [Dive] entity.
-  dynamic extractFromDive(Dive dive) {
+  ///
+  /// [DiveField.sac] yields bar/min from [Dive.sac] (in bar of one reference
+  /// tank, no volume needed for it); [DiveField.rmv] yields L/min from
+  /// [Dive.rmvFor] under [gasModel] (every tank with a volume). The two are
+  /// separate columns, so there is no unit preference to thread through
+  /// here.
+  ///
+  /// [diveTypeLabel] resolves a dive-type slug to its display label for
+  /// [DiveField.diveTypeName]. On-screen callers pass the localizing resolver
+  /// (`diveTypeLabel` in `dive_log/presentation/formatters/`) so the column
+  /// honors the active locale (issue #643). Omitting it keeps the English slug
+  /// capitalization, which is what locale-independent consumers want.
+  /// [gasModel] selects the equation of state behind the RMV and gas consumed
+  /// values and is ignored for every other field. Defaults to [GasModel.real]
+  /// to match the AppSettings default (issue #828).
+  dynamic extractFromDive(
+    Dive dive, {
+    GasModel gasModel = GasModel.real,
+    String Function(String id)? diveTypeLabel,
+  }) {
     switch (this) {
       case DiveField.diveNumber:
         return dive.diveNumber;
@@ -14,6 +38,8 @@ extension DiveFieldExtractor on DiveField {
         return dive.effectiveEntryTime;
       case DiveField.siteName:
         return dive.site?.name;
+      case DiveField.diveName:
+        return dive.effectiveName ?? dive.site?.name;
       case DiveField.maxDepth:
         return dive.maxDepth;
       case DiveField.avgDepth:
@@ -21,13 +47,20 @@ extension DiveFieldExtractor on DiveField {
       case DiveField.bottomTime:
         return dive.bottomTime;
       case DiveField.runtime:
-        return dive.effectiveRuntime;
+        return dive.measuredRuntime;
       case DiveField.waterTemp:
         return dive.waterTemp;
       case DiveField.airTemp:
         return dive.airTemp;
       case DiveField.visibility:
-        return dive.visibility?.displayName;
+        // Raw metric value, consistent with maxDepth and swellHeight: the
+        // UnitFormatter converts at render time. Pre-v144 dives have no
+        // measurement, so they fall back to the legacy bucket's English label.
+        // A band-picked dive (issue #3226) yields its VisibilityRange, which
+        // sorts after measured values and before legacy text.
+        return dive.visibilityMeters ??
+            dive.visibilityRange ??
+            dive.visibility?.displayName;
       case DiveField.currentDirection:
         return dive.currentDirection?.displayName;
       case DiveField.currentStrength:
@@ -35,11 +68,11 @@ extension DiveFieldExtractor on DiveField {
       case DiveField.swellHeight:
         return dive.swellHeight;
       case DiveField.entryMethod:
-        return dive.entryMethod?.displayName;
+        return dive.effectiveEntryMethod?.displayName;
       case DiveField.exitMethod:
         return dive.exitMethod?.displayName;
       case DiveField.waterType:
-        return dive.waterType?.displayName;
+        return dive.effectiveWaterType?.displayName;
       case DiveField.altitude:
         return dive.altitude;
       case DiveField.surfacePressure:
@@ -54,22 +87,28 @@ extension DiveFieldExtractor on DiveField {
         return dive.humidity;
       case DiveField.weatherDescription:
         return dive.weatherDescription;
+      case DiveField.surfaceConditions:
+        return dive.surfaceConditions;
+      // The gas columns read the first breathing cylinder: a suit inflation
+      // bottle listed first is not the gas the dive was on (issue #4243).
       case DiveField.primaryGas:
-        return dive.tanks.isNotEmpty ? dive.tanks.first.gasMix.name : null;
+        return dive.breathingTanks.firstOrNull?.gasMix.name;
       case DiveField.diluentGas:
         return dive.diluentGas?.name;
       case DiveField.tankCount:
         return dive.tanks.length;
       case DiveField.startPressure:
-        return dive.tanks.isNotEmpty ? dive.tanks.first.startPressure : null;
+        return dive.breathingTanks.firstOrNull?.startPressure;
       case DiveField.endPressure:
-        return dive.tanks.isNotEmpty ? dive.tanks.first.endPressure : null;
-      case DiveField.sacRate:
-        return _computeSacRate(dive);
+        return dive.breathingTanks.firstOrNull?.endPressure;
+      case DiveField.sac:
+        return dive.sac;
+      case DiveField.rmv:
+        return dive.rmvFor(gasModel);
       case DiveField.gasConsumed:
-        return _computeGasConsumed(dive);
+        return _computeGasConsumed(dive, gasModel);
       case DiveField.totalWeight:
-        return dive.totalWeight > 0 ? dive.totalWeight : null;
+        return dive.recordedWeightKg;
       case DiveField.diveComputerModel:
         return dive.diveComputerModel;
       case DiveField.gradientFactorLow:
@@ -95,13 +134,19 @@ extension DiveFieldExtractor on DiveField {
       case DiveField.setpointDeco:
         return dive.setpointDeco;
       case DiveField.buddy:
-        return dive.buddy;
+        return dive.resolvedBuddyNames;
       case DiveField.diveMaster:
-        return dive.diveMaster;
+        return dive.resolvedDiveMasterNames;
       case DiveField.siteLocation:
         return dive.site?.locationString;
       case DiveField.diveCenterName:
         return dive.diveCenter?.name;
+      case DiveField.diveOperator:
+        return dive.diveOperator;
+      case DiveField.boatName:
+        return dive.boatName;
+      case DiveField.boatCaptain:
+        return dive.boatCaptain;
       case DiveField.siteLatitude:
         return dive.site?.location?.latitude;
       case DiveField.siteLongitude:
@@ -112,14 +157,26 @@ extension DiveFieldExtractor on DiveField {
         return dive.rating;
       case DiveField.isFavorite:
         return dive.isFavorite;
+      case DiveField.excludedFromStats:
+        return dive.excludedFromStats;
+      case DiveField.excludedFromGasStats:
+        return dive.excludedFromGasStats;
+      case DiveField.windDirection:
+        return dive.windDirection?.displayName;
+      case DiveField.scrubberType:
+        return dive.scrubber?.type;
+      case DiveField.scrubberDuration:
+        return dive.scrubber?.ratedMinutes;
       case DiveField.notes:
-        return dive.notes.isNotEmpty ? dive.notes : null;
+        return dive.notes.isNotEmpty ? markdownToPlainText(dive.notes) : null;
       case DiveField.tags:
         return dive.tags.map((t) => t.name).toList();
       case DiveField.importSource:
         return dive.importSource;
       case DiveField.diveTypeName:
-        return dive.diveTypeName;
+        return diveTypeLabel == null
+            ? dive.diveTypeNames.join(', ')
+            : dive.diveTypeIds.map(diveTypeLabel).join(', ');
       case DiveField.surfaceInterval:
         return dive.surfaceInterval;
     }
@@ -128,7 +185,12 @@ extension DiveFieldExtractor on DiveField {
   /// Extract the raw value for this field from a [DiveSummary].
   ///
   /// Returns null for fields not available on [DiveSummary].
-  dynamic extractFromSummary(DiveSummary summary) {
+  ///
+  /// See [extractFromDive] for [diveTypeLabel].
+  dynamic extractFromSummary(
+    DiveSummary summary, {
+    String Function(String id)? diveTypeLabel,
+  }) {
     switch (this) {
       case DiveField.diveNumber:
         return summary.diveNumber;
@@ -136,6 +198,8 @@ extension DiveFieldExtractor on DiveField {
         return summary.entryTime ?? summary.dateTime;
       case DiveField.siteName:
         return summary.siteName;
+      case DiveField.diveName:
+        return summary.effectiveName ?? summary.siteName;
       case DiveField.maxDepth:
         return summary.maxDepth;
       case DiveField.avgDepth:
@@ -150,10 +214,12 @@ extension DiveFieldExtractor on DiveField {
         return summary.rating;
       case DiveField.isFavorite:
         return summary.isFavorite;
+      case DiveField.diveMode:
+        return summary.diveMode.name.toUpperCase();
       case DiveField.diveTypeName:
-        final id = summary.diveTypeId;
-        if (id.isEmpty) return 'Recreational';
-        return id[0].toUpperCase() + id.substring(1).replaceAll('_', ' ');
+        return summary.diveTypeIds
+            .map(diveTypeLabel ?? Dive.diveTypeDisplayName)
+            .join(', ');
       case DiveField.tags:
         return summary.tags.map((t) => t.name).toList();
       case DiveField.siteLocation:
@@ -168,48 +234,30 @@ extension DiveFieldExtractor on DiveField {
   }
 }
 
-/// Compute the SAC rate (Surface Air Consumption) in L/min from a [Dive].
-///
-/// Uses the first tank's gas consumption and effective runtime with average
-/// depth to calculate surface-equivalent consumption.
-double? _computeSacRate(Dive dive) {
-  if (dive.tanks.isEmpty) return null;
-  final runtime = dive.effectiveRuntime;
-  final avgDepth = dive.avgDepth;
-  if (runtime == null || avgDepth == null) return null;
-
-  final minutes = runtime.inSeconds / 60.0;
-  if (minutes <= 0) return null;
-
-  final tank = dive.tanks.first;
-  if (tank.startPressure == null ||
-      tank.endPressure == null ||
-      tank.volume == null) {
-    return null;
+/// Compute the total gas consumed in liters across the breathing cylinders
+/// of a [Dive]; a suit inflation bottle is not breathed (issue #4243), and an
+/// Avelo Hydrotank's pressure drop is no gas consumed (issue #4657), so only
+/// the cylinders that measure it count, as in the gas used statistics.
+double? _computeGasConsumed(Dive dive, GasModel gasModel) {
+  final tanks = dive.breathingTanks;
+  if (tanks.isEmpty) return null;
+  double total = 0;
+  for (final tank in tanks) {
+    if (!tank.role.pressureMeasuresGasUse) continue;
+    final start = tank.startPressure;
+    final end = tank.endPressure;
+    final volume = consumptionVolume(tank, tanks);
+    if (start == null || end == null || volume == null || end >= start) {
+      continue;
+    }
+    total += gasVolumeBetween(
+      tankSizeLiters: volume,
+      startBar: start,
+      endBar: end,
+      o2Percent: tank.gasMix.o2,
+      hePercent: tank.gasMix.he,
+      model: gasModel,
+    );
   }
-
-  final pressureUsed = tank.startPressure! - tank.endPressure!;
-  if (pressureUsed <= 0) return null;
-
-  final gasLiters = tank.volume! * pressureUsed;
-  final avgPressureAtm = (avgDepth / 10.0) + 1.0;
-
-  return gasLiters / minutes / avgPressureAtm;
-}
-
-/// Compute the total gas consumed in liters from the first tank of a [Dive].
-double? _computeGasConsumed(Dive dive) {
-  if (dive.tanks.isEmpty) return null;
-
-  final tank = dive.tanks.first;
-  if (tank.startPressure == null ||
-      tank.endPressure == null ||
-      tank.volume == null) {
-    return null;
-  }
-
-  final pressureUsed = tank.startPressure! - tank.endPressure!;
-  if (pressureUsed <= 0) return null;
-
-  return tank.volume! * pressureUsed;
+  return total > 0 ? total : null;
 }

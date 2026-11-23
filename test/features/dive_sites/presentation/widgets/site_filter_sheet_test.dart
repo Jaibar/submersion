@@ -1,0 +1,376 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_filter_sheet.dart';
+import 'package:submersion/core/services/shared_library/shared_library_models.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/shared_library/presentation/providers/shared_library_providers.dart';
+import 'package:submersion/features/site_types/domain/entities/site_type_entity.dart';
+import 'package:submersion/features/site_types/presentation/providers/site_type_providers.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
+import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/theme_sentinels.dart';
+
+/// Opens the sheet the way the site list does: as a modal bottom sheet handed
+/// a [WidgetRef]. Going through a real route keeps "Apply"'s Navigator.pop
+/// legitimate.
+class _SheetLauncher extends ConsumerWidget {
+  const _SheetLauncher();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () => showModalBottomSheet<void>(
+            context: context,
+            isScrollControlled: true,
+            builder: (_) => SiteFilterSheet(ref: ref),
+          ),
+          child: const Text('open'),
+        ),
+      ),
+    );
+  }
+}
+
+Future<ProviderContainer> _container({
+  required AppSettings settings,
+  SiteFilterState filter = const SiteFilterState(),
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+  return ProviderContainer(
+    overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      settingsProvider.overrideWith((ref) => MockSettingsNotifier(settings)),
+      siteFilterProvider.overrideWith((ref) => filter),
+    ],
+  );
+}
+
+Widget _app(ProviderContainer container, {ThemeData? theme}) {
+  return UncontrolledProviderScope(
+    container: container,
+    child: MaterialApp(
+      theme: theme,
+      // Pinned so assertions on English labels ("Max", "Apply Filters") do not
+      // depend on the host machine's locale, which flutter_test forwards.
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: const _SheetLauncher(),
+    ),
+  );
+}
+
+/// The sheet is taller than a default test window; its overflow is a layout
+/// artifact of the surface size, not the behavior under test.
+void _useTallSurface(WidgetTester tester) {
+  tester.view.devicePixelRatio = 1.0;
+  tester.view.physicalSize = const Size(1000, 2200);
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  final originalOnError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    if (details.toString().contains('overflowed')) return;
+    originalOnError?.call(details);
+  };
+  addTearDown(() => FlutterError.onError = originalOnError);
+}
+
+Future<void> _openSheet(
+  WidgetTester tester,
+  ProviderContainer container, {
+  ThemeData? theme,
+}) async {
+  await tester.pumpWidget(_app(container, theme: theme));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  group('depth filter unit handling (issue #1257)', () {
+    testWidgets('suffixes the depth fields with the diver depth unit', (
+      tester,
+    ) async {
+      _useTallSurface(tester);
+      final container = await _container(
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+      );
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      expect(find.text('ft'), findsNWidgets(2));
+      expect(find.text('m'), findsNothing);
+    });
+
+    testWidgets('seeds the fields by converting the stored meter bounds', (
+      tester,
+    ) async {
+      _useTallSurface(tester);
+      final container = await _container(
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+        filter: const SiteFilterState(minDepth: 5, maxDepth: 30),
+      );
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      // 5 m -> 16.40 ft, 30 m -> 98.43 ft, rounded to whole units.
+      expect(find.widgetWithText(TextField, '16'), findsOneWidget);
+      expect(find.widgetWithText(TextField, '98'), findsOneWidget);
+    });
+
+    testWidgets('converts a depth typed in feet back to meters on apply', (
+      tester,
+    ) async {
+      _useTallSurface(tester);
+      final container = await _container(
+        settings: const AppSettings(depthUnit: DepthUnit.feet),
+      );
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      await tester.enterText(find.widgetWithText(TextField, 'Max'), '100');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply Filters'));
+      await tester.pumpAndSettle();
+
+      // 100 ft -> 30.48 m, which is what the site query compares against.
+      final applied = container.read(siteFilterProvider).maxDepth;
+      expect(applied, isNotNull);
+      expect(applied!, closeTo(30.48, 0.01));
+    });
+
+    testWidgets('a blank bound clears and a typo keeps the last bound '
+        '(#1900)', (tester) async {
+      _useTallSurface(tester);
+      final container = await _container(settings: const AppSettings());
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      final minField = find.widgetWithText(TextField, 'Min');
+      await tester.enterText(minField, '');
+      await tester.enterText(minField, '12');
+      await tester.enterText(minField, '1..2');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Enter a valid number'), findsOneWidget);
+      await tester.tap(find.text('Apply Filters'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(siteFilterProvider).minDepth, closeTo(12, 0.001));
+    });
+
+    testWidgets('leaves a metric diver typing meters untouched', (
+      tester,
+    ) async {
+      _useTallSurface(tester);
+      final container = await _container(settings: const AppSettings());
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      await tester.enterText(find.widgetWithText(TextField, 'Max'), '30');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply Filters'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(siteFilterProvider).maxDepth, closeTo(30, 0.001));
+    });
+  });
+
+  group('site type and tag filters (issue #1765)', () {
+    final now = DateTime(2026);
+
+    Future<ProviderContainer> classificationContainer({
+      SiteFilterState filter = const SiteFilterState(),
+    }) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      return ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          settingsProvider.overrideWith(
+            (ref) => MockSettingsNotifier(const AppSettings()),
+          ),
+          siteFilterProvider.overrideWith((ref) => filter),
+          siteTypesProvider.overrideWith(
+            (ref) async => [
+              SiteTypeEntity(
+                id: 'wreck',
+                name: 'Wreck',
+                isBuiltIn: true,
+                createdAt: now,
+                updatedAt: now,
+              ),
+              SiteTypeEntity(
+                id: 'lake',
+                name: 'Lake',
+                isBuiltIn: true,
+                createdAt: now,
+                updatedAt: now,
+              ),
+            ],
+          ),
+          tagsProvider.overrideWith(
+            (ref) async => [
+              Tag(
+                id: 'dive-tag',
+                name: 'Night',
+                createdAt: now,
+                updatedAt: now,
+                scopes: const {TagScope.dives},
+              ),
+              Tag(
+                id: 'site-tag',
+                name: 'To try',
+                createdAt: now,
+                updatedAt: now,
+                scopes: const {TagScope.sites},
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    testWidgets(
+      'without a shared site library the tags keep the usual 24px gap to depth',
+      (tester) async {
+        _useTallSurface(tester);
+        final container = await classificationContainer();
+        addTearDown(container.dispose);
+        await _openSheet(tester, container);
+
+        final chipBottom = tester
+            .getBottomLeft(find.widgetWithText(FilterChip, 'To try'))
+            .dy;
+        final depthTop = tester.getTopLeft(find.text('Max Depth Range')).dy;
+        expect(depthTop - chipBottom, 24);
+      },
+    );
+
+    testWidgets('lists types and only site-scoped tags', (tester) async {
+      _useTallSurface(tester);
+      final container = await classificationContainer();
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      expect(find.widgetWithText(FilterChip, 'Wreck'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, 'Lake'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, 'To try'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, 'Night'), findsNothing);
+    });
+
+    testWidgets('applying stores the chosen types and tags', (tester) async {
+      _useTallSurface(tester);
+      final container = await classificationContainer();
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      await tester.tap(find.widgetWithText(FilterChip, 'Lake'));
+      await tester.tap(find.widgetWithText(FilterChip, 'To try'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply Filters'));
+      await tester.pumpAndSettle();
+
+      final applied = container.read(siteFilterProvider);
+      expect(applied.siteTypeIds, {'lake'});
+      expect(applied.tagIds, {'site-tag'});
+    });
+
+    testWidgets('seeds the chips from the current filter', (tester) async {
+      _useTallSurface(tester);
+      final container = await classificationContainer(
+        filter: const SiteFilterState(siteTypeIds: {'wreck'}),
+      );
+      addTearDown(container.dispose);
+      await _openSheet(tester, container);
+
+      expect(
+        tester
+            .widget<FilterChip>(find.widgetWithText(FilterChip, 'Wreck'))
+            .selected,
+        isTrue,
+      );
+    });
+  });
+
+  testWidgets('library chips list only the active profile\'s libraries', (
+    tester,
+  ) async {
+    _useTallSurface(tester);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final container = ProviderContainer(
+      overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        settingsProvider.overrideWith(
+          (ref) => MockSettingsNotifier(const AppSettings()),
+        ),
+        sharedLibrariesProvider.overrideWith(
+          (ref) => Stream.value(const [
+            SharedLibrary(
+              id: 'mine',
+              name: 'My library',
+              connectedAccountId: 'a',
+              prefix: 'p',
+            ),
+            SharedLibrary(
+              id: 'theirs',
+              name: 'Another profile\'s library',
+              connectedAccountId: 'b',
+              prefix: 'q',
+            ),
+          ]),
+        ),
+        currentMembershipsProvider.overrideWith(
+          (ref) async => const [
+            SharedLibraryMembership(
+              id: 'ms',
+              diverId: 'd',
+              libraryId: 'mine',
+              memberId: 'm',
+              displayName: 'Ann',
+              libraryName: 'My library',
+              backendKind: 's3',
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await _openSheet(tester, container);
+
+    expect(find.widgetWithText(FilterChip, 'My library'), findsOneWidget);
+    expect(
+      find.widgetWithText(FilterChip, 'Another profile\'s library'),
+      findsNothing,
+    );
+  });
+
+  testWidgets('the button bar shadow follows the theme', (tester) async {
+    _useTallSurface(tester);
+    final container = await _container(settings: const AppSettings());
+    addTearDown(container.dispose);
+    await _openSheet(tester, container, theme: sentinelTheme());
+
+    final shadows = boxShadowsUnder(tester, find.byType(SiteFilterSheet));
+    expect(shadows, isNotEmpty);
+    expect(
+      shadows.every((s) => sameHue(s.color, sentinelShadow)),
+      isTrue,
+      reason: 'a shadow is fixed black instead of the theme shadow',
+    );
+  });
+}

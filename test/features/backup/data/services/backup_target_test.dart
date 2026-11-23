@@ -1,0 +1,353 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/backup/data/services/backup_saf_port.dart';
+import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/data/services/backup_target.dart';
+
+class _FakeAdapter implements BackupDatabaseAdapter {
+  _FakeAdapter(this.dbPath, {this.exportBytes});
+  final String dbPath;
+
+  /// What the export writes when it should differ from the live file, which a
+  /// real one always does: it is compacted and it folds in the WAL.
+  final String? exportBytes;
+  String? copiedTo;
+  String? lastNote;
+
+  @override
+  Future<void> backup(String destinationPath, {String? note}) async {
+    copiedTo = destinationPath;
+    lastNote = note;
+    final bytes = exportBytes;
+    if (bytes != null) {
+      await File(destinationPath).writeAsString(bytes);
+      return;
+    }
+    await File(dbPath).copy(destinationPath);
+  }
+
+  @override
+  Future<void> restore(
+    String backupPath, {
+    void Function(int, int)? onMigrationProgress,
+  }) async {}
+
+  @override
+  Future<String> get databasePath async => dbPath;
+
+  @override
+  AppDatabase get database => throw UnimplementedError();
+
+  @override
+  String? get databaseKeyHex => null;
+}
+
+class _FakeSafPort implements BackupSafPort {
+  _FakeSafPort({this.failWrite = false});
+
+  final bool failWrite;
+  String? wroteSource;
+  String? wroteName;
+
+  @override
+  Future<String> writeBackup({
+    required String treeUri,
+    required String fileName,
+    required String sourcePath,
+  }) async {
+    wroteSource = sourcePath;
+    wroteName = fileName;
+    if (failWrite) throw Exception('SAF write failed');
+    return 'content://tree/1/doc/$fileName';
+  }
+
+  @override
+  Future<void> readBackup({
+    required String documentUri,
+    required String destPath,
+  }) async {}
+
+  @override
+  Future<bool> delete(String documentUri) async => true;
+
+  @override
+  Future<bool> exists(String documentUri) async => true;
+
+  @override
+  Future<String?> resolveTree(String treeUri) async => 'Backups';
+}
+
+void main() {
+  test('isSafRef detects content URIs', () {
+    expect(isSafRef('content://x/y'), isTrue);
+    expect(isSafRef('/storage/emulated/0/x.db'), isFalse);
+  });
+
+  test(
+    'FilesystemBackupTarget delegates to adapter.backup and returns the path',
+    () async {
+      final tmp = await Directory.systemTemp.createTemp('fbt_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final src = File(p.join(tmp.path, 'src.db'));
+      await src.writeAsString('db');
+      final adapter = _FakeAdapter(src.path);
+
+      final result = await FilesystemBackupTarget(
+        tmp.path,
+      ).write(adapter, 'out.db');
+
+      expect(result.ref, p.join(tmp.path, 'out.db'));
+      expect(adapter.copiedTo, result.ref);
+      expect(File(result.ref).existsSync(), isTrue);
+      expect(result.sizeBytes, File(result.ref).lengthSync());
+    },
+  );
+
+  test(
+    'SafBackupTarget streams an exported artifact, never the live DB file',
+    () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      await live.writeAsString('live database bytes');
+      final port = _FakeSafPort();
+      final adapter = _FakeAdapter(live.path);
+
+      final result = await SafBackupTarget(
+        'content://tree/1',
+        port,
+        tempDir: () async => tmp,
+      ).write(adapter, 'out.db');
+
+      expect(result.ref, 'content://tree/1/doc/out.db');
+      expect(port.wroteName, 'out.db');
+      // Handing the port the live path streams `<db>` alone: under WAL that
+      // omits the committed rows still in the sidecar, and under database
+      // password protection it writes ciphertext to a backup that is meant to
+      // be portable plaintext.
+      expect(port.wroteSource, isNot(live.path));
+      expect(adapter.copiedTo, port.wroteSource);
+    },
+  );
+
+  test(
+    'SafBackupTarget reports the artifact size, not the live DB size',
+    () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_size_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      // The export is compacted and carries the sidecar's rows, so it is never
+      // safe to assume it is the same size as the live file.
+      await live.writeAsString('x' * 900);
+      final adapter = _FakeAdapter(live.path, exportBytes: 'y' * 40);
+
+      final result = await SafBackupTarget(
+        'content://tree/1',
+        _FakeSafPort(),
+        tempDir: () async => tmp,
+      ).write(adapter, 'out.db');
+
+      expect(result.sizeBytes, 40);
+    },
+  );
+
+  test('SafBackupTarget deletes its staged export afterwards', () async {
+    final tmp = await Directory.systemTemp.createTemp('sbt_clean_');
+    addTearDown(() => tmp.delete(recursive: true));
+    final live = File(p.join(tmp.path, 'live.db'));
+    await live.writeAsString('db');
+    final port = _FakeSafPort();
+    final adapter = _FakeAdapter(live.path);
+
+    await SafBackupTarget(
+      'content://tree/1',
+      port,
+      tempDir: () async => tmp,
+    ).write(adapter, 'out.db');
+
+    // A plaintext copy of the whole library must not be left in the temp dir.
+    expect(File(port.wroteSource!).existsSync(), isFalse);
+  });
+
+  test(
+    'SafBackupTarget deletes its staged export when the port fails',
+    () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_fail_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      await live.writeAsString('db');
+      final port = _FakeSafPort(failWrite: true);
+      final adapter = _FakeAdapter(live.path);
+
+      await expectLater(
+        SafBackupTarget(
+          'content://tree/1',
+          port,
+          tempDir: () async => tmp,
+        ).write(adapter, 'out.db'),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(adapter.copiedTo, isNotNull);
+      expect(File(adapter.copiedTo!).existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'FilesystemBackupTarget.writeSource copies a pre-made file into the dir',
+    () async {
+      final tmp = await Directory.systemTemp.createTemp('fbt_ws_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final src = File(p.join(tmp.path, 'src.sbe'));
+      await src.writeAsString('ENCRYPTED');
+
+      final ref = await FilesystemBackupTarget(
+        tmp.path,
+      ).writeSource(src.path, 'backup.sbe');
+
+      expect(ref, p.join(tmp.path, 'backup.sbe'));
+      expect(File(ref).readAsStringSync(), 'ENCRYPTED');
+    },
+  );
+
+  test(
+    'SafBackupTarget.writeSource streams the given source via the port',
+    () async {
+      final port = _FakeSafPort();
+
+      final ref = await SafBackupTarget(
+        'content://tree/1',
+        port,
+      ).writeSource('/tmp/enc.sbe', 'backup.sbe');
+
+      expect(ref, 'content://tree/1/doc/backup.sbe');
+      expect(port.wroteSource, '/tmp/enc.sbe');
+      expect(port.wroteName, 'backup.sbe');
+    },
+  );
+
+  group('whileWritten: the copy the cloud upload reads', () {
+    test('a filesystem target hands over the file it wrote', () async {
+      final tmp = await Directory.systemTemp.createTemp('fbt_ww_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final src = File(p.join(tmp.path, 'src.db'));
+      await src.writeAsString('db');
+      String? seen;
+
+      final result = await FilesystemBackupTarget(tmp.path).write(
+        _FakeAdapter(src.path),
+        'out.db',
+        whileWritten: (path) async => seen = path,
+      );
+
+      expect(seen, result.ref);
+    });
+
+    test('a SAF target hands over its staged file, then deletes it', () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_ww_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      await live.writeAsString('db');
+      String? seen;
+      var existedThen = false;
+
+      await SafBackupTarget(
+        'content://tree/1',
+        _FakeSafPort(),
+        tempDir: () async => tmp,
+      ).write(
+        _FakeAdapter(live.path),
+        'out.db',
+        whileWritten: (path) async {
+          seen = path;
+          existedThen = File(path).existsSync();
+        },
+      );
+
+      expect(isSafRef(seen!), isFalse);
+      expect(existedThen, isTrue);
+      expect(File(seen!).existsSync(), isFalse);
+    });
+
+    test('the staged file is deleted when whileWritten throws', () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_wwx_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      await live.writeAsString('db');
+      String? seen;
+
+      await expectLater(
+        SafBackupTarget(
+          'content://tree/1',
+          _FakeSafPort(),
+          tempDir: () async => tmp,
+        ).write(
+          _FakeAdapter(live.path),
+          'out.db',
+          whileWritten: (path) async {
+            seen = path;
+            throw StateError('upload blew up');
+          },
+        ),
+        throwsStateError,
+      );
+
+      expect(File(seen!).existsSync(), isFalse);
+    });
+
+    test('a failed SAF write never calls whileWritten', () async {
+      final tmp = await Directory.systemTemp.createTemp('sbt_wwf_');
+      addTearDown(() => tmp.delete(recursive: true));
+      final live = File(p.join(tmp.path, 'live.db'));
+      await live.writeAsString('db');
+      var called = false;
+
+      await expectLater(
+        SafBackupTarget(
+          'content://tree/1',
+          _FakeSafPort(failWrite: true),
+          tempDir: () async => tmp,
+        ).write(
+          _FakeAdapter(live.path),
+          'out.db',
+          whileWritten: (_) async => called = true,
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(called, isFalse);
+    });
+  });
+
+  test('filesystem target hands the note to the copy', () async {
+    final dir = Directory.systemTemp.createTempSync('target_note');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final db = p.join(dir.path, 'live.db');
+    File(db).writeAsStringSync('live');
+    final adapter = _FakeAdapter(db);
+
+    await FilesystemBackupTarget(dir.path).write(adapter, 'b.db', note: 'n');
+
+    expect(adapter.lastNote, 'n');
+  });
+
+  test('SAF target hands the note to the staged copy', () async {
+    final dir = Directory.systemTemp.createTempSync('target_note_saf');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final db = p.join(dir.path, 'live.db');
+    File(db).writeAsStringSync('live');
+    final adapter = _FakeAdapter(db);
+
+    await SafBackupTarget(
+      'content://tree/x',
+      _FakeSafPort(),
+      tempDir: () async => dir,
+    ).write(adapter, 'b.db', note: 'n');
+
+    expect(adapter.lastNote, 'n');
+  });
+}

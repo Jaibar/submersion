@@ -1,0 +1,411 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/setup_wizard/domain/setup_wizard_models.dart';
+
+void main() {
+  group('offersNoLibrary', () {
+    test('the browser connect step offers it on the existing-data path', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+        browser: true,
+      );
+      expect(offersNoLibrary(draft, SetupStepId.setUpAccount), isTrue);
+      expect(offersNoLibrary(draft, SetupStepId.setUpSync), isTrue);
+    });
+
+    test('once the path is fresh the connect step keeps Not now', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.fresh,
+        browser: true,
+      );
+      expect(offersNoLibrary(draft, SetupStepId.setUpAccount), isFalse);
+      expect(offersNoLibrary(draft, SetupStepId.setUpSync), isFalse);
+    });
+
+    test('natively only the sync step offers it', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+      );
+      expect(offersNoLibrary(draft, SetupStepId.setUpAccount), isFalse);
+      expect(offersNoLibrary(draft, SetupStepId.setUpSync), isTrue);
+    });
+  });
+
+  group('computeSteps', () {
+    test('first run starts with fork only while path undecided', () {
+      const draft = SetupWizardDraft(mode: SetupWizardMode.firstRun);
+      expect(computeSteps(draft), [SetupStepId.welcomeFork]);
+    });
+
+    test('fresh path shows full first-run flow', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.fresh,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.welcomeFork,
+        SetupStepId.profile,
+        SetupStepId.units,
+        ...kSetUpWizardSteps,
+        SetupStepId.finish,
+      ]);
+      expect(kSetUpWizardSteps, [
+        SetupStepId.setUpAccount,
+        SetupStepId.setUpSync,
+        SetupStepId.setUpBackups,
+        SetupStepId.setUpPhotos,
+      ]);
+    });
+
+    test('skip setup collapses fresh path to profile then finish', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.fresh,
+        skipRequested: true,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.welcomeFork,
+        SetupStepId.profile,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('existing-data path shows choice, then source step', () {
+      const undecided = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+      );
+      expect(computeSteps(undecided), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+      ]);
+
+      const restore = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+        source: ExistingDataSource.restoreBackup,
+      );
+      expect(computeSteps(restore), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        SetupStepId.restore,
+      ]);
+
+      const sync = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+        source: ExistingDataSource.cloudSync,
+      );
+      expect(computeSteps(sync), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        ...kSetUpWizardSteps,
+        SetupStepId.finish,
+      ]);
+
+      // A downloaded library with no diver: Finish asks for a name.
+      final syncNeedsName = sync.copyWith(needsProfile: true);
+      expect(computeSteps(syncNeedsName), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        ...kSetUpWizardSteps,
+        SetupStepId.profile,
+        SetupStepId.finish,
+      ]);
+
+      const folder = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.existingData,
+        source: ExistingDataSource.openFolder,
+      );
+      expect(computeSteps(folder).last, SetupStepId.openFolder);
+    });
+
+    test('settings mode hides fork and profile', () {
+      const draft = SetupWizardDraft(mode: SetupWizardMode.settings);
+      expect(computeSteps(draft), [
+        SetupStepId.units,
+        ...kSetUpWizardSteps,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('a fresh path that needs a name already asks for it', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        path: SetupPath.fresh,
+        needsProfile: true,
+      );
+      expect(
+        computeSteps(draft).where((s) => s == SetupStepId.profile).length,
+        1,
+      );
+    });
+  });
+
+  group('SetupWizardDraft', () {
+    test('applyUnitPreset metric sets distance back to kilometres', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        settings: AppSettings(distanceUnit: DistanceUnit.miles),
+      );
+      final metric = draft.applyingUnitPreset(UnitPreset.metric);
+      expect(metric.settings.distanceUnit, DistanceUnit.kilometers);
+    });
+
+    test('applyUnitPreset imperial sets the seven core units', () {
+      const draft = SetupWizardDraft(mode: SetupWizardMode.firstRun);
+      final imperial = draft.applyingUnitPreset(UnitPreset.imperial);
+      expect(imperial.settings.depthUnit, DepthUnit.feet);
+      expect(imperial.settings.temperatureUnit, TemperatureUnit.fahrenheit);
+      expect(imperial.settings.pressureUnit, PressureUnit.psi);
+      expect(imperial.settings.volumeUnit, VolumeUnit.cubicFeet);
+      expect(imperial.settings.weightUnit, WeightUnit.pounds);
+      expect(imperial.settings.altitudeUnit, AltitudeUnit.feet);
+      expect(imperial.settings.distanceUnit, DistanceUnit.miles);
+      // gasConsumptionDisplay untouched by preset
+      expect(
+        imperial.settings.gasConsumptionDisplay,
+        const AppSettings().gasConsumptionDisplay,
+      );
+      // and back to metric
+      final metric = imperial.applyingUnitPreset(UnitPreset.metric);
+      expect(metric.settings.unitPreset, UnitPreset.metric);
+    });
+  });
+
+  group('computeSteps with the species model offered (#4881)', () {
+    const offered = SetupWizardDraft(
+      mode: SetupWizardMode.firstRun,
+      speciesModelOffered: true,
+    );
+
+    test('the fresh path runs it after Photos and before Finish', () {
+      expect(computeSteps(offered.copyWith(path: SetupPath.fresh)), [
+        SetupStepId.welcomeFork,
+        SetupStepId.profile,
+        SetupStepId.units,
+        ...kSetUpWizardSteps,
+        SetupStepId.speciesModel,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('cloud sync runs it after Photos, before the profile and Finish', () {
+      final draft = offered.copyWith(
+        path: SetupPath.existingData,
+        source: ExistingDataSource.cloudSync,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        ...kSetUpWizardSteps,
+        SetupStepId.speciesModel,
+        SetupStepId.finish,
+      ]);
+      expect(computeSteps(draft.copyWith(needsProfile: true)), [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        ...kSetUpWizardSteps,
+        SetupStepId.speciesModel,
+        SetupStepId.profile,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('the setup assistant runs it after the four steps', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.settings,
+        speciesModelOffered: true,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.units,
+        ...kSetUpWizardSteps,
+        SetupStepId.speciesModel,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('not offered, every list is as it was', () {
+      for (final draft in [
+        const SetupWizardDraft(
+          mode: SetupWizardMode.firstRun,
+          path: SetupPath.fresh,
+        ),
+        const SetupWizardDraft(mode: SetupWizardMode.settings),
+        const SetupWizardDraft(
+          mode: SetupWizardMode.firstRun,
+          path: SetupPath.existingData,
+          source: ExistingDataSource.cloudSync,
+        ),
+      ]) {
+        expect(
+          computeSteps(draft),
+          isNot(contains(SetupStepId.speciesModel)),
+          reason: '${draft.mode} ${draft.path}',
+        );
+      }
+    });
+
+    test('skip, restore, open folder and a browser never get it', () {
+      final drafts = [
+        offered.copyWith(path: SetupPath.fresh, skipRequested: true),
+        offered.copyWith(
+          path: SetupPath.existingData,
+          source: ExistingDataSource.restoreBackup,
+        ),
+        offered.copyWith(
+          path: SetupPath.existingData,
+          source: ExistingDataSource.openFolder,
+        ),
+        for (final mode in SetupWizardMode.values)
+          SetupWizardDraft(
+            mode: mode,
+            browser: true,
+            path: SetupPath.fresh,
+            speciesModelOffered: true,
+          ),
+      ];
+      for (final draft in drafts) {
+        expect(
+          computeSteps(draft),
+          isNot(contains(SetupStepId.speciesModel)),
+          reason:
+              '${draft.mode} ${draft.path} ${draft.source} '
+              'browser=${draft.browser}',
+        );
+      }
+    });
+
+    test('copyWith keeps the offer', () {
+      expect(offered.copyWith(name: 'Ana').speciesModelOffered, isTrue);
+      expect(
+        const SetupWizardDraft(
+          mode: SetupWizardMode.firstRun,
+        ).speciesModelOffered,
+        isFalse,
+      );
+    });
+  });
+
+  group('speciesModelOfferFits (#4881)', () {
+    const fresh = [
+      SetupStepId.welcomeFork,
+      SetupStepId.profile,
+      SetupStepId.units,
+      ...kSetUpWizardSteps,
+      SetupStepId.finish,
+    ];
+
+    test('fits while the diver has not passed Photos', () {
+      expect(speciesModelOfferFits(fresh, 0), isTrue);
+      expect(
+        speciesModelOfferFits(fresh, fresh.indexOf(SetupStepId.setUpPhotos)),
+        isTrue,
+      );
+    });
+
+    test('a list with no Photos step yet takes it for later', () {
+      expect(speciesModelOfferFits(const [SetupStepId.welcomeFork], 0), isTrue);
+    });
+
+    test('never behind the diver: not on Finish', () {
+      expect(
+        speciesModelOfferFits(fresh, fresh.indexOf(SetupStepId.finish)),
+        isFalse,
+      );
+    });
+
+    // Cloud sync with no diver: Finish sends the diver to a Profile step
+    // that sits after Photos.
+    test('never behind the diver: not on a Profile after Photos', () {
+      const cloud = [
+        SetupStepId.welcomeFork,
+        SetupStepId.existingChoice,
+        ...kSetUpWizardSteps,
+        SetupStepId.profile,
+        SetupStepId.finish,
+      ];
+      expect(
+        speciesModelOfferFits(cloud, cloud.indexOf(SetupStepId.profile)),
+        isFalse,
+      );
+    });
+  });
+
+  group('computeSteps in a browser (#4121)', () {
+    // A browser has no automatic backups (no files, no background work) and
+    // no photo library to sync, so those two shared steps are gone in every
+    // mode; a first run also has no welcome fork and no existing-data choice.
+    const browserSteps = [SetupStepId.setUpAccount, SetupStepId.setUpSync];
+
+    test('a first run opens on the connect step', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        browser: true,
+        path: SetupPath.existingData,
+        source: ExistingDataSource.cloudSync,
+      );
+      expect(computeSteps(draft), [...browserSteps, SetupStepId.finish]);
+    });
+
+    test('continue without a sync store runs profile, units, the steps '
+        'and finish, with no fork to go back to', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        browser: true,
+        path: SetupPath.fresh,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.profile,
+        SetupStepId.units,
+        ...browserSteps,
+        SetupStepId.finish,
+      ]);
+    });
+
+    test('a draft with no path yet still opens on the connect step', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.firstRun,
+        browser: true,
+      );
+      expect(computeSteps(draft), [...browserSteps, SetupStepId.finish]);
+    });
+
+    test('the backups and photos steps never show in a browser', () {
+      for (final mode in SetupWizardMode.values) {
+        final draft = SetupWizardDraft(
+          mode: mode,
+          browser: true,
+          path: SetupPath.fresh,
+        );
+        expect(
+          computeSteps(draft),
+          isNot(contains(SetupStepId.setUpBackups)),
+          reason: '$mode',
+        );
+        expect(
+          computeSteps(draft),
+          isNot(contains(SetupStepId.setUpPhotos)),
+          reason: '$mode',
+        );
+      }
+    });
+
+    test('the settings assistant keeps units and the connect steps', () {
+      const draft = SetupWizardDraft(
+        mode: SetupWizardMode.settings,
+        browser: true,
+      );
+      expect(computeSteps(draft), [
+        SetupStepId.units,
+        ...browserSteps,
+        SetupStepId.finish,
+      ]);
+    });
+  });
+}

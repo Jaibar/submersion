@@ -1,61 +1,47 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:submersion/core/router/back_navigation.dart';
 
-import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
-import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
-import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
-import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
-import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_import/presentation/providers/dive_health_metrics_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
-import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
-import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/services/dive_equipment_defaulter.dart';
+import 'package:submersion/features/gps_log/presentation/providers/gps_log_providers.dart';
 import 'package:submersion/features/import_wizard/data/adapters/dive_computer_adapter.dart';
+import 'package:submersion/features/import_wizard/data/adapters/divelogs_import_adapter.dart';
 import 'package:submersion/features/import_wizard/data/adapters/universal_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/adapters/import_source_adapter.dart';
 import 'package:submersion/features/import_wizard/domain/models/import_bundle.dart';
-import 'package:submersion/features/import_wizard/domain/models/wizard_step_def.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_step_failure.dart';
+import 'package:submersion/shared/widgets/wizard/wizard_step_def.dart';
 import 'package:submersion/features/import_wizard/domain/services/step_skip_calculator.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_job_provider.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/dive_computer_scan_scope.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/running_import_gate.dart';
+import 'package:submersion/features/rules/presentation/providers/rule_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/import_progress_step.dart';
+import 'package:submersion/features/import_wizard/presentation/pages/step_indicator_view.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/import_summary_step.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/review_step.dart';
-import 'package:submersion/features/import_wizard/presentation/widgets/wizard_step_indicator.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/wizard_message.dart';
+import 'package:submersion/shared/widgets/wizard/wizard_step_indicator.dart';
 
-/// The unified import wizard shell.
-///
-/// Accepts an [ImportSourceAdapter] and orchestrates the full import flow:
-/// acquisition steps (source-specific), review, import progress, and summary.
-class UnifiedImportWizard extends StatelessWidget {
-  const UnifiedImportWizard({super.key, required this.adapter});
-
-  final ImportSourceAdapter adapter;
-
-  @override
-  Widget build(BuildContext context) {
-    return ProviderScope(
-      overrides: [
-        importWizardNotifierProvider.overrideWith(
-          (ref) => ImportWizardNotifier(
-            adapter,
-            tagRepository: ref.read(tagRepositoryProvider),
-          ),
-        ),
-      ],
-      child: _UnifiedImportWizardBody(adapter: adapter),
-    );
-  }
-}
+part 'unified_import_wizard_session.dart';
 
 class _UnifiedImportWizardBody extends ConsumerStatefulWidget {
-  const _UnifiedImportWizardBody({required this.adapter});
+  const _UnifiedImportWizardBody({
+    required this.adapter,
+    this.initialPageOverride,
+  });
 
   final ImportSourceAdapter adapter;
+  final int? initialPageOverride;
 
   @override
   ConsumerState<_UnifiedImportWizardBody> createState() =>
@@ -68,6 +54,28 @@ class _UnifiedImportWizardBodyState
   int _currentPage = 0;
   bool _navigatingForward = true;
   bool _resetComplete = false;
+
+  /// True while [_onNext] is building the bundle or animating to the next
+  /// page. An acquisition step's auto-advance re-arms on every rebuild while
+  /// its page is still current, and [_currentPage] only moves once the page
+  /// animation completes, so a rebuild in that window would otherwise run
+  /// the whole advance (bundle build included) a second time.
+  bool _advancing = false;
+
+  /// True while a step's work runs, which is what the bottom bar shows: a
+  /// large file can take a while on a worker, with the app live around it.
+  /// Back is held as well as Next, because [_advance] carries on from
+  /// wherever the wizard is when that work ends.
+  bool _stepWorking = false;
+
+  /// Why the last Next tap did not move the wizard on, shown above the bottom
+  /// bar until the next attempt. Null while nothing has failed.
+  String? _advanceError;
+
+  /// The step whose `onBeforeAdvance` is running, if any.
+  WizardStepDef? _advancingStep;
+
+  static const _log = LoggerService('UnifiedImportWizard');
 
   List<WizardStepDef> get _acquisitionSteps => widget.adapter.acquisitionSteps;
   int get _reviewIndex => _acquisitionSteps.length;
@@ -84,6 +92,11 @@ class _UnifiedImportWizardBodyState
     final adapter = widget.adapter;
     if (adapter is DiveComputerAdapter) {
       adapter.goBackFromConfirm = () {
+        _navigatingForward = false;
+        _animateToPage(_currentPage - 1);
+      };
+    } else if (adapter is DivelogsImportAdapter) {
+      adapter.goBack = () {
         _navigatingForward = false;
         _animateToPage(_currentPage - 1);
       };
@@ -110,23 +123,46 @@ class _UnifiedImportWizardBodyState
         widget.adapter.resetState();
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _resetComplete = true);
+        if (!mounted) return;
+        setState(() {
+          _resetComplete = true;
+          if (widget.initialPageOverride != null) {
+            _currentPage = widget.initialPageOverride!;
+          }
+        });
+        if (widget.initialPageOverride != null && _pageController.hasClients) {
+          _pageController.jumpToPage(widget.initialPageOverride!);
+        }
       });
     });
   }
 
   @override
   void dispose() {
+    _advancingStep?.onCancelAdvance?.call();
     _pageController.dispose();
     super.dispose();
   }
 
-  List<String> _buildStepLabels() {
-    final labels = _acquisitionSteps.map((s) => s.label).toList();
-    labels.add('Review');
-    labels.add('Import');
-    labels.add('Done');
-    return labels;
+  /// The step indicator's labels and current dot. Steps that do not apply
+  /// to this import are left out (issue #1893); watching their conditions
+  /// keeps the indicator in step as the import reveals what it holds.
+  ({List<String> labels, int current}) _buildStepIndicator() {
+    final l10n = context.l10n;
+    final steps = _acquisitionSteps;
+    return stepIndicatorView(
+      acquisitionLabels: [for (final s in steps) s.label],
+      hidden: [
+        for (final s in steps)
+          if (s.hiddenWhen case final hidden?) ref.watch(hidden) else false,
+      ],
+      trailingLabels: [
+        l10n.universalImport_step_review,
+        l10n.universalImport_step_import,
+        l10n.universalImport_step_done,
+      ],
+      currentPage: _currentPage,
+    );
   }
 
   Future<void> _animateToPage(int page) async {
@@ -138,16 +174,73 @@ class _UnifiedImportWizardBodyState
       );
     }
     if (mounted) {
-      setState(() => _currentPage = page);
+      setState(() {
+        _currentPage = page;
+        // The banner belongs to the attempt that failed, not to the step the
+        // user has since moved to.
+        _advanceError = null;
+      });
     }
   }
 
   Future<void> _onNext() async {
+    if (_advancing) return;
+    _advancing = true;
+    if (_advanceError != null) {
+      setState(() => _advanceError = null);
+    }
+    try {
+      await _advance();
+    } on ImportStepCancelled {
+      // The diver stopped the step, so there is nothing to report. As with a
+      // failure, the wizard has to stop arming auto-advance on this step.
+      _navigatingForward = false;
+    } catch (e, stackTrace) {
+      // An ImportStepFailure carries text the step wrote for the user.
+      // Anything else, such as a failed database read or a parser blowing up
+      // on an unexpected shape, is unexpected, so log it and wrap it. Before
+      // this, the future returned by _onNext was dropped on the floor by the
+      // Next button's VoidCallback, so either kind of throw surfaced nowhere
+      // at all and the button simply looked dead.
+      if (e is! ImportStepFailure) {
+        _log.error(
+          'Import wizard could not advance',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+      // One guard for both paths: it keeps setState off a disposed State and
+      // is what makes the context read below safe after the await.
+      if (!mounted) return;
+      setState(() {
+        _advanceError = e is ImportStepFailure
+            ? e.message
+            : context.l10n.universalImport_error_stepFailed('$e');
+        // Hand the step back to the user. _AcquisitionStepPage re-arms
+        // auto-advance on every build where its page is current, is still
+        // navigating forward and canAutoAdvance reads true -- and showing this
+        // error is itself a rebuild, so a failing auto-advance step would
+        // re-run its own work on every frame and never let go.
+        _navigatingForward = false;
+      });
+    } finally {
+      _advancing = false;
+      _setStepWorking(false);
+    }
+  }
+
+  void _setStepWorking(bool working) {
+    if (!mounted || _stepWorking == working) return;
+    setState(() => _stepWorking = working);
+  }
+
+  Future<void> _advance() async {
     _navigatingForward = true;
     if (_currentPage < _reviewIndex) {
+      _setStepWorking(true);
+
       // Let the current step commit any pending state before we leave it.
-      final step = _acquisitionSteps[_currentPage];
-      await step.onBeforeAdvance?.call();
+      await _beforeAdvance(_acquisitionSteps[_currentPage]);
       if (!mounted) return;
 
       // Determine the next page. Skip any remaining acquisition steps whose
@@ -165,7 +258,7 @@ class _UnifiedImportWizardBodyState
 
       // Run onBeforeAdvance for each skipped step so it can finalize state.
       for (final step in skipped) {
-        await step.onBeforeAdvance?.call();
+        await _beforeAdvance(step);
         if (!mounted) return;
       }
 
@@ -173,90 +266,97 @@ class _UnifiedImportWizardBodyState
       if (nextPage >= _reviewIndex) {
         final bundle = await widget.adapter.buildBundle();
         if (!mounted) return;
-        final checkedBundle = await widget.adapter.checkDuplicates(bundle);
+        // Duplicate detection reads the existing library and is only an
+        // advisory overlay on the review list. Letting it throw here used to
+        // abandon the advance entirely, which is what a large or unhappy
+        // library looked like from the outside: Next did nothing, forever.
+        ImportBundle checkedBundle;
+        var duplicateCheckFailed = false;
+        try {
+          checkedBundle = await widget.adapter.checkDuplicates(bundle);
+        } catch (e, stackTrace) {
+          _log.error(
+            'Duplicate detection failed; continuing without it',
+            error: e,
+            stackTrace: stackTrace,
+          );
+          checkedBundle = bundle;
+          duplicateCheckFailed = true;
+        }
+        if (!mounted) return;
+        await _awaitSettingsLoad();
         if (!mounted) return;
         ref
             .read(importWizardNotifierProvider.notifier)
-            .setBundle(checkedBundle);
-        ref.read(importWizardNotifierProvider.notifier).initializeDefaultTag();
+            .setBundle(
+              checkedBundle,
+              duplicateCheckFailed: duplicateCheckFailed,
+            );
+        ref
+            .read(importWizardNotifierProvider.notifier)
+            .initializeDefaultTag(
+              autoTagImports: ref.read(settingsProvider).autoTagImports,
+            );
       }
+      _setStepWorking(false);
       await _animateToPage(nextPage);
     } else if (_currentPage == _reviewIndex) {
       await _startImport();
     }
   }
 
+  /// Runs [step]'s `onBeforeAdvance`, remembering the step so that leaving
+  /// while it runs can stop it.
+  Future<void> _beforeAdvance(WizardStepDef step) async {
+    _advancingStep = step;
+    try {
+      await step.onBeforeAdvance?.call();
+    } finally {
+      _advancingStep = null;
+    }
+  }
+
+  /// Waits for [SettingsNotifier]'s current load before the review step reads
+  /// the diver's saved auto-tag preference (issues #998, #2564).
+  ///
+  /// Until that load lands, [settingsProvider] holds the defaults, where
+  /// auto-tagging is on, so a wizard opened right after launch would ignore
+  /// a saved "off"; right after a diver switch it holds the previous diver's
+  /// preference instead. A failed load is already logged where it started,
+  /// in the notifier, and leaves those settings in place: they are the
+  /// documented fallback, so the failure is not re-raised here.
+  Future<void> _awaitSettingsLoad() async {
+    try {
+      await ref.read(settingsProvider.notifier).settingsLoaded;
+    } catch (_) {
+      // See the doc comment: already logged, defaults are the fallback.
+    }
+  }
+
   Future<void> _startImport() async {
+    // Held while a change of profile re-checks the rows (issue #2050).
+    if (ref.read(importWizardNotifierProvider).isRetargeting) return;
     await _animateToPage(_importIndex);
     final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
     if (!mounted) return;
     final notifier = ref.read(importWizardNotifierProvider.notifier);
     notifier.setDiverId(diverId);
+    // The import's job refreshes the imported lists when it ends, so they
+    // are fresh here and also when the diver has left the wizard.
     await notifier.performImport();
     if (!mounted) return;
-    _invalidateImportedProviders();
     await _animateToPage(_summaryIndex);
   }
 
-  /// Invalidate list providers for entity types that were imported so
-  /// list screens reflect the new data without requiring an app restart.
-  void _invalidateImportedProviders() {
-    final result = ref.read(importWizardNotifierProvider).importResult;
-    if (result == null) return;
-
-    // Always refresh the computers list — ensureComputer() may have created
-    // a new record even when all dives were skipped.
-    if (widget.adapter.sourceType == ImportSourceType.diveComputer) {
-      ref.invalidate(allDiveComputersProvider);
-    }
-
-    for (final type in result.importedCounts.keys) {
-      if ((result.importedCounts[type] ?? 0) <= 0) continue;
-      switch (type) {
-        case ImportEntityType.dives:
-          ref.invalidate(diveListNotifierProvider);
-          ref.invalidate(paginatedDiveListProvider);
-          ref.invalidate(divesProvider);
-          ref.invalidate(diveStatisticsProvider);
-          ref.invalidate(diveRecordsProvider);
-          ref.invalidate(allDiveComputersProvider);
-          ref.invalidate(nextDiveNumberProvider);
-          // Dives link to sites, buddies, trips, etc. — their counts/lists
-          // may change even when those entities weren't imported.
-          ref.invalidate(sitesWithCountsProvider);
-          ref.invalidate(siteListNotifierProvider);
-        case ImportEntityType.sites:
-          ref.invalidate(sitesProvider);
-          ref.invalidate(sitesWithCountsProvider);
-          ref.invalidate(siteListNotifierProvider);
-        case ImportEntityType.buddies:
-          ref.invalidate(allBuddiesProvider);
-        case ImportEntityType.equipment:
-          ref.invalidate(allEquipmentProvider);
-          ref.invalidate(activeEquipmentProvider);
-          ref.invalidate(retiredEquipmentProvider);
-          ref.invalidate(serviceDueEquipmentProvider);
-          ref.invalidate(equipmentListNotifierProvider);
-        case ImportEntityType.equipmentSets:
-          ref.invalidate(equipmentSetsProvider);
-        case ImportEntityType.trips:
-          ref.invalidate(allTripsProvider);
-        case ImportEntityType.diveCenters:
-          ref.invalidate(allDiveCentersProvider);
-        case ImportEntityType.certifications:
-          ref.invalidate(allCertificationsProvider);
-        case ImportEntityType.courses:
-          ref.invalidate(allCoursesProvider);
-        case ImportEntityType.tags:
-          ref.invalidate(tagsProvider);
-        case ImportEntityType.diveTypes:
-          ref.invalidate(diveTypesProvider);
-      }
-    }
-  }
-
+  /// Leaves the wizard. Opened from Transfer there is a page to pop back
+  /// to; opened as a nav shortcut (#2936) the wizard is the only page, so it
+  /// goes home, where system Back from any top-level page leads.
   void _close() {
-    context.pop();
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go(kRootLocation);
+    }
   }
 
   void _navigateToDives() {
@@ -276,27 +376,56 @@ class _UnifiedImportWizardBodyState
     }
 
     if (_currentPage >= _importIndex) {
-      await showDialog<void>(
+      final notifier = ref.read(importWizardNotifierProvider.notifier);
+      final state = ref.read(importWizardNotifierProvider);
+
+      // Already cancelling — show a waiting notice.
+      if (state.isCancellationRequested) {
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text(context.l10n.universalImport_cancel_inProgressTitle),
+            content: Text(context.l10n.universalImport_cancel_inProgressBody),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(context.l10n.common_action_ok),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('Import in progress'),
-          content: const Text('Import is in progress and cannot be cancelled.'),
+          title: Text(context.l10n.universalImport_cancel_confirmTitle),
+          content: Text(context.l10n.universalImport_cancel_confirmBody),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('OK'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(context.l10n.universalImport_cancel_keepImporting),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(context.l10n.universalImport_cancel_confirmAction),
             ),
           ],
         ),
       );
+
+      if (confirmed == true) {
+        notifier.cancelImport();
+      }
       return;
     }
 
     final String message;
     if (_currentPage == _reviewIndex) {
-      message = 'Discard selections and cancel?';
+      message = context.l10n.universalImport_cancel_discardSelections;
     } else {
-      message = 'Cancel import?';
+      message = context.l10n.universalImport_cancel_confirmTitle;
     }
 
     final confirmed = await showDialog<bool>(
@@ -306,11 +435,11 @@ class _UnifiedImportWizardBodyState
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('No'),
+            child: Text(context.l10n.common_action_no),
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Yes'),
+            child: Text(context.l10n.common_action_yes),
           ),
         ],
       ),
@@ -323,7 +452,7 @@ class _UnifiedImportWizardBodyState
 
   @override
   Widget build(BuildContext context) {
-    final stepLabels = _buildStepLabels();
+    final indicator = _buildStepIndicator();
     final currentStepDef = _currentPage < _acquisitionSteps.length
         ? _acquisitionSteps[_currentPage]
         : null;
@@ -342,7 +471,10 @@ class _UnifiedImportWizardBodyState
       ),
       body: Column(
         children: [
-          WizardStepIndicator(labels: stepLabels, currentStep: _currentPage),
+          WizardStepIndicator(
+            labels: indicator.labels,
+            currentStep: indicator.current,
+          ),
           Expanded(
             child: PageView(
               controller: _pageController,
@@ -355,7 +487,13 @@ class _UnifiedImportWizardBodyState
                     isCurrentPage: _currentPage == i,
                     navigatingForward: _navigatingForward,
                     resetComplete: _resetComplete,
-                    onAutoAdvance: () => _onNext(),
+                    // Re-checked at fire time, not just at arming time: the
+                    // post-frame callback may have been scheduled a frame
+                    // before a failure (or a Back tap) took the wizard out of
+                    // forward navigation, and it carries no such check itself.
+                    onAutoAdvance: () {
+                      if (_navigatingForward) _onNext();
+                    },
                   ),
                 ),
                 ReviewStep(
@@ -373,6 +511,27 @@ class _UnifiedImportWizardBodyState
               ],
             ),
           ),
+          if (_advanceError != null && _currentPage < _reviewIndex)
+            WizardMessage(
+              message: _advanceError!,
+              icon: Icons.error_outline,
+              isError: true,
+            ),
+          // Duplicate detection threw and the review list was built without
+          // it, on entering the review step or after a change of profile
+          // there (issue #2050). Said here so nobody re-imports a dive
+          // believing the wizard checked.
+          if (ref.watch(
+                importWizardNotifierProvider.select(
+                  (s) => s.duplicateCheckFailed,
+                ),
+              ) &&
+              _currentPage == _reviewIndex)
+            WizardMessage(
+              message: context.l10n.universalImport_error_duplicateCheckFailed,
+              icon: Icons.warning_amber_outlined,
+              isError: false,
+            ),
           if (showBottomBar) _buildBottomBar(),
         ],
       ),
@@ -392,24 +551,27 @@ class _UnifiedImportWizardBodyState
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size(100, 48),
                 ),
-                onPressed: () {
-                  _navigatingForward = false;
-                  _animateToPage(_currentPage - 1);
-                },
-                child: const Text('Back'),
+                onPressed: _stepWorking
+                    ? null
+                    : () {
+                        _navigatingForward = false;
+                        _animateToPage(_currentPage - 1);
+                      },
+                child: Text(context.l10n.common_action_back),
               ),
             const Spacer(),
             if (_currentPage < _reviewIndex)
               _AcquisitionNextButton(
                 stepIndex: _currentPage,
                 step: _acquisitionSteps[_currentPage],
+                working: _stepWorking,
                 onNext: _onNext,
               )
             else if (_currentPage == _reviewIndex)
               FilledButton(
                 style: FilledButton.styleFrom(minimumSize: const Size(120, 48)),
                 onPressed: _startImport,
-                child: const Text('Import Selected'),
+                child: Text(context.l10n.universalImport_action_importSelected),
               ),
           ],
         ),
@@ -473,21 +635,33 @@ class _AcquisitionNextButton extends ConsumerWidget {
   const _AcquisitionNextButton({
     required this.stepIndex,
     required this.step,
+    required this.working,
     required this.onNext,
   });
 
   final int stepIndex;
   final WizardStepDef step;
+  final bool working;
   final VoidCallback onNext;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final canAdvance = ref.watch(step.canAdvance);
 
-    return FilledButton(
+    return FilledButton.icon(
       style: FilledButton.styleFrom(minimumSize: const Size(120, 48)),
-      onPressed: canAdvance ? onNext : null,
-      child: const Text('Next'),
+      onPressed: canAdvance && !working ? onNext : null,
+      icon: working
+          ? SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                semanticsLabel: context.l10n.common_label_loading,
+              ),
+            )
+          : null,
+      label: Text(context.l10n.universalImport_action_next),
     );
   }
 }

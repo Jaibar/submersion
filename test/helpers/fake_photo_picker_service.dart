@@ -1,0 +1,220 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:submersion/features/media/data/services/cloud_identifier_source.dart';
+import 'package:submersion/features/media/data/services/gallery_asset_reader.dart';
+import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_metadata.dart';
+
+/// One photo or video in a fake device library.
+class FakeGalleryAsset {
+  const FakeGalleryAsset({
+    required this.id,
+    required this.bytes,
+    required this.takenAt,
+    this.width = 4032,
+    this.height = 3024,
+    this.filename = 'IMG_0001.JPG',
+    this.type = AssetType.image,
+    this.cloudId,
+    this.file,
+  });
+
+  final String id;
+  final Uint8List bytes;
+  final DateTime takenAt;
+  final int width;
+  final int height;
+
+  /// Null models a library listing that carries no title, which PhotoKit
+  /// often omits on a peer's fast date-range query.
+  final String? filename;
+  final AssetType type;
+
+  /// PhotoKit's cloud identifier. Two devices sharing an iCloud library
+  /// hold the same photo under different ids and the SAME cloud id.
+  final String? cloudId;
+
+  /// The original as a file, the way photo_manager exports it on Apple
+  /// platforms. Null models a platform that hands over bytes only.
+  final File? file;
+
+  AssetInfo get info => AssetInfo(
+    id: id,
+    type: type,
+    createDateTime: takenAt,
+    width: width,
+    height: height,
+    filename: filename,
+  );
+}
+
+/// In-memory photo library standing in for photo_manager on one device.
+///
+/// Serves both halves of the gallery stack: the candidate search
+/// `AssetResolutionService` runs through [PhotoPickerService], and the byte
+/// reads `PlatformGalleryResolver` runs through [GalleryAssetReader]. Two
+/// devices get two instances; a shared iCloud library is modelled by giving
+/// both the same bytes under different ids.
+class FakePhotoPickerService
+    implements PhotoPickerService, GalleryAssetReader, CloudIdentifierSource {
+  FakePhotoPickerService({
+    List<FakeGalleryAsset> assets = const [],
+    this.permission = PhotoPermissionStatus.authorized,
+    this.supportsGalleryBrowsing = true,
+  }) : _assets = {for (final a in assets) a.id: a};
+
+  final Map<String, FakeGalleryAsset> _assets;
+  PhotoPermissionStatus permission;
+
+  /// Ids the user did NOT select under limited access. Invisible to every
+  /// query while [permission] is [PhotoPermissionStatus.limited].
+  final Set<String> hiddenFromLimitedAccess = {};
+
+  @override
+  final bool supportsGalleryBrowsing;
+
+  /// How many times the app asked for access, which shows the OS prompt on
+  /// a real device. Background resolution must leave it at zero.
+  int prompts = 0;
+
+  /// When set, gallery queries throw it (a platform channel failure).
+  Object? queryError;
+
+  void add(FakeGalleryAsset asset) => _assets[asset.id] = asset;
+  void remove(String id) => _assets.remove(id);
+
+  /// The picker's view of asset [id], as a selection hands it over.
+  AssetInfo infoFor(String id) => _assets[id]!.info;
+
+  FakeGalleryAsset? _visible(String id) {
+    final asset = _assets[id];
+    if (asset == null) return null;
+    if (permission == PhotoPermissionStatus.limited &&
+        hiddenFromLimitedAccess.contains(id)) {
+      return null;
+    }
+    if (permission == PhotoPermissionStatus.denied ||
+        permission == PhotoPermissionStatus.restricted) {
+      return null;
+    }
+    return asset;
+  }
+
+  /// Newest first, as [PhotoPickerService] documents: the resolver's
+  /// candidate order is part of the contract, so returning insertion order
+  /// would let a test pass on setup order alone.
+  @override
+  Future<List<AssetInfo>> getAssetsInDateRange(
+    DateTime start,
+    DateTime end,
+  ) async {
+    final error = queryError;
+    if (error != null) throw error;
+    final matches = [
+      for (final a in _assets.values)
+        if (_visible(a.id) != null &&
+            !a.takenAt.isBefore(start) &&
+            !a.takenAt.isAfter(end))
+          a,
+    ]..sort((a, b) => b.takenAt.compareTo(a.takenAt));
+    return [for (final a in matches) a.info];
+  }
+
+  @override
+  Future<Uint8List?> getThumbnail(String assetId, {int size = 200}) async =>
+      _visible(assetId)?.bytes;
+
+  @override
+  Future<Uint8List?> getFileBytes(String assetId) async =>
+      _visible(assetId)?.bytes;
+
+  @override
+  Future<PhotoPermissionStatus> checkPermission() async {
+    prompts++;
+    return permission;
+  }
+
+  @override
+  Future<PhotoPermissionStatus> currentPermission() async => permission;
+
+  @override
+  Future<PhotoPermissionStatus> requestPermission() async {
+    prompts++;
+    return permission;
+  }
+
+  @override
+  Future<String?> getFilePath(String assetId) async => null;
+
+  @override
+  Future<MediaSourceMetadata?> getAssetMetadata(String assetId) async {
+    final a = _visible(assetId);
+    if (a == null) return null;
+    return MediaSourceMetadata(
+      takenAt: a.takenAt,
+      width: a.width,
+      height: a.height,
+      mimeType: a.type == AssetType.video ? 'video/quicktime' : 'image/jpeg',
+    );
+  }
+
+  // GalleryAssetReader
+
+  /// How many originals were read whole into memory.
+  int originBytesReads = 0;
+
+  /// Whether this library hands originals over as files, as photo_manager
+  /// does on iOS and macOS. Off by default, as on Android.
+  @override
+  bool originalsAsFiles = false;
+
+  @override
+  Future<Uint8List?> originBytes(String assetId) async {
+    originBytesReads++;
+    return _visible(assetId)?.bytes;
+  }
+
+  @override
+  Future<File?> originFile(String assetId) async => _visible(assetId)?.file;
+
+  @override
+  Future<Uint8List?> thumbnailBytes(
+    String assetId,
+    int width,
+    int height,
+  ) async => _visible(assetId)?.bytes;
+
+  @override
+  Future<bool> exists(String assetId) async => _visible(assetId) != null;
+
+  @override
+  Future<bool> originIsLocal(String assetId) async => _visible(assetId) != null;
+
+  // CloudIdentifierSource
+
+  /// How many batch lookups ran: resolution must not ask for a row that
+  /// has no cloud id to match.
+  int cloudIdCalls = 0;
+
+  /// When set, the lookups throw it (a platform channel failure).
+  Object? cloudIdError;
+
+  /// False models a platform with no iCloud identifiers (Android, desktop).
+  bool supportsCloudIdentifiers = true;
+
+  @override
+  bool get isSupported => supportsCloudIdentifiers;
+
+  @override
+  Future<Map<String, String>> cloudIdentifiers(List<String> localIds) async {
+    cloudIdCalls++;
+    final error = cloudIdError;
+    if (error != null) throw error;
+    return {
+      for (final id in localIds)
+        if (_visible(id)?.cloudId case final cloudId? when cloudId.isNotEmpty)
+          id: cloudId,
+    };
+  }
+}

@@ -1,0 +1,313 @@
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
+
+/// Maps a Drift row to the domain entity. Shared with BuddyRepository so
+/// per-dive role resolution uses the exact same mapping.
+DiveRole mapDiveRoleRow(DiveRoleRow row) {
+  return DiveRole(
+    id: row.id,
+    diverId: row.diverId,
+    name: row.name,
+    isBuiltIn: row.isBuiltIn,
+    sortOrder: row.sortOrder,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+    updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+  );
+}
+
+/// The role [roleId] names on a dive owned by [diveDiverId], looked up in
+/// [rolesById]. Custom roles are diver-scoped (#1806), so another diver's
+/// role is not borrowed (its owner could rename it under this dive). That
+/// role and an id no row holds stay visible as synthetic roles instead of
+/// silently coercing to Buddy.
+DiveRole resolveDiveRole(
+  Map<String, DiveRole> rolesById,
+  String roleId, {
+  String? diveDiverId,
+}) {
+  final role = rolesById[roleId];
+  final foreign =
+      role != null &&
+      !role.isBuiltIn &&
+      role.diverId != null &&
+      diveDiverId != null &&
+      role.diverId != diveDiverId;
+  return role == null || foreign ? DiveRole.synthetic(roleId) : role;
+}
+
+class DiveRoleRepository {
+  AppDatabase get _db => DatabaseService.instance.database;
+  final SyncRepository _syncRepository = SyncRepository();
+  final _uuid = const Uuid();
+  final _log = LoggerService.forClass(DiveRoleRepository);
+
+  /// Emits whenever the `dive_roles` table changes so list providers can
+  /// refresh after a sync or any other write.
+  Stream<void> watchDiveRolesChanges() =>
+      _db.tableUpdates(TableUpdateQuery.onTable(_db.diveRoles));
+
+  /// Built-in roles plus the given diver's custom roles, built-ins first,
+  /// each group ordered by sortOrder then name. Without a diverId only
+  /// built-ins are returned (custom roles are always diver-scoped).
+  Future<List<DiveRole>> getAllDiveRoles({String? diverId}) async {
+    try {
+      final query = _db.select(_db.diveRoles)
+        ..orderBy([
+          (t) => OrderingTerm.desc(t.isBuiltIn),
+          (t) => OrderingTerm.asc(t.sortOrder),
+          (t) => OrderingTerm.asc(t.name),
+        ]);
+      if (diverId != null) {
+        query.where(
+          (t) =>
+              t.isBuiltIn.equals(true) |
+              (t.isBuiltIn.equals(false) & t.diverId.equals(diverId)),
+        );
+      } else {
+        query.where((t) => t.isBuiltIn.equals(true));
+      }
+      final rows = await query.get();
+      return rows.map(mapDiveRoleRow).toList();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get all dive roles',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Get a single dive role by id.
+  Future<DiveRole?> getDiveRoleById(String id) async {
+    try {
+      final row = await (_db.select(
+        _db.diveRoles,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      return row != null ? mapDiveRoleRow(row) : null;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get dive role by id: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Create a custom dive role for [diverId]. Ids are UUIDs (never
+  /// name-derived) so renames cannot break dive_buddies/dives references.
+  Future<DiveRole> createDiveRole({
+    required String name,
+    required String diverId,
+  }) async {
+    try {
+      final id = _uuid.v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final maxSortOrder = await _getMaxSortOrder();
+
+      await _db
+          .into(_db.diveRoles)
+          .insert(
+            DiveRolesCompanion(
+              id: Value(id),
+              diverId: Value(diverId),
+              name: Value(name.trim()),
+              isBuiltIn: const Value(false),
+              sortOrder: Value(maxSortOrder + 1),
+              createdAt: Value(now),
+              updatedAt: Value(now),
+            ),
+          );
+
+      await _syncRepository.markRecordPending(
+        entityType: 'diveRoles',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+
+      _log.info('Created dive role $id ($name) for diver: $diverId');
+      final created = await getDiveRoleById(id);
+      return created!;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to create dive role',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Restore a custom dive role preserving its original id (backup/restore
+  /// path, #551). The id must survive so dive_buddies.role and
+  /// dives.diver_role references resolve after restore. InsertOrIgnore keeps
+  /// re-imports idempotent; returns true when a row was actually inserted.
+  Future<bool> importDiveRole({
+    required String id,
+    required String name,
+    required String diverId,
+    int sortOrder = 100,
+  }) async {
+    try {
+      // Drift's insert return value does not distinguish an ignored
+      // conflict, so check existence explicitly.
+      final existing = await getDiveRoleById(id);
+      if (existing != null) return false;
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db
+          .into(_db.diveRoles)
+          .insert(
+            DiveRolesCompanion(
+              id: Value(id),
+              diverId: Value(diverId),
+              name: Value(name.trim()),
+              isBuiltIn: const Value(false),
+              sortOrder: Value(sortOrder),
+              createdAt: Value(now),
+              updatedAt: Value(now),
+            ),
+            mode: InsertMode.insertOrIgnore,
+          );
+      await _syncRepository.markRecordPending(
+        entityType: 'diveRoles',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+      _log.info('Imported dive role $id ($name)');
+      return true;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to import dive role: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Rename a custom dive role (built-ins cannot be renamed).
+  Future<void> renameDiveRole(String id, String newName) async {
+    try {
+      final existing = await getDiveRoleById(id);
+      if (existing == null) {
+        throw Exception('Dive role not found: $id');
+      }
+      if (existing.isBuiltIn) {
+        throw Exception('Cannot update built-in dive roles');
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(_db.diveRoles)..where((t) => t.id.equals(id))).write(
+        DiveRolesCompanion(name: Value(newName.trim()), updatedAt: Value(now)),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: 'diveRoles',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+      _log.info('Renamed dive role $id to $newName');
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to rename dive role: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Delete a custom dive role (built-ins cannot be deleted).
+  Future<void> deleteDiveRole(String id) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.deletedRecord,
+    body: () => _deleteDiveRoleInner(id),
+  );
+
+  Future<void> _deleteDiveRoleInner(String id) async {
+    try {
+      final existing = await getDiveRoleById(id);
+      if (existing == null) return;
+      if (existing.isBuiltIn) {
+        throw Exception('Cannot delete built-in dive roles');
+      }
+
+      await (_db.delete(_db.diveRoles)..where((t) => t.id.equals(id))).go();
+      await _syncRepository.logDeletion(entityType: 'diveRoles', recordId: id);
+      SyncEventBus.notifyLocalChange();
+      _log.info('Deleted dive role: $id');
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to delete dive role: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// True when any dive_buddies row, dive_buddy_roles row, dives.diver_role
+  /// or dive_diver_roles row references [id] (the junctions since #1221; a
+  /// stale junction row still counts, the safe side of a deletion guard).
+  ///
+  /// A reference from another diver's dive does not count (#1806): custom
+  /// roles are diver-scoped, so that dive cannot show the role anyway, and
+  /// it must not stop the owner deleting it. A dive with no diver still
+  /// counts, as the safe side of a deletion guard.
+  Future<bool> isDiveRoleInUse(String id) async {
+    try {
+      final owner = (await getDiveRoleById(id))?.diverId;
+      const otherDiversDives =
+          'SELECT id FROM dives WHERE diver_id IS NOT NULL AND diver_id != ?2';
+      final result = await _db
+          .customSelect(
+            'SELECT '
+            // stats-scope-exempt: deletion guard, same reasoning as
+            // isDiveTypeInUse. Counts references, not statistics.
+            '(SELECT COUNT(*) FROM dive_buddies WHERE role = ?1 '
+            'AND (?2 IS NULL OR dive_id NOT IN ($otherDiversDives))) + '
+            '(SELECT COUNT(*) FROM dives WHERE diver_role = ?1 '
+            'AND (?2 IS NULL OR diver_id IS NULL OR diver_id = ?2)) + '
+            // A role row whose link is gone (an older version removed the
+            // buddy) is no use: no dive shows it (#1221).
+            '(SELECT COUNT(*) FROM dive_buddy_roles r WHERE r.role_id = ?1 '
+            'AND EXISTS (SELECT 1 FROM dive_buddies l '
+            'WHERE l.dive_id = r.dive_id AND l.buddy_id = r.buddy_id) '
+            'AND (?2 IS NULL OR r.dive_id NOT IN ($otherDiversDives))) + '
+            '(SELECT COUNT(*) FROM dive_diver_roles r JOIN dives d '
+            'ON d.id = r.dive_id WHERE r.role_id = ?1 '
+            'AND (?2 IS NULL OR d.diver_id IS NULL OR d.diver_id = ?2)) '
+            'AS uses',
+            variables: [Variable.withString(id), Variable<String>(owner)],
+          )
+          .getSingle();
+      return (result.data['uses'] as int) > 0;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to check if dive role is in use: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<int> _getMaxSortOrder() async {
+    final result = await _db.customSelect('''
+      SELECT MAX(sort_order) as max_order FROM dive_roles
+    ''').getSingleOrNull();
+    return (result?.data['max_order'] as int?) ?? 0;
+  }
+}

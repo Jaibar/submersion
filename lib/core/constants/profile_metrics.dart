@@ -34,6 +34,13 @@ enum ProfileRightAxisMetric {
     unitSuffix: null, // Uses unit formatter (bar/min or L/min)
     category: ProfileMetricCategory.primary,
   ),
+  ascentRate(
+    displayName: 'Ascent Rate',
+    shortName: 'Rate',
+    color: Colors.lime,
+    unitSuffix: null, // Uses unit formatter (depth/min)
+    category: ProfileMetricCategory.primary,
+  ),
   ndl(
     displayName: 'NDL',
     shortName: 'NDL',
@@ -65,7 +72,7 @@ enum ProfileRightAxisMetric {
   gasDensity(
     displayName: 'Gas Density',
     shortName: 'Density',
-    color: Colors.brown,
+    color: Color(0xFF827717),
     unitSuffix: 'g/L',
     category: ProfileMetricCategory.gasAnalysis,
   ),
@@ -110,10 +117,62 @@ enum ProfileRightAxisMetric {
     color: Color(0xFF6D4C41), // Brown 600
     unitSuffix: null, // Unit is the name itself; avoids "OTU (OTU)" on axis
     category: ProfileMetricCategory.decompression,
+  ),
+  o2CellMv(
+    displayName: 'O2 Cells',
+    shortName: 'Cells',
+    // Cyan 800 - the ppO2 family, darker; individual cells shade from here.
+    color: Color(0xFF00838F),
+    unitSuffix: 'mV',
+    category: ProfileMetricCategory.gasAnalysis,
+  ),
+  gtr(
+    displayName: 'GTR',
+    shortName: 'GTR',
+    // Green 800 - apart from NDL's yellow-green and SAC's teal, the two
+    // lines it is most likely to share a chart with.
+    color: Color(0xFF2E7D32),
+    unitSuffix: 'min',
+    category: ProfileMetricCategory.gasAnalysis,
+  ),
+  buoyancy(
+    displayName: 'Buoyancy',
+    shortName: 'Buoyancy',
+    // The buoyant side's colour; the line itself is two-coloured (#4593).
+    color: Color(0xFF00936B),
+    unitSuffix: null, // Uses unit formatter (kg or lbs)
+    category: ProfileMetricCategory.other,
+  ),
+  // The three values Shearwater's Avelo mode logs (issue #4664), as the
+  // computer recorded them. Their colours are the diver's palette's.
+  aveloBuoyancy(
+    displayName: 'Avelo buoyancy',
+    shortName: 'Avelo',
+    color: Color(0xFF29B6F6),
+    unitSuffix: null, // Uses unit formatter (kg or lbs)
+    category: ProfileMetricCategory.other,
+  ),
+  aveloGasRemaining(
+    displayName: 'Gas remaining',
+    shortName: 'Gas',
+    color: Color(0xFF689F38),
+    unitSuffix: '%',
+    category: ProfileMetricCategory.gasAnalysis,
+  ),
+  computerRmv(
+    displayName: 'RMV (computer)',
+    shortName: 'RMV',
+    color: Color(0xFFFF7043),
+    unitSuffix: null, // Uses unit formatter (L/min or cuft/min)
+    category: ProfileMetricCategory.gasAnalysis,
   );
 
   final String displayName;
   final String shortName;
+
+  /// The colour shipped for this metric. The chart reads only ascent rate's
+  /// and O2 cells' from here; every other metric's colour is the diver's
+  /// choice, resolved through `ProfileMetricPalette` (issue #3012).
   final Color? color;
   final String? unitSuffix;
   final ProfileMetricCategory category;
@@ -136,11 +195,6 @@ enum ProfileRightAxisMetric {
     ndl,
     ppO2,
   ];
-
-  /// Get the effective color, using theme color for temperature
-  Color getColor(ColorScheme colorScheme) {
-    return color ?? colorScheme.tertiary;
-  }
 }
 
 /// Categories for grouping metrics in the UI
@@ -178,8 +232,6 @@ enum MetricDataSource {
       value == 0 ? MetricDataSource.computer : MetricDataSource.calculated;
 }
 
-/// Reports which data source was actually used for each metric after fallback
-/// resolution.
 ///
 /// When a user prefers `computer` but no computer data exists for that metric,
 /// the actual source falls back to `calculated`.
@@ -188,4 +240,6 @@ typedef MetricSourceInfo = ({
   MetricDataSource ceilingActual,
   MetricDataSource ttsActual,
   MetricDataSource cnsActual,
+  MetricDataSource decoStopActual,
+  MetricDataSource gtrActual,
 });

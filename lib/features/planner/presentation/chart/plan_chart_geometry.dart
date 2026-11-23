@@ -1,0 +1,153 @@
+import 'dart:ui';
+
+import 'package:submersion/core/utils/time_weighted_mean.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+
+/// Pure (time, depth) to pixel mapping for the plan profile chart, plus tick
+/// intervals and inverse hit-testing. Positions work in metric depth;
+/// [depthUnitScale] (display units per meter) only shapes tick spacing so
+/// grid lines land on round display values.
+class PlanChartGeometry {
+  final Size size;
+  final double maxTimeSeconds;
+  final double maxDepthMeters;
+  final double depthUnitScale;
+
+  static const double leftGutter = 44;
+  static const double bottomGutter = 24;
+  static const double topPad = 12;
+  static const double rightPad = 12;
+
+  const PlanChartGeometry({
+    required this.size,
+    required this.maxTimeSeconds,
+    required this.maxDepthMeters,
+    required this.depthUnitScale,
+  });
+
+  Rect get plotRect => Rect.fromLTRB(
+    leftGutter,
+    topPad,
+    size.width - rightPad,
+    size.height - bottomGutter,
+  );
+
+  double get _paddedMaxTime => maxTimeSeconds > 0 ? maxTimeSeconds * 1.05 : 600;
+  double get _paddedMaxDepth => maxDepthMeters > 0 ? maxDepthMeters * 1.1 : 10;
+
+  double xFor(double timeSeconds) =>
+      plotRect.left + (timeSeconds / _paddedMaxTime) * plotRect.width;
+
+  double yFor(double depthMeters) =>
+      plotRect.top + (depthMeters / _paddedMaxDepth) * plotRect.height;
+
+  Offset toPixel(double timeSeconds, double depthMeters) =>
+      Offset(xFor(timeSeconds), yFor(depthMeters));
+
+  /// Inverse of [xFor], clamped to the data range (not the padded range) so
+  /// scrubbing never reads past the end of the plan.
+  double timeAtDx(double dx) {
+    if (maxTimeSeconds <= 0) return 0;
+    final t = (dx - plotRect.left) / plotRect.width * _paddedMaxTime;
+    return t.clamp(0.0, maxTimeSeconds);
+  }
+
+  /// Inverse of [yFor], clamped to the padded depth range (unlike [timeAtDx],
+  /// which clamps to the data range): a drag may extend a waypoint into the
+  /// padding below the deepest planned point, but never past the axis edge.
+  double depthAtDy(double dy) {
+    final d = (dy - plotRect.top) / plotRect.height * _paddedMaxDepth;
+    return d.clamp(0.0, _paddedMaxDepth);
+  }
+
+  /// Inverse of [xFor] for dragging a waypoint: floored at zero but not
+  /// capped, so a pointer carried past the right edge keeps extending the
+  /// segment at the same seconds-per-pixel (issue #3113).
+  double dragTimeAtDx(double dx) {
+    final t = (dx - plotRect.left) / plotRect.width * _paddedMaxTime;
+    return t < 0 ? 0 : t;
+  }
+
+  /// Inverse of [yFor] for dragging a waypoint: floored at the surface but
+  /// not capped at the axis, like [dragTimeAtDx].
+  double dragDepthAtDy(double dy) {
+    final d = (dy - plotRect.top) / plotRect.height * _paddedMaxDepth;
+    return d < 0 ? 0 : d;
+  }
+
+  double get timeTickIntervalSeconds => niceInterval(_paddedMaxTime / 60) * 60;
+
+  double get depthTickIntervalMeters =>
+      niceInterval(_paddedMaxDepth * depthUnitScale) / depthUnitScale;
+
+  /// Legacy interval ladder from the fl_chart implementation, preserved so
+  /// grid density matches diver expectations.
+  static double niceInterval(double maxValue) {
+    if (maxValue <= 0) return 5;
+    if (maxValue <= 10) return 2;
+    if (maxValue <= 20) return 5;
+    if (maxValue <= 50) return 10;
+    if (maxValue <= 100) return 20;
+    return 30;
+  }
+
+  /// Time-weighted mean depth of a polyline profile (trapezoidal rule).
+  static double meanDepthMeters(List<CanvasPoint> profile) {
+    if (profile.length < 2) return 0;
+    return timeWeightedMean(
+      profile,
+      time: (p) => p.timeSeconds,
+      value: (p) => p.depth,
+    )!;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is PlanChartGeometry &&
+      other.size == size &&
+      other.maxTimeSeconds == maxTimeSeconds &&
+      other.maxDepthMeters == maxDepthMeters &&
+      other.depthUnitScale == depthUnitScale;
+
+  @override
+  int get hashCode =>
+      Object.hash(size, maxTimeSeconds, maxDepthMeters, depthUnitScale);
+}
+
+/// The user-authored segment whose time span covers [timeSeconds], or null
+/// when the time falls in the computed ascent past the last segment.
+String? segmentIdAtTime(List<PlanSegment> segments, double timeSeconds) {
+  final ordered = List<PlanSegment>.from(segments)
+    ..sort((a, b) => a.order.compareTo(b.order));
+  var elapsed = 0.0;
+  for (final segment in ordered) {
+    final end = elapsed + segment.durationSeconds;
+    if (timeSeconds >= elapsed && timeSeconds <= end) return segment.id;
+    elapsed = end;
+  }
+  return null;
+}
+
+/// The point of [profile] nearest [position] within [radius] pixels, or
+/// null. Covers every corner of the drawn profile, including the stop
+/// arrivals and departures of the computed deco schedule, which have no
+/// waypoint handle of their own (#3775).
+CanvasPoint? hitTestProfilePoint({
+  required List<CanvasPoint> profile,
+  required PlanChartGeometry geometry,
+  required Offset position,
+  double radius = 16,
+}) {
+  CanvasPoint? best;
+  var bestDistance = radius;
+  for (final point in profile) {
+    final distance =
+        (geometry.toPixel(point.timeSeconds, point.depth) - position).distance;
+    if (distance <= bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}

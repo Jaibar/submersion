@@ -1,0 +1,338 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/data_quality/domain/entities/quality_finding.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/core/services/logger_service.dart';
+
+class ScanApplyResult {
+  const ScanApplyResult({
+    required this.inserted,
+    required this.updated,
+    required this.removed,
+  });
+  final int inserted;
+  final int updated;
+  final int removed;
+}
+
+class QualityFindingsRepository {
+  static final _log = LoggerService.forClass(QualityFindingsRepository);
+
+  QualityFindingsRepository();
+
+  AppDatabase get _db => DatabaseService.instance.database;
+  final _sync = SyncRepository();
+
+  /// Applies one scan's results for a scope of dives and detectors.
+  ///
+  /// Semantics (spec "Write discipline"):
+  /// - re-produced findings refresh facts but preserve `dismissed`;
+  /// - `resolved` findings still produced reopen (the repair did not stick);
+  /// - findings in scope not re-produced are deleted with tombstones;
+  /// - detectors outside [ranDetectorIds] are never touched.
+  ///
+  /// Runs in one transaction and does NOT notify; the scan service emits one
+  /// SyncEventBus.notifyLocalChange() per batch.
+  Future<ScanApplyResult> applyScanResults({
+    required Set<String> scopeDiveIds,
+    required Set<String> ranDetectorIds,
+    required List<QualityFinding> produced,
+  }) async {
+    if (scopeDiveIds.isEmpty || ranDetectorIds.isEmpty) {
+      return const ScanApplyResult(inserted: 0, updated: 0, removed: 0);
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // Same id produced twice in a batch (both members of a pair scanned)
+    // collapses here.
+    final producedById = {for (final f in produced) f.id: f};
+
+    return _db.transaction(() async {
+      // Chunked because a scope can be a whole import, and each chunk binds
+      // twice. A pair can match in two chunks, so everything below reads this
+      // map rather than the rows, or a removed pair would be logged twice.
+      final existingById = <String, QualityFindingRow>{};
+      for (final chunk in seriesIdChunks(scopeDiveIds.toList())) {
+        final rows =
+            await (_db.select(_db.qualityFindings)..where(
+                  (t) =>
+                      t.detectorId.isIn(ranDetectorIds) &
+                      (t.diveId.isIn(chunk) | t.relatedDiveId.isIn(chunk)),
+                ))
+                .get();
+        existingById.addAll({for (final r in rows) r.id: r});
+      }
+
+      var removed = 0;
+      for (final row in existingById.values) {
+        if (producedById.containsKey(row.id)) continue;
+        await (_db.delete(
+          _db.qualityFindings,
+        )..where((t) => t.id.equals(row.id))).go();
+        await _sync.logDeletion(
+          entityType: 'qualityFindings',
+          recordId: row.id,
+        );
+        removed++;
+      }
+
+      var inserted = 0;
+      var updated = 0;
+      for (final f in producedById.values) {
+        final existing =
+            existingById[f.id] ??
+            await (_db.select(
+              _db.qualityFindings,
+            )..where((t) => t.id.equals(f.id))).getSingleOrNull();
+        final paramsJson = jsonEncode(f.params);
+        if (existing == null) {
+          await _db
+              .into(_db.qualityFindings)
+              .insert(
+                QualityFindingsCompanion.insert(
+                  id: f.id,
+                  diveId: f.diveId,
+                  relatedDiveId: Value(f.relatedDiveId),
+                  computerId: Value(f.computerId),
+                  detectorId: f.detectorId,
+                  detectorVersion: f.detectorVersion,
+                  category: f.category.name,
+                  severity: f.severity.name,
+                  status: const Value('open'),
+                  params: Value(paramsJson),
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              );
+          inserted++;
+        } else {
+          final newStatus = existing.status == QualityStatus.resolved.name
+              ? QualityStatus.open.name
+              : existing.status;
+          final unchanged =
+              existing.params == paramsJson &&
+              existing.severity == f.severity.name &&
+              existing.detectorVersion == f.detectorVersion &&
+              existing.status == newStatus;
+          if (unchanged) continue; // avoid sync churn on repeat scans
+          await (_db.update(
+            _db.qualityFindings,
+          )..where((t) => t.id.equals(f.id))).write(
+            QualityFindingsCompanion(
+              detectorVersion: Value(f.detectorVersion),
+              severity: Value(f.severity.name),
+              params: Value(paramsJson),
+              status: Value(newStatus),
+              updatedAt: Value(now),
+            ),
+          );
+          updated++;
+        }
+        await _sync.markRecordPending(
+          entityType: 'qualityFindings',
+          recordId: f.id,
+          localUpdatedAt: now,
+        );
+      }
+      return ScanApplyResult(
+        inserted: inserted,
+        updated: updated,
+        removed: removed,
+      );
+    });
+  }
+
+  Future<void> setStatus(String id, QualityStatus status) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(
+      _db.qualityFindings,
+    )..where((t) => t.id.equals(id))).write(
+      QualityFindingsCompanion(
+        status: Value(status.name),
+        updatedAt: Value(now),
+      ),
+    );
+    await _sync.markRecordPending(
+      entityType: 'qualityFindings',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  Future<List<QualityFinding>> getFindings({
+    QualityStatus? status,
+    String? diveId,
+  }) async {
+    final query = _db.select(_db.qualityFindings)
+      ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
+    if (status != null) {
+      query.where((t) => t.status.equals(status.name));
+    }
+    if (diveId != null) {
+      query.where(
+        (t) => t.diveId.equals(diveId) | t.relatedDiveId.equals(diveId),
+      );
+    }
+    final rows = await query.get();
+    return [for (final r in rows) ?_fromRow(r)];
+  }
+
+  /// Open findings this build can read: the counts must match what the
+  /// inbox lists, and [_fromRow] skips a synced finding whose category or
+  /// severity a newer build added (issue #2853).
+  Expression<bool> get _openAndReadable =>
+      _db.qualityFindings.status.equals(QualityStatus.open.name) &
+      _db.qualityFindings.category.isIn([
+        for (final c in QualityCategory.values) c.name,
+      ]) &
+      _db.qualityFindings.severity.isIn([
+        for (final s in QualitySeverity.values) s.name,
+      ]);
+
+  /// Findings that name a dive of [diverId], as anchor or related dive.
+  ///
+  /// A finding has no diver of its own, so it reaches one through its dives.
+  /// Both ends count: a shared-gear pair spans two divers and is stored once,
+  /// anchored on the smaller dive id, and each diver must still see it
+  /// (issue #3049).
+  Expression<bool> _namesDiveOf(String diverId) {
+    Expression<bool> inDiverDives(Expression<String> column) {
+      final dives = _db.selectOnly(_db.dives)
+        ..addColumns([_db.dives.id])
+        ..where(_db.dives.diverId.equals(diverId));
+      return column.isInQuery(dives);
+    }
+
+    return inDiverDives(_db.qualityFindings.diveId) |
+        inDiverDives(_db.qualityFindings.relatedDiveId);
+  }
+
+  /// Open findings for [diverId]'s dives, or across every diver when null.
+  Stream<int> watchOpenCount({String? diverId}) {
+    final count = _db.qualityFindings.id.count();
+    final query = _db.selectOnly(_db.qualityFindings)
+      ..addColumns([count])
+      ..where(
+        diverId == null
+            ? _openAndReadable
+            : _openAndReadable & _namesDiveOf(diverId),
+      );
+    return query.watchSingle().map((row) => row.read(count) ?? 0);
+  }
+
+  /// Findings for [diverId]'s dives, or across every diver when null.
+  Stream<List<QualityFinding>> watchFindings({String? diverId}) {
+    final query = _db.select(_db.qualityFindings)
+      ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
+    if (diverId != null) query.where((_) => _namesDiveOf(diverId));
+    return query.watch().map((rows) => [for (final r in rows) ?_fromRow(r)]);
+  }
+
+  Stream<int> watchOpenCountForDive(String diveId) {
+    final count = _db.qualityFindings.id.count();
+    final query = _db.selectOnly(_db.qualityFindings)
+      ..addColumns([count])
+      ..where(
+        _openAndReadable &
+            (_db.qualityFindings.diveId.equals(diveId) |
+                _db.qualityFindings.relatedDiveId.equals(diveId)),
+      );
+    return query.watchSingle().map((row) => row.read(count) ?? 0);
+  }
+
+  /// Open-finding count scoped to a set of dive ids (dive_id OR related_dive_id
+  /// in the set). Counts in SQL so the stream stays cheap regardless of how
+  /// large the overall findings library grows. Empty set -> constant 0.
+  Stream<int> watchOpenCountForDives(Set<String> diveIds) {
+    if (diveIds.isEmpty) return Stream.value(0);
+    final ids = diveIds.toList();
+    final count = _db.qualityFindings.id.count();
+    final query = _db.selectOnly(_db.qualityFindings)
+      ..addColumns([count])
+      ..where(
+        _openAndReadable &
+            (_db.qualityFindings.diveId.isIn(ids) |
+                _db.qualityFindings.relatedDiveId.isIn(ids)),
+      );
+    return query.watchSingle().map((row) => row.read(count) ?? 0);
+  }
+
+  /// Bulk dismiss with ONE notify (fifty false positives, one tap).
+  Future<void> dismissAll(Iterable<String> ids) =>
+      _setAll(ids, QualityStatus.dismissed);
+
+  /// Puts [ids] back to open with one notify: the Undo of Dismiss all shown
+  /// (issue #4393).
+  Future<void> reopenAll(Iterable<String> ids) =>
+      _setAll(ids, QualityStatus.open);
+
+  /// Marks [ids] resolved with one notify: the findings a bulk repair
+  /// answered (issue #4393).
+  Future<void> resolveAll(Iterable<String> ids) =>
+      _setAll(ids, QualityStatus.resolved);
+
+  Future<void> _setAll(Iterable<String> ids, QualityStatus status) async {
+    final idList = ids.toList();
+    if (idList.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.transaction(() async {
+      // Chunked like the scan's reads: Dismiss all shown can pass every open
+      // finding of a large logbook at once.
+      for (final chunk in seriesIdChunks(idList)) {
+        await (_db.update(
+          _db.qualityFindings,
+        )..where((t) => t.id.isIn(chunk))).write(
+          QualityFindingsCompanion(
+            status: Value(status.name),
+            updatedAt: Value(now),
+          ),
+        );
+      }
+      for (final id in idList) {
+        await _sync.markRecordPending(
+          entityType: 'qualityFindings',
+          recordId: id,
+          localUpdatedAt: now,
+        );
+      }
+    });
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// The finding in [row], or null when this build does not know its
+  /// category, severity or status: a newer build can sync one, and the
+  /// inbox must still list the rest (issue #2853). Logged every time, so no
+  /// process-wide state is kept.
+  QualityFinding? _fromRow(QualityFindingRow row) {
+    final category = QualityCategory.values.asNameMap()[row.category];
+    final severity = QualitySeverity.values.asNameMap()[row.severity];
+    final status = QualityStatus.values.asNameMap()[row.status];
+    if (category == null || severity == null || status == null) {
+      _log.warning(
+        'Skipping finding ${row.id}: unknown category, severity or status '
+        '(${row.category}, ${row.severity}, ${row.status})',
+      );
+      return null;
+    }
+    return QualityFinding(
+      id: row.id,
+      diveId: row.diveId,
+      relatedDiveId: row.relatedDiveId,
+      computerId: row.computerId,
+      detectorId: row.detectorId,
+      detectorVersion: row.detectorVersion,
+      category: category,
+      severity: severity,
+      status: status,
+      params: (jsonDecode(row.params) as Map<String, dynamic>),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+    );
+  }
+}

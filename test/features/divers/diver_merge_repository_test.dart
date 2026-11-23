@@ -1,0 +1,649 @@
+import 'package:drift/drift.dart' hide isNotNull, isNull;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/divers/data/repositories/diver_merge_repository.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/core/services/sync/sync_fact_groups.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart'
+    as domain;
+
+import '../../helpers/test_database.dart';
+
+domain.Diver makeDiver(
+  String id,
+  String name, {
+  bool isDefault = false,
+  int createdAt = 0,
+}) {
+  return domain.Diver(
+    id: id,
+    name: name,
+    isDefault: isDefault,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(createdAt),
+    updatedAt: DateTime.fromMillisecondsSinceEpoch(createdAt),
+  );
+}
+
+/// Exhaustive, schema-driven coverage for diver merge.
+///
+/// Rather than hand-seed 16 hand-written Companion rows (brittle against schema
+/// changes), this test discovers every table that has a `diver_id` column via
+/// SQLite's catalog, seeds one minimal row per table pointing at the duplicate,
+/// runs the merge, then sweeps every such table asserting no row still points
+/// at the deleted duplicate. Any future table that gains a diver_id is covered
+/// automatically.
+void main() {
+  late AppDatabase db;
+  late DiverMergeRepository repo;
+
+  const keeper = 'diver-keeper';
+  const dup = 'diver-dup';
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    repo = DiverMergeRepository();
+
+    for (final id in [keeper, dup]) {
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: id,
+              name: 'Alex Diver',
+              createdAt: 1000,
+              updatedAt: 1000,
+            ),
+          );
+    }
+  });
+
+  tearDown(() {
+    DatabaseService.instance.resetForTesting();
+  });
+
+  /// All user tables (excluding the divers table itself) that have a
+  /// `diver_id` column, discovered from the live schema.
+  Future<List<String>> tablesWithDiverId() async {
+    final rows = await db
+        .customSelect(
+          "SELECT m.name AS tbl FROM sqlite_master m "
+          "JOIN pragma_table_info(m.name) p "
+          "WHERE m.type = 'table' AND p.name = 'diver_id' "
+          "AND m.name != 'divers' AND m.name != 'change_log_operations'",
+        )
+        .get();
+    return rows.map((r) => r.read<String>('tbl')).toList();
+  }
+
+  Future<int> countByDiver(String table, String diverId) async {
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(*) AS c FROM "$table" WHERE diver_id = ?',
+          variables: [Variable.withString(diverId)],
+        )
+        .getSingle();
+    return row.read<int>('c');
+  }
+
+  /// Column names for [table] that are NOT NULL and have no default, so a
+  /// minimal INSERT can satisfy them.
+  Future<List<({String name, String type})>> requiredColumns(
+    String table,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM pragma_table_info(?)',
+          variables: [Variable.withString(table)],
+        )
+        .get();
+    return rows
+        .where(
+          (r) =>
+              (r.data['notnull'] as int? ?? 0) == 1 &&
+              r.data['dflt_value'] == null,
+        )
+        .map(
+          (r) => (
+            name: r.data['name'] as String,
+            type: (r.data['type'] as String?) ?? '',
+          ),
+        )
+        .toList();
+  }
+
+  /// Foreign keys among [table]'s NOT NULL columns get a parent row with id
+  /// 'x' (the TEXT placeholder) so the seed satisfies the constraint. The
+  /// parent's own diver_id stays null: it must not count as a duplicate-owned
+  /// row when the parent table is itself a diver_id table. v202's
+  /// equipment_observations (diver_id plus a required equipment_id) is the
+  /// first table that needs this.
+  Future<void> ensureParentRows(String table) async {
+    final fks = await db
+        .customSelect(
+          'SELECT "table" AS parent, "from" AS col FROM pragma_foreign_key_list(?)',
+          variables: [Variable.withString(table)],
+        )
+        .get();
+    final required = (await requiredColumns(table)).map((c) => c.name).toSet();
+    for (final fk in fks) {
+      final col = fk.read<String>('col');
+      final parent = fk.read<String>('parent');
+      if (!required.contains(col) || col == 'diver_id') continue;
+      final cols = await requiredColumns(parent);
+      final names = <String>['"id"'];
+      final values = <Object?>['x'];
+      for (final c in cols) {
+        if (c.name == 'id' || c.name == 'diver_id') continue;
+        names.add('"${c.name}"');
+        final t = c.type.toUpperCase();
+        values.add(
+          t.contains('INT')
+              ? 0
+              : (t.contains('REAL') || t.contains('FLOA') || t.contains('DOUB'))
+              ? 0.0
+              : t.contains('BLOB')
+              ? Uint8List(0)
+              : 'x',
+        );
+      }
+      await db.customStatement(
+        'INSERT OR IGNORE INTO "$parent" (${names.join(",")}) '
+        'VALUES (${List.filled(names.length, "?").join(",")})',
+        values,
+      );
+    }
+  }
+
+  /// Insert one minimal row into [table] with diver_id = [diverId], filling
+  /// every required column with a type-appropriate placeholder.
+  Future<void> seedRow(String table, String diverId, String pk) async {
+    await ensureParentRows(table);
+    final cols = await requiredColumns(table);
+    final names = <String>[];
+    final placeholders = <String>[];
+    final vars = <Variable>[];
+    for (final col in cols) {
+      names.add('"${col.name}"');
+      placeholders.add('?');
+      if (col.name == 'diver_id') {
+        vars.add(Variable.withString(diverId));
+      } else if (col.name == 'id') {
+        vars.add(Variable.withString(pk));
+      } else {
+        final t = col.type.toUpperCase();
+        if (t.contains('INT')) {
+          vars.add(Variable.withInt(0));
+        } else if (t.contains('REAL') ||
+            t.contains('FLOA') ||
+            t.contains('DOUB')) {
+          vars.add(Variable.withReal(0));
+        } else if (t.contains('BLOB')) {
+          vars.add(Variable.withBlob(Uint8List(0)));
+        } else {
+          vars.add(Variable.withString('x'));
+        }
+      }
+    }
+    // Ensure diver_id present even if it was nullable (not in requiredColumns).
+    if (!names.contains('"diver_id"')) {
+      names.add('"diver_id"');
+      placeholders.add('?');
+      vars.add(Variable.withString(diverId));
+    }
+    // Ensure a primary key id present even if nullable.
+    if (!names.contains('"id"')) {
+      names.add('"id"');
+      placeholders.add('?');
+      vars.add(Variable.withString(pk));
+    }
+    await db.customStatement(
+      'INSERT INTO "$table" (${names.join(",")}) '
+      'VALUES (${placeholders.join(",")})',
+      vars.map((v) => v.value).toList(),
+    );
+  }
+
+  test('every diver_id table is repointed or cleared; none reference the '
+      'duplicate after merge', () async {
+    final tables = await tablesWithDiverId();
+    expect(tables, isNotEmpty, reason: 'sanity: schema has diver_id tables');
+
+    // Seed one duplicate-owned row per table.
+    var i = 0;
+    for (final table in tables) {
+      await seedRow(table, dup, 'row-$i');
+      i++;
+      expect(
+        await countByDiver(table, dup),
+        1,
+        reason: 'precondition: $table seeded with a duplicate-owned row',
+      );
+    }
+
+    await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+    for (final table in tables) {
+      expect(
+        await countByDiver(table, dup),
+        0,
+        reason: '$table still references the deleted duplicate after merge',
+      );
+    }
+  });
+
+  test("the duplicate's change log entries follow the keeper", () async {
+    await seedRow('change_log_operations', dup, 'op-1');
+    // A summary, because a settle removes an entry with nothing in it.
+    await db.customStatement(
+      "UPDATE change_log_operations SET summary_count = 1 WHERE id = 'op-1'",
+    );
+
+    await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+    expect(await countByDiver('change_log_operations', dup), 0);
+    final moved = await db
+        .customSelect(
+          "SELECT diver_id FROM change_log_operations WHERE id = 'op-1'",
+        )
+        .getSingle();
+    expect(moved.read<String>('diver_id'), keeper);
+  });
+
+  test('the duplicate diver row is deleted and the keeper remains', () async {
+    await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+    final ids = (await db.select(db.divers).get()).map((d) => d.id).toSet();
+    expect(ids, contains(keeper));
+    expect(ids, isNot(contains(dup)));
+  });
+
+  test('additive data is preserved on the keeper, not lost', () async {
+    // A dive owned by the duplicate must survive, now owned by the keeper.
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion.insert(
+            id: 'dive-keepme',
+            diveDateTime: 2000,
+            diverId: const Value(dup),
+            createdAt: 2000,
+            updatedAt: 2000,
+          ),
+        );
+
+    await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+    expect(await countByDiver('dives', keeper), 1);
+    final dive = await (db.select(
+      db.dives,
+    )..where((t) => t.id.equals('dive-keepme'))).getSingleOrNull();
+    expect(
+      dive,
+      isNotNull,
+      reason: 'the dive must not be deleted by the merge',
+    );
+    expect(dive!.diverId, keeper);
+  });
+
+  test(
+    'the duplicate deletion is logged so it propagates to other devices',
+    () async {
+      await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+      final logged = await db
+          .customSelect(
+            "SELECT COUNT(*) AS c FROM deletion_log "
+            "WHERE entity_type = 'divers' AND record_id = ?",
+            variables: [Variable.withString(dup)],
+          )
+          .getSingle();
+      expect(logged.read<int>('c'), 1);
+    },
+  );
+
+  group('merge guards and helpers', () {
+    test('rejects merging a diver into itself', () async {
+      expect(
+        () => repo.mergeDivers(keeperId: keeper, duplicateId: keeper),
+        throwsArgumentError,
+      );
+    });
+
+    test('throws when the duplicate diver does not exist', () async {
+      expect(
+        () => repo.mergeDivers(keeperId: keeper, duplicateId: 'ghost-diver'),
+        throwsStateError,
+      );
+    });
+
+    test('DuplicateDiverGroup.displayName is the keeper name', () {
+      final group = DuplicateDiverGroup(
+        keeper: makeDiver('k', 'Alex Diver', isDefault: true),
+        duplicates: [makeDiver('d', 'Alex Diver')],
+      );
+      expect(group.displayName, 'Alex Diver');
+    });
+  });
+
+  group('undoMerge', () {
+    Future<String?> clockOf(String table, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT hlc FROM "$table" WHERE id = ?',
+                  variables: [Variable.withString(id)],
+                )
+                .getSingleOrNull())
+            ?.read<String?>('hlc');
+
+    /// Returns a snapshot of the entire DB state relevant to the merge:
+    /// every row in every diver_id table, plus the divers themselves. Used
+    /// to assert merge -> undo produces a true restore of the data.
+    ///
+    /// Leaves out `hlc`, the fact-group clocks and `updated_at`: an undo is
+    /// a new edit (#2670), so the rows it restores carry a fresh clock (and a
+    /// group clock their first stamp fills, as for a diver's list
+    /// arrangements, #3748), and the ones it re-inserts a fresh update time,
+    /// for a peer that already synced the merge.
+    Future<Map<String, List<Map<String, dynamic>>>> dbSnapshot() async {
+      final snap = <String, List<Map<String, dynamic>>>{};
+      final tables =
+          (await db
+                  .customSelect(
+                    "SELECT m.name AS tbl FROM sqlite_master m "
+                    "JOIN pragma_table_info(m.name) p "
+                    "WHERE m.type = 'table' AND p.name = 'diver_id' "
+                    "AND m.name != 'change_log_operations'",
+                  )
+                  .get())
+              .map((r) => r.read<String>('tbl'))
+              .toList();
+      tables.add('divers');
+      final factClocks = {
+        for (final groups in SyncFactGroups.byEntity.values)
+          for (final g in groups) g.clockColumn,
+      };
+      for (final t in tables) {
+        final rows = await db
+            .customSelect('SELECT * FROM "$t" ORDER BY id')
+            .get();
+        snap[t] = [
+          for (final r in rows)
+            {
+              for (final e in r.data.entries)
+                if (e.key != 'hlc' &&
+                    e.key != 'updated_at' &&
+                    !factClocks.contains(e.key))
+                  e.key: e.value,
+            },
+        ];
+      }
+      return snap;
+    }
+
+    test('merge followed by undo restores every diver_id table to its '
+        'pre-merge state', () async {
+      // Seed an additive row in every diver_id table for the duplicate, and
+      // a singleton-config row (viewConfigs) for both keeper and duplicate.
+      final tables = await db
+          .customSelect(
+            "SELECT m.name AS tbl FROM sqlite_master m "
+            "JOIN pragma_table_info(m.name) p "
+            "WHERE m.type = 'table' AND p.name = 'diver_id' "
+            "AND m.name != 'divers' AND m.name != 'change_log_operations'",
+          )
+          .get();
+      var i = 0;
+      for (final r in tables) {
+        await seedRow(r.read<String>('tbl'), dup, 'row-$i');
+        i++;
+      }
+      // Keeper view_configs row so the singleton-deletion path runs against
+      // a non-empty target -- merge will drop the duplicate's row.
+      await db
+          .into(db.viewConfigs)
+          .insert(
+            ViewConfigsCompanion.insert(
+              id: 'vc-keeper',
+              diverId: keeper,
+              viewMode: 'table',
+              configJson: '{"k":1}',
+              updatedAt: 1000,
+            ),
+          );
+
+      final before = await dbSnapshot();
+      final snapshot = await repo.mergeDivers(
+        keeperId: keeper,
+        duplicateId: dup,
+      );
+      await repo.undoMerge(snapshot);
+      final after = await dbSnapshot();
+
+      // Whole-DB equality: row sets per table match exactly.
+      expect(after.keys.toSet(), before.keys.toSet());
+      for (final t in before.keys) {
+        expect(
+          after[t],
+          before[t],
+          reason: 'table $t did not restore to its pre-merge state',
+        );
+      }
+    });
+
+    test('undo restores the duplicate diver itself', () async {
+      final snapshot = await repo.mergeDivers(
+        keeperId: keeper,
+        duplicateId: dup,
+      );
+      expect(
+        (await db.select(db.divers).get()).map((d) => d.id).toSet(),
+        isNot(contains(dup)),
+      );
+
+      await repo.undoMerge(snapshot);
+      expect(
+        (await db.select(db.divers).get()).map((d) => d.id).toSet(),
+        containsAll([keeper, dup]),
+      );
+    });
+
+    test('undo clears the divers deletion-log tombstone', () async {
+      final snapshot = await repo.mergeDivers(
+        keeperId: keeper,
+        duplicateId: dup,
+      );
+      await repo.undoMerge(snapshot);
+      final remaining = await db
+          .customSelect(
+            "SELECT COUNT(*) AS c FROM deletion_log "
+            "WHERE entity_type = 'divers' AND record_id = ?",
+            variables: [Variable.withString(dup)],
+          )
+          .getSingle();
+      expect(remaining.read<int>('c'), 0);
+    });
+
+    test('undo publishes itself: tombstones cleared, restored rows pending '
+        'under fresh clocks', () async {
+      // Additive row owned by the duplicate (repointed -> marked pending).
+      await db
+          .into(db.dives)
+          .insert(
+            DivesCompanion.insert(
+              id: 'dive-resid',
+              diveDateTime: 2000,
+              diverId: const Value(dup),
+              createdAt: 2000,
+              updatedAt: 2000,
+            ),
+          );
+      // Singleton config on both keeper and duplicate (duplicate's is deleted
+      // -> tombstone logged).
+      for (final owner in [keeper, dup]) {
+        await db
+            .into(db.viewConfigs)
+            .insert(
+              ViewConfigsCompanion.insert(
+                id: 'vc-$owner',
+                diverId: owner,
+                viewMode: 'table',
+                configJson: '{}',
+                updatedAt: 2000,
+              ),
+            );
+      }
+
+      final snapshot = await repo.mergeDivers(
+        keeperId: keeper,
+        duplicateId: dup,
+      );
+      // Sanity: the merge created tombstone(s) and pending residue.
+      final tombstonesAfterMerge =
+          (await db
+                  .customSelect('SELECT COUNT(*) AS c FROM deletion_log')
+                  .getSingle())
+              .read<int>('c');
+      expect(tombstonesAfterMerge, greaterThan(0));
+
+      final clocksAfterMerge = {
+        for (final (table, id) in [
+          ('dives', 'dive-resid'),
+          ('divers', dup),
+          ('view_configs', 'vc-$dup'),
+        ])
+          '$table/$id': await clockOf(table, id),
+      };
+      await repo.undoMerge(snapshot);
+
+      final tombstones =
+          (await db
+                  .customSelect('SELECT COUNT(*) AS c FROM deletion_log')
+                  .getSingle())
+              .read<int>('c');
+      expect(
+        tombstones,
+        0,
+        reason: 'undo must clear every tombstone the merge logged',
+      );
+      final pending = {
+        for (final r in await db.select(db.syncRecords).get())
+          if (r.syncStatus == 'pending') '${r.entityType}/${r.recordId}',
+      };
+      expect(
+        pending,
+        containsAll(['dives/dive-resid', 'divers/$dup', 'viewConfigs/vc-$dup']),
+        reason: 'an undo is a new edit, so every row it restores is published',
+      );
+      for (final e in clocksAfterMerge.entries) {
+        final [table, id] = e.key.split('/');
+        final clock = await clockOf(table, id);
+        expect(clock, isNotNull, reason: '${e.key} restored without a clock');
+        if (e.value != null) {
+          expect(
+            clock!.compareTo(e.value!),
+            greaterThan(0),
+            reason: '${e.key} must be newer than the merge left it',
+          );
+        }
+      }
+    });
+  });
+
+  group('active diver id in settings', () {
+    const activeKey = DiverRepository.activeDiverIdSettingsKey;
+
+    Future<String?> activeDiverId() async {
+      final row = await (db.select(
+        db.settings,
+      )..where((t) => t.key.equals(activeKey))).getSingleOrNull();
+      return row?.value;
+    }
+
+    Future<void> setActiveDiverId(String id) async {
+      await db
+          .into(db.settings)
+          .insert(
+            SettingsCompanion.insert(
+              key: activeKey,
+              value: Value(id),
+              updatedAt: 0,
+            ),
+          );
+    }
+
+    test('is repointed to the keeper when it named the duplicate', () async {
+      // Deleting the duplicate would otherwise leave settings.active_diver_id
+      // dangling, and the startup validator would fall back to the default
+      // diver rather than the profile the user was actually using (#1342).
+      await setActiveDiverId(dup);
+
+      await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+      expect(await activeDiverId(), keeper);
+    });
+
+    test('is left alone when it names an unrelated diver', () async {
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-other',
+              name: 'Someone Else',
+              createdAt: 1000,
+              updatedAt: 1000,
+            ),
+          );
+      await setActiveDiverId('diver-other');
+
+      await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+      expect(await activeDiverId(), 'diver-other');
+    });
+
+    test('is not created when no active diver is recorded', () async {
+      await repo.mergeDivers(keeperId: keeper, duplicateId: dup);
+
+      expect(await activeDiverId(), isNull);
+    });
+  });
+
+  group('findDuplicateGroups', () {
+    test('groups divers with the same normalized name', () {
+      final groups = DiverMergeRepository.findDuplicateGroups([
+        makeDiver('a', 'Alex Diver', createdAt: 100),
+        makeDiver('b', ' alex diver ', createdAt: 200),
+        makeDiver('c', 'Someone Else', createdAt: 300),
+      ]);
+      expect(groups, hasLength(1));
+      expect(groups.first.duplicates, hasLength(1));
+      expect(
+        {groups.first.keeper.id, groups.first.duplicates.first.id},
+        {'a', 'b'},
+      );
+    });
+
+    test('prefers the default diver as keeper', () {
+      final groups = DiverMergeRepository.findDuplicateGroups([
+        makeDiver('old', 'Alex', createdAt: 100),
+        makeDiver('default', 'Alex', isDefault: true, createdAt: 500),
+      ]);
+      expect(groups.first.keeper.id, 'default');
+      expect(groups.first.duplicates.single.id, 'old');
+    });
+
+    test('falls back to the oldest diver when none is default', () {
+      final groups = DiverMergeRepository.findDuplicateGroups([
+        makeDiver('newer', 'Alex', createdAt: 500),
+        makeDiver('older', 'Alex', createdAt: 100),
+      ]);
+      expect(groups.first.keeper.id, 'older');
+    });
+
+    test('returns no groups when all names are distinct', () {
+      final groups = DiverMergeRepository.findDuplicateGroups([
+        makeDiver('a', 'Alex', createdAt: 100),
+        makeDiver('b', 'Blair', createdAt: 200),
+      ]);
+      expect(groups, isEmpty);
+    });
+  });
+}

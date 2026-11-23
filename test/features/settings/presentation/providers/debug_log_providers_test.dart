@@ -1,16 +1,73 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:share_plus_platform_interface/share_plus_platform_interface.dart';
 import 'package:submersion/core/models/log_entry.dart';
+import 'package:submersion/core/services/log_environment.dart';
 import 'package:submersion/core/services/log_file_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/settings/presentation/providers/debug_log_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+import '../../../../helpers/fake_path_provider.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// getTemporaryDirectory() is a platform channel with no implementation under
+/// flutter_test; shareLogFile writes its export copy there.
+class _FakePathProvider extends PathProviderPlatform
+    with MockPlatformInterfaceMixin {
+  _FakePathProvider(this.temporaryPath);
+  final String temporaryPath;
+
+  @override
+  Future<String?> getTemporaryPath() async => temporaryPath;
+}
+
+/// Counts full-file reads, so a test can tell a re-read from a cached value.
+class _CountingLogFileService extends LogFileService {
+  _CountingLogFileService({required super.logDirectory});
+  int reads = 0;
+
+  @override
+  Future<List<LogEntry>> readEntries() {
+    reads++;
+    return super.readEntries();
+  }
+}
+
+/// Records what reached the share sheet.
+class _FakeSharePlatform extends SharePlatform {
+  final List<ShareParams> calls = [];
+
+  @override
+  Future<ShareResult> share(ShareParams params) async {
+    calls.add(params);
+    return const ShareResult('ok', ShareResultStatus.success);
+  }
+}
+
+/// English localizations for the share/save helpers, which now take their
+/// subject and dialog title from the app's translations.
+final _l10n = l10nForLocaleTag('en');
+
+/// Fixed environment so the export header is byte-comparable across renders.
+final _environment = LogEnvironment(
+  appVersion: '1.7.6.123',
+  platform: 'ios',
+  osVersion: 'Version 26.6 (Build 23G93)',
+  locale: 'de_DE.UTF-8',
+  buildMode: 'release',
+  capturedAt: DateTime(2026, 8, 25, 20, 25, 19),
+);
 
 LogEntry _entry({
   required String message,
@@ -52,16 +109,8 @@ void main() {
   group('LogFilterState', () {
     test('default constructor has all categories active', () {
       const state = LogFilterState();
-      expect(
-        state.activeCategories,
-        equals({
-          LogCategory.app,
-          LogCategory.bluetooth,
-          LogCategory.serial,
-          LogCategory.libdc,
-          LogCategory.database,
-        }),
-      );
+      // Every category, so a new one is visible by default.
+      expect(state.activeCategories, equals(LogCategory.values.toSet()));
     });
 
     test('default constructor has minimumSeverity=debug', () {
@@ -139,16 +188,7 @@ void main() {
 
     test('initial state matches LogFilterState defaults', () {
       final state = container.read(logFilterNotifierProvider);
-      expect(
-        state.activeCategories,
-        equals({
-          LogCategory.app,
-          LogCategory.bluetooth,
-          LogCategory.serial,
-          LogCategory.libdc,
-          LogCategory.database,
-        }),
-      );
+      expect(state.activeCategories, equals(LogCategory.values.toSet()));
       expect(state.minimumSeverity, LogLevel.debug);
       expect(state.searchQuery, '');
     });
@@ -180,7 +220,8 @@ void main() {
       notifier.toggleCategory(LogCategory.bluetooth);
       notifier.toggleCategory(LogCategory.serial);
       notifier.toggleCategory(LogCategory.libdc);
-      // Only database remains — attempt to remove it.
+      notifier.toggleCategory(LogCategory.media);
+      // Only database remains; attempt to remove it.
       notifier.toggleCategory(LogCategory.database);
       final state = container.read(logFilterNotifierProvider);
       expect(state.activeCategories, equals({LogCategory.database}));
@@ -222,16 +263,7 @@ void main() {
       notifier.resetFilters();
 
       final state = container.read(logFilterNotifierProvider);
-      expect(
-        state.activeCategories,
-        equals({
-          LogCategory.app,
-          LogCategory.bluetooth,
-          LogCategory.serial,
-          LogCategory.libdc,
-          LogCategory.database,
-        }),
-      );
+      expect(state.activeCategories, equals(LogCategory.values.toSet()));
       expect(state.minimumSeverity, LogLevel.debug);
       expect(state.searchQuery, '');
     });
@@ -494,6 +526,45 @@ void main() {
       expect(updated.length, 2);
       expect(updated.last.message, 'live entry');
     });
+
+    test('does not re-read the file for lines that never reach it '
+        '(#1826)', () async {
+      // Outside debug mode debug and info lines are not persisted, and the
+      // viewer is now reachable in that mode; re-reading the whole file for
+      // each of them would be pure IO churn.
+      final tempDir = Directory.systemTemp.createTempSync(
+        'log_entries_reads_test_',
+      );
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      final service = _CountingLogFileService(logDirectory: tempDir.path);
+      await service.initialize();
+      LoggerService.configureFileLogging(service, verbose: false);
+      addTearDown(() {
+        LoggerService.setFileService(null);
+        LoggerService.setMinimumFileLevel(LogLevel.debug);
+      });
+
+      final container = ProviderContainer(
+        overrides: [logFileServiceProvider.overrideWithValue(service)],
+      );
+      addTearDown(container.dispose);
+      await container.read(logEntriesProvider.future);
+      expect(service.reads, 1);
+
+      const logger = LoggerService('test');
+      logger.debug('not persisted');
+      await LoggerService.flushPendingWrites();
+      await Future<void>.delayed(Duration.zero);
+      await container.read(logEntriesProvider.future);
+      expect(service.reads, 1);
+
+      logger.error('persisted');
+      await LoggerService.flushPendingWrites();
+      await Future<void>.delayed(Duration.zero);
+      final updated = await container.read(logEntriesProvider.future);
+      expect(service.reads, 2);
+      expect(updated.single.message, 'persisted');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -697,7 +768,7 @@ void main() {
         ),
       ];
 
-      await copyFilteredLogs(entries);
+      await copyFilteredLogs(entries, environment: _environment);
 
       final setDataCall = clipboardCalls.firstWhere(
         (c) => c.method == 'Clipboard.setData',
@@ -707,27 +778,92 @@ void main() {
 
       expect(text, contains(entries[0].toLogLine()));
       expect(text, contains(entries[1].toLogLine()));
-      // Lines joined by newline.
+      // Header, then the lines joined by newline.
       expect(
         text,
-        equals('${entries[0].toLogLine()}\n${entries[1].toLogLine()}'),
+        equals(
+          '${_environment.toExportHeader()}'
+          '${entries[0].toLogLine()}\n${entries[1].toLogLine()}',
+        ),
       );
     });
 
-    test('copies empty string when entries list is empty', () async {
-      await copyFilteredLogs([]);
+    test('prefixes the header naming the build that wrote the logs', () async {
+      // Issue #1246: a pasted log excerpt with no version behind it cost a
+      // full investigation to attribute to a build.
+      await copyFilteredLogs([
+        _entry(message: 'alpha'),
+      ], environment: _environment);
 
       final setDataCall = clipboardCalls.firstWhere(
         (c) => c.method == 'Clipboard.setData',
       );
       final text =
           (setDataCall.arguments as Map<dynamic, dynamic>)['text'] as String;
-      expect(text, isEmpty);
+
+      expect(text, startsWith('=== Submersion debug log ==='));
+      expect(text, contains('1.7.6.123'));
+      expect(text, contains('ios'));
+    });
+
+    test('copies the header alone when entries list is empty', () async {
+      // This is the function's contract, not a UI path: the Copy button
+      // guards on a non-empty list, so DebugLogViewerPage never reaches it.
+      // Pinned so the header stays unconditional if that guard is relaxed.
+      await copyFilteredLogs([], environment: _environment);
+
+      final setDataCall = clipboardCalls.firstWhere(
+        (c) => c.method == 'Clipboard.setData',
+      );
+      final text =
+          (setDataCall.arguments as Map<dynamic, dynamic>)['text'] as String;
+      expect(text, equals(_environment.toExportHeader()));
+    });
+
+    test('redacts secrets left by builds that predate redaction', () async {
+      await copyFilteredLogs([
+        _entry(message: 'callback ?access_token=legacy-secret'),
+      ], environment: _environment);
+
+      final setDataCall = clipboardCalls.firstWhere(
+        (c) => c.method == 'Clipboard.setData',
+      );
+      final text =
+          (setDataCall.arguments as Map<dynamic, dynamic>)['text'] as String;
+
+      expect(text, isNot(contains('legacy-secret')));
+      expect(text, contains('callback ?access_token='));
+    });
+
+    test('captures the environment itself when none is supplied', () async {
+      await copyFilteredLogs([_entry(message: 'alpha')]);
+
+      final setDataCall = clipboardCalls.firstWhere(
+        (c) => c.method == 'Clipboard.setData',
+      );
+      final text =
+          (setDataCall.arguments as Map<dynamic, dynamic>)['text'] as String;
+
+      expect(text, startsWith('=== Submersion debug log ==='));
     });
   });
 
   // -------------------------------------------------------------------------
   group('shareLogFile', () {
+    // One fake for the group; each test clears its calls.
+    final sharePlatform = _FakeSharePlatform();
+    // The harness pins a forwarder that looks the platform up on every share
+    // (test/helpers/late_bound_share_platform.dart), so the fake comes out
+    // again when this group is done.
+    late SharePlatform originalSharePlatform;
+
+    setUpAll(() {
+      originalSharePlatform = SharePlatform.instance;
+      SharePlatform.instance = sharePlatform;
+    });
+    tearDownAll(() => SharePlatform.instance = originalSharePlatform);
+    setUp(sharePlatform.calls.clear);
+
     test('returns immediately when log file does not exist', () async {
       final tempDir = Directory.systemTemp.createTempSync('share_log_test_');
       addTearDown(() => tempDir.deleteSync(recursive: true));
@@ -735,30 +871,103 @@ void main() {
       await service.initialize();
 
       // No entries written, so log file doesn't exist
-      await shareLogFile(service);
+      await shareLogFile(service, _l10n, environment: _environment);
       // Should complete without error
     });
 
-    test('attempts to share when log file exists', () async {
+    test('bundles the media report as a second file when given one', () async {
       final tempDir = Directory.systemTemp.createTempSync('share_log_test_');
       addTearDown(() => tempDir.deleteSync(recursive: true));
+      final shareTemp = Directory(p.join(tempDir.path, 'tmp'))..createSync();
+      useFakePathProvider(_FakePathProvider(shareTemp.path));
       final service = LogFileService(logDirectory: tempDir.path);
       await service.initialize();
+      await service.writeLine(_entry(message: 'a line').toLogLine());
 
-      // Write an entry so the file exists
-      await service.writeLine(_entry(message: 'share test').toLogLine());
+      await shareLogFile(
+        service,
+        _l10n,
+        environment: _environment,
+        mediaReport: 'Submersion media health report\nrows: 0\n',
+      );
 
-      // SharePlus may throw MissingPluginException in test env.
-      // The key is that we reach the share call (covering those lines).
-      try {
-        await shareLogFile(service);
-      } catch (_) {
-        // Expected in test environment
-      }
+      final files = sharePlatform.calls.single.files!;
+      expect(files, hasLength(2));
+      expect(files.last.path, endsWith('submersion-media-report.txt'));
+      expect(
+        File(files.last.path).readAsStringSync(),
+        startsWith('Submersion media health report'),
+      );
+    });
+
+    test('shares a header-prefixed, redacted copy of the log', () async {
+      final tempDir = Directory.systemTemp.createTempSync('share_log_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      final shareTemp = Directory(p.join(tempDir.path, 'tmp'))..createSync();
+      useFakePathProvider(_FakePathProvider(shareTemp.path));
+      final service = LogFileService(logDirectory: tempDir.path);
+      await service.initialize();
+      await service.writeLine(
+        _entry(message: 'share test ?access_token=legacy-secret').toLogLine(),
+      );
+
+      await shareLogFile(service, _l10n, environment: _environment);
+
+      final shared = sharePlatform.calls.single.files!.single;
+      final text = File(shared.path).readAsStringSync();
+      expect(text, startsWith(_environment.toExportHeader()));
+      expect(text, contains('share test'));
+      expect(text, isNot(contains('legacy-secret')));
     });
   });
 
   // -------------------------------------------------------------------------
+  group('buildLogExportBytes (#1826)', () {
+    late Directory tempDir;
+    late File file;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('export_bytes_test_');
+      file = File(p.join(tempDir.path, 'submersion.log'));
+    });
+
+    tearDown(() => tempDir.deleteSync(recursive: true));
+
+    test('prefixes the header to the log content', () async {
+      file.writeAsStringSync('[2026-09-12T09:00:00.000] [APP] [WARN] low\n');
+
+      final text = utf8.decode(await buildLogExportBytes(file, 'HEADER\n'));
+
+      expect(text, 'HEADER\n[2026-09-12T09:00:00.000] [APP] [WARN] low\n');
+    });
+
+    test('redacts secrets left by builds that predate redaction', () async {
+      file.writeAsStringSync(
+        '[2026-09-12T09:00:00.000] [APP] [DEBUG] '
+        'GET https://x.test/cb?access_token=legacy-secret\n',
+      );
+
+      final text = utf8.decode(await buildLogExportBytes(file, ''));
+
+      expect(text, isNot(contains('legacy-secret')));
+      expect(text, contains('GET https://x.test/cb'));
+    });
+
+    test('keeps the export when the log holds malformed UTF-8', () async {
+      file.writeAsBytesSync([
+        ...utf8.encode('before '),
+        0xC3,
+        0x28,
+        ...utf8.encode(' after\n'),
+      ]);
+
+      final text = utf8.decode(await buildLogExportBytes(file, 'H\n'));
+
+      expect(text, startsWith('H\nbefore '));
+      expect(text, contains(' after'));
+    });
+  });
+
   group('saveLogFile', () {
     test('returns null when log file does not exist', () async {
       final tempDir = Directory.systemTemp.createTempSync('save_log_test_');
@@ -766,7 +975,11 @@ void main() {
       final service = LogFileService(logDirectory: tempDir.path);
       await service.initialize();
 
-      final result = await saveLogFile(service);
+      final result = await saveLogFile(
+        service,
+        _l10n,
+        environment: _environment,
+      );
       expect(result, isNull);
     });
 
@@ -782,12 +995,26 @@ void main() {
       // FilePicker may throw MissingPluginException in test env.
       // The key is that we reach the FilePicker call (covering those lines).
       try {
-        final result = await saveLogFile(service);
+        final result = await saveLogFile(
+          service,
+          _l10n,
+          environment: _environment,
+        );
         // If it somehow succeeds (returns null from picker), that's fine
         expect(result, anything);
       } catch (_) {
         // Expected in test environment
       }
     });
+  });
+
+  test('a browser export is the header, then the redacted lines', () {
+    final bytes = buildBrowserLogExportBytes([
+      'one',
+      'password=hunter2',
+    ], 'HEADER\n');
+    final text = utf8.decode(bytes);
+    expect(text, startsWith('HEADER\none\n'));
+    expect(text, isNot(contains('hunter2')));
   });
 }

@@ -12,34 +12,9 @@
 namespace libdivecomputer_plugin {
 
 std::string MapEventType(unsigned int type) {
-    switch (type) {
-        case 0: return "none";
-        case 1: return "deco";
-        case 2: return "ascent";
-        case 3: return "ceiling";
-        case 4: return "workload";
-        case 5: return "transmitter";
-        case 6: return "violation";
-        case 7: return "bookmark";
-        case 8: return "surface";
-        case 9: return "safetystop";
-        case 10: return "gaschange";
-        case 11: return "safetystop_voluntary";
-        case 12: return "safetystop_mandatory";
-        case 13: return "deepstop";
-        case 14: return "ceiling_safetystop";
-        case 15: return "floor";
-        case 16: return "divetime";
-        case 17: return "maxdepth";
-        case 18: return "OLF";
-        case 19: return "PO2";
-        case 20: return "airtime";
-        case 21: return "rgbm";
-        case 22: return "heading";
-        case 23: return "tissuelevel";
-        case 24: return "gaschange2";
-        default: return "unknown_" + std::to_string(type);
-    }
+    // One shared table for every platform; see libdc_event_type_name in
+    // libdc_wrapper.h for why this is no longer a local switch.
+    return libdc_event_type_name(type);
 }
 
 ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
@@ -92,16 +67,72 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
                 std::isnan(s.deco_depth) ? std::nullopt
                                          : std::optional<double>(s.deco_depth);
 
+            // Per-cell O2 ppO2: NaN -> nullopt.
+            std::optional<double> o2_sensor[6];
+            for (int c = 0; c < 6; c++) {
+                o2_sensor[c] = std::isnan(s.o2_sensor[c])
+                                   ? std::nullopt
+                                   : std::optional<double>(s.o2_sensor[c]);
+            }
+
+            // Per-cell raw O2 output: UINT32_MAX -> nullptr.
+            std::optional<int64_t> o2_sensor_mv[6];
+            for (int c = 0; c < 6; c++) {
+                o2_sensor_mv[c] =
+                    (s.o2_sensor_mv[c] == UINT32_MAX)
+                        ? std::nullopt
+                        : std::optional<int64_t>(
+                              static_cast<int64_t>(s.o2_sensor_mv[c]));
+            }
+
+            // Shearwater Avelo mode (issue #4664): NaN / UINT32_MAX -> nullopt.
+            std::optional<double> avelo_buoyancy =
+                std::isnan(s.avelo_buoyancy)
+                    ? std::nullopt
+                    : std::optional<double>(s.avelo_buoyancy);
+            std::optional<int64_t> gas_remaining =
+                (s.gas_remaining == UINT32_MAX)
+                    ? std::nullopt
+                    : std::optional<int64_t>(
+                          static_cast<int64_t>(s.gas_remaining));
+            std::optional<double> computer_rmv =
+                std::isnan(s.computer_rmv)
+                    ? std::nullopt
+                    : std::optional<double>(s.computer_rmv);
+
+            // Every tank's pressure at this sample (issue #1223): a sample can
+            // carry one reading per air-integrated transmitter, and `pressure`
+            // above holds only the last of them. NaN -> null, trailing nulls
+            // trimmed, all-NaN -> no list at all.
+            std::optional<flutter::EncodableList> tank_pressures;
+            for (int t = LIBDC_MAX_TANKS - 1; t >= 0; t--) {
+                if (!tank_pressures && std::isnan(s.tank_pressure[t])) continue;
+                if (!tank_pressures) tank_pressures.emplace(t + 1);
+                (*tank_pressures)[t] =
+                    std::isnan(s.tank_pressure[t])
+                        ? flutter::EncodableValue()
+                        : flutter::EncodableValue(s.tank_pressure[t]);
+            }
+
             // Nullable ints: UINT32_MAX -> nullptr.
             std::optional<int64_t> tank_index =
                 (s.tank == UINT32_MAX)
                     ? std::nullopt
                     : std::optional<int64_t>(static_cast<int64_t>(s.tank));
+            std::optional<int64_t> gas_mix_index =
+                (s.gasmix == UINT32_MAX)
+                    ? std::nullopt
+                    : std::optional<int64_t>(static_cast<int64_t>(s.gasmix));
             std::optional<int64_t> heart_rate =
                 (s.heartbeat == UINT32_MAX)
                     ? std::nullopt
                     : std::optional<int64_t>(
                           static_cast<int64_t>(s.heartbeat));
+            std::optional<double> heading =
+                (s.heading == UINT32_MAX)
+                    ? std::nullopt
+                    : std::optional<double>(
+                          static_cast<double>(s.heading));
             std::optional<int64_t> rbt =
                 (s.rbt == UINT32_MAX)
                     ? std::nullopt
@@ -129,7 +160,9 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
                     temp_c ? &*temp_c : nullptr,
                     pressure ? &*pressure : nullptr,
                     tank_index ? &*tank_index : nullptr,
+                    tank_pressures ? &*tank_pressures : nullptr,
                     heart_rate ? &*heart_rate : nullptr,
+                    heading ? &*heading : nullptr,
                     setpoint ? &*setpoint : nullptr,
                     ppo2 ? &*ppo2 : nullptr,
                     cns ? &*cns : nullptr,
@@ -137,7 +170,23 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
                     deco_type ? &*deco_type : nullptr,
                     deco_time ? &*deco_time : nullptr,
                     deco_depth ? &*deco_depth : nullptr,
-                    tts ? &*tts : nullptr)));
+                    tts ? &*tts : nullptr,
+                    o2_sensor[0] ? &*o2_sensor[0] : nullptr,
+                    o2_sensor[1] ? &*o2_sensor[1] : nullptr,
+                    o2_sensor[2] ? &*o2_sensor[2] : nullptr,
+                    o2_sensor[3] ? &*o2_sensor[3] : nullptr,
+                    o2_sensor[4] ? &*o2_sensor[4] : nullptr,
+                    o2_sensor[5] ? &*o2_sensor[5] : nullptr,
+                    o2_sensor_mv[0] ? &*o2_sensor_mv[0] : nullptr,
+                    o2_sensor_mv[1] ? &*o2_sensor_mv[1] : nullptr,
+                    o2_sensor_mv[2] ? &*o2_sensor_mv[2] : nullptr,
+                    o2_sensor_mv[3] ? &*o2_sensor_mv[3] : nullptr,
+                    o2_sensor_mv[4] ? &*o2_sensor_mv[4] : nullptr,
+                    o2_sensor_mv[5] ? &*o2_sensor_mv[5] : nullptr,
+                    avelo_buoyancy ? &*avelo_buoyancy : nullptr,
+                    gas_remaining ? &*gas_remaining : nullptr,
+                    computer_rmv ? &*computer_rmv : nullptr,
+                    gas_mix_index ? &*gas_mix_index : nullptr)));
         }
     }
 
@@ -145,10 +194,17 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
     flutter::EncodableList gas_mixes;
     gas_mixes.reserve(dive.gasmix_count);
     for (unsigned int i = 0; i < dive.gasmix_count; i++) {
+        std::optional<int64_t> opt_gm_usage =
+            (dive.gasmixes[i].usage == 0)
+                ? std::nullopt
+                : std::optional<int64_t>(
+                      static_cast<int64_t>(dive.gasmixes[i].usage));
+
         gas_mixes.push_back(flutter::CustomEncodableValue(GasMix(
             static_cast<int64_t>(i),
             dive.gasmixes[i].oxygen * 100.0,
-            dive.gasmixes[i].helium * 100.0)));
+            dive.gasmixes[i].helium * 100.0,
+            opt_gm_usage ? &*opt_gm_usage : nullptr)));
     }
 
     // Convert tanks.
@@ -166,13 +222,21 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
             (begin_p == 0.0) ? std::nullopt : std::optional<double>(begin_p);
         std::optional<double> opt_end =
             (end_p == 0.0) ? std::nullopt : std::optional<double>(end_p);
+        std::optional<int64_t> opt_usage =
+            (tk.usage == 0) ? std::nullopt
+                            : std::optional<int64_t>(static_cast<int64_t>(tk.usage));
+        std::optional<int64_t> opt_serial =
+            (tk.serial == 0) ? std::nullopt
+                             : std::optional<int64_t>(static_cast<int64_t>(tk.serial));
 
         tanks.push_back(flutter::CustomEncodableValue(TankInfo(
             static_cast<int64_t>(i),
             static_cast<int64_t>(tk.gasmix),
             opt_vol ? &*opt_vol : nullptr,
             opt_begin ? &*opt_begin : nullptr,
-            opt_end ? &*opt_end : nullptr)));
+            opt_end ? &*opt_end : nullptr,
+            opt_usage ? &*opt_usage : nullptr,
+            opt_serial ? &*opt_serial : nullptr)));
     }
 
     // Convert events.
@@ -222,6 +286,28 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
     std::optional<double> max_temp =
         std::isnan(dive.max_temp) ? std::nullopt
                                   : std::optional<double>(dive.max_temp);
+    std::optional<double> surface_pressure =
+        std::isnan(dive.surface_pressure)
+            ? std::nullopt
+            : std::optional<double>(dive.surface_pressure);
+
+    // Nullable GPS entry/exit (Shearwater Swift).
+    std::optional<double> entry_lat =
+        std::isnan(dive.entry_latitude)
+            ? std::nullopt
+            : std::optional<double>(dive.entry_latitude);
+    std::optional<double> entry_lon =
+        std::isnan(dive.entry_longitude)
+            ? std::nullopt
+            : std::optional<double>(dive.entry_longitude);
+    std::optional<double> exit_lat =
+        std::isnan(dive.exit_latitude)
+            ? std::nullopt
+            : std::optional<double>(dive.exit_latitude);
+    std::optional<double> exit_lon =
+        std::isnan(dive.exit_longitude)
+            ? std::nullopt
+            : std::optional<double>(dive.exit_longitude);
 
     // GF/conservatism: 0 means unknown -> null.
     std::optional<int64_t> gf_low =
@@ -273,7 +359,12 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
         gf_high ? &*gf_high : nullptr,
         deco_conservatism ? &*deco_conservatism : nullptr,
         raw_data ? &*raw_data : nullptr,
-        raw_fp ? &*raw_fp : nullptr);
+        raw_fp ? &*raw_fp : nullptr,
+        entry_lat ? &*entry_lat : nullptr,
+        entry_lon ? &*entry_lon : nullptr,
+        exit_lat ? &*exit_lat : nullptr,
+        exit_lon ? &*exit_lon : nullptr,
+        surface_pressure ? &*surface_pressure : nullptr);
 }
 
 }  // namespace libdivecomputer_plugin

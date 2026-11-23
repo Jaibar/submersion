@@ -1,26 +1,38 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_filter_sheet.dart';
+import 'package:submersion/features/dive_sites/domain/services/site_location_backfill_service.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_location_backfill_dialog.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/table_selection_owner.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/catalogue_gap_notice.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_map_content.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_summary_widget.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
-import 'package:submersion/features/dive_sites/presentation/pages/site_edit_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_list_count_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
 class SiteListPage extends ConsumerStatefulWidget {
   const SiteListPage({super.key});
@@ -29,7 +41,8 @@ class SiteListPage extends ConsumerStatefulWidget {
   ConsumerState<SiteListPage> createState() => _SiteListPageState();
 }
 
-class _SiteListPageState extends ConsumerState<SiteListPage> {
+class _SiteListPageState extends ConsumerState<SiteListPage>
+    with TableSelectionOwner {
   bool get _isMapView {
     final state = GoRouterState.of(context);
     return state.uri.queryParameters['view'] == 'map';
@@ -58,6 +71,14 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
     }
   }
 
+  /// Leaves a pane whose site was just deleted: drops the selection from the
+  /// URL and the list's highlight, which would otherwise keep pointing at a
+  /// site that no longer exists.
+  void _leaveDeletedSite(BuildContext context) {
+    ref.read(highlightedSiteIdProvider.notifier).state = null;
+    context.go(GoRouterState.of(context).uri.path);
+  }
+
   @override
   Widget build(BuildContext context) {
     final fab = FloatingActionButton.extended(
@@ -69,7 +90,7 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/sites/new');
+          openNewSite(context);
         }
       },
       tooltip: context.l10n.diveSites_fab_tooltip,
@@ -77,31 +98,35 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
       label: Text(context.l10n.diveSites_fab_label),
     );
 
+    resetTableSelectionOffTable(siteListViewModeProvider);
+
     // Table mode: use shared TableModeLayout for full-width table with
     // optional detail pane and map.
     final viewMode = ref.watch(siteListViewModeProvider);
     if (viewMode == ListViewMode.table) {
       return TableModeLayout(
         sectionKey: 'sites',
+        rememberedSelectedId: ref.watch(rememberedSiteIdProvider),
         appBarTitle: context.l10n.nav_sites,
-        tableContent: const SiteListContent(showAppBar: false),
+        appBarSubtitle: siteListCountLabel(context, ref),
+        tableContent: SiteListContent(
+          showAppBar: false,
+          selectionController: tableSelection,
+        ),
         detailBuilder: (context, id) => SiteDetailPage(
           siteId: id,
           embedded: true,
-          onDeleted: () {
-            final state = GoRouterState.of(context);
-            context.go(state.uri.path);
-          },
+          onDeleted: () => _leaveDeletedSite(context),
         ),
         summaryBuilder: (context) => const SiteSummaryWidget(),
-        editBuilder: (context, id, onSaved, onCancel) => SiteEditPage(
-          siteId: id,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
+        editBuilder: (context, id, onSaved, onCancel) => siteEditPane(
+          context,
+          id,
+          onSaved,
+          onCancel,
+          onDeleted: () => _leaveDeletedSite(context),
         ),
-        createBuilder: (context, onSaved, onCancel) =>
-            SiteEditPage(embedded: true, onSaved: onSaved, onCancel: onCancel),
+        createBuilder: newSitePane,
         mapContent: SiteMapContent(
           selectedId: ref.watch(highlightedSiteIdProvider),
           onItemSelected: (siteId) {
@@ -117,27 +142,19 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
         onMapViewToggle: _toggleMapView,
         columnSettingsAction: IconButton(
           icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
-          onPressed: () {
-            final config = ref.read(siteTableConfigProvider);
-            final notifier = ref.read(siteTableConfigProvider.notifier);
-            showEntityTableColumnPicker<SiteField>(
-              context,
-              config: config,
-              adapter: SiteFieldAdapter.instance,
-              onToggleColumn: notifier.toggleColumn,
-              onReorderColumn: notifier.reorderColumn,
-              onTogglePin: notifier.togglePin,
-            );
-          },
+          tooltip: context.l10n.columnConfig_tooltip_columnSettings,
+          onPressed: () => showEntityTableColumnPicker<SiteField>(
+            context,
+            configProvider: siteTableConfigProvider,
+            adapter: SiteFieldAdapter.instance,
+          ),
         ),
         appBarActions: [
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
+          EntitySearchAction(
+            subject: QuerySubject.sites,
+            active: ref.watch(siteFilterProvider).query != null,
             tooltip: context.l10n.diveSites_list_tooltip_searchSites,
-            onPressed: () {
-              showSearch(context: context, delegate: SiteSearchDelegate(ref));
-            },
+            compact: true,
           ),
           IconButton(
             icon: Badge(
@@ -149,6 +166,7 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
               showModalBottomSheet(
                 context: context,
                 isScrollControlled: true,
+                useSafeArea: true,
                 builder: (_) => SiteFilterSheet(ref: ref),
               );
             },
@@ -164,13 +182,15 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
                 currentField: sort.field,
                 currentDirection: sort.direction,
                 fields: SiteSortField.values,
-                getFieldDisplayName: (field) => field.displayName,
+                getFieldDisplayName: (field) =>
+                    field.localizedName(context.l10n),
                 getFieldIcon: (field) => field.icon,
                 onSortChanged: (field, direction) {
-                  ref.read(siteSortProvider.notifier).state = SortState(
-                    field: field,
-                    direction: direction,
-                  );
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setSiteSort(
+                        SortState(field: field, direction: direction),
+                      );
                 },
               );
             },
@@ -182,12 +202,31 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(siteListViewModeProvider.notifier).state = mode;
+                ref.read(settingsProvider.notifier).setSiteListViewMode(mode);
+              } else if (value == 'fill_location_details') {
+                unawaited(
+                  showSiteLocationBackfillFlow(
+                    context,
+                    ref,
+                    mode: SiteLocationLookupMode.fillMissing,
+                  ),
+                );
+              } else if (value == kCatalogueReviewMenuValue) {
+                context.push(kCatalogueReviewRoute);
+              } else if (value == 'refresh_place_names') {
+                unawaited(
+                  showSiteLocationBackfillFlow(
+                    context,
+                    ref,
+                    mode: SiteLocationLookupMode.refreshAll,
+                  ),
+                );
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(siteListViewModeProvider);
               return [
+                ...tableSelectItemsEntries(context),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -197,6 +236,28 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
                     ListViewMode.table,
                   ],
                 ),
+                const PopupMenuDivider(),
+                PopupMenuItem(
+                  value: 'fill_location_details',
+                  child: ListTile(
+                    leading: const Icon(Icons.travel_explore),
+                    title: Text(
+                      context.l10n.diveSites_list_menu_fillLocationDetails,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'refresh_place_names',
+                  child: ListTile(
+                    leading: const Icon(Icons.translate),
+                    title: Text(
+                      context.l10n.diveSites_list_menu_refreshPlaceNames,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                catalogueReviewMenuItem(context),
               ];
             },
           ),
@@ -209,7 +270,8 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
       return FocusTraversalGroup(
         child: MasterDetailScaffold(
-          sectionId: 'sites',
+          sectionId: RecordListSection.sites,
+          rememberedSelectedId: ref.watch(rememberedSiteIdProvider),
           masterBuilder: (context, onItemSelected, selectedId) =>
               SiteListContent(
                 onItemSelected: onItemSelected,
@@ -221,11 +283,7 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
           detailBuilder: (context, id) => SiteDetailPage(
             siteId: id,
             embedded: true,
-            onDeleted: () {
-              final state = GoRouterState.of(context);
-              final currentPath = state.uri.path;
-              context.go(currentPath);
-            },
+            onDeleted: () => _leaveDeletedSite(context),
           ),
           summaryBuilder: (context) => const SiteSummaryWidget(),
           mapBuilder: (context, selectedId, onItemSelected) => SiteMapContent(
@@ -238,17 +296,14 @@ class _SiteListPageState extends ConsumerState<SiteListPage> {
               context.go('$currentPath?selected=$siteId');
             },
           ),
-          editBuilder: (context, id, onSaved, onCancel) => SiteEditPage(
-            siteId: id,
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
+          editBuilder: (context, id, onSaved, onCancel) => siteEditPane(
+            context,
+            id,
+            onSaved,
+            onCancel,
+            onDeleted: () => _leaveDeletedSite(context),
           ),
-          createBuilder: (context, onSaved, onCancel) => SiteEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          createBuilder: newSitePane,
           floatingActionButton: fab,
         ),
       );

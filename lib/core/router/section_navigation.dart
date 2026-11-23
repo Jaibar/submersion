@@ -1,0 +1,106 @@
+import 'package:flutter/widgets.dart';
+import 'package:go_router/go_router.dart';
+
+import 'package:submersion/core/app/app_exit_guard.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/router/pushed_route.dart';
+
+/// Navigation helper for jumping to a detail page from a section the user
+/// expects to be returned to.
+///
+/// `context.go(...)` is declarative: it discards the current stack and rebuilds
+/// it from the target location. For a child route such as `/dives/:diveId` that
+/// also materializes the `/dives` ancestor, so Back lands the user on a list
+/// they never visited and the section they came from -- with its filters and
+/// scroll position -- is gone.
+///
+/// `push` keeps that section underneath, but unlike `go` it is not idempotent:
+/// a double tap, or a navigation loop that can reach the same page twice,
+/// stacks duplicate live copies that each need their own Back press.
+extension SectionNavigation on BuildContext {
+  /// Navigate to [location], keeping the current section underneath.
+  ///
+  /// Pushes when [location] is not already on the stack. When it is, walks
+  /// back to the existing page instead of stacking a second copy of it.
+  void pushOrReturnTo(String location) {
+    final router = GoRouter.of(this);
+    if (!_stackContains(
+      router.routerDelegate.currentConfiguration.matches,
+      location,
+    )) {
+      router.push(location);
+      return;
+    }
+
+    // Bounded: each iteration pops one page, and the guard keeps a router
+    // state we did not anticipate from spinning rather than failing visibly.
+    for (var guard = 0; guard < 32; guard++) {
+      final matches = router.routerDelegate.currentConfiguration.matches;
+      if (matches.isEmpty) return;
+      if (_leafLocation(matches.last) == location) return;
+      if (!router.canPop()) return;
+      router.pop();
+    }
+  }
+
+  /// Change this page's own URL (selection, mode, view) without discarding
+  /// the pages under it.
+  ///
+  /// On a pushed page this replaces the top page, keeping its page key and
+  /// widget state (#3292). A page go() built is changed with `go` as before,
+  /// even when its parent sits under it: replace would turn it into a push,
+  /// and its URL would stop reflecting the selection.
+  void goInPlace(String location) {
+    if (isImperativelyPushed(this)) {
+      GoRouter.of(this).replace<void>(location);
+    } else {
+      GoRouter.of(this).go(location);
+    }
+  }
+
+  /// [goInPlace], for a change that replaces the record a list pane shows:
+  /// unsaved work held there (a record's editing sitting, issue #4527) is
+  /// asked about first, and nothing changes when the diver keeps it.
+  Future<void> goInPlaceGuarded(String location) =>
+      _guarded(() => goInPlace(location));
+
+  /// `go`, for a tab's destination: a tab's own entry keeps its route, so
+  /// no `GoRoute.onExit` sees it, yet it drops the record its list pane
+  /// shows. Held work is asked about first (issue #4527).
+  Future<void> goGuarded(String location) => _guarded(() => go(location));
+
+  Future<void> _guarded(void Function() navigate) async {
+    final guard = ProviderScope.containerOf(
+      this,
+      listen: false,
+    ).read(appExitGuardProvider);
+    if (!await guard.mayLeave() || !mounted) return;
+    navigate();
+  }
+}
+
+/// Whether any page in [matches] resolves to [location].
+///
+/// Shell matches nest their children, and an imperative (pushed) match carries
+/// the whole match list that produced it, so both have to be descended into.
+bool _stackContains(List<RouteMatchBase> matches, String location) {
+  for (final match in matches) {
+    if (match is ShellRouteMatch) {
+      if (_stackContains(match.matches, location)) return true;
+      continue;
+    }
+    if (match is ImperativeRouteMatch) {
+      if (_stackContains(match.matches.matches, location)) return true;
+      continue;
+    }
+    if (match.matchedLocation == location) return true;
+  }
+  return false;
+}
+
+/// The location of the page actually on top for [match].
+///
+/// A shell reports its own prefix, so descend to the leaf. An
+/// [ImperativeRouteMatch] already reports the leaf of the list that produced
+/// it, so it needs no descent.
+String _leafLocation(RouteMatchBase match) => leafMatch(match).matchedLocation;

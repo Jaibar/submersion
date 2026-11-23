@@ -3,29 +3,198 @@ import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
+import 'package:submersion/core/data/repositories/sync_repository.dart'
+    show CloudProviderType;
+import 'package:submersion/core/database/database_version_exception.dart';
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/cloud_storage/headless_cloud_provider.dart';
+import 'package:submersion/core/services/database_location_service.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/headless_file_logging.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/security/database_security_service.dart';
 import 'package:submersion/core/services/notification_service.dart';
+import 'package:submersion/core/services/sync/crypto/encryption_key_store.dart';
+import 'package:submersion/core/services/sync/sync_preferences.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_encryption_key_store.dart';
 import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
 import 'package:submersion/features/notifications/data/repositories/scheduled_notification_repository.dart';
 import 'package:submersion/features/notifications/data/services/notification_scheduler.dart';
 import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
+import 'package:submersion/features/demo_mode/data/demo_paths.dart';
 
 const String kNotificationRefreshTask = 'com.submersion.notificationRefresh';
 const String kBackupTask = 'com.submersion.backup';
 
+const _log = LoggerService('HeadlessDatabase');
+
+/// Points the headless [DatabaseService] at the diver's ACTUAL database.
+///
+/// [DatabaseService] is a per-isolate singleton, so the Workmanager isolate
+/// starts with no location service and `_resolveDatabasePath` falls back to
+/// `<appDocuments>/Submersion/submersion.db`. For a diver who moved their
+/// database, that fallback is not merely a wrong read: drift creates the file
+/// on first statement, so a background run MANUFACTURES an empty database at
+/// the default path, then backs it up and registers the artifact as a healthy
+/// automatic backup (#1168).
+///
+/// The location is reconstructible here for the same reason
+/// [resolveHeadlessCloudProvider] is: [DatabaseLocationService] is entirely
+/// SharedPreferences-backed, and SharedPreferences crosses the isolate
+/// boundary.
+///
+/// Returns false when the task must SKIP. A headless run never creates a
+/// database and never falls back to the default path; falling back is what
+/// produces the phantom. Two things make it skip:
+///   * nothing at the resolved path (the diver has not launched the app at
+///     this location yet), and
+///   * a resolved path that cannot be opened for reading, above all a custom
+///     folder behind a security-scoped bookmark (iOS/macOS) that a headless
+///     isolate cannot re-acquire.
+///
+/// Note what it deliberately does NOT do: reset an unreachable custom location
+/// to the default. Nothing may silently rewrite the diver's storage setting;
+/// in the foreground only the diver can, from the startup failure screen
+/// (#2178).
+Future<bool> prepareHeadlessDatabaseLocation({
+  required SharedPreferences prefs,
+}) async {
+  final location = DatabaseLocationService(prefs);
+  final config = await location.getStorageConfig();
+
+  // On iOS/macOS the custom folder is only reachable through the stored
+  // bookmark. It may well fail to resolve headlessly; the readability probe
+  // below is what decides, so a failure here is not fatal on its own.
+  //
+  // resolveStoredBookmark already swallows the native call, but its prefs read
+  // sits outside that guard. Nothing in this function may escape: its contract
+  // is to answer skip-or-proceed, and a throw would instead fail the task and
+  // put it in Workmanager's retry queue.
+  if (config.isCustomLocation) {
+    try {
+      await location.resolveStoredBookmark();
+    } catch (e) {
+      _log.info(
+        'Headless bookmark resolution failed, letting the probe decide: $e',
+      );
+    }
+  }
+
+  final dbPath = await location.getDatabasePath();
+  // Existence alone is not enough: a security-scoped folder can be listed
+  // and still refuse the open. The same probe the foreground startup uses.
+  if (await readProbeError(dbPath) != null) {
+    _log.info(
+      'Headless run skipped: no readable database at $dbPath '
+      '(custom location: ${config.isCustomLocation}). Not creating one.',
+    );
+    return false;
+  }
+
+  DatabaseService.instance.adoptLocationService(location);
+  return true;
+}
+
+/// Headless isolates have no unlock UI. Load the cached key (keychain) and
+/// hand it to DatabaseService; when the database is encrypted and no cached
+/// key exists (fresh device, keychain wipe), the task must SKIP — never
+/// prompt, never open, never corrupt.
+Future<bool> prepareHeadlessDatabaseKey({
+  required SharedPreferences prefs,
+}) async {
+  final security = DatabaseSecurityService.instance;
+  await security.configure(prefs: prefs);
+  if (!security.encryptionEnabled) return true;
+  final loaded = await security.tryLoadCachedKey();
+  if (!loaded || security.databaseKeyHex == null) return false;
+  DatabaseService.instance.databaseKeyHex = security.databaseKeyHex;
+  return true;
+}
+
+/// Opens the database for a headless task, or reports that the task must skip.
+///
+/// The headless isolate is barred from running the schema upgrade ladder. It
+/// has no progress UI, writes no pre-migration safety copy, and cannot report
+/// a failure to the diver -- and worse, it would be running that ladder
+/// against the same file as the foreground launch that is very probably
+/// running it too, since Android reschedules overdue periodic work exactly
+/// when the app is updated and reopened. Two isolates upgrading one file is
+/// how a launch ends on "database is locked".
+///
+/// Skipping costs nothing: the task runs on its next turn, after a foreground
+/// launch has done the upgrade properly.
+Future<bool> openHeadlessDatabase({LoggerService? log}) async {
+  try {
+    await DatabaseService.instance.initialize(allowSchemaUpgrade: false);
+    return true;
+  } on SchemaUpgradePendingException catch (e) {
+    (log ?? const LoggerService('BackgroundService')).info(
+      'Background task skipped: the database needs a schema upgrade, which '
+      'only a foreground launch may run ($e).',
+    );
+    return false;
+  }
+}
+
+/// Whether background work must stand down because demo mode is in any
+/// phase: entering, exploring the sample logbook, or leaving it. A
+/// synchronous stat of the demo directory, so it costs nothing when demo
+/// mode has never been used.
+bool backgroundWorkBlockedByDemoMode(DemoPaths paths) =>
+    Directory(paths.root).existsSync();
+
 /// Callback for Workmanager background tasks
 @pragma('vm:entry-point')
 void callbackDispatcher() {
-  Workmanager().executeTask((task, inputData) async {
+  Future<bool> runTask(String task, Map<String, dynamic>? inputData) async {
     const log = LoggerService('BackgroundService');
-    log.info('Background task started: $task');
 
     try {
-      // Initialize database
-      await DatabaseService.instance.initialize();
+      final prefs = await SharedPreferences.getInstance();
+      // First, so everything below reaches the debug log (issue #4572).
+      await attachHeadlessFileLogging(prefs);
+      log.info('Background task started: $task');
+
+      // Demo mode (issue #3708): the open database may be the sample logbook,
+      // and nothing in it may be backed up or raise a reminder. Checked before
+      // any database is located or opened.
+      if (backgroundWorkBlockedByDemoMode(await DemoPaths.resolve())) {
+        log.info('Background task skipped: demo mode is on.');
+        return true;
+      }
+
+      // Resolve WHICH database before unlocking one: a diver with a custom
+      // location has no database at the default path, and opening there would
+      // create one (#1168).
+      final located = await prepareHeadlessDatabaseLocation(prefs: prefs);
+      if (!located) {
+        log.info(
+          'Background task skipped: the configured database is not readable '
+          'from this headless context.',
+        );
+        // "succeeded": a missing database is not a retryable error.
+        return true;
+      }
+
+      final ready = await prepareHeadlessDatabaseKey(prefs: prefs);
+      if (!ready) {
+        log.info(
+          'Background task skipped: database is encrypted and no cached '
+          'key is available in this headless context.',
+        );
+        return true; // "succeeded" — do not retry-loop a locked database
+      }
+
+      // Opens the location adopted above, NOT the default path. The schema
+      // version this reads has to come from the diver's own file, which is why
+      // the location gate runs first.
+      if (!await openHeadlessDatabase(log: log)) {
+        return true; // "succeeded" — do not retry-loop a pending upgrade
+      }
 
       // Initialize notification service
       await NotificationService.instance.initialize();
@@ -33,7 +202,11 @@ void callbackDispatcher() {
       if (task == kNotificationRefreshTask) {
         await _refreshNotifications(log);
       } else if (task == kBackupTask) {
-        await _performScheduledBackup(log);
+        await runScheduledBackup(
+          prefs: prefs,
+          dbAdapter: DefaultBackupDatabaseAdapter(DatabaseService.instance),
+          log: log,
+        );
       }
 
       log.info('Background task completed: $task');
@@ -46,7 +219,9 @@ void callbackDispatcher() {
       );
       return false;
     }
-  });
+  }
+
+  Workmanager().executeTask(flushingLogs(runTask));
 }
 
 Future<void> _refreshNotifications(LoggerService log) async {
@@ -73,12 +248,99 @@ Future<void> _refreshNotifications(LoggerService log) async {
   await scheduler.scheduleAll(settings: settings);
 }
 
-Future<void> _performScheduledBackup(LoggerService log) async {
+/// The [BackupService] the scheduled backup runs on.
+///
+/// Every store this reaches for is isolate-safe: SharedPreferences and secure
+/// storage (credentials, both encryption keys). That is what lets a scheduled
+/// backup honour the user's "Cloud Backup" switch -- for a long time this
+/// isolate built a cloud-less service, so automatic backups silently stayed on
+/// the device while the UI advertised cloud uploads (issue #969).
+///
+/// The two key stores are separately load-bearing:
+///   * backup encryption -- when the flag is on, the artifact MUST be written
+///     as an encrypted `.sbe`, otherwise `_activeBackupKey` fails closed and
+///     the whole scheduled backup throws.
+///   * sync encryption -- the cloud copy of an otherwise-plaintext backup is
+///     framed before upload, exactly as the foreground path frames it, so
+///     restore sees one artifact format regardless of who wrote it.
+///
+/// [instanceFor] is a test seam for the cloud-provider singletons.
+Future<BackupService> buildScheduledBackupService({
+  required SharedPreferences prefs,
+  required BackupDatabaseAdapter dbAdapter,
+  CloudStorageProvider Function(CloudProviderType type)? instanceFor,
+}) async {
+  // One store for both the provider wrap and the upload's framing, mirroring
+  // the foreground's single encryptionKeyStoreProvider.
+  final encryptionKeyStore = EncryptionKeyStore();
+  final settings = BackupPreferences(prefs).getSettings();
+  return BackupService(
+    // Read with the provider below, so the two cannot disagree mid-backup.
+    copyAccountId: settings.cloudBackupEnabled ? settings.copyAccountId : null,
+    dbAdapter: dbAdapter,
+    preferences: BackupPreferences(prefs),
+    cloudProvider: await resolveHeadlessBackupCopyProvider(
+      prefs: prefs,
+      encryptionKeyStore: encryptionKeyStore,
+      instanceFor: instanceFor,
+    ),
+    extraCopies: await resolveHeadlessExtraCopyDestinations(
+      prefs: prefs,
+      encryptionKeyStore: encryptionKeyStore,
+      instanceFor: instanceFor,
+    ),
+    encryptionKeyStore: encryptionKeyStore,
+    syncPreferences: SyncPreferences(prefs),
+    backupEncryptionKeyStore: BackupEncryptionKeyStore(),
+  );
+}
+
+/// How the scheduled backup reports its outcome. A seam over
+/// [NotificationService.showBackupNotification] so the flow's decisions --
+/// above all whether the cloud copy is missing -- are assertable without a
+/// platform channel.
+typedef BackupNotifier =
+    Future<void> Function({
+      required bool success,
+      String? error,
+      bool cloudCopyMissing,
+      bool extraCopyMissing,
+    });
+
+/// What a successful scheduled [record] is missing, for its notification.
+/// [cloudCopyMissing]: nothing left the device, though a copy was asked for.
+/// [extraCopyMissing]: a copy is off the device, but an account did not get
+/// one: an extra account in [missedExtraIds] (issue #3782), or the main
+/// copy's own account when only extra copies arrived.
+({bool cloudCopyMissing, bool extraCopyMissing}) scheduledBackupCopyGaps({
+  required bool cloudBackupEnabled,
+  required BackupRecord record,
+  required List<String> missedExtraIds,
+}) {
+  final mainMissing =
+      cloudBackupEnabled && record.location == BackupLocation.local;
+  return (
+    cloudCopyMissing: mainMissing && record.extraCloudCopies.isEmpty,
+    extraCopyMissing:
+        cloudBackupEnabled && (mainMissing || missedExtraIds.isNotEmpty),
+  );
+}
+
+/// Run the scheduled backup if one is due, then report the outcome.
+///
+/// [notify] and [instanceFor] are seams for tests; production passes neither.
+Future<void> runScheduledBackup({
+  required SharedPreferences prefs,
+  required BackupDatabaseAdapter dbAdapter,
+  required LoggerService log,
+  BackupNotifier? notify,
+  CloudStorageProvider Function(CloudProviderType type)? instanceFor,
+}) async {
   log.info('Checking if scheduled backup is due');
 
-  final prefs = await SharedPreferences.getInstance();
-  final preferences = BackupPreferences(prefs);
-  final settings = preferences.getSettings();
+  final notifier =
+      notify ?? NotificationService.instance.showBackupNotification;
+  final settings = BackupPreferences(prefs).getSettings();
 
   if (!settings.enabled) {
     log.info('Automatic backups disabled, skipping');
@@ -92,27 +354,58 @@ Future<void> _performScheduledBackup(LoggerService log) async {
 
   log.info('Backup is due, starting automatic backup');
 
-  // Background isolate cannot access cloud auth, so backup is local-only
-  final dbAdapter = DefaultBackupDatabaseAdapter(DatabaseService.instance);
-  final service = BackupService(dbAdapter: dbAdapter, preferences: preferences);
+  final service = await buildScheduledBackupService(
+    prefs: prefs,
+    dbAdapter: dbAdapter,
+    instanceFor: instanceFor,
+  );
 
   try {
     final record = await service.performBackup(isAutomatic: true);
-    log.info('Automatic backup completed: ${record.filename}');
-    await NotificationService.instance.showBackupNotification(success: true);
+    // The record's location is the only honest signal: the upload swallows
+    // its own failures to protect the local artifact, so a cloud copy the
+    // user asked for can be missing from an otherwise successful backup.
+    // The backup has just written the extra accounts it missed.
+    final (:cloudCopyMissing, :extraCopyMissing) = scheduledBackupCopyGaps(
+      cloudBackupEnabled: settings.cloudBackupEnabled,
+      record: record,
+      missedExtraIds: BackupPreferences(
+        prefs,
+      ).getSettings().lastExtraCopyMissingIds,
+    );
+    log.info(
+      'Automatic backup completed: ${record.filename} '
+      '(location: ${record.location.name})',
+    );
+    await notifier(
+      success: true,
+      cloudCopyMissing: cloudCopyMissing,
+      extraCopyMissing: extraCopyMissing,
+    );
   } catch (e, stack) {
     log.error('Automatic backup failed', error: e, stackTrace: stack);
-    await NotificationService.instance.showBackupNotification(
-      success: false,
-      error: e.toString(),
-    );
+    // Persisted for Settings > Data health, which runs in the foreground
+    // isolate long after this one is gone.
+    // A failed write here must not cost the diver the notification.
+    try {
+      await BackupPreferences(
+        prefs,
+      ).setLastScheduledFailure(DateTime.now(), e.toString());
+    } catch (writeError, writeStack) {
+      log.error(
+        'Could not record the failed backup',
+        error: writeError,
+        stackTrace: writeStack,
+      );
+    }
+    await notifier(success: false, error: e.toString());
   }
 }
 
 /// Initialize background task registration
 Future<void> initializeBackgroundService() async {
   // Background service is mobile-only (iOS/Android)
-  if (!Platform.isIOS && !Platform.isAndroid) {
+  if (!HostPlatform.isIOS && !HostPlatform.isAndroid) {
     return;
   }
 

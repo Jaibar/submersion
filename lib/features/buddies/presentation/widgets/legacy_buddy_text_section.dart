@@ -1,0 +1,112 @@
+import 'package:flutter/material.dart';
+
+import 'package:submersion/features/buddies/domain/services/legacy_name_parser.dart';
+import 'package:submersion/features/buddies/presentation/legacy_buddy_conversion_actions.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+
+/// The Buddies card's legacy text (#1831): plain tiles for a dive's
+/// `buddy` and `dive_master` text and the action that links them to buddy
+/// records. Shown only while the dive has no linked buddies.
+class LegacyBuddyTextSection extends StatefulWidget {
+  const LegacyBuddyTextSection({
+    super.key,
+    required this.dive,
+    this.onLink,
+    this.linkShown = true,
+  });
+
+  final Dive dive;
+
+  /// Links the text: null links it at once, as the dive page always has.
+  /// A sitting on the dive passes its own, which holds the links until
+  /// Save (issue #4527).
+  final Future<void> Function(BuildContext context)? onLink;
+
+  /// Whether the link action is offered. Hidden, it keeps its room, so the
+  /// card does not change height when the action comes and goes.
+  final bool linkShown;
+
+  /// Whether [dive] has legacy text that parses to at least one name. A
+  /// text holding only a placeholder such as `None` does not count.
+  static bool hasContent(Dive dive) =>
+      hasBuddyText(dive) || hasDiveMasterText(dive);
+
+  /// Whether [Dive.buddy] names anyone, by the same rule as [hasContent].
+  static bool hasBuddyText(Dive dive) =>
+      LegacyNameParser.parse(dive.buddy).isNotEmpty;
+
+  /// Whether [Dive.diveMaster] names anyone, by the same rule as [hasContent].
+  static bool hasDiveMasterText(Dive dive) =>
+      LegacyNameParser.parse(dive.diveMaster).isNotEmpty;
+
+  @override
+  State<LegacyBuddyTextSection> createState() => _LegacyBuddyTextSectionState();
+}
+
+class _LegacyBuddyTextSectionState extends State<LegacyBuddyTextSection> {
+  /// True while a review is being planned or shown, so a second tap cannot
+  /// open a second sheet.
+  bool _busy = false;
+
+  Future<void> _link() async {
+    setState(() => _busy = true);
+    try {
+      final link = widget.onLink;
+      if (link != null) {
+        await link(context);
+      } else {
+        await linkLegacyBuddiesForDive(context, widget.dive);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dive = widget.dive;
+    final l10n = context.l10n;
+    final colorScheme = Theme.of(context).colorScheme;
+    final showBuddy = LegacyBuddyTextSection.hasBuddyText(dive);
+    final showDiveMaster = LegacyBuddyTextSection.hasDiveMasterText(dive);
+    if (!showBuddy && !showDiveMaster) return const SizedBox.shrink();
+
+    // There is no record behind the text yet, so the tile opens nothing.
+    Widget tile(String text, {String? subtitle}) => ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        backgroundColor: colorScheme.primaryContainer,
+        child: Icon(
+          Icons.person_outline,
+          color: colorScheme.onPrimaryContainer,
+        ),
+      ),
+      title: Text(text),
+      subtitle: subtitle == null ? null : Text(subtitle),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (showBuddy) tile(dive.buddy!.trim()),
+        if (showDiveMaster)
+          tile(
+            dive.diveMaster!.trim(),
+            subtitle: l10n.diveRole_builtin_diveMaster,
+          ),
+        Visibility(
+          visible: widget.linkShown,
+          maintainSize: true,
+          maintainAnimation: true,
+          maintainState: true,
+          child: TextButton.icon(
+            onPressed: _busy || !widget.linkShown ? null : _link,
+            icon: const Icon(Icons.link),
+            label: Text(l10n.buddies_linkText_action),
+          ),
+        ),
+      ],
+    );
+  }
+}

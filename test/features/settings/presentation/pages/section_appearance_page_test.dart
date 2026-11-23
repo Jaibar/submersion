@@ -5,8 +5,8 @@ import 'package:submersion/core/constants/card_color.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/features/certifications/presentation/providers/certification_providers.dart';
-import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric.dart';
+import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric_color_overrides.dart';
 import 'package:submersion/features/settings/presentation/pages/section_appearance_page.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -18,10 +18,13 @@ Widget _buildTestWidget(
   bool embedded = false,
   VoidCallback? onColumnConfigTap,
   List<dynamic>? overrides,
+  MockSettingsNotifier? notifier,
 }) {
   return ProviderScope(
     overrides: [
-      settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+      settingsProvider.overrideWith(
+        (ref) => notifier ?? MockSettingsNotifier(),
+      ),
       ...?overrides?.cast(),
     ],
     child: MaterialApp(
@@ -38,6 +41,40 @@ Widget _buildTestWidget(
 
 void main() {
   group('SectionAppearancePage - Dives section', () {
+    testWidgets('Dive Profile has a Metric Colors tile with a summary '
+        '(issue #3012)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget('dives'));
+      await tester.pumpAndSettle();
+      expect(find.text('Metric Colors'), findsOneWidget);
+      expect(find.text('Default colors'), findsOneWidget);
+    });
+
+    testWidgets('the Metric Colors tile counts customised metrics', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        _buildTestWidget(
+          'dives',
+          notifier: MockSettingsNotifier(
+            AppSettings(
+              profileMetricColors: ProfileMetricColorOverrides.none.withColor(
+                ProfileMetric.ppO2,
+                const Color(0xFFE040FB),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('1 customized'), findsOneWidget);
+    });
+
     testWidgets('shows all 5 section headers and dive-specific settings', (
       tester,
     ) async {
@@ -59,6 +96,67 @@ void main() {
       expect(find.text('Show Profile Panel in Table View'), findsOneWidget);
       expect(find.text('Show data source badges'), findsOneWidget);
     });
+
+    testWidgets('the dive figure switch is under Dive Details, on, and saves', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final notifier = MockSettingsNotifier();
+
+      await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+      await tester.pumpAndSettle();
+
+      final tile = find.widgetWithText(
+        SwitchListTile,
+        'Show diver figure on dives',
+      );
+      expect(tile, findsOneWidget);
+      expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+      expect(notifier.state.showDiveFigure, isFalse);
+    });
+
+    testWidgets('the pin profile switch is under Dive Profile, on, and saves', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final notifier = MockSettingsNotifier();
+
+      await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+      await tester.pumpAndSettle();
+
+      final tile = find.widgetWithText(
+        SwitchListTile,
+        'Pin profile when scrolling',
+      );
+      expect(tile, findsOneWidget);
+      expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+      expect(notifier.state.pinProfileOnScroll, isFalse);
+    });
+
+    testWidgets(
+      'the late gas switches switch is under Dive Profile, on, and saves',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(400, 4000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final notifier = MockSettingsNotifier();
+
+        await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+        await tester.pumpAndSettle();
+
+        final tile = find.widgetWithText(SwitchListTile, 'Late gas switches');
+        expect(tile, findsOneWidget);
+        expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+        await tester.tap(tile);
+        await tester.pumpAndSettle();
+        expect(notifier.state.defaultShowLateGasSwitches, isFalse);
+      },
+    );
   });
 
   group('SectionAppearancePage - Sites section', () {
@@ -80,6 +178,59 @@ void main() {
         expect(find.text('Dive Details'), findsNothing);
       },
     );
+
+    testWidgets('shows a Site Details group linking to the card settings', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget('sites'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Site Details'), findsOneWidget);
+      expect(find.text('Section Order & Visibility'), findsOneWidget);
+    });
+
+    testWidgets('the Site Details row opens the site sections page', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) =>
+                const SectionAppearancePage(sectionKey: 'sites'),
+          ),
+          GoRoute(
+            path: '/settings/site-detail-sections',
+            builder: (context, state) =>
+                const Scaffold(body: Text('SITE_SECTIONS_PAGE')),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Section Order & Visibility'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SITE_SECTIONS_PAGE'), findsOneWidget);
+    });
   });
 
   group('SectionAppearancePage - Buddies section', () {
@@ -362,6 +513,76 @@ void main() {
 
       expect(find.byIcon(Icons.map), findsWidgets);
     });
+
+    testWidgets('the photo background switch saves and reveals the sliders', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final notifier = MockSettingsNotifier();
+
+      await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+      await tester.pumpAndSettle();
+
+      final tile = find.widgetWithText(
+        SwitchListTile,
+        'Photo background on dive cards',
+      );
+      expect(tile, findsOneWidget);
+      expect(find.text('Photo overlay opacity, dark theme'), findsNothing);
+
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+      expect(notifier.state.showPhotoBackgroundOnDiveCards, isTrue);
+      expect(find.text('Photo overlay opacity, dark theme'), findsOneWidget);
+      expect(find.text('Photo overlay opacity, light theme'), findsOneWidget);
+      expect(find.text('60%'), findsNWidgets(2));
+    });
+
+    testWidgets('the overlay hint lines up with the slider labels', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final notifier = MockSettingsNotifier();
+      await notifier.setShowPhotoBackgroundOnDiveCards(true);
+
+      await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+      await tester.pumpAndSettle();
+
+      double left(String text) => tester.getTopLeft(find.text(text)).dx;
+      final hint = left(
+        'Higher keeps the text readable, lower shows more of the photo',
+      );
+
+      expect(hint, left('Photo overlay opacity, light theme'));
+      expect(hint, left('Photo overlay opacity, dark theme'));
+      // And with the other settings' subtitles.
+      expect(hint, left('Photo background on dive cards'));
+    });
+
+    testWidgets('dragging an overlay slider saves once it is let go', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final notifier = MockSettingsNotifier();
+      await notifier.setShowPhotoBackgroundOnDiveCards(true);
+
+      await tester.pumpWidget(_buildTestWidget('dives', notifier: notifier));
+      await tester.pumpAndSettle();
+
+      final slider = find.descendant(
+        of: find.byKey(const ValueKey('card_photo_overlay_light')),
+        matching: find.byType(Slider),
+      );
+      await tester.drag(slider, const Offset(-400, 0));
+      await tester.pumpAndSettle();
+
+      // Dragged to the far left: the lowest opacity offered.
+      expect(notifier.state.cardPhotoOverlayLight, closeTo(0.2, 1e-9));
+      expect(notifier.state.cardPhotoOverlayDark, 0.6);
+    });
   });
 
   group('SectionAppearancePage - Site cards settings', () {
@@ -462,23 +683,20 @@ void main() {
   });
 
   group('SectionAppearancePage - View mode for certifications/courses', () {
-    testWidgets('certifications uses runtime provider', (tester) async {
+    testWidgets('certifications shows the saved view mode', (tester) async {
       await tester.binding.setSurfaceSize(const Size(400, 4000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(
         _buildTestWidget(
           'certifications',
-          overrides: [
-            certificationListViewModeProvider.overrideWith(
-              (_) => ListViewMode.table,
-            ),
-          ],
+          notifier: MockSettingsNotifier(
+            const AppSettings(certificationListViewMode: ListViewMode.table),
+          ),
         ),
       );
       await tester.pumpAndSettle();
 
-      // Should show Table as current value
       expect(
         find.descendant(
           of: find.byType(DropdownButton<ListViewMode>),
@@ -488,16 +706,16 @@ void main() {
       );
     });
 
-    testWidgets('courses uses runtime provider', (tester) async {
+    testWidgets('courses shows the saved view mode', (tester) async {
       await tester.binding.setSurfaceSize(const Size(400, 4000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(
         _buildTestWidget(
           'courses',
-          overrides: [
-            courseListViewModeProvider.overrideWith((_) => ListViewMode.table),
-          ],
+          notifier: MockSettingsNotifier(
+            const AppSettings(courseListViewMode: ListViewMode.table),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -547,22 +765,26 @@ void main() {
       });
     }
 
-    testWidgets(
-      'changing dropdown for certifications updates runtime provider',
-      (tester) async {
+    for (final key in ['certifications', 'courses']) {
+      testWidgets('changing dropdown for $key saves the view mode', (
+        tester,
+      ) async {
         await tester.binding.setSurfaceSize(const Size(400, 4000));
         addTearDown(() => tester.binding.setSurfaceSize(null));
+        final notifier = MockSettingsNotifier();
 
-        await tester.pumpWidget(_buildTestWidget('certifications'));
+        await tester.pumpWidget(_buildTestWidget(key, notifier: notifier));
         await tester.pumpAndSettle();
 
-        // Open dropdown and select Table
         await tester.tap(find.byType(DropdownButton<ListViewMode>));
         await tester.pumpAndSettle();
-
         await tester.tap(find.text('Table').last);
         await tester.pumpAndSettle();
 
+        final saved = key == 'certifications'
+            ? notifier.state.certificationListViewMode
+            : notifier.state.courseListViewMode;
+        expect(saved, ListViewMode.table);
         expect(
           find.descendant(
             of: find.byType(DropdownButton<ListViewMode>),
@@ -570,33 +792,8 @@ void main() {
           ),
           findsOneWidget,
         );
-      },
-    );
-
-    testWidgets('changing dropdown for courses updates runtime provider', (
-      tester,
-    ) async {
-      await tester.binding.setSurfaceSize(const Size(400, 4000));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-
-      await tester.pumpWidget(_buildTestWidget('courses'));
-      await tester.pumpAndSettle();
-
-      // Open dropdown and select Table
-      await tester.tap(find.byType(DropdownButton<ListViewMode>));
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Table').last);
-      await tester.pumpAndSettle();
-
-      expect(
-        find.descendant(
-          of: find.byType(DropdownButton<ListViewMode>),
-          matching: find.text('Table'),
-        ),
-        findsOneWidget,
-      );
-    });
+      });
+    }
   });
 
   group('SectionAppearancePage - Card color attribute dropdown changes', () {
@@ -712,8 +909,9 @@ void main() {
       await tester.pumpAndSettle();
 
       // Default settings have some metrics enabled. The exact count depends
-      // on default AppSettings. Find the pattern "X of 18"
-      expect(find.textContaining('of 18'), findsOneWidget);
+      // on default AppSettings. Find the pattern "X of 27" -- one entry per
+      // SwitchListTile on DefaultVisibleMetricsPage.
+      expect(find.textContaining('of 27'), findsOneWidget);
     });
   });
 
@@ -1028,6 +1226,54 @@ void main() {
       expect(pushedPath, '/settings/default-metrics');
     });
 
+    testWidgets('metric colors tile navigates to metric-colors (issue #3012)', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/settings/section',
+        routes: [
+          GoRoute(
+            path: '/settings/section',
+            builder: (context, state) =>
+                const SectionAppearancePage(sectionKey: 'dives'),
+          ),
+          GoRoute(
+            path: '/settings/metric-colors',
+            builder: (context, state) {
+              pushedPath = state.uri.toString();
+              return const SizedBox();
+            },
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Find and tap the visible metrics tile (has visibility icon)
+      final colorsTile = find.widgetWithIcon(ListTile, Icons.palette_outlined);
+      expect(colorsTile, findsOneWidget);
+      await tester.tap(colorsTile);
+      await tester.pumpAndSettle();
+
+      expect(pushedPath, '/settings/metric-colors');
+    });
+
     testWidgets('dive detail sections tile navigates to detail-sections', (
       tester,
     ) async {
@@ -1074,6 +1320,31 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(pushedPath, '/settings/dive-detail-sections');
+    });
+  });
+
+  group('SectionAppearancePage - Gas timeline toggle', () {
+    testWidgets('toggling gas timeline switch updates state', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget('dives'));
+      await tester.pumpAndSettle();
+
+      final gasTimelineSwitch = find.widgetWithIcon(
+        SwitchListTile,
+        Icons.timeline,
+      );
+      expect(gasTimelineSwitch, findsOneWidget);
+
+      var switchWidget = tester.widget<SwitchListTile>(gasTimelineSwitch);
+      expect(switchWidget.value, isFalse);
+
+      await tester.tap(gasTimelineSwitch);
+      await tester.pumpAndSettle();
+
+      switchWidget = tester.widget<SwitchListTile>(gasTimelineSwitch);
+      expect(switchWidget.value, isTrue);
     });
   });
 }

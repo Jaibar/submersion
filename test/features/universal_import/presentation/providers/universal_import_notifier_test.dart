@@ -1,21 +1,47 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/universal_import/data/models/detection_result.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_options.dart';
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/data/parsers/macdive_sqlite_parser.dart';
+import 'package:submersion/features/universal_import/data/parsers/macdive_xml_parser.dart';
+import 'package:submersion/features/import_wizard/data/adapters/universal_adapter.dart';
+import 'package:submersion/features/import_wizard/domain/models/import_step_failure.dart';
+import 'package:submersion/features/universal_import/data/services/zip_expansion_service.dart';
+import 'package:submersion/features/universal_import/domain/services/import_media_resolver.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
 
-/// Helper to encode a CSV string to bytes for testing.
+import '../../../../fixtures/divemate/build_divemate_ddb.dart';
+import '../../../../fixtures/macdive_sqlite/build_synthetic_db.dart';
+import 'package:submersion/features/universal_import/data/models/picked_import_file.dart';
+
+PickedImportFile testPickedFile(Uint8List bytes, [String name = 'test-file']) {
+  return PickedImportFile(
+    name: name,
+    bytes: bytes,
+    detection: const DetectionResult(
+      format: ImportFormat.unknown,
+      confidence: 0,
+    ),
+    status: ImportFileStatus.pending,
+  );
+}
+
 Uint8List _csvBytes(String csv) => Uint8List.fromList(csv.codeUnits);
 
-/// Wait for the notifier's background async work (e.g. _parseAndCheckDuplicates)
-/// to complete. Non-CSV confirmSource fires parsing without await, so we need
+/// Wait for the notifier's background async work (e.g. _parseAndInstall) to
+/// complete. Non-CSV confirmSource fires parsing without await, so we need
 /// to pump the event loop until isLoading settles back to false.
 Future<void> _waitForAsyncWork(UniversalImportNotifier notifier) async {
   // Pump microtasks until the notifier finishes loading.
@@ -25,12 +51,33 @@ Future<void> _waitForAsyncWork(UniversalImportNotifier notifier) async {
   }
 }
 
+/// Run [action], absorbing the [ImportStepFailure] it raises when the file
+/// produced no payload.
+///
+/// Most cases below feed placeholder bytes on purpose and assert on the state
+/// the notifier recorded along the way (options, step, error), not on a
+/// payload. The notifier reports "nothing came out of this file" by throwing
+/// so the wizard stays on the step the user is looking at rather than
+/// advancing to one that has nothing to act on.
+Future<void> _tolerating(Future<void> Function() action) async {
+  try {
+    await action();
+  } on ImportStepFailure catch (_) {
+    // Expected for these fixtures.
+  }
+}
+
 void main() {
   late ProviderContainer container;
   late UniversalImportNotifier notifier;
 
-  setUp(() {
-    container = ProviderContainer();
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    container = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
     notifier = container.read(universalImportNotifierProvider.notifier);
   });
 
@@ -159,25 +206,28 @@ void main() {
     });
 
     group('confirmFieldMapping', () {
-      test('sets step to review when payload is null', () {
-        notifier.confirmFieldMapping();
+      test('sets step to review when payload is null', () async {
+        await _tolerating(notifier.confirmFieldMapping);
 
         expect(notifier.state.currentStep, ImportWizardStep.review);
       });
 
-      test('does not change step when called again (payload still null)', () {
-        // First call sets step to review.
-        notifier.confirmFieldMapping();
-        expect(notifier.state.currentStep, ImportWizardStep.review);
+      test(
+        'does not change step when called again (payload still null)',
+        () async {
+          // First call sets step to review.
+          await _tolerating(notifier.confirmFieldMapping);
+          expect(notifier.state.currentStep, ImportWizardStep.review);
 
-        // Manually move step back to fieldMapping to prove
-        // confirmFieldMapping will advance again when payload is null.
-        notifier.skipAdditionalFile();
-        expect(notifier.state.currentStep, ImportWizardStep.fieldMapping);
+          // Manually move step back to fieldMapping to prove
+          // confirmFieldMapping will advance again when payload is null.
+          notifier.skipAdditionalFile();
+          expect(notifier.state.currentStep, ImportWizardStep.fieldMapping);
 
-        notifier.confirmFieldMapping();
-        expect(notifier.state.currentStep, ImportWizardStep.review);
-      });
+          await _tolerating(notifier.confirmFieldMapping);
+          expect(notifier.state.currentStep, ImportWizardStep.review);
+        },
+      );
     });
 
     group('toggleSelection', () {
@@ -276,115 +326,6 @@ void main() {
       });
     });
 
-    group('setDiveResolution', () {
-      test('sets resolution for a dive index', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.skip);
-
-        expect(notifier.state.diveResolutions[0], DiveDuplicateResolution.skip);
-      });
-
-      test('skip resolution removes dive from selection', () {
-        // First add the dive to selection.
-        notifier.toggleSelection(ImportEntityType.dives, 0);
-        expect(notifier.state.selectionFor(ImportEntityType.dives), {0});
-
-        notifier.setDiveResolution(0, DiveDuplicateResolution.skip);
-
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          isNot(contains(0)),
-        );
-      });
-
-      test('importAsNew resolution adds dive to selection', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.importAsNew);
-
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          contains(0),
-        );
-        expect(
-          notifier.state.diveResolutions[0],
-          DiveDuplicateResolution.importAsNew,
-        );
-      });
-
-      test('consolidate resolution adds dive to selection', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.consolidate);
-
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          contains(0),
-        );
-        expect(
-          notifier.state.diveResolutions[0],
-          DiveDuplicateResolution.consolidate,
-        );
-      });
-
-      test('changing from importAsNew to skip removes from selection', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.importAsNew);
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          contains(0),
-        );
-
-        notifier.setDiveResolution(0, DiveDuplicateResolution.skip);
-
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          isNot(contains(0)),
-        );
-      });
-
-      test('changing from skip to consolidate adds to selection', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.skip);
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          isNot(contains(0)),
-        );
-
-        notifier.setDiveResolution(0, DiveDuplicateResolution.consolidate);
-
-        expect(
-          notifier.state.selectionFor(ImportEntityType.dives),
-          contains(0),
-        );
-      });
-
-      test('sets resolutions for multiple dive indices independently', () {
-        notifier.setDiveResolution(0, DiveDuplicateResolution.skip);
-        notifier.setDiveResolution(1, DiveDuplicateResolution.importAsNew);
-        notifier.setDiveResolution(2, DiveDuplicateResolution.consolidate);
-
-        expect(notifier.state.diveResolutions[0], DiveDuplicateResolution.skip);
-        expect(
-          notifier.state.diveResolutions[1],
-          DiveDuplicateResolution.importAsNew,
-        );
-        expect(
-          notifier.state.diveResolutions[2],
-          DiveDuplicateResolution.consolidate,
-        );
-
-        // Indices 1 and 2 should be selected, 0 should not.
-        final diveSelection = notifier.state.selectionFor(
-          ImportEntityType.dives,
-        );
-        expect(diveSelection, isNot(contains(0)));
-        expect(diveSelection, contains(1));
-        expect(diveSelection, contains(2));
-      });
-
-      test('does not affect other entity type selections', () {
-        notifier.toggleSelection(ImportEntityType.sites, 0);
-
-        notifier.setDiveResolution(0, DiveDuplicateResolution.importAsNew);
-
-        expect(notifier.state.selectionFor(ImportEntityType.sites), {0});
-      });
-    });
-
     group('reset', () {
       test('resets to initial state', () {
         // Modify state in multiple ways.
@@ -394,7 +335,6 @@ void main() {
         );
         notifier.skipAdditionalFile();
         notifier.toggleSelection(ImportEntityType.dives, 0);
-        notifier.setDiveResolution(1, DiveDuplicateResolution.consolidate);
 
         notifier.reset();
 
@@ -410,9 +350,7 @@ void main() {
         expect(notifier.state.options, isNull);
         expect(notifier.state.fieldMapping, isNull);
         expect(notifier.state.payload, isNull);
-        expect(notifier.state.duplicateResult, isNull);
         expect(notifier.state.selections, isEmpty);
-        expect(notifier.state.diveResolutions, isEmpty);
         expect(notifier.state.importCounts, isEmpty);
       });
 
@@ -429,7 +367,6 @@ void main() {
         expect(notifier.state.isImporting, defaultState.isImporting);
         expect(notifier.state.error, defaultState.error);
         expect(notifier.state.selections, defaultState.selections);
-        expect(notifier.state.diveResolutions, defaultState.diveResolutions);
         expect(notifier.state.importCounts, defaultState.importCounts);
         expect(notifier.state.importPhase, defaultState.importPhase);
         expect(notifier.state.importCurrent, defaultState.importCurrent);
@@ -442,7 +379,7 @@ void main() {
         // State starts with no detectionResult.
         expect(notifier.state.detectionResult, isNull);
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         // Nothing should change -- still at initial step with no options.
         expect(notifier.state.currentStep, ImportWizardStep.fileSelection);
@@ -457,7 +394,7 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.9,
           ),
-          fileBytes: _csvBytes('placeholder'),
+          files: [testPickedFile(_csvBytes('placeholder'), 'test-file')],
         );
 
         // Set pending overrides.
@@ -466,7 +403,7 @@ void main() {
           format: ImportFormat.csv,
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         // The effective options should use the pending overrides.
         expect(notifier.state.options, isNotNull);
@@ -483,12 +420,14 @@ void main() {
               sourceApp: SourceApp.subsurface,
               confidence: 0.9,
             ),
-            fileBytes: _csvBytes('placeholder'),
+            files: [testPickedFile(_csvBytes('placeholder'), 'test-file')],
           );
 
           notifier.setPendingSourceOverride(SourceApp.macdive);
 
-          await notifier.confirmSource(overrideApp: SourceApp.shearwater);
+          await _tolerating(
+            () => notifier.confirmSource(overrideApp: SourceApp.shearwater),
+          );
           await _waitForAsyncWork(notifier);
 
           expect(notifier.state.options!.sourceApp, SourceApp.shearwater);
@@ -504,7 +443,7 @@ void main() {
               sourceApp: SourceApp.generic,
               confidence: 0.5,
             ),
-            fileBytes: _csvBytes('placeholder'),
+            files: [testPickedFile(_csvBytes('placeholder'), 'test-file')],
           );
 
           notifier.setPendingSourceOverride(
@@ -512,9 +451,11 @@ void main() {
             format: ImportFormat.csv,
           );
 
-          await notifier.confirmSource(
-            overrideApp: SourceApp.subsurface,
-            overrideFormat: ImportFormat.subsurfaceXml,
+          await _tolerating(
+            () => notifier.confirmSource(
+              overrideApp: SourceApp.subsurface,
+              overrideFormat: ImportFormat.subsurfaceXml,
+            ),
           );
           await _waitForAsyncWork(notifier);
 
@@ -529,10 +470,10 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.95,
           ),
-          fileBytes: _csvBytes('<xml></xml>'),
+          files: [testPickedFile(_csvBytes('<xml></xml>'), 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.subsurfaceXml);
@@ -546,10 +487,10 @@ void main() {
               format: ImportFormat.uddf,
               confidence: 0.8,
             ),
-            fileBytes: _csvBytes('<xml></xml>'),
+            files: [testPickedFile(_csvBytes('<xml></xml>'), 'test-file')],
           );
 
-          await notifier.confirmSource();
+          await _tolerating(notifier.confirmSource);
           await _waitForAsyncWork(notifier);
 
           expect(notifier.state.options!.sourceApp, SourceApp.generic);
@@ -563,7 +504,7 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.9,
           ),
-          fileBytes: _csvBytes('test'),
+          files: [testPickedFile(_csvBytes('test'), 'test-file')],
         );
 
         notifier.setPendingSourceOverride(
@@ -573,11 +514,11 @@ void main() {
         expect(notifier.state.pendingSourceOverride, SourceApp.macdive);
         expect(notifier.state.pendingFormatOverride, ImportFormat.csv);
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         // The pending override was CSV, so this takes the CSV path.
         // No need to wait for background parse since CSV path doesn't fire
-        // _parseAndCheckDuplicates.
+        // _parseAndInstall.
         expect(notifier.state.pendingSourceOverride, isNull);
         expect(notifier.state.pendingFormatOverride, isNull);
       });
@@ -591,10 +532,10 @@ void main() {
             sourceApp: SourceApp.generic,
             confidence: 0.8,
           ),
-          fileBytes: csvData,
+          files: [testPickedFile(csvData, 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         expect(notifier.state.options, isNotNull);
         expect(notifier.state.options!.format, ImportFormat.csv);
@@ -617,10 +558,10 @@ void main() {
             sourceApp: SourceApp.generic,
             confidence: 0.8,
           ),
-          fileBytes: csvData,
+          files: [testPickedFile(csvData, 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         // Pipeline should have parsed the CSV and stored the result.
         expect(notifier.state.parsedCsv, isNotNull);
@@ -637,10 +578,10 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.9,
           ),
-          fileBytes: _csvBytes('<xml></xml>'),
+          files: [testPickedFile(_csvBytes('<xml></xml>'), 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         // Non-CSV formats skip fieldMapping and go straight to review.
@@ -657,10 +598,10 @@ void main() {
               sourceApp: SourceApp.generic,
               confidence: 0.8,
             ),
-            fileBytes: Uint8List(0),
+            files: [testPickedFile(Uint8List(0), 'test-file')],
           );
 
-          await notifier.confirmSource();
+          await _tolerating(notifier.confirmSource);
 
           // Pipeline failure falls through to the non-pipeline CSV path.
           expect(notifier.state.options!.format, ImportFormat.csv);
@@ -679,12 +620,12 @@ void main() {
             sourceApp: SourceApp.generic,
             confidence: 0.8,
           ),
-          fileBytes: _csvBytes('A,B\n1,2\n'),
+          files: [testPickedFile(_csvBytes('A,B\n1,2\n'), 'test-file')],
         );
 
         // After confirmSource completes, step should advance past
         // sourceConfirmation to either fieldMapping or additionalFiles.
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         expect(
           notifier.state.currentStep,
@@ -752,11 +693,16 @@ void main() {
             format: ImportFormat.csv,
           ),
           payload: existingPayload,
-          fileBytes: _csvBytes('Date,Depth\n2024-01-01,30\n'),
+          files: [
+            testPickedFile(
+              _csvBytes('Date,Depth\n2024-01-01,30\n'),
+              'test-file',
+            ),
+          ],
           currentStep: ImportWizardStep.fieldMapping,
         );
 
-        await notifier.confirmFieldMapping();
+        await _tolerating(notifier.confirmFieldMapping);
 
         // Payload should remain unchanged (early return).
         expect(notifier.state.payload, existingPayload);
@@ -766,7 +712,7 @@ void main() {
       });
 
       test('advances to review step when payload is null', () async {
-        await notifier.confirmFieldMapping();
+        await _tolerating(notifier.confirmFieldMapping);
 
         expect(notifier.state.currentStep, ImportWizardStep.review);
       });
@@ -780,11 +726,14 @@ void main() {
           ),
         );
 
-        await notifier.confirmFieldMapping();
+        await expectLater(
+          notifier.confirmFieldMapping(),
+          throwsA(isA<ImportStepFailure>()),
+        );
 
-        // _parseAndCheckDuplicates returns early when bytes are null,
-        // so no error is set, but step is advanced to review.
-        expect(notifier.state.currentStep, ImportWizardStep.review);
+        // Unreadable bytes are reported, not passed over in silence: the
+        // wizard has to know the step failed or it advances anyway.
+        expect(notifier.state.error, isNotNull);
         expect(notifier.state.payload, isNull);
         expect(notifier.state.isLoading, isFalse);
       });
@@ -792,14 +741,20 @@ void main() {
       test('sets error when options is null during parse attempt', () async {
         // Set file bytes but no options.
         notifier.state = notifier.state.copyWith(
-          fileBytes: _csvBytes('Date,Depth\n2024-01-01,30\n'),
+          files: [
+            testPickedFile(
+              _csvBytes('Date,Depth\n2024-01-01,30\n'),
+              'test-file',
+            ),
+          ],
         );
 
-        await notifier.confirmFieldMapping();
+        await expectLater(
+          notifier.confirmFieldMapping(),
+          throwsA(isA<ImportStepFailure>()),
+        );
 
-        // _parseAndCheckDuplicates returns early when options is null,
-        // so no error but step is advanced to review.
-        expect(notifier.state.currentStep, ImportWizardStep.review);
+        expect(notifier.state.error, isNotNull);
         expect(notifier.state.payload, isNull);
         expect(notifier.state.isLoading, isFalse);
       });
@@ -814,14 +769,14 @@ void main() {
               sourceApp: SourceApp.generic,
               format: ImportFormat.unknown,
             ),
-            fileBytes: _csvBytes('some data'),
+            files: [testPickedFile(_csvBytes('some data'), 'test-file')],
           );
 
           notifier.addListener((state) {
             loadingStates.add(state.isLoading);
           });
 
-          await notifier.confirmFieldMapping();
+          await _tolerating(notifier.confirmFieldMapping);
 
           // The placeholder parser returns an empty payload, which triggers
           // the error path. Loading should have been set to true then false.
@@ -837,10 +792,10 @@ void main() {
             sourceApp: SourceApp.generic,
             format: ImportFormat.unknown,
           ),
-          fileBytes: _csvBytes('some bytes'),
+          files: [testPickedFile(_csvBytes('some bytes'), 'test-file')],
         );
 
-        await notifier.confirmFieldMapping();
+        await _tolerating(notifier.confirmFieldMapping);
 
         // PlaceholderParser returns empty entities -> error path.
         expect(notifier.state.error, isNotNull);
@@ -856,10 +811,10 @@ void main() {
               sourceApp: SourceApp.generic,
               format: ImportFormat.unknown,
             ),
-            fileBytes: _csvBytes('test data'),
+            files: [testPickedFile(_csvBytes('test data'), 'test-file')],
           );
 
-          await notifier.confirmFieldMapping();
+          await _tolerating(notifier.confirmFieldMapping);
 
           // PlaceholderParser produces a warning about unsupported format.
           expect(notifier.state.error, isNotNull);
@@ -874,10 +829,12 @@ void main() {
             sourceApp: SourceApp.subsurface,
             format: ImportFormat.subsurfaceXml,
           ),
-          fileBytes: _csvBytes('not valid xml at all {{{'),
+          files: [
+            testPickedFile(_csvBytes('not valid xml at all {{{'), 'test-file'),
+          ],
         );
 
-        await notifier.confirmFieldMapping();
+        await _tolerating(notifier.confirmFieldMapping);
 
         // Parsing invalid XML should produce an error.
         // Either it throws (caught in catch block) or returns empty payload.
@@ -900,18 +857,18 @@ void main() {
             sourceApp: SourceApp.generic,
             format: ImportFormat.csv,
           ),
-          fileBytes: _csvBytes(
-            'MyDate,MyDepth,MyDuration\n2024-01-01,30.0,2700\n',
-          ),
+          files: [
+            testPickedFile(
+              _csvBytes('MyDate,MyDepth,MyDuration\n2024-01-01,30.0,2700\n'),
+              'test-file',
+            ),
+          ],
           fieldMapping: mapping,
         );
 
-        await notifier.confirmFieldMapping();
+        await _tolerating(notifier.confirmFieldMapping);
 
         // The CSV parser should use the field mapping and produce dives.
-        // It may fail at duplicate checking (no provider overrides), but
-        // we can verify the parse attempt happened.
-        // If parse succeeded but duplicate check fails, we get an error.
         // If parse produced dives, they would be in the payload.
         expect(notifier.state.isLoading, isFalse);
       });
@@ -931,10 +888,10 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.8,
           ),
-          fileBytes: csvData,
+          files: [testPickedFile(csvData, 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         expect(notifier.state.options, isNotNull);
         expect(notifier.state.options!.format, ImportFormat.csv);
@@ -959,10 +916,10 @@ void main() {
             sourceApp: SourceApp.macdive,
             confidence: 0.8,
           ),
-          fileBytes: csvData,
+          files: [testPickedFile(csvData, 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
 
         // If a preset was detected, it should be stored in state.
         // Even if no preset matches, the flow should still work.
@@ -982,10 +939,10 @@ void main() {
               sourceApp: SourceApp.generic,
               confidence: 0.5,
             ),
-            fileBytes: csvData,
+            files: [testPickedFile(csvData, 'test-file')],
           );
 
-          await notifier.confirmSource();
+          await _tolerating(notifier.confirmSource);
 
           expect(notifier.state.currentStep, ImportWizardStep.fieldMapping);
         },
@@ -1000,10 +957,10 @@ void main() {
             sourceApp: SourceApp.submersion,
             confidence: 0.95,
           ),
-          fileBytes: _csvBytes('<uddf></uddf>'),
+          files: [testPickedFile(_csvBytes('<uddf></uddf>'), 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.uddf);
@@ -1018,10 +975,12 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.9,
           ),
-          fileBytes: _csvBytes('<divelog></divelog>'),
+          files: [
+            testPickedFile(_csvBytes('<divelog></divelog>'), 'test-file'),
+          ],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.subsurfaceXml);
@@ -1035,10 +994,10 @@ void main() {
             sourceApp: SourceApp.garminConnect,
             confidence: 0.9,
           ),
-          fileBytes: _csvBytes('fit data'),
+          files: [testPickedFile(_csvBytes('fit data'), 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.fit);
@@ -1052,10 +1011,10 @@ void main() {
             sourceApp: SourceApp.shearwater,
             confidence: 0.95,
           ),
-          fileBytes: _csvBytes('db data'),
+          files: [testPickedFile(_csvBytes('db data'), 'test-file')],
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.shearwaterDb);
@@ -1073,10 +1032,10 @@ void main() {
               sourceApp: SourceApp.suunto,
               confidence: 0.8,
             ),
-            fileBytes: _csvBytes('data'),
+            files: [testPickedFile(_csvBytes('data'), 'test-file')],
           );
 
-          await notifier.confirmSource();
+          await _tolerating(notifier.confirmSource);
           await _waitForAsyncWork(notifier);
 
           expect(
@@ -1084,6 +1043,9 @@ void main() {
             const ImportOptions(
               sourceApp: SourceApp.suunto,
               format: ImportFormat.uddf,
+              // fileName is threaded from the picked file (#507); the batch
+              // model exposes it via the derived state.fileName getter.
+              fileName: 'test-file',
             ),
           );
         },
@@ -1096,10 +1058,12 @@ void main() {
             sourceApp: SourceApp.subsurface,
             confidence: 0.7,
           ),
-          fileBytes: _csvBytes('data'),
+          files: [testPickedFile(_csvBytes('data'), 'test-file')],
         );
 
-        await notifier.confirmSource(overrideApp: SourceApp.scubapro);
+        await _tolerating(
+          () => notifier.confirmSource(overrideApp: SourceApp.scubapro),
+        );
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.sourceApp, SourceApp.scubapro);
@@ -1113,12 +1077,14 @@ void main() {
             sourceApp: SourceApp.generic,
             confidence: 0.5,
           ),
-          fileBytes: _csvBytes('data'),
+          files: [testPickedFile(_csvBytes('data'), 'test-file')],
         );
 
-        await notifier.confirmSource(
-          overrideApp: SourceApp.shearwater,
-          overrideFormat: ImportFormat.shearwaterDb,
+        await _tolerating(
+          () => notifier.confirmSource(
+            overrideApp: SourceApp.shearwater,
+            overrideFormat: ImportFormat.shearwaterDb,
+          ),
         );
         await _waitForAsyncWork(notifier);
 
@@ -1128,6 +1094,22 @@ void main() {
     });
 
     group('loadFileFromBytes', () {
+      test(
+        'keeps a Suunto JSON export on file selection for its hand-off card',
+        () async {
+          final bytes = Uint8List.fromList(
+            utf8.encode('{"DeviceLog":{"Header":{"ActivityType":51}}}'),
+          );
+
+          final result = await notifier.loadFileFromBytes(bytes, 'dive.json');
+
+          expect(result.format, ImportFormat.suuntoJson);
+          expect(notifier.state.currentStep, ImportWizardStep.fileSelection);
+          expect(notifier.state.fileBytes, bytes);
+          expect(notifier.state.fileName, 'dive.json');
+        },
+      );
+
       test(
         'sets state to sourceConfirmation for a recognized UDDF file',
         () async {
@@ -1222,12 +1204,12 @@ void main() {
           // Create a minimal SQLite database with the tables that
           // ShearwaterDbReader.isShearwaterCloudDb checks for.
           final tempDir = await Directory.systemTemp.createTemp('shearwater_');
-          final dbPath = '${tempDir.path}/shearwater_cloud.db';
+          final dbPath = p.join(tempDir.path, 'shearwater_cloud.db');
           final db = sqlite3.sqlite3.open(dbPath);
           try {
             db.execute('CREATE TABLE dive_details (DiveId INTEGER)');
             db.execute('CREATE TABLE log_data (DiveId INTEGER)');
-            db.dispose();
+            db.close();
 
             final bytes = await File(dbPath).readAsBytes();
             final result = await notifier.loadFileFromBytes(
@@ -1331,8 +1313,7 @@ void main() {
             'Date,Depth,Duration\n2024-01-01,30.0,2700\n',
           );
           notifier.state = notifier.state.copyWith(
-            fileBytes: csvData,
-            fileName: 'test.csv',
+            files: [testPickedFile(csvData, 'test.csv')],
             detectionResult: const DetectionResult(
               format: ImportFormat.csv,
               sourceApp: SourceApp.generic,
@@ -1342,7 +1323,7 @@ void main() {
           );
 
           // Step 1: Confirm source.
-          await notifier.confirmSource();
+          await _tolerating(notifier.confirmSource);
           expect(notifier.state.options, isNotNull);
           expect(notifier.state.options!.format, ImportFormat.csv);
 
@@ -1359,15 +1340,14 @@ void main() {
           expect(notifier.state.fieldMapping, mapping);
 
           // Step 3: Confirm field mapping (triggers parse).
-          await notifier.confirmFieldMapping();
+          await _tolerating(notifier.confirmFieldMapping);
           expect(notifier.state.currentStep, ImportWizardStep.review);
         },
       );
 
       test('non-CSV flow: confirm source goes directly to review', () async {
         notifier.state = notifier.state.copyWith(
-          fileBytes: _csvBytes('<uddf/>'),
-          fileName: 'test.uddf',
+          files: [testPickedFile(_csvBytes('<uddf/>'), 'test.uddf')],
           detectionResult: const DetectionResult(
             format: ImportFormat.uddf,
             sourceApp: SourceApp.submersion,
@@ -1376,7 +1356,7 @@ void main() {
           currentStep: ImportWizardStep.sourceConfirmation,
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         await _waitForAsyncWork(notifier);
 
         expect(notifier.state.options!.format, ImportFormat.uddf);
@@ -1386,8 +1366,7 @@ void main() {
       test('reset after partial wizard flow restores initial state', () async {
         final csvData = _csvBytes('A,B\n1,2\n');
         notifier.state = notifier.state.copyWith(
-          fileBytes: csvData,
-          fileName: 'test.csv',
+          files: [testPickedFile(csvData, 'test.csv')],
           detectionResult: const DetectionResult(
             format: ImportFormat.csv,
             sourceApp: SourceApp.generic,
@@ -1395,7 +1374,7 @@ void main() {
           ),
         );
 
-        await notifier.confirmSource();
+        await _tolerating(notifier.confirmSource);
         expect(notifier.state.options, isNotNull);
 
         notifier.updateFieldMapping(
@@ -1410,6 +1389,348 @@ void main() {
         expect(notifier.state.parsedCsv, isNull);
         expect(notifier.state.fileBytes, isNull);
       });
+    });
+
+    group('UniversalImportNotifier - MacDive XML', () {
+      test('detects MacDive native XML format', () async {
+        final content = await File(
+          'test/fixtures/macdive_xml/metric_small.xml',
+        ).readAsString();
+        final bytes = Uint8List.fromList(content.codeUnits);
+
+        final detection = await notifier.loadFileFromBytes(
+          bytes,
+          'metric_small.xml',
+        );
+
+        expect(detection.format, ImportFormat.macdiveXml);
+        expect(detection.sourceApp, SourceApp.macdive);
+        expect(notifier.state.fileBytes, isNotNull);
+        expect(notifier.state.fileName, 'metric_small.xml');
+        expect(notifier.state.currentStep, ImportWizardStep.sourceConfirmation);
+      });
+
+      test(
+        'MacDiveXmlParser produces full payload with tags and sites',
+        () async {
+          final content = await File(
+            'test/fixtures/macdive_xml/metric_small.xml',
+          ).readAsString();
+          final bytes = Uint8List.fromList(content.codeUnits);
+
+          // Test that MacDiveXmlParser (the parser returned by _parserFor
+          // at line 429 for ImportFormat.macdiveXml) produces the correct
+          // payload with all expected entities. If the switch case is
+          // regressed to return PlaceholderParser, this test would fail
+          // because PlaceholderParser always returns an empty payload (0 tags).
+          // NOTE: Testing _parserFor indirectly via confirmSource would
+          // require full database initialization (SharedPreferences, Drift,
+          // etc.), so we test the parser directly here.
+          const parser = MacDiveXmlParser();
+          final payload = await parser.parse(bytes);
+
+          expect(
+            payload.entitiesOf(ImportEntityType.dives).length,
+            1,
+            reason: 'metric_small.xml fixture contains 1 dive',
+          );
+          expect(
+            payload.entitiesOf(ImportEntityType.tags).length,
+            2,
+            reason:
+                'metric_small.xml has 2 tags (Reef, Photography); PlaceholderParser would return 0 tags',
+          );
+          expect(payload.entitiesOf(ImportEntityType.sites).length, 1);
+          expect(payload.entitiesOf(ImportEntityType.buddies).length, 1);
+          expect(payload.entitiesOf(ImportEntityType.equipment).length, 1);
+        },
+      );
+    });
+
+    group('UniversalImportNotifier - DiveMate database', () {
+      test('detects a DiveMate .ddb as DiveMate, not Diving Log', () async {
+        final detection = await notifier.loadFileFromBytes(
+          buildDiveMateDdb(),
+          'DiveMate.ddb',
+        );
+
+        expect(detection.format, ImportFormat.diveMateDdb);
+        expect(detection.sourceApp, SourceApp.diveMate);
+      });
+
+      test(
+        'a browser leaves a SQLite file generic and unsupported (#4121)',
+        () async {
+          // No SQLite engine to open the file with: the probe that tells
+          // the flavours apart cannot run, so the file is reported as a
+          // database the browser cannot import and the wizard stays put.
+          SharedPreferences.setMockInitialValues({});
+          final prefs = await SharedPreferences.getInstance();
+          final browser = ProviderContainer(
+            overrides: [
+              sharedPreferencesProvider.overrideWithValue(prefs),
+              deviceCapabilitiesProvider.overrideWithValue(
+                DeviceCapabilities.web,
+              ),
+            ],
+          );
+          addTearDown(browser.dispose);
+          final webNotifier = browser.read(
+            universalImportNotifierProvider.notifier,
+          );
+
+          final detection = await webNotifier.loadFileFromBytes(
+            buildDiveMateDdb(),
+            'DiveMate.ddb',
+          );
+
+          expect(detection.format, ImportFormat.sqlite);
+          expect(detection.isFormatSupported, isFalse);
+          expect(webNotifier.state.currentStep, ImportWizardStep.fileSelection);
+        },
+      );
+    });
+
+    group('UniversalImportNotifier - MacDive SQLite', () {
+      test('detects MacDive SQLite format from synthetic DB', () async {
+        final dir = Directory.systemTemp.createTempSync('mdw_');
+        addTearDown(() {
+          if (dir.existsSync()) dir.deleteSync(recursive: true);
+        });
+        final file = buildSyntheticMacDiveDb(p.join(dir.path, 'mdw.sqlite'));
+        final bytes = Uint8List.fromList(await file.readAsBytes());
+
+        final detection = await notifier.loadFileFromBytes(
+          bytes,
+          'MacDive.sqlite',
+        );
+
+        expect(detection.format, ImportFormat.macdiveSqlite);
+        expect(detection.sourceApp, SourceApp.macdive);
+        expect(notifier.state.currentStep, ImportWizardStep.sourceConfirmation);
+      });
+
+      test(
+        'MacDiveSqliteParser produces populated payload from synthetic DB',
+        () async {
+          final dir = Directory.systemTemp.createTempSync('mdw2_');
+          addTearDown(() {
+            if (dir.existsSync()) dir.deleteSync(recursive: true);
+          });
+          final file = buildSyntheticMacDiveDb(p.join(dir.path, 'mdw2.sqlite'));
+          final bytes = Uint8List.fromList(await file.readAsBytes());
+
+          const parser = MacDiveSqliteParser();
+          final payload = await parser.parse(bytes);
+
+          expect(payload.entitiesOf(ImportEntityType.dives).length, 3);
+          expect(payload.entitiesOf(ImportEntityType.tags).length, 2);
+        },
+      );
+    });
+    group('photo folder resolution', () {
+      ImportPayload payloadWithOnePicture(String filename) => ImportPayload(
+        entities: {
+          ImportEntityType.dives: [
+            {'uddfId': 'd0', 'dateTime': DateTime(2025, 1, 15)},
+          ],
+          ImportEntityType.media: [
+            {'filename': filename, '_diveIndex': 0},
+          ],
+        },
+      );
+
+      test('resolvePhotosIn stores the root and the resolution', () async {
+        final root = await Directory.systemTemp.createTemp('wizard_photos_');
+        addTearDown(() async {
+          if (root.existsSync()) await root.delete(recursive: true);
+        });
+        final photo = File(p.join(root.path, 'dive042.jpg'))
+          ..writeAsStringSync('bytes');
+
+        notifier.state = notifier.state.copyWith(
+          payload: payloadWithOnePicture('/home/jai/Pictures/dive042.jpg'),
+        );
+
+        await notifier.resolvePhotosIn(root.path);
+
+        expect(notifier.state.photoFolderPath, root.path);
+        expect(notifier.state.photoResolution?.matchedCount, 1);
+        expect(
+          notifier.state.photoResolution?.resolvedPathByIndex[0],
+          photo.path,
+        );
+        expect(notifier.state.photosSkipped, isFalse);
+        expect(notifier.state.isLoading, isFalse);
+      });
+
+      test(
+        'resolvePhotosIn is a no-op when the payload has no pictures',
+        () async {
+          notifier.state = notifier.state.copyWith(
+            payload: const ImportPayload(entities: {}),
+          );
+
+          await notifier.resolvePhotosIn('/nowhere');
+
+          expect(notifier.state.photoFolderPath, isNull);
+          expect(notifier.state.photoResolution, isNull);
+        },
+      );
+
+      test(
+        'skipPhotos clears any resolution and marks the step done',
+        () async {
+          notifier.state = notifier.state.copyWith(
+            payload: payloadWithOnePicture('/home/jai/Pictures/dive042.jpg'),
+            photoFolderPath: '/some/folder',
+          );
+
+          notifier.skipPhotos();
+
+          expect(notifier.state.photosSkipped, isTrue);
+          expect(notifier.state.photoResolution, isNull);
+          expect(notifier.state.photoFolderPath, isNull);
+          expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+        },
+      );
+
+      test(
+        'the step gate is open with no pictures and shut with unhandled ones',
+        () {
+          notifier.state = notifier.state.copyWith(
+            payload: const ImportPayload(entities: {}),
+          );
+          expect(container.read(universalAdapterNoPhotosProvider), isTrue);
+          expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+
+          notifier.state = notifier.state.copyWith(
+            payload: payloadWithOnePicture('/p/a.jpg'),
+          );
+          expect(container.read(universalAdapterNoPhotosProvider), isFalse);
+          expect(container.read(universalAdapterPhotosReadyProvider), isFalse);
+        },
+      );
+
+      test(
+        'bundled archive photos shut the gate until a folder is chosen',
+        () async {
+          final dir = Directory.systemTemp.createTempSync('bundled_dest_');
+          addTearDown(() => dir.deleteSync(recursive: true));
+          notifier.state = notifier.state.copyWith(
+            payload: const ImportPayload(entities: {}),
+            photoPathsByBaseName: {
+              'dive1': ['/tmp/zip/a.jpg'],
+            },
+          );
+          expect(container.read(universalAdapterNoPhotosProvider), isFalse);
+          expect(container.read(universalAdapterPhotosReadyProvider), isFalse);
+
+          expect(await notifier.chooseBundledPhotoFolder(dir.path), isTrue);
+          expect(notifier.state.bundledPhotoFolderPath, dir.path);
+          expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+        },
+      );
+
+      test('a base name carrying no photos leaves the gate open', () {
+        notifier.state = notifier.state.copyWith(
+          payload: const ImportPayload(entities: {}),
+          photoPathsByBaseName: const {'dive1': []},
+        );
+        expect(container.read(universalAdapterNoPhotosProvider), isTrue);
+        expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+      });
+
+      test(
+        'an unwritable bundled folder is refused and not recorded',
+        () async {
+          if (Platform.isWindows) {
+            markTestSkipped(
+              'POSIX permission bits are not honoured on Windows',
+            );
+            return;
+          }
+          final dir = Directory.systemTemp.createTempSync('bundled_ro_');
+          Process.runSync('chmod', ['000', dir.path]);
+          addTearDown(() {
+            Process.runSync('chmod', ['755', dir.path]);
+            dir.deleteSync(recursive: true);
+          });
+          notifier.state = notifier.state.copyWith(
+            photoPathsByBaseName: {
+              'dive1': ['/tmp/zip/a.jpg'],
+            },
+          );
+
+          final accepted = await notifier.chooseBundledPhotoFolder(dir.path);
+          if (accepted) {
+            markTestSkipped('running with permissions that bypass chmod');
+            return;
+          }
+          expect(notifier.state.bundledPhotoFolderPath, isNull);
+          expect(container.read(universalAdapterPhotosReadyProvider), isFalse);
+        },
+      );
+
+      test('skipping opens the gate and forgets the bundled folder', () async {
+        notifier.state = notifier.state.copyWith(
+          payload: payloadWithOnePicture('/p/a.jpg'),
+          photoPathsByBaseName: {
+            'dive1': ['/tmp/zip/a.jpg'],
+          },
+        );
+        final dir = Directory.systemTemp.createTempSync('bundled_skip_');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        expect(await notifier.chooseBundledPhotoFolder(dir.path), isTrue);
+        // Referenced photos are still unresolved, so the gate stays shut.
+        expect(container.read(universalAdapterPhotosReadyProvider), isFalse);
+
+        notifier.skipPhotos();
+        expect(notifier.state.bundledPhotoFolderPath, isNull);
+        expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+      });
+
+      test('a new file pick forgets every earlier photo decision', () async {
+        final dir = Directory.systemTemp.createTempSync('bundled_stale_');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        notifier.state = notifier.state.copyWith(
+          payload: payloadWithOnePicture('/p/a.jpg'),
+          photoPathsByBaseName: {
+            'dive1': ['/tmp/zip/a.jpg'],
+          },
+          photoFolderPath: '/old/photos',
+          photoResolution: const ImportMediaResolution.empty(),
+          photosSkipped: true,
+        );
+        expect(await notifier.chooseBundledPhotoFolder(dir.path), isTrue);
+
+        // pickFiles and pickFolder reach this hook without the full reset
+        // loadFileFromBytes performs, so a decision left here would make
+        // a new archive's photos land in the old folder unasked.
+        notifier.applyExpansionExtras(const ArchiveExpansion(filePaths: []));
+
+        final state = notifier.state;
+        expect(state.bundledPhotoFolderPath, isNull);
+        expect(state.photoFolderPath, isNull);
+        expect(state.photoResolution, isNull);
+        expect(state.photosSkipped, isFalse);
+        expect(state.photoPathsByBaseName, isEmpty);
+      });
+
+      test(
+        'a missing folder resolves to zero matches without throwing',
+        () async {
+          notifier.state = notifier.state.copyWith(
+            payload: payloadWithOnePicture('/home/jai/Pictures/dive042.jpg'),
+          );
+
+          await notifier.resolvePhotosIn('/definitely/not/a/folder');
+
+          expect(notifier.state.photoResolution?.matchedCount, 0);
+          expect(notifier.state.photoResolution?.notFoundCount, 1);
+          expect(container.read(universalAdapterPhotosReadyProvider), isTrue);
+        },
+      );
     });
   });
 }

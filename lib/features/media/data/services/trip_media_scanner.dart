@@ -1,5 +1,17 @@
+import 'dart:io';
+
+import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/media/data/services/dive_gallery_lookup.dart';
+import 'package:submersion/features/media/data/services/linked_gallery_assets.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/services/dive_photo_matcher.dart';
+import 'package:submersion/features/media/domain/value_objects/extracted_file.dart';
+import 'package:submersion/features/media/domain/value_objects/matched_selection.dart';
+import 'package:submersion/features/media/domain/value_objects/media_source_metadata.dart';
+import 'package:submersion/features/media/domain/value_objects/taken_at_source.dart';
 
 /// Result of scanning the device gallery for trip photos.
 ///
@@ -41,7 +53,7 @@ class ScanResult {
 /// This service handles:
 /// - Requesting photo library permissions
 /// - Fetching photos within a trip date range
-/// - Matching photos to dives based on timestamps
+/// - Matching photos to dives based on timestamps (via [DivePhotoMatcher])
 /// - Filtering out already linked photos
 ///
 /// Time convention: Dive times use wall-clock-as-UTC (e.g. a 10:00 AM local
@@ -50,8 +62,24 @@ class ScanResult {
 /// to wall-clock-as-UTC so that only the displayed hour/minute matter, not
 /// the underlying epoch.
 class TripMediaScanner {
-  /// Default buffer time in minutes before/after dive boundaries.
-  static const int defaultBufferMinutes = 30;
+  static final _log = LoggerService.forClass(TripMediaScanner);
+
+  static const Duration _photoLibraryTimezoneSlack = Duration(days: 1);
+  static final Set<Duration> _fallbackTimezoneOffsets = {
+    for (var hours = -12; hours <= 14; hours += 1) Duration(hours: hours),
+  };
+
+  /// Default pre-dive buffer time in minutes (mirrors [DivePhotoMatcher.preBuffer]).
+  static const int defaultPreBufferMinutes = 30;
+
+  /// Default post-dive buffer time in minutes (mirrors [DivePhotoMatcher.postBuffer]).
+  static const int defaultPostBufferMinutes = 60;
+
+  /// Default buffer time in minutes before dive boundaries.
+  ///
+  /// Kept for API compatibility. For matching, the post-dive buffer is wider
+  /// (60 min) — see [defaultPostBufferMinutes].
+  static const int defaultBufferMinutes = defaultPreBufferMinutes;
 
   /// Match a photo timestamp to a dive from a list of dives.
   ///
@@ -65,6 +93,11 @@ class TripMediaScanner {
   /// Falls back to [Dive.dateTime] + [Dive.duration] if entry/exit times are not set.
   ///
   /// Returns null if no dive matches.
+  @Deprecated(
+    'Use DivePhotoMatcher.match() instead. This static helper is retained '
+    'only for legacy test coverage; its symmetric 30-minute buffer differs '
+    'from DivePhotoMatcher\'s asymmetric 30 pre / 60 post (per spec).',
+  )
   static Dive? matchPhotoToDive(
     DateTime photoTime,
     List<Dive> dives, {
@@ -84,7 +117,7 @@ class TripMediaScanner {
     bool bestIsExact = false;
 
     for (final dive in dives) {
-      final (rawEntry, rawExit) = _getDiveBounds(dive);
+      final (rawEntry, rawExit) = diveBounds(dive);
       final entryTime = toWallClockUtc(rawEntry);
       final exitTime = toWallClockUtc(rawExit);
 
@@ -152,9 +185,12 @@ class TripMediaScanner {
   /// [dives] - List of dives in the trip to match photos against.
   /// [tripStartDate] - Start of the trip (inclusive).
   /// [tripEndDate] - End of the trip (inclusive).
-  /// [existingAssetIds] - Set of asset IDs already linked, to filter out.
+  /// [linked] - The trip's already-linked media rows; the assets they stand
+  /// for on this device (per [linkedGalleryAssets]) are filtered out.
   /// [photoPickerService] - Service for accessing the photo gallery.
-  /// [bufferMinutes] - Buffer time around dive boundaries (default 30).
+  ///
+  /// Matching is delegated to [DivePhotoMatcher], which applies a 30-minute
+  /// pre-dive buffer and a 60-minute post-dive buffer.
   ///
   /// Returns a [ScanResult] with matched and unmatched photos.
   /// Returns null if permission is denied.
@@ -162,9 +198,11 @@ class TripMediaScanner {
     required List<Dive> dives,
     required DateTime tripStartDate,
     required DateTime tripEndDate,
-    required Set<String> existingAssetIds,
+    required List<MediaItem> linked,
+    required LinkedGalleryAssets linkedGalleryAssets,
     required PhotoPickerService photoPickerService,
-    int bufferMinutes = defaultBufferMinutes,
+    Future<MediaSourceMetadata?> Function(AssetInfo asset)?
+    assetMetadataResolver,
   }) async {
     // Request permission
     final permission = await photoPickerService.requestPermission();
@@ -173,39 +211,136 @@ class TripMediaScanner {
       return null;
     }
 
-    // Convert trip dates from wall-clock-as-UTC to local for photo_manager,
-    // which filters by local device time.
-    final assets = await photoPickerService.getAssetsInDateRange(
-      wallClockUtcToLocal(tripStartDate),
-      wallClockUtcToLocal(tripEndDate),
+    // Trip dates are date-only values. Query the full selected calendar days
+    // so photos taken later on the trip's final day are not excluded.
+    //
+    // Convert from wall-clock-as-UTC to local for photo_manager, which filters
+    // by local device time.
+    final tripWindowStart = toWallClockUtc(_startOfDay(tripStartDate));
+    final tripWindowEnd = toWallClockUtc(_endOfDay(tripEndDate));
+    final queryStart = wallClockUtcToLocal(
+      tripWindowStart.subtract(_photoLibraryTimezoneSlack),
+    );
+    final queryEnd = wallClockUtcToLocal(
+      tripWindowEnd.add(_photoLibraryTimezoneSlack),
     );
 
-    // Initialize result structures
-    final Map<Dive, List<AssetInfo>> matchedByDive = {};
-    final List<AssetInfo> unmatched = [];
-    int alreadyLinkedCount = 0;
-
-    for (final asset in assets) {
-      // Skip already linked photos
-      if (existingAssetIds.contains(asset.id)) {
-        alreadyLinkedCount++;
-        continue;
-      }
-
-      // Try to match to a dive
-      final matchedDive = matchPhotoToDive(
-        asset.createDateTime,
-        dives,
-        bufferMinutes: bufferMinutes,
+    // Build DiveBounds from each dive (normalised to wall-clock-as-UTC).
+    final bounds = dives.map((dive) {
+      final (rawEntry, rawExit) = diveBounds(dive);
+      return DiveBounds(
+        diveId: dive.id,
+        entryTime: toWallClockUtc(rawEntry),
+        exitTime: toWallClockUtc(rawExit),
       );
+    }).toList();
 
-      if (matchedDive != null) {
-        matchedByDive.putIfAbsent(matchedDive, () => []);
-        matchedByDive[matchedDive]!.add(asset);
-      } else {
-        unmatched.add(asset);
+    final assets = await _assetsForTrip(
+      photoPickerService: photoPickerService,
+      queryStart: queryStart,
+      queryEnd: queryEnd,
+      bounds: bounds,
+    );
+
+    // Build lookup and ExtractedFile list for the matcher.
+    final assetById = {for (final a in assets) a.id: a};
+    // Candidate-aware, like [scanGalleryForDive]: a row linked on another
+    // device carries that device's asset id (#885), and burst frames only
+    // resolve by count against the assets actually returned.
+    final newAssets = await linkedGalleryAssets.withoutLinked(
+      candidates: assets,
+      linked: linked,
+    );
+
+    final primaryExtractedById = <String, ExtractedFile>{};
+    for (final asset in newAssets) {
+      final extracted = _toExtractedFile(asset);
+      final takenAt = extracted.metadata.takenAt;
+      if (takenAt != null &&
+          _isInTripWindowOrDiveBuffer(
+            takenAt,
+            tripWindowStart,
+            tripWindowEnd,
+            bounds,
+          )) {
+        primaryExtractedById[asset.id] = extracted;
       }
     }
+
+    const matcher = DivePhotoMatcher();
+    final primarySelection = matcher.match(
+      files: primaryExtractedById.values.toList(),
+      dives: bounds,
+    );
+
+    final primaryMatchedAssetIds = _matchedAssetIds(primarySelection);
+    final locationTimezoneOffsets = _likelyTripTimezoneOffsets(dives);
+    final timezoneOffsets = locationTimezoneOffsets.isEmpty
+        ? _fallbackTimezoneOffsets
+        : locationTimezoneOffsets;
+    final sourceTimezoneOffsets = _fallbackTimezoneOffsets;
+    final fallbackCandidates = newAssets
+        .where((asset) => !primaryMatchedAssetIds.contains(asset.id))
+        .where(
+          (asset) => _couldMatchWithTimezoneShift(
+            asset.createDateTime,
+            bounds,
+            timezoneOffsets,
+            sourceTimezoneOffsets,
+          ),
+        )
+        .toList();
+    final fallbackExtractedById = await _loadExifFallbacks(
+      assets: fallbackCandidates,
+      tripWindowStart: tripWindowStart,
+      tripWindowEnd: tripWindowEnd,
+      bounds: bounds,
+      assetMetadataResolver:
+          assetMetadataResolver ??
+          (asset) => readGalleryAssetMetadata(asset, photoPickerService),
+    );
+    final fallbackSelection = matcher.match(
+      files: fallbackExtractedById.values.toList(),
+      dives: bounds,
+    );
+
+    final selection = _mergeSelections(
+      primarySelection: primarySelection,
+      fallbackSelection: fallbackSelection,
+    );
+    _log.debug(
+      'Trip media scan assets=${assets.length} new=${newAssets.length} '
+      'primary=${primaryExtractedById.length} '
+      'exifFallback=${fallbackExtractedById.length} '
+      'matched=${selection.matched.values.fold<int>(0, (sum, files) => sum + files.length)} '
+      'unmatched=${selection.unmatched.length}',
+    );
+
+    // Round-trip matched files back to AssetInfo via sourcePath == asset.id.
+    // A photo dated by its EXIF goes on with that time rather than this
+    // device's digits, or it would be stored and placed on the profile hours
+    // from where it matched (#259).
+    AssetInfo assetFor(ExtractedFile file) {
+      final asset = assetById[file.sourcePath]!;
+      final exifTime = fallbackExtractedById[file.sourcePath]?.metadata.takenAt;
+      if (exifTime == null) return asset;
+      return asset.copyWith(createDateTime: wallClockUtcToLocal(exifTime));
+    }
+
+    final diveById = {for (final d in dives) d.id: d};
+    final Map<Dive, List<AssetInfo>> matchedByDive = {};
+    for (final entry in selection.matched.entries) {
+      final dive = diveById[entry.key];
+      if (dive == null) continue;
+      matchedByDive[dive] = entry.value.map(assetFor).toList();
+    }
+
+    final List<AssetInfo> unmatched = selection.unmatched
+        .map(assetFor)
+        .toList();
+
+    final alreadyLinkedCount =
+        assets.length - newAssets.length; // already filtered before matching
 
     return ScanResult(
       matchedByDive: matchedByDive,
@@ -214,17 +349,61 @@ class TripMediaScanner {
     );
   }
 
+  /// The gallery assets a trip scan matches against: the trip's own range,
+  /// plus the window of any dive that falls outside it.
+  ///
+  /// A dive's window is read on its camera's clock (see [diveBounds]), so a
+  /// camera on the wrong date puts it days from the trip, where the trip's
+  /// range never looks (issue #4539). Each such dive gets a query of its own
+  /// rather than a wider trip range: a camera a decade out would otherwise
+  /// pull the whole library.
+  static Future<List<AssetInfo>> _assetsForTrip({
+    required PhotoPickerService photoPickerService,
+    required DateTime queryStart,
+    required DateTime queryEnd,
+    required List<DiveBounds> bounds,
+  }) async {
+    final assets = await photoPickerService.getAssetsInDateRange(
+      queryStart,
+      queryEnd,
+    );
+    final tripStart = toWallClockUtc(queryStart);
+    final tripEnd = toWallClockUtc(queryEnd);
+    final outside = [
+      for (final dive in bounds)
+        (
+          start: dive.entryTime.subtract(DivePhotoMatcher.preBuffer),
+          end: dive.exitTime.add(DivePhotoMatcher.postBuffer),
+        ),
+    ].where((w) => w.start.isBefore(tripStart) || w.end.isAfter(tripEnd));
+    if (outside.isEmpty) return assets;
+
+    final byId = {for (final asset in assets) asset.id: asset};
+    for (final window in outside) {
+      final found = await photoPickerService.getAssetsInDateRange(
+        wallClockUtcToLocal(window.start),
+        wallClockUtcToLocal(window.end),
+      );
+      for (final asset in found) {
+        byId.putIfAbsent(asset.id, () => asset);
+      }
+    }
+    return byId.values.toList();
+  }
+
   /// Scan the device gallery for photos near a single dive.
   ///
-  /// Uses the dive's entry/exit times with a [bufferMinutes] window on each
-  /// side. Filters out photos whose asset IDs are in [existingAssetIds].
+  /// Uses the dive's entry/exit times with [DivePhotoMatcher.preBuffer] before
+  /// entry and [DivePhotoMatcher.postBuffer] after exit as the dive window that
+  /// [DiveGalleryLookup] searches. Filters out photos the dive's [linked] rows
+  /// already stand for.
   ///
   /// Returns a list of new [AssetInfo] found, or null if permission is denied.
   static Future<List<AssetInfo>?> scanGalleryForDive({
     required Dive dive,
-    required Set<String> existingAssetIds,
+    required List<MediaItem> linked,
+    required LinkedGalleryAssets linkedGalleryAssets,
     required PhotoPickerService photoPickerService,
-    int bufferMinutes = defaultBufferMinutes,
   }) async {
     final permission = await photoPickerService.requestPermission();
     if (permission != PhotoPermissionStatus.authorized &&
@@ -232,34 +411,43 @@ class TripMediaScanner {
       return null;
     }
 
-    final (entryTime, exitTime) = _getDiveBounds(dive);
-    final bufferDuration = Duration(minutes: bufferMinutes);
-    final rangeStart = entryTime.subtract(bufferDuration);
-    final rangeEnd = exitTime.add(bufferDuration);
+    final (entryTime, exitTime) = diveBounds(dive);
+    final rangeStart = entryTime.subtract(DivePhotoMatcher.preBuffer);
+    final rangeEnd = exitTime.add(DivePhotoMatcher.postBuffer);
 
-    // Convert from wall-clock-as-UTC to local for photo_manager,
-    // which filters by local device time.
-    final assets = await photoPickerService.getAssetsInDateRange(
-      wallClockUtcToLocal(rangeStart),
-      wallClockUtcToLocal(rangeEnd),
+    final assets = await DiveGalleryLookup.find(
+      windowStart: rangeStart,
+      windowEnd: rangeEnd,
+      photoPickerService: photoPickerService,
     );
 
-    return assets
-        .where((asset) => !existingAssetIds.contains(asset.id))
-        .toList();
+    // Not a synced-id comparison: a row linked on another device carries
+    // that device's asset id, so it would never match and the photo would
+    // be offered (and imported) a second time (#885).
+    return linkedGalleryAssets.withoutLinked(
+      candidates: assets,
+      linked: linked,
+    );
   }
 
   /// Get the effective entry and exit times for a dive.
   ///
   /// Falls back to dateTime and dateTime + duration if entry/exit times not set.
-  static (DateTime, DateTime) _getDiveBounds(Dive dive) {
+  ///
+  /// The window is the dive's as its camera reads it: moved by the dive's
+  /// media time shift, so media is matched on the clock it is later placed
+  /// by (issue #4539).
+  static (DateTime, DateTime) diveBounds(Dive dive) {
     final entryTime = dive.entryTime ?? dive.dateTime;
     final exitTime =
         dive.exitTime ??
         (dive.effectiveRuntime != null
             ? dive.dateTime.add(dive.effectiveRuntime!)
             : dive.dateTime.add(const Duration(minutes: 60)));
-    return (entryTime, exitTime);
+    return (
+      DiveMediaClock.onCameraClock(dive, entryTime),
+      DiveMediaClock.onCameraClock(dive, exitTime),
+    );
   }
 
   /// Convert a local [DateTime] to wall-clock-as-UTC by preserving the
@@ -278,6 +466,7 @@ class TripMediaScanner {
       dt.minute,
       dt.second,
       dt.millisecond,
+      dt.microsecond,
     );
   }
 
@@ -297,6 +486,177 @@ class TripMediaScanner {
       dt.minute,
       dt.second,
       dt.millisecond,
+      dt.microsecond,
     );
   }
+
+  static DateTime _startOfDay(DateTime dt) => dt.isUtc
+      ? DateTime.utc(dt.year, dt.month, dt.day)
+      : DateTime(dt.year, dt.month, dt.day);
+
+  static DateTime _endOfDay(DateTime dt) {
+    final nextDay = dt.isUtc
+        ? DateTime.utc(dt.year, dt.month, dt.day + 1)
+        : DateTime(dt.year, dt.month, dt.day + 1);
+    return nextDay.subtract(const Duration(microseconds: 1));
+  }
+
+  static bool _isInRange(DateTime value, DateTime start, DateTime end) =>
+      !value.isBefore(start) && !value.isAfter(end);
+
+  static bool _isInTripWindowOrDiveBuffer(
+    DateTime value,
+    DateTime tripWindowStart,
+    DateTime tripWindowEnd,
+    List<DiveBounds> bounds,
+  ) {
+    if (_isInRange(value, tripWindowStart, tripWindowEnd)) {
+      return true;
+    }
+    return _isInAnyDiveBuffer(value, bounds);
+  }
+
+  static bool _isInAnyDiveBuffer(DateTime value, List<DiveBounds> bounds) {
+    for (final dive in bounds) {
+      final earliest = dive.entryTime.subtract(DivePhotoMatcher.preBuffer);
+      final latest = dive.exitTime.add(DivePhotoMatcher.postBuffer);
+      if (_isInRange(value, earliest, latest)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool _couldMatchWithTimezoneShift(
+    DateTime assetTime,
+    List<DiveBounds> bounds,
+    Set<Duration> likelyTimezoneOffsets,
+    Set<Duration> sourceTimezoneOffsets,
+  ) {
+    if (likelyTimezoneOffsets.isEmpty || sourceTimezoneOffsets.isEmpty) {
+      return false;
+    }
+
+    final assetWallClock = toWallClockUtc(assetTime);
+    for (final tripOffset in likelyTimezoneOffsets) {
+      for (final sourceOffset in sourceTimezoneOffsets) {
+        final shiftedAssetTime = assetWallClock.add(tripOffset - sourceOffset);
+        if (_isInAnyDiveBuffer(shiftedAssetTime, bounds)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static Set<Duration> _likelyTripTimezoneOffsets(List<Dive> dives) {
+    final offsets = <Duration>{};
+    for (final dive in dives) {
+      final longitude =
+          dive.entryLocation?.longitude ??
+          dive.exitLocation?.longitude ??
+          dive.site?.location?.longitude;
+      if (longitude == null) continue;
+      final hours = (longitude / 15).round().clamp(-12, 14).toInt();
+      offsets.add(Duration(hours: hours));
+    }
+    return offsets;
+  }
+
+  static Set<String> _matchedAssetIds(MatchedSelection selection) => selection
+      .matched
+      .values
+      .expand((files) => files)
+      .map((file) => file.sourcePath)
+      .toSet();
+
+  static Future<Map<String, ExtractedFile>> _loadExifFallbacks({
+    required List<AssetInfo> assets,
+    required DateTime tripWindowStart,
+    required DateTime tripWindowEnd,
+    required List<DiveBounds> bounds,
+    required Future<MediaSourceMetadata?> Function(AssetInfo asset)
+    assetMetadataResolver,
+  }) async {
+    final extractedById = <String, ExtractedFile>{};
+    for (final asset in assets) {
+      final metadata = await assetMetadataResolver(asset);
+      final takenAt = metadata?.takenAt;
+      if (metadata == null ||
+          takenAt == null ||
+          metadata.takenAtSource == TakenAtSource.fileModifiedTime ||
+          !_isInTripWindowOrDiveBuffer(
+            takenAt,
+            tripWindowStart,
+            tripWindowEnd,
+            bounds,
+          )) {
+        continue;
+      }
+      extractedById[asset.id] = ExtractedFile(
+        sourcePath: asset.id,
+        file: File(asset.id),
+        metadata: MediaSourceMetadata(
+          takenAt: takenAt,
+          latitude: metadata.latitude ?? asset.latitude,
+          longitude: metadata.longitude ?? asset.longitude,
+          width: metadata.width ?? asset.width,
+          height: metadata.height ?? asset.height,
+          durationSeconds: metadata.durationSeconds ?? asset.durationSeconds,
+          mimeType: metadata.mimeType,
+        ),
+      );
+    }
+    return extractedById;
+  }
+
+  static MatchedSelection _mergeSelections({
+    required MatchedSelection primarySelection,
+    required MatchedSelection fallbackSelection,
+  }) {
+    final fallbackMatchedAssetIds = _matchedAssetIds(fallbackSelection);
+    final matched = <String, List<ExtractedFile>>{};
+    for (final entry in primarySelection.matched.entries) {
+      matched[entry.key] = [...entry.value];
+    }
+    for (final entry in fallbackSelection.matched.entries) {
+      matched.putIfAbsent(entry.key, () => []).addAll(entry.value);
+    }
+
+    final unmatchedById = <String, ExtractedFile>{};
+    for (final file in primarySelection.unmatched) {
+      if (!fallbackMatchedAssetIds.contains(file.sourcePath)) {
+        unmatchedById[file.sourcePath] = file;
+      }
+    }
+    for (final file in fallbackSelection.unmatched) {
+      unmatchedById.putIfAbsent(file.sourcePath, () => file);
+    }
+
+    return MatchedSelection(
+      matched: matched,
+      unmatched: unmatchedById.values.toList(),
+    );
+  }
+
+  /// Convert an [AssetInfo] to an [ExtractedFile] for use with [DivePhotoMatcher].
+  ///
+  /// The [sourcePath] is set to [AssetInfo.id] so that the round-trip lookup
+  /// works via [assetById]. The [File] handle is synthetic and not read by
+  /// the matcher (only [metadata.takenAt] is consumed). The [createDateTime]
+  /// is normalised to wall-clock-as-UTC so it compares correctly against dive
+  /// times stored in the same convention.
+  static ExtractedFile _toExtractedFile(AssetInfo asset) => ExtractedFile(
+    sourcePath: asset.id,
+    file: File(asset.id),
+    metadata: MediaSourceMetadata(
+      takenAt: toWallClockUtc(asset.createDateTime),
+      latitude: asset.latitude,
+      longitude: asset.longitude,
+      width: asset.width,
+      height: asset.height,
+      durationSeconds: asset.durationSeconds,
+      mimeType: 'image/jpeg',
+    ),
+  );
 }

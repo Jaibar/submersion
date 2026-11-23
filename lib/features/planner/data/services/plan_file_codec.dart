@@ -1,0 +1,476 @@
+import 'dart:convert';
+
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/schedule_policy.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/data/services/plan_file_mission_codec.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/entities/plan_setting_group.dart';
+import 'package:submersion/features/planner/domain/entities/stored_series.dart';
+import 'package:submersion/features/planner/domain/services/plan_breathing_tanks.dart';
+
+/// The `.subplan` file format: versioned JSON around the plan aggregate.
+/// Every version carries the engine-relevant inputs; schedules are never
+/// exported — the importing install recomputes them.
+///
+/// Version 2 writes segments as waypoints: `targetDepth` and a duration. The
+/// version 1 fields `type`, `startDepth` and `rate` are gone, because the
+/// phase, the start depth and the rate are all derived from the chain.
+/// Version 1 files still import — their `endDepth` is the target depth and
+/// the retired fields are ignored — so a plan shared by an older install
+/// keeps opening.
+///
+/// Version 3 adds an optional `mission` block: a DPV mission's route, team
+/// and scooter numbers (issue #2086). It is absent for a plan without one,
+/// and version 1 and 2 files import with no mission. A plan without a
+/// mission is still written as version 2, so an older install keeps
+/// opening it.
+///
+/// Version 4 adds a `series` block: a repetitive series' dives in order, each
+/// with its plan, its own name and interval, and which tank of the dive
+/// before each of its tanks carries from, by position (issue #3565). `plan`
+/// still holds the first dive, and a single dive is still written as version
+/// 2 or 3. The followed dive is left out: it is in the sender's log, not the
+/// reader's. Older installs refuse the file rather than open one dive of a
+/// series as if it stood alone.
+///
+/// A series dive may also carry `settingOverrides`: the setting groups it
+/// keeps its own values for rather than the first dive's.
+///
+/// Any version may carry a plan's optional `startDateTime`, its clock digits
+/// with no offset (`2026-11-03T09:30:00`), like the dive log's times, and a
+/// series dive its `fixedStart`: whether the diver set that start rather
+/// than letting it follow from the surface interval. Both are optional, so
+/// a file without them still imports, and an older install that does not
+/// know them opens the file without its times.
+const subplanFormat = 'submersion-plan';
+const subplanVersion = 4;
+const subplanMinReadableVersion = 1;
+const subplanExtension = 'subplan';
+
+const _uuid = Uuid();
+
+/// The version written for a plan with no mission block.
+const _subplanVersionWithoutMission = 2;
+
+/// The version written for a single plan with a mission block.
+const _subplanVersionWithMission = 3;
+
+/// Serializes [plan] into a shareable `.subplan` JSON string.
+String planToSubplanJson(domain.DivePlan plan) {
+  final map = {
+    'format': subplanFormat,
+    'version': plan.mission == null
+        ? _subplanVersionWithoutMission
+        : _subplanVersionWithMission,
+    'plan': _planToMap(plan),
+  };
+  return const JsonEncoder.withIndent('  ').convert(map);
+}
+
+/// [plan]'s inputs as a file map.
+Map<String, dynamic> _planToMap(domain.DivePlan plan) => {
+  'name': plan.name,
+  'notes': plan.notes,
+  if (plan.startDateTime case final start?)
+    'startDateTime': _wallClockToFile(start),
+  'mode': plan.mode.name,
+  'altitude': plan.altitude,
+  'waterType': plan.waterType?.name,
+  'salinityPpt': plan.salinityPpt,
+  'gfLow': plan.gfLow,
+  'gfHigh': plan.gfHigh,
+  'descentRate': plan.descentRate,
+  'ascentRate': plan.ascentRate,
+  'intermediateAscentRate': plan.intermediateAscentRate,
+  'shallowAscentRate': plan.shallowAscentRate,
+  'finalAscentRate': plan.finalAscentRate,
+  'lastStopDepth': plan.lastStopDepth,
+  'gasSwitchStopSeconds': plan.gasSwitchStopSeconds,
+  'airBreaks': plan.airBreaks == null
+      ? null
+      : {
+          'o2Seconds': plan.airBreaks!.o2Seconds,
+          'breakSeconds': plan.airBreaks!.breakSeconds,
+        },
+  'airBreaksExplicitlyOff': plan.airBreaksExplicitlyOff,
+  'sacBottom': plan.sacBottom,
+  'sacDeco': plan.sacDeco,
+  'sacStressed': plan.sacStressed,
+  // Per-plan deco ppO2 layers (issue #3580) and hypercapnia phase
+  // (issue #3743): absent from an older file, which imports as "follow
+  // Settings".
+  'ppO2DecoBand1': plan.ppO2DecoBand1,
+  'ppO2DecoBand2': plan.ppO2DecoBand2,
+  'ppO2DecoBand3': plan.ppO2DecoBand3,
+  'ppO2DecoBandsExplicitlyOff': plan.ppO2DecoBandsExplicitlyOff,
+  'maxO2DepthMeters': plan.maxO2DepthMeters,
+  'maxO2DepthExplicitlyOff': plan.maxO2DepthExplicitlyOff,
+  'hypercapniaAmv': plan.hypercapniaAmv,
+  'hypercapniaMinutes': plan.hypercapniaMinutes,
+  'hypercapniaExplicitlyOff': plan.hypercapniaExplicitlyOff,
+  'reservePressure': plan.reservePressure,
+  'setpointLow': plan.setpointLow,
+  'setpointHigh': plan.setpointHigh,
+  'setpointSwitchDepth': plan.setpointSwitchDepth,
+  'scrInjectionRate': plan.scrInjectionRate,
+  'scrVo2': plan.scrVo2,
+  'pscrVo2': plan.pscrVo2,
+  'deviationDepthDelta': plan.deviationDepthDelta,
+  'deviationTimeMinutes': plan.deviationTimeMinutes,
+  'turnPressureRule': plan.turnPressureRule?.name,
+  'turnPressureFraction': plan.turnPressureFraction,
+  'tanks': [
+    for (final tank in plan.tanks)
+      {
+        'key': tank.id,
+        'name': tank.name,
+        'volume': tank.volume,
+        'workingPressure': tank.workingPressure,
+        'startPressure': tank.startPressure,
+        'o2': tank.gasMix.o2,
+        'he': tank.gasMix.he,
+        'role': tank.role.name,
+        'isTravelGas': tank.isTravelGas,
+        'order': tank.order,
+      },
+  ],
+  'segments': [
+    for (final segment in plan.segments)
+      {
+        'targetDepth': segment.targetDepth,
+        'durationSeconds': segment.durationSeconds,
+        'tankKey': segment.tankId,
+        'o2': segment.gasMix.o2,
+        'he': segment.gasMix.he,
+        'setpointBar': segment.setpointBar,
+        'diveModeOverride': segment.diveModeOverride?.name,
+        'splitAtConfiguredRate': segment.splitAtConfiguredRate,
+        'order': segment.order,
+      },
+  ],
+  if (plan.mission != null) 'mission': missionToFileMap(plan.mission!),
+};
+
+/// A clock-digits-as-UTC time (see `wall_clock_utc.dart`) as its digits with
+/// no offset, so the reader takes the same clock time whatever its zone.
+String _wallClockToFile(DateTime wallClockUtc) {
+  final iso = wallClockUtc.toIso8601String();
+  return iso.endsWith('Z') ? iso.substring(0, iso.length - 1) : iso;
+}
+
+/// Serializes [series] into a shareable `.subplan` JSON string.
+String seriesToSubplanJson(StoredSeries series) {
+  final map = {
+    'format': subplanFormat,
+    'version': subplanVersion,
+    'plan': _planToMap(series.dives.first.plan),
+    'series': {
+      'name': series.name,
+      'dives': [
+        for (final (index, dive) in series.dives.indexed)
+          _seriesDiveToMap(
+            dive,
+            previous: index == 0 ? null : series.dives[index - 1],
+          ),
+      ],
+    },
+  };
+  return const JsonEncoder.withIndent('  ').convert(map);
+}
+
+Map<String, dynamic> _seriesDiveToMap(
+  StoredSeriesDive dive, {
+  required StoredSeriesDive? previous,
+}) {
+  final tanks = dive.plan.tanks;
+  final before = previous?.plan.tanks ?? const <DiveTank>[];
+  return {
+    'plan': _planToMap(dive.plan),
+    'diveName': dive.name,
+    'surfaceIntervalSeconds': dive.plan.surfaceInterval?.inSeconds,
+    if (dive.fixedStart) 'fixedStart': true,
+    if (dive.settingOverrides.isNotEmpty)
+      'settingOverrides': [
+        for (final group in dive.settingOverrides) group.name,
+      ],
+    'carriesFrom': [
+      for (final tank in tanks)
+        before.indexWhere((t) => t.id == dive.sourceTankIds[tank.id]),
+    ],
+    'pinned': [
+      for (final (index, tank) in tanks.indexed)
+        if (dive.pinnedTankIds.contains(tank.id)) index,
+    ],
+  };
+}
+
+/// Parses a `.subplan` JSON string holding a series into a fresh one, or null
+/// when the file holds a single plan. All ids are regenerated.
+/// Throws [FormatException] as [subplanFromJson] does for a file with a
+/// series; one without is left to [subplanFromJson], which the caller runs
+/// next, so it is not parsed twice here.
+StoredSeries? seriesFromSubplanJson(String source, {DateTime? now}) {
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(source);
+  } on FormatException {
+    throw const FormatException('Not a valid .subplan file');
+  }
+  final raw = decoded is Map<String, dynamic> ? decoded['series'] : null;
+  if (raw == null) return null;
+  // Checks the format and version, and that the first dive reads.
+  subplanFromJson(source, now: now);
+  try {
+    final map = raw as Map<String, dynamic>;
+    final timestamp = now ?? DateTime.now();
+    final dives = <StoredSeriesDive>[];
+    for (final item in map['dives'] as List) {
+      final dive = item as Map<String, dynamic>;
+      final seconds = dive['surfaceIntervalSeconds'] as int?;
+      final plan = _planFromMap(dive['plan'] as Map<String, dynamic>, timestamp)
+          .copyWith(
+            surfaceInterval: seconds == null
+                ? null
+                : Duration(seconds: seconds),
+          );
+      final tanks = plan.tanks;
+      final before = dives.isEmpty ? const <DiveTank>[] : dives.last.plan.tanks;
+      final carriesFrom = (dive['carriesFrom'] as List? ?? const [])
+          .cast<int>();
+      dives.add(
+        StoredSeriesDive(
+          plan: plan,
+          name: dive['diveName'] as String?,
+          fixedStart: dive['fixedStart'] as bool? ?? false,
+          settingOverrides: {
+            for (final name in dive['settingOverrides'] as List? ?? const [])
+              ?PlanSettingGroup.values.asNameMap()[name],
+          },
+          sourceTankIds: {
+            for (var i = 0; i < tanks.length && i < carriesFrom.length; i++)
+              if (carriesFrom[i] >= 0 && carriesFrom[i] < before.length)
+                tanks[i].id: before[carriesFrom[i]].id,
+          },
+          pinnedTankIds: {
+            for (final index
+                in (dive['pinned'] as List? ?? const []).cast<int>())
+              if (index >= 0 && index < tanks.length) tanks[index].id,
+          },
+        ),
+      );
+    }
+    if (dives.isEmpty) {
+      throw const FormatException('Plan file carries an empty series');
+    }
+    return StoredSeries(
+      id: _uuid.v4(),
+      name: map['name'] as String,
+      dives: dives,
+    );
+  } on FormatException {
+    rethrow;
+  } catch (e) {
+    throw FormatException('Malformed .subplan file: $e');
+  }
+}
+
+/// Parses a `.subplan` JSON string into a fresh [domain.DivePlan].
+///
+/// All ids are regenerated (tank references are remapped through the
+/// exported keys) so importing can never collide with existing rows.
+/// Throws [FormatException] on a foreign format or a newer version.
+domain.DivePlan subplanFromJson(String source, {DateTime? now}) {
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(source);
+  } on FormatException {
+    throw const FormatException('Not a valid .subplan file');
+  }
+  if (decoded is! Map<String, dynamic> || decoded['format'] != subplanFormat) {
+    throw const FormatException('Not a Submersion plan file');
+  }
+  final version = decoded['version'];
+  if (version is! int ||
+      version > subplanVersion ||
+      version < subplanMinReadableVersion) {
+    throw FormatException(
+      'Plan file version $version is not supported by this app',
+    );
+  }
+  final plan = decoded['plan'];
+  if (plan is! Map<String, dynamic>) {
+    throw const FormatException('Plan file carries no plan');
+  }
+
+  try {
+    return _planFromMap(plan, now ?? DateTime.now());
+  } on FormatException {
+    rethrow;
+  } catch (e) {
+    // A cast/type failure on a malformed or foreign file surfaces as a clean
+    // FormatException so the import UI can show a friendly message instead of
+    // crashing on a raw TypeError.
+    throw FormatException('Malformed .subplan file: $e');
+  }
+}
+
+domain.DivePlan _planFromMap(Map<String, dynamic> plan, DateTime timestamp) {
+  // Fresh tank ids, remembering the export keys for segment references.
+  final tankIdByKey = <String, String>{};
+  final tanks = <DiveTank>[];
+  for (final (index, raw) in (plan['tanks'] as List? ?? const []).indexed) {
+    final tank = raw as Map<String, dynamic>;
+    final id = _uuid.v4();
+    tankIdByKey[tank['key'] as String] = id;
+    tanks.add(
+      DiveTank(
+        id: id,
+        name: tank['name'] as String?,
+        volume: (tank['volume'] as num?)?.toDouble(),
+        workingPressure: (tank['workingPressure'] as num?)?.toDouble(),
+        startPressure: (tank['startPressure'] as num?)?.toDouble(),
+        gasMix: GasMix(
+          o2: (tank['o2'] as num).toDouble(),
+          he: (tank['he'] as num?)?.toDouble() ?? 0.0,
+        ),
+        role: TankRole.fromName(switch (tank['role']) {
+          final String name => name,
+          _ => null,
+        }),
+        isTravelGas: tank['isTravelGas'] as bool? ?? false,
+        order: (tank['order'] as num?)?.toInt() ?? index,
+      ),
+    );
+  }
+
+  final segments = <PlanSegment>[];
+  for (final (index, raw) in (plan['segments'] as List? ?? const []).indexed) {
+    final segment = raw as Map<String, dynamic>;
+    // A segment must reference a tank the file actually carries; an unknown
+    // or missing key would build an unusable plan, so reject the file.
+    final tankId = tankIdByKey[segment['tankKey']];
+    if (tankId == null) {
+      throw FormatException(
+        'Segment references unknown tank "${segment['tankKey']}"',
+      );
+    }
+    // v2 writes `targetDepth`; v1 wrote `endDepth`, which meant the same
+    // thing. Its `type`, `startDepth` and `rate` are read and discarded.
+    final targetDepth = (segment['targetDepth'] ?? segment['endDepth']) as num?;
+    if (targetDepth == null) {
+      throw const FormatException('Segment carries no target depth');
+    }
+    final diveModeOverride = segment['diveModeOverride'];
+    segments.add(
+      PlanSegment(
+        id: _uuid.v4(),
+        targetDepth: targetDepth.toDouble(),
+        durationSeconds: (segment['durationSeconds'] as num).toInt(),
+        tankId: tankId,
+        gasMix: GasMix(
+          o2: (segment['o2'] as num).toDouble(),
+          he: (segment['he'] as num?)?.toDouble() ?? 0.0,
+        ),
+        setpointBar: (segment['setpointBar'] as num?)?.toDouble(),
+        diveModeOverride: diveModeOverride is String
+            ? domain.PlanMode.values.asNameMap()[diveModeOverride]
+            : null,
+        splitAtConfiguredRate:
+            segment['splitAtConfiguredRate'] as bool? ?? false,
+        order: (segment['order'] as num?)?.toInt() ?? index,
+      ),
+    );
+  }
+
+  final airBreaks = plan['airBreaks'];
+  // A plan holds breathing gas only: a suit inflation bottle in the file is
+  // left out (issue #4243).
+  final breathing = breathingPlanParts(tanks, segments);
+
+  return domain.DivePlan(
+    id: _uuid.v4(),
+    name: plan['name'] as String? ?? 'Imported plan',
+    notes: plan['notes'] as String? ?? '',
+    startDateTime: switch (plan['startDateTime']) {
+      final String raw => parseExternalDateAsWallClockUtc(raw),
+      _ => null,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    mode:
+        domain.PlanMode.values.asNameMap()[plan['mode']] ?? domain.PlanMode.oc,
+    altitude: (plan['altitude'] as num?)?.toDouble(),
+    waterType: WaterType.values.asNameMap()[plan['waterType']],
+    salinityPpt: (plan['salinityPpt'] as num?)?.toDouble(),
+    gfLow: (plan['gfLow'] as num?)?.toInt(),
+    gfHigh: (plan['gfHigh'] as num?)?.toInt(),
+    // Unset here means "follow Settings" (issue #3552); coercing an absent
+    // field to a hardcoded constant would create a per-plan override on
+    // import instead of letting it resolve through PlanEngineConfig.
+    descentRate: (plan['descentRate'] as num?)?.toDouble(),
+    ascentRate: (plan['ascentRate'] as num?)?.toDouble(),
+    intermediateAscentRate: (plan['intermediateAscentRate'] as num?)
+        ?.toDouble(),
+    shallowAscentRate: (plan['shallowAscentRate'] as num?)?.toDouble(),
+    finalAscentRate: (plan['finalAscentRate'] as num?)?.toDouble(),
+    lastStopDepth: (plan['lastStopDepth'] as num?)?.toDouble(),
+    gasSwitchStopSeconds: (plan['gasSwitchStopSeconds'] as num?)?.toInt(),
+    airBreaks: airBreaks is Map<String, dynamic>
+        ? AirBreakPolicy(
+            o2Seconds: (airBreaks['o2Seconds'] as num).toInt(),
+            breakSeconds: (airBreaks['breakSeconds'] as num).toInt(),
+          )
+        : null,
+    airBreaksExplicitlyOff: plan['airBreaksExplicitlyOff'] as bool? ?? false,
+    // The pSCR loop divides by the bottom RMV (issue #4660), so like a loop
+    // flow it must be positive; the UI and agent writes refuse anything else.
+    sacBottom: _positive(plan['sacBottom']),
+    sacDeco: _positive(plan['sacDeco']),
+    sacStressed: (plan['sacStressed'] as num?)?.toDouble(),
+    ppO2DecoBand1: (plan['ppO2DecoBand1'] as num?)?.toDouble(),
+    ppO2DecoBand2: (plan['ppO2DecoBand2'] as num?)?.toDouble(),
+    ppO2DecoBand3: (plan['ppO2DecoBand3'] as num?)?.toDouble(),
+    ppO2DecoBandsExplicitlyOff:
+        plan['ppO2DecoBandsExplicitlyOff'] as bool? ?? false,
+    maxO2DepthMeters: (plan['maxO2DepthMeters'] as num?)?.toDouble(),
+    maxO2DepthExplicitlyOff: plan['maxO2DepthExplicitlyOff'] as bool? ?? false,
+    hypercapniaAmv: (plan['hypercapniaAmv'] as num?)?.toDouble(),
+    hypercapniaMinutes: (plan['hypercapniaMinutes'] as num?)?.toInt(),
+    hypercapniaExplicitlyOff:
+        plan['hypercapniaExplicitlyOff'] as bool? ?? false,
+    reservePressure: (plan['reservePressure'] as num?)?.toDouble(),
+    setpointLow: (plan['setpointLow'] as num?)?.toDouble(),
+    setpointHigh: (plan['setpointHigh'] as num?)?.toDouble(),
+    setpointSwitchDepth: (plan['setpointSwitchDepth'] as num?)?.toDouble(),
+    scrInjectionRate: _positive(plan['scrInjectionRate']),
+    scrVo2: _positive(plan['scrVo2']),
+    pscrVo2: _positive(plan['pscrVo2']),
+    deviationDepthDelta: (plan['deviationDepthDelta'] as num?)?.toDouble(),
+    deviationTimeMinutes: (plan['deviationTimeMinutes'] as num?)?.toInt(),
+    turnPressureRule: domain.TurnPressureRule.values
+        .asNameMap()[plan['turnPressureRule']],
+    turnPressureFraction: (plan['turnPressureFraction'] as num?)?.toDouble(),
+    tanks: breathing.tanks,
+    segments: breathing.segments,
+    // Only an absent or null block means no mission. A present block of the
+    // wrong type fails the cast, which the caller turns into a
+    // FormatException rather than importing the plan without it.
+    mission: plan['mission'] == null
+        ? null
+        : missionFromFileMap(plan['mission'] as Map<String, dynamic>, _uuid.v4),
+  );
+}
+
+/// A loop flow or RMV from a plan file (issue #4660): a positive, finite
+/// number, or null so the plan follows the diver's Settings, as every other
+/// way of entering one refuses anything else.
+double? _positive(Object? value) {
+  final v = (value as num?)?.toDouble();
+  return v != null && v.isFinite && v > 0 ? v : null;
+}

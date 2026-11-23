@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart';
 import 'package:submersion/features/dive_import/domain/services/imported_dive_converter.dart';
+import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
 
 void main() {
   const converter = ImportedDiveConverter();
@@ -104,6 +105,78 @@ void main() {
         expect(dive.diverId, isNull);
         expect(dive.diveNumber, isNull);
         expect(dive.importSource, equals('garmin'));
+      });
+
+      test('maps latitude/longitude into entryLocation', () {
+        final importedDive = ImportedDive(
+          sourceId: 'hk-gps',
+          source: ImportSource.appleWatch,
+          startTime: DateTime(2024, 6, 15, 10, 0),
+          endTime: DateTime(2024, 6, 15, 10, 45),
+          maxDepth: 25.3,
+          latitude: 36.62,
+          longitude: -121.90,
+          profile: const [],
+        );
+
+        final dive = converter.convert(importedDive);
+
+        // Geofenced equipment defaulting relies on this fix being carried
+        // through from the source file.
+        expect(dive.entryLocation, isNotNull);
+        expect(dive.entryLocation!.latitude, 36.62);
+        expect(dive.entryLocation!.longitude, -121.90);
+      });
+
+      test('maps exitLatitude/exitLongitude into exitLocation', () {
+        final importedDive = ImportedDive(
+          sourceId: 'hk-exit-gps',
+          source: ImportSource.appleWatch,
+          startTime: DateTime(2024, 6, 15, 10, 0),
+          endTime: DateTime(2024, 6, 15, 10, 45),
+          maxDepth: 25.3,
+          latitude: 36.62,
+          longitude: -121.90,
+          exitLatitude: 36.63,
+          exitLongitude: -121.91,
+          profile: const [],
+        );
+
+        final dive = converter.convert(importedDive);
+
+        // Geofenced equipment defaulting matches against both entry and exit
+        // points, so an import with a distinct exit fix must carry it through.
+        expect(dive.exitLocation, isNotNull);
+        expect(dive.exitLocation!.latitude, 36.63);
+        expect(dive.exitLocation!.longitude, -121.91);
+      });
+
+      test('leaves exitLocation null when exit coordinates are absent', () {
+        final importedDive = ImportedDive(
+          sourceId: 'hk-no-exit-gps',
+          source: ImportSource.uddf,
+          startTime: DateTime(2024, 6, 15, 10, 0),
+          endTime: DateTime(2024, 6, 15, 10, 30),
+          maxDepth: 12.0,
+          latitude: 36.62,
+          longitude: -121.90,
+          profile: const [],
+        );
+
+        expect(converter.convert(importedDive).exitLocation, isNull);
+      });
+
+      test('leaves entryLocation null when coordinates are absent', () {
+        final importedDive = ImportedDive(
+          sourceId: 'hk-no-gps',
+          source: ImportSource.uddf,
+          startTime: DateTime(2024, 6, 15, 10, 0),
+          endTime: DateTime(2024, 6, 15, 10, 30),
+          maxDepth: 12.0,
+          profile: const [],
+        );
+
+        expect(converter.convert(importedDive).entryLocation, isNull);
       });
 
       test('converts profile samples to DiveProfilePoints', () {
@@ -233,6 +306,67 @@ void main() {
           expect(dive.importId, 'abc123');
         },
       );
+    });
+  });
+
+  group('ImportedDiveConverter computer tissue', () {
+    test('threads the tissue snapshot onto the Dive', () {
+      const snapshot = ComputerTissueSnapshot(
+        start: ComputerTissueState(n2Bar: [0.79, 0.79]),
+        end: ComputerTissueState(n2Bar: [0.89665, 0.97105]),
+      );
+      final importedDive = ImportedDive(
+        sourceId: 'suunto-tissue',
+        source: ImportSource.suunto,
+        startTime: DateTime(2024, 6, 15, 10, 0),
+        endTime: DateTime(2024, 6, 15, 10, 40),
+        maxDepth: 30.0,
+        profile: const [],
+        computerTissue: snapshot,
+      );
+
+      final dive = converter.convert(importedDive);
+
+      expect(dive.computerTissue, snapshot);
+    });
+
+    test('leaves computerTissue null when the import had none', () {
+      final importedDive = ImportedDive(
+        sourceId: 'no-tissue',
+        source: ImportSource.garmin,
+        startTime: DateTime(2024, 6, 15, 10, 0),
+        endTime: DateTime(2024, 6, 15, 10, 40),
+        maxDepth: 30.0,
+        profile: const [],
+      );
+
+      expect(converter.convert(importedDive).computerTissue, isNull);
+    });
+
+    test('threads gf99 and n2Load onto the profile points', () {
+      final importedDive = ImportedDive(
+        sourceId: 'garmin-tissue',
+        source: ImportSource.garmin,
+        startTime: DateTime(2024, 6, 15, 10, 0),
+        endTime: DateTime(2024, 6, 15, 10, 40),
+        maxDepth: 30.0,
+        profile: const [
+          ImportedProfileSample(
+            timeSeconds: 0,
+            depth: 5.0,
+            gf99: 12,
+            n2Load: 40,
+          ),
+          ImportedProfileSample(timeSeconds: 60, depth: 10.0),
+        ],
+      );
+
+      final dive = converter.convert(importedDive);
+
+      expect(dive.profile[0].gf99, 12);
+      expect(dive.profile[0].n2Load, 40);
+      expect(dive.profile[1].gf99, isNull);
+      expect(dive.profile[1].n2Load, isNull);
     });
   });
 }

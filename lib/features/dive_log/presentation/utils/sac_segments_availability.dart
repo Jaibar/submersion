@@ -1,0 +1,49 @@
+import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
+
+/// Whether the Gas consumption by segment card should explain that no tank
+/// pressure was recorded during the dive (issue #2505).
+///
+/// Per-segment SAC needs a pressure reading throughout the dive. A cylinder
+/// logged with only a start and an end pressure gives the Cylinders card a
+/// whole-dive average, but no breakdown: filling in the readings between them
+/// (the profile chart's straight "(est.)" line) would make segment SAC vary
+/// with depth only because of that assumption. Without this note the card
+/// vanished while its section toggle stayed on.
+///
+/// True once [analysis] has loaded with no SAC curve, meaning no pressure
+/// series reached it, while a cylinder holds a start pressure above its end
+/// pressure. False while loading, when there are segments to show, and when a
+/// pressure series was recorded but produced no segment, since "only start and
+/// end pressures" would then be untrue. False on a rebreather dive, which has
+/// no SAC at all (issue #3673), so there is nothing missing to explain.
+///
+/// [computerId] is the computer the analysis was scoped to on a multi-source
+/// dive (null for a single source). Only that computer's cylinders and the
+/// unattributed ones count, the same set `computeAnalysisForProfile` reads:
+/// another computer's start/end pair says nothing about what this source
+/// recorded, and that computer may well have logged a full pressure series.
+bool sacSegmentsLackRecordedPressure(
+  ProfileAnalysis? analysis,
+  Dive dive, {
+  String? computerId,
+}) {
+  if (analysis == null || dive.isRebreather) return false;
+  if (analysis.sacSegments?.isNotEmpty ?? false) return false;
+  if (analysis.sacCurve != null) return false;
+  // On an Avelo Hydrotank dive the segments are missing because its pressure
+  // is no gas used (issue #4657), not because no pressure was logged.
+  if (breathesUnmeasuredTank(dive.tanks)) return false;
+  // A suit inflation bottle's drop is not breathing (issue #4243).
+  return dive.breathingTanks.any((tank) {
+    if (computerId != null &&
+        tank.computerId != null &&
+        tank.computerId != computerId) {
+      return false;
+    }
+    final start = tank.startPressure;
+    final end = tank.endPressure;
+    return start != null && end != null && start > end;
+  });
+}

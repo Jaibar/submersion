@@ -1,16 +1,50 @@
+export 'package:submersion/features/backup/presentation/providers/backup_operation_state.dart';
+export 'package:submersion/features/backup/presentation/providers/backup_settings_notifier.dart';
+
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/storage/gc/storage_gc_store.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/restore_source_missing_exception.dart';
+import 'package:submersion/core/services/sync/library_epoch_store.dart';
+import 'package:submersion/core/services/sync/post_restore_sync_store.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_encryption_key_store.dart';
+import 'package:submersion/features/backup/data/services/backup_copy_destination.dart';
+import 'package:submersion/features/backup/data/services/backup_copy_guard.dart';
+import 'package:submersion/features/backup/data/services/backup_encryption_service.dart';
+import 'package:submersion/features/backup/data/services/backup_origin.dart';
 import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/data/services/browser_backup_download.dart';
+import 'package:submersion/features/backup/data/services/cloud_backup_history.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_copy_providers.dart';
+import 'package:submersion/features/backup/presentation/providers/extra_copy_providers.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_operation_state.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_settings_notifier.dart';
+import 'package:submersion/core/services/sync/crypto/sync_encryption_service.dart'
+    show WrongPassphraseException;
+import 'package:submersion/features/backup/domain/exceptions/backup_encrypted_exception.dart';
 import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
-import 'package:submersion/features/divers/data/repositories/diver_repository.dart';
+import 'package:submersion/features/backup/domain/entities/restore_mode.dart';
+import 'package:submersion/features/backup/domain/newest_backup_time.dart';
+import 'package:submersion/features/backup/presentation/providers/post_restore_safety_review.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/marine_life/data/services/builtin_species_seed_version_store.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion_saf/submersion_saf.dart';
 
 // =============================================================================
 // Repository & Service Providers
@@ -23,53 +57,50 @@ final backupPreferencesProvider = Provider<BackupPreferences>((ref) {
 
 /// Backup service with all dependencies injected
 final backupServiceProvider = Provider<BackupService>((ref) {
+  // Captured now, not read through ref inside the hook: a restore can run
+  // for minutes, and a rebuild of this provider meanwhile would leave the
+  // hook holding an unmounted Ref that throws, failing the restore.
+  final prefs = ref.watch(sharedPreferencesProvider);
   return BackupService(
     dbAdapter: DefaultBackupDatabaseAdapter(DatabaseService.instance),
     preferences: ref.watch(backupPreferencesProvider),
-    cloudProvider: ref.watch(cloudStorageProviderProvider),
+    cloudProvider: ref.watch(backupCopyProviderProvider),
+    copyAccountId: ref.watch(pinnedCopyAccountIdProvider),
+    extraCopies: ref.watch(extraCopyDestinationsProvider),
+    syncRepository: ref.watch(syncRepositoryProvider),
+    epochStore: LibraryEpochStore(ref.watch(sharedPreferencesProvider)),
+    postRestoreSyncStore: PostRestoreSyncStore(
+      ref.watch(sharedPreferencesProvider),
+    ),
+    onRestoring: (at) => StorageGcStore.markRestored(prefs, at),
+    encryptionKeyStore: ref.watch(encryptionKeyStoreProvider),
+    syncPreferences: ref.watch(syncPreferencesProvider),
+    backupEncryptionKeyStore: ref.watch(backupEncryptionKeyStoreProvider),
+    seedVersionStore: PrefsBuiltInSpeciesSeedVersionStore(
+      ref.watch(sharedPreferencesProvider),
+    ),
+  );
+});
+
+/// Backup-encryption key custody (issue #580), independent of sync encryption.
+final backupEncryptionKeyStoreProvider = Provider<BackupEncryptionKeyStore>((
+  ref,
+) {
+  return BackupEncryptionKeyStore();
+});
+
+/// Backup-encryption key lifecycle (enable / change / regenerate).
+final backupEncryptionServiceProvider = Provider<BackupEncryptionService>((
+  ref,
+) {
+  return BackupEncryptionService(
+    keyStore: ref.watch(backupEncryptionKeyStoreProvider),
   );
 });
 
 // =============================================================================
 // Settings
 // =============================================================================
-
-/// Notifier for backup settings (enabled, frequency, retention, cloud)
-class BackupSettingsNotifier extends StateNotifier<BackupSettings> {
-  final BackupPreferences _prefs;
-
-  BackupSettingsNotifier(this._prefs) : super(_prefs.getSettings());
-
-  Future<void> setEnabled(bool value) async {
-    await _prefs.setEnabled(value);
-    state = state.copyWith(enabled: value);
-  }
-
-  Future<void> setFrequency(BackupFrequency frequency) async {
-    await _prefs.setFrequency(frequency);
-    state = state.copyWith(frequency: frequency);
-  }
-
-  Future<void> setRetentionCount(int count) async {
-    await _prefs.setRetentionCount(count);
-    state = state.copyWith(retentionCount: count);
-  }
-
-  Future<void> setCloudBackupEnabled(bool value) async {
-    await _prefs.setCloudBackupEnabled(value);
-    state = state.copyWith(cloudBackupEnabled: value);
-  }
-
-  Future<void> setBackupLocation(String? path) async {
-    await _prefs.setBackupLocation(path);
-    state = _prefs.getSettings();
-  }
-
-  /// Refresh state from SharedPreferences (e.g. after a backup updates lastBackupTime)
-  void refresh() {
-    state = _prefs.getSettings();
-  }
-}
 
 final backupSettingsProvider =
     StateNotifierProvider<BackupSettingsNotifier, BackupSettings>((ref) {
@@ -80,93 +111,102 @@ final backupSettingsProvider =
 // Operation State
 // =============================================================================
 
-/// Status of a backup operation
-enum BackupOperationStatus { idle, inProgress, success, restoreComplete, error }
-
-/// State for backup/restore operations
-class BackupOperationState {
-  final BackupOperationStatus status;
-  final String? message;
-  final BackupRecord? lastRecord;
-
-  const BackupOperationState({
-    this.status = BackupOperationStatus.idle,
-    this.message,
-    this.lastRecord,
-  });
-
-  BackupOperationState copyWith({
-    BackupOperationStatus? status,
-    String? message,
-    BackupRecord? lastRecord,
-  }) {
-    return BackupOperationState(
-      status: status ?? this.status,
-      message: message ?? this.message,
-      lastRecord: lastRecord ?? this.lastRecord,
-    );
-  }
-}
-
 /// Notifier managing backup/restore/delete operations with state transitions
 class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
   final Ref _ref;
+  final _log = LoggerService.forClass(BackupOperationNotifier);
   Timer? _desktopBackupTimer;
+  bool _sweepSkipped = false;
 
   BackupOperationNotifier(this._ref) : super(const BackupOperationState()) {
     _startDesktopTimerIfNeeded();
   }
 
+  /// Localizations for the operation messages this notifier publishes.
+  ///
+  /// A provider has no BuildContext, so the persisted locale setting is
+  /// resolved through the same helper SyncNotifier uses. This is the string
+  /// half of what [SafetyReviewSweepProgress] already does structurally.
+  AppLocalizations get _l10n => l10nForLocaleTag(_ref.read(localeProvider));
+
   BackupService get _service => _ref.read(backupServiceProvider);
 
-  /// After a restore, read the active diver ID from the restored database's
-  /// Settings table and push it into SharedPreferences so the app picks up
-  /// the correct diver on restart.
+  /// After a restore, realign the active diver from the restored database's
+  /// Settings table (shared with the sync library adoption flow).
   Future<void> _syncActiveDiverAfterRestore() async {
+    await realignActiveDiverAfterDataReplace(
+      _ref.read(sharedPreferencesProvider),
+    );
+  }
+
+  /// Stops the post-restore safety sweep at the next dive boundary.
+  ///
+  /// Lossless: unswept dives still compute lazily when opened, and
+  /// Settings > Safety > "Analyze all dives" remains available.
+  void skipSafetyReviewSweep() {
+    _sweepSkipped = true;
+  }
+
+  /// Analyze the restored library so safety findings and dive-list badges are
+  /// present immediately, instead of only after each dive is opened.
+  ///
+  /// Deliberately cannot fail the restore: by the time this runs the database
+  /// swap and the sync re-baseline have already succeeded, so a sweep error is
+  /// logged and swallowed rather than turning a completed restore into a
+  /// failed one. isRestoring stays true so the barrier keeps the app blocked.
+  Future<void> _runPostRestoreSafetyReview() async {
+    _sweepSkipped = false;
     try {
-      final repository = DiverRepository();
-      final prefs = _ref.read(sharedPreferencesProvider);
-
-      // Read the active diver ID that was stored in the restored DB
-      var restoredId = await repository.getActiveDiverIdFromSettings();
-
-      // Validate it actually exists in the restored divers table
-      if (restoredId != null) {
-        final diver = await repository.getDiverById(restoredId);
-        if (diver == null) {
-          restoredId = null;
-        }
-      }
-
-      // Fall back to the default diver if the stored ID was invalid
-      if (restoredId == null) {
-        final defaultDiver = await repository.getDefaultDiver();
-        restoredId = defaultDiver?.id;
-      }
-
-      // Sync to SharedPreferences so startup picks up the right diver
-      if (restoredId != null) {
-        await prefs.setString(currentDiverIdKey, restoredId);
-      }
-    } catch (_) {
-      // Non-fatal: startup validation in CurrentDiverIdNotifier will handle it
+      await _ref
+          .read(postRestoreSafetyReviewProvider)
+          .run(
+            onProgress: (done, total) {
+              if (!mounted || total == 0) return;
+              state = BackupOperationState(
+                status: BackupOperationStatus.inProgress,
+                isRestoring: true,
+                sweepProgress: SafetyReviewSweepProgress(
+                  done: done,
+                  total: total,
+                ),
+              );
+            },
+            isCancelled: () => _sweepSkipped,
+          );
+    } catch (e, st) {
+      _log.error(
+        'Post-restore safety review failed; the restore itself is unaffected',
+        error: e,
+        stackTrace: st,
+      );
     }
   }
 
-  /// Perform a manual backup
-  Future<void> performBackup() async {
+  /// Perform a manual backup, with the diver's optional [note]. With [pin],
+  /// the new backup is recorded pinned, so no prune removes it (issue
+  /// #4535).
+  Future<void> performBackup({String? note, bool pin = false}) async {
     if (state.status == BackupOperationStatus.inProgress) return;
 
-    state = const BackupOperationState(
+    state = BackupOperationState(
       status: BackupOperationStatus.inProgress,
-      message: 'Creating backup...',
+      message: _l10n.backup_backingUp,
     );
 
     try {
-      final record = await _service.performBackup();
+      final record = await _service.performBackup(note: note, pin: pin);
+      // The cloud copy fails closed while sync encryption is locked on this
+      // device (issue #3089); say why it stayed local.
+      final withheldFromCloud =
+          record.location == BackupLocation.local &&
+          await _isCloudBackupBlockedByEncryptionLock();
       state = BackupOperationState(
         status: BackupOperationStatus.success,
-        message: 'Backup created: ${record.formattedSize}',
+        message: withheldFromCloud
+            ? _l10n.backup_operation_createdLocalOnlyLocked(
+                record.formattedSize,
+              )
+            : _l10n.backup_operation_created(record.formattedSize),
         lastRecord: record,
       );
       _ref.read(backupSettingsProvider.notifier).refresh();
@@ -174,61 +214,233 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
     } catch (e) {
       state = BackupOperationState(
         status: BackupOperationStatus.error,
-        message: 'Backup failed: $e',
+        message: _l10n.backup_operation_backupFailed('$e'),
       );
     }
   }
 
-  /// Restore from a specific backup record
-  Future<void> restoreFromBackup(BackupRecord record) async {
-    if (state.status == BackupOperationStatus.inProgress) return;
-
-    state = const BackupOperationState(
-      status: BackupOperationStatus.inProgress,
-      message: 'Restoring backup...',
-    );
-
+  /// The lock check reads the keychain after the backup is already written,
+  /// so a keychain error must not turn that backup into a reported failure;
+  /// it only drops the explanatory message.
+  Future<bool> _isCloudBackupBlockedByEncryptionLock() async {
     try {
-      await _service.restoreFromBackup(record);
-      await _syncActiveDiverAfterRestore();
-      state = const BackupOperationState(
-        status: BackupOperationStatus.restoreComplete,
+      return await _service.isCloudBackupBlockedByEncryptionLock();
+    } catch (e, st) {
+      _log.warning(
+        'Could not check the sync encryption lock after a backup',
+        error: e,
+        stackTrace: st,
       );
-      _ref.invalidate(backupHistoryProvider);
-    } catch (e) {
-      state = BackupOperationState(
-        status: BackupOperationStatus.error,
-        message: 'Restore failed: $e',
-      );
+      return false;
     }
+  }
+
+  /// Restore from a specific backup record
+  Future<void> restoreFromBackup(
+    BackupRecord record, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+  }) async {
+    if (state.status == BackupOperationStatus.inProgress) return;
+    await _restoreAndFinish(
+      () => _service.restoreFromBackup(
+        record,
+        mode: mode,
+        encryptionSecret: encryptionSecret,
+        onMigrationProgress: _onRestoreMigrationProgress,
+      ),
+    );
   }
 
   /// Delete a specific backup
   Future<void> deleteBackup(BackupRecord record) async {
     if (state.status == BackupOperationStatus.inProgress) return;
 
-    state = const BackupOperationState(
+    state = BackupOperationState(
       status: BackupOperationStatus.inProgress,
-      message: 'Deleting backup...',
+      message: _l10n.backup_operation_deleting,
     );
 
     try {
       await _service.deleteBackup(record);
-      state = const BackupOperationState(
+      state = BackupOperationState(
         status: BackupOperationStatus.success,
-        message: 'Backup deleted',
+        message: _l10n.backup_operation_deleted,
       );
       _ref.invalidate(backupHistoryProvider);
+      _ref.invalidate(newestBackupTimeProvider);
     } catch (e) {
       state = BackupOperationState(
         status: BackupOperationStatus.error,
-        message: 'Delete failed: $e',
+        message: _l10n.backup_operation_deleteFailed('$e'),
       );
     }
   }
 
-  /// Export backup to a user-chosen file path
-  Future<void> exportToPath(String destinationPath) async {
+  /// Export backup to a user-chosen file path, with an optional [note].
+  Future<void> exportToPath(String destinationPath, {String? note}) async {
+    if (state.status == BackupOperationStatus.inProgress) return;
+
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_exporting,
+    );
+
+    try {
+      final record = await _service.exportBackupToPath(
+        destinationPath,
+        note: note,
+      );
+      state = BackupOperationState(
+        status: BackupOperationStatus.success,
+        message: _l10n.backup_operation_exported(record.formattedSize),
+        lastRecord: record,
+      );
+      _ref.read(backupSettingsProvider.notifier).refresh();
+      _ref.invalidate(backupHistoryProvider);
+    } catch (e) {
+      state = BackupOperationState(
+        status: BackupOperationStatus.error,
+        message: _l10n.backup_operation_exportFailed('$e'),
+      );
+    }
+  }
+
+  /// Export backup to temp file for sharing, with an optional [note].
+  Future<File?> exportForSharing({String? note}) async {
+    if (state.status == BackupOperationStatus.inProgress) return null;
+
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_preparingShare,
+    );
+
+    try {
+      final file = await _service.exportBackupToTemp(note: note);
+      state = BackupOperationState(
+        status: BackupOperationStatus.success,
+        message: _l10n.backup_operation_shareReady,
+      );
+      return file;
+    } catch (e) {
+      state = BackupOperationState(
+        status: BackupOperationStatus.error,
+        message: _l10n.backup_operation_exportFailed('$e'),
+      );
+      return null;
+    }
+  }
+
+  /// [record] from the history as a file for the share sheet (issue #3650),
+  /// downloading a cloud-only backup first. The file is not deleted here:
+  /// some receiving apps read it only when the diver finally presses Send,
+  /// so a temp copy is left for the day-old temp sweep. Null when busy or on
+  /// failure, which the state reports.
+  Future<File?> prepareBackupForSharing(BackupRecord record) async {
+    if (state.status == BackupOperationStatus.inProgress) return null;
+
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_preparingShare,
+    );
+
+    try {
+      final prepared = await _service.prepareBackupCopy(
+        record,
+        purpose: BackupCopyPurpose.share,
+      );
+      state = BackupOperationState(
+        status: BackupOperationStatus.success,
+        message: _l10n.backup_operation_shareReady,
+      );
+      return File(prepared.path);
+    } catch (e) {
+      _reportCopyOutFailure(e);
+      return null;
+    }
+  }
+
+  /// Copies [record] from the history into [directory], never overwriting a
+  /// file already there (issue #3650). Adds nothing to the history.
+  Future<void> saveBackupCopyToDirectory(
+    BackupRecord record,
+    String directory,
+  ) => _saveBackupCopy(record, (copy) async {
+    final dest = await uniqueDestinationPath(directory, copy.fileName);
+    await copyWithoutPartial(copy.path, dest);
+  });
+
+  /// The Android counterpart to [saveBackupCopyToDirectory]: streams the copy
+  /// into a SAF tree without replacing a same-name document, which may be
+  /// the very backup being copied.
+  Future<void> saveBackupCopyToSafTree(BackupRecord record, String treeUri) =>
+      _saveBackupCopy(
+        record,
+        (copy) => SubmersionSaf.writeBackup(
+          treeUri: treeUri,
+          fileName: copy.fileName,
+          sourcePath: copy.path,
+          replaceExisting: false,
+        ),
+      );
+
+  Future<void> _saveBackupCopy(
+    BackupRecord record,
+    Future<void> Function(PreparedBackupFile copy) write,
+  ) async {
+    if (state.status == BackupOperationStatus.inProgress) return;
+
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_exporting,
+    );
+
+    PreparedBackupFile? prepared;
+    try {
+      prepared = await _service.prepareBackupCopy(
+        record,
+        purpose: BackupCopyPurpose.save,
+      );
+      await write(prepared);
+      state = BackupOperationState(
+        status: BackupOperationStatus.success,
+        message: _l10n.backup_operation_exported(record.formattedSize),
+      );
+    } catch (e) {
+      _reportCopyOutFailure(e);
+    } finally {
+      // A downloaded or streamed copy is a full library, plaintext when the
+      // backup is; it must not outlive the save.
+      await prepared?.discard();
+    }
+  }
+
+  void _reportCopyOutFailure(Object e) {
+    state = BackupOperationState(
+      status: BackupOperationStatus.error,
+      message: e is BackupCopyInOtherAccountException
+          ? _l10n.backup_restore_copyInOtherAccount
+          : _l10n.backup_operation_exportFailed('$e'),
+    );
+  }
+
+  /// Export a backup into an Android SAF tree, streaming it in.
+  ///
+  /// The Android counterpart to [exportToPath]. Scoped storage gives no
+  /// writable filesystem path for a user-chosen folder, and file_picker 12's
+  /// `saveFile` requires the whole artifact in memory as bytes, which a large
+  /// dive library cannot afford. So the artifact is built in temp (encrypted
+  /// when backup encryption is on, exactly as every other export path does)
+  /// and then streamed into the tree by the same platform channel the
+  /// scheduled backup uses.
+  ///
+  /// [note] is stamped into the artifact, the only place it is kept for an
+  /// export that leaves no history record.
+  Future<void> exportToSafTree({
+    required String treeUri,
+    required String fileName,
+    String? note,
+  }) async {
     if (state.status == BackupOperationStatus.inProgress) return;
 
     state = const BackupOperationState(
@@ -236,12 +448,17 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
       message: 'Exporting backup...',
     );
 
+    File? temp;
     try {
-      final record = await _service.exportBackupToPath(destinationPath);
-      state = BackupOperationState(
+      temp = await _service.exportBackupToTemp(note: note);
+      await SubmersionSaf.writeBackup(
+        treeUri: treeUri,
+        fileName: fileName,
+        sourcePath: temp.path,
+      );
+      state = const BackupOperationState(
         status: BackupOperationStatus.success,
-        message: 'Backup exported: ${record.formattedSize}',
-        lastRecord: record,
+        message: 'Backup exported',
       );
       _ref.read(backupSettingsProvider.notifier).refresh();
       _ref.invalidate(backupHistoryProvider);
@@ -250,71 +467,167 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
         status: BackupOperationStatus.error,
         message: 'Export failed: $e',
       );
-    }
-  }
-
-  /// Export backup to temp file for sharing
-  Future<File?> exportForSharing() async {
-    if (state.status == BackupOperationStatus.inProgress) return null;
-
-    state = const BackupOperationState(
-      status: BackupOperationStatus.inProgress,
-      message: 'Preparing backup for sharing...',
-    );
-
-    try {
-      final file = await _service.exportBackupToTemp();
-      state = const BackupOperationState(
-        status: BackupOperationStatus.success,
-        message: 'Backup ready for sharing',
-      );
-      return file;
-    } catch (e) {
-      state = BackupOperationState(
-        status: BackupOperationStatus.error,
-        message: 'Export failed: $e',
-      );
-      return null;
+    } finally {
+      // The temp artifact is a full copy of the library, and when encryption
+      // is off it is plaintext. Never leave it behind.
+      if (temp != null && await temp.exists()) {
+        try {
+          await temp.delete();
+        } catch (_) {
+          // best-effort temp cleanup
+        }
+      }
     }
   }
 
   /// Restore from an arbitrary file path
-  Future<void> restoreFromFilePath(String filePath) async {
+  Future<void> restoreFromFilePath(
+    String filePath, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+  }) async {
     if (state.status == BackupOperationStatus.inProgress) return;
 
-    state = const BackupOperationState(
+    state = BackupOperationState(
       status: BackupOperationStatus.inProgress,
-      message: 'Validating backup file...',
+      message: _l10n.backup_import_validating,
+      isRestoring: true,
     );
 
     try {
-      // Validate first
-      final validation = await _service.validateBackupFile(filePath);
+      // Validate first. A pre-update safety copy of a protected database is
+      // SQLCipher under the live key; the history row already restores it,
+      // and the same file saved or shared from there restores here too, on
+      // this install only (issue #3650). Any other encrypted-looking file
+      // still fails, now with a message that says why.
+      final validation = await _service.validateBackupFile(
+        filePath,
+        allowLiveDatabaseEncryption: true,
+      );
       if (!validation.isValid) {
         state = BackupOperationState(
           status: BackupOperationStatus.error,
-          message: validation.error ?? 'Invalid backup file',
+          message: validation.error ?? _l10n.backup_import_invalidFile,
         );
         return;
       }
-
-      state = const BackupOperationState(
-        status: BackupOperationStatus.inProgress,
-        message: 'Restoring backup...',
+    } catch (e) {
+      state = BackupOperationState(
+        status: BackupOperationStatus.error,
+        message: _l10n.backup_operation_restoreFailed('$e'),
       );
+      return;
+    }
+    await _restoreAndFinish(
+      () => _service.restoreFromFile(
+        filePath,
+        mode: mode,
+        encryptionSecret: encryptionSecret,
+        onMigrationProgress: _onRestoreMigrationProgress,
+      ),
+    );
+  }
 
-      await _service.restoreFromFile(filePath);
+  /// Restores a backup a browser's picker read into memory (issue #4121).
+  /// A copy of the browser's library downloads first, where a file restore
+  /// takes a backup.
+  Future<void> restoreFromImage(
+    Uint8List bytes, {
+    RestoreMode mode = RestoreMode.merge,
+    String? encryptionSecret,
+  }) async {
+    if (state.status == BackupOperationStatus.inProgress) return;
+    await _restoreAndFinish(
+      () => _service.restoreFromImage(
+        bytes,
+        mode: mode,
+        encryptionSecret: encryptionSecret,
+        safetyCopy: _ref.read(browserSafetyCopyProvider),
+        onMigrationProgress: _onRestoreMigrationProgress,
+      ),
+    );
+  }
+
+  /// Runs [restore], then brings the restored library up to this build:
+  /// the active diver, the safety review and the summary sweeps. Every
+  /// restore entry point ends here. An encrypted backup's passphrase
+  /// question goes back to the caller.
+  Future<void> _restoreAndFinish(Future<void> Function() restore) async {
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_restoring,
+      isRestoring: true,
+    );
+    try {
+      await restore();
       await _syncActiveDiverAfterRestore();
+      await _runPostRestoreSafetyReview();
+      // The restored library carries its own summary rows, or none; either
+      // way a stale sweep brings them up to this build. Runs in the
+      // background so the restore barrier does not wait on it.
+      SensorSummaryScheduler.instance.scheduleStaleSweep();
+      DerivedMetricsScheduler.instance.scheduleStaleSweep();
       state = const BackupOperationState(
         status: BackupOperationStatus.restoreComplete,
       );
       _ref.invalidate(backupHistoryProvider);
+    } on BackupEncryptedException {
+      // The page prompts for the passphrase and retries with the secret.
+      state = const BackupOperationState(status: BackupOperationStatus.idle);
+      rethrow;
+    } on WrongPassphraseException {
+      // A wrong secret during the retry must reach the passphrase dialog so it
+      // can keep itself open and show the inline error; the generic catch below
+      // would swallow it into an error state and close the dialog on success.
+      state = const BackupOperationState(status: BackupOperationStatus.idle);
+      rethrow;
+    } on RestoreSourceMissingException {
+      // The source was gone by the time the swap ran, so DatabaseService left
+      // the live database untouched (issue #1344). Say exactly that: the
+      // generic "Restore failed: ..." below reads as a botched restore, and
+      // restoreComplete would read as a restore of an empty library.
+      state = BackupOperationState(
+        status: BackupOperationStatus.error,
+        message: _l10n.backup_operation_restoreSourceMissing,
+      );
+    } on BackupCopyInOtherAccountException {
+      state = BackupOperationState(
+        status: BackupOperationStatus.error,
+        message: _l10n.backup_restore_copyInOtherAccount,
+      );
     } catch (e) {
       state = BackupOperationState(
         status: BackupOperationStatus.error,
-        message: 'Restore failed: $e',
+        message: _l10n.backup_operation_restoreFailed('$e'),
       );
     }
+  }
+
+  /// Restore from a database copy a restore set aside next to the live
+  /// database (issue #1923). See [BackupService.restoreFromDatabaseCopy].
+  Future<void> restoreFromDatabaseCopy(
+    String path, {
+    RestoreMode mode = RestoreMode.merge,
+  }) async {
+    if (state.status == BackupOperationStatus.inProgress) return;
+    await _restoreAndFinish(
+      () => _service.restoreFromDatabaseCopy(
+        path,
+        mode: mode,
+        onMigrationProgress: _onRestoreMigrationProgress,
+      ),
+    );
+  }
+
+  /// Surface migration-ladder progress while a restored older-schema backup
+  /// upgrades to the current schema — the only long phase of the swap, and
+  /// otherwise a silent stall behind the restore barrier.
+  void _onRestoreMigrationProgress(int currentStep, int totalSteps) {
+    state = BackupOperationState(
+      status: BackupOperationStatus.inProgress,
+      message: _l10n.backup_operation_upgrading(currentStep, totalSteps),
+      isRestoring: true,
+    );
   }
 
   /// Reset status back to idle
@@ -324,7 +637,7 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
 
   /// On desktop (no WorkManager), periodically check if backup is due
   void _startDesktopTimerIfNeeded() {
-    if (Platform.isIOS || Platform.isAndroid) return;
+    if (HostPlatform.isIOS || HostPlatform.isAndroid) return;
 
     _desktopBackupTimer = Timer.periodic(
       const Duration(hours: 1),
@@ -333,6 +646,7 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
   }
 
   Future<void> _checkDesktopBackup() async {
+    if (DemoModeGate.instance.isActive) return;
     final settings = _ref.read(backupSettingsProvider);
     if (!settings.enabled || !settings.isBackupDue) return;
     if (state.status == BackupOperationStatus.inProgress) return;
@@ -341,8 +655,12 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
       await _service.performBackup(isAutomatic: true);
       _ref.read(backupSettingsProvider.notifier).refresh();
       _ref.invalidate(backupHistoryProvider);
-    } catch (_) {
-      // Desktop automatic backup failure is silent — no notification system
+    } catch (e) {
+      // Desktop automatic backup failure has no notification system; it is
+      // recorded for Settings > Data health instead (#3394).
+      await _ref
+          .read(backupSettingsProvider.notifier)
+          .recordScheduledFailure(e.toString());
     }
   }
 
@@ -353,6 +671,11 @@ class BackupOperationNotifier extends StateNotifier<BackupOperationState> {
   }
 }
 
+/// A browser's safety copy before a restore (issue #4121); tests replace it.
+final browserSafetyCopyProvider = Provider<Future<void> Function()>(
+  (ref) => downloadLibraryBeforeRestore,
+);
+
 final backupOperationProvider =
     StateNotifierProvider<BackupOperationNotifier, BackupOperationState>((ref) {
       return BackupOperationNotifier(ref);
@@ -362,11 +685,65 @@ final backupOperationProvider =
 // History
 // =============================================================================
 
-/// Backup history sorted newest-first
-final backupHistoryProvider = FutureProvider<List<BackupRecord>>((ref) async {
+/// Backup history sorted newest-first, plus the backups in the connected
+/// cloud folder that the local history has no record of (issue #3214: after a
+/// fresh install the local history is empty, the cloud copies are not).
+///
+/// Auto-disposed so every visit to the backup page lists the cloud folder
+/// afresh. Signing in changes no provider state this could watch (Cloud Sync
+/// selects the provider before authenticating, and a re-sign-in to the same
+/// provider selects nothing), so a cached signed-out listing would otherwise
+/// hide the cloud backups until something else invalidated it.
+final backupHistoryProvider = FutureProvider.autoDispose<List<BackupRecord>>((
+  ref,
+) async {
   final service = ref.watch(backupServiceProvider);
-  return service.getValidatedBackupHistory();
+  // Started first so the listing overlaps the local read. Not joined with a
+  // record `.wait`, which would wrap a history failure in ParallelWaitError
+  // and hide the real message; getCloudBackups never throws, so leaving it
+  // unawaited on that path cannot surface an unhandled error.
+  final cloudFiles = service.getCloudBackups();
+  final history = await service.getValidatedBackupHistory();
+  final listing = await cloudFiles;
+  final listedIds = {for (final f in listing) f.id};
+  return [
+    for (final r in markPinnedOnAnotherDevice(
+      mergeCloudBackups(
+        history,
+        listing,
+        accountId: await service.cloudCopyAccountId(),
+      ),
+      listing,
+      thisDeviceId: await service.thisDeviceIdOrNull(),
+    ))
+      listedIds.contains(r.cloudFileId) ? r.copyWith(cloudCopyListed: true) : r,
+  ];
 });
+
+/// This device's id as backup names record it, or null when it cannot be
+/// read.
+///
+/// Read again whenever the history reloads or the sync identity changes. The
+/// id lives in the database, and a restore reopens the database in place;
+/// Reset Sync State and some syncs mint a fresh id without touching the
+/// history, and SyncNotifier invalidates [conflictLocalDeviceProvider] after
+/// both. An id cached for the life of the Backups page would otherwise
+/// label this device's new backups as another device's.
+final backupDeviceIdProvider = FutureProvider.autoDispose<String?>((ref) {
+  ref.watch(backupHistoryProvider);
+  ref.watch(conflictLocalDeviceProvider);
+  return ref.watch(backupServiceProvider).thisDeviceIdOrNull();
+});
+
+/// Names the device behind each history row (issue #3651). Until the id
+/// and the peer names have loaded it knows no devices, so rows show none
+/// rather than a guess.
+final backupOriginResolverProvider = Provider.autoDispose<BackupOriginResolver>(
+  (ref) => BackupOriginResolver(
+    thisDeviceId: ref.watch(backupDeviceIdProvider).value,
+    peerDeviceNames: ref.watch(peerDeviceNamesProvider).value ?? const {},
+  ),
+);
 
 // =============================================================================
 // Convenience Providers
@@ -376,6 +753,47 @@ final backupHistoryProvider = FutureProvider<List<BackupRecord>>((ref) async {
 final lastBackupTimeProvider = Provider<DateTime?>((ref) {
   return ref.watch(backupSettingsProvider).lastBackupTime;
 });
+
+/// The home backup chip's time: [newestBackupTime] over the stored history,
+/// so the copy taken before an upgrade counts (issue #4204). Rebuilds when a
+/// backup moves the last backup time; [BackupOperationNotifier.deleteBackup]
+/// invalidates it, since a deleted upgrade copy moves nothing else. An upgrade
+/// copy is taken at startup, before anything reads this.
+///
+/// A history that will not parse falls back to the last backup time, so a
+/// damaged registry costs the chip its upgrade copy, never the home strip.
+/// An upgrade copy whose file is gone does not count, by the same rule as
+/// [BackupService.getValidatedBackupHistory]. These copies are plain files
+/// (never SAF refs) and at most three are kept, so the check is a few stats.
+final newestBackupTimeProvider = Provider<DateTime?>((ref) {
+  final lastBackupTime = ref.watch(lastBackupTimeProvider);
+  final List<BackupRecord> history;
+  try {
+    history = ref.watch(backupPreferencesProvider).getHistory();
+  } catch (e, stack) {
+    LoggerService.forClass(BackupOperationNotifier).warning(
+      'Backup history unreadable; the home chip uses the last backup time',
+      error: e,
+      stackTrace: stack,
+    );
+    return lastBackupTime;
+  }
+  return newestBackupTime(
+    lastBackupTime: lastBackupTime,
+    history: history,
+    isAvailable: _localCopyPresent,
+  );
+});
+
+bool _localCopyPresent(BackupRecord record) {
+  final path = record.localPath;
+  if (path == null) return true;
+  try {
+    return File(path).existsSync();
+  } catch (_) {
+    return false;
+  }
+}
 
 /// Whether a backup operation is currently running
 final isBackupInProgressProvider = Provider<bool>((ref) {

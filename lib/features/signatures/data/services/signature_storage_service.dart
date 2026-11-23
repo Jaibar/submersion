@@ -9,6 +9,7 @@ import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
 
 /// Service for capturing, storing, and retrieving instructor signatures
@@ -21,17 +22,35 @@ class SignatureStorageService {
   static const String _signatureFileType = 'instructor_signature';
   static const String _buddySignatureFileType = 'buddy_signature';
 
+  /// `media.file_path` is NOT NULL, but a signature has no file behind it:
+  /// the strokes live in the row's `image_data` BLOB. The empty string is the
+  /// schema's existing "no file" sentinel -- the v72 `source_type` backfill
+  /// tests `file_path != ''` before classifying a row as a local file, and
+  /// `SignatureResolver` only falls back to the path when it is non-empty.
+  ///
+  /// Omitting it entirely is what broke signature capture (issue #1358):
+  /// Drift rejects the companion in `validateIntegrity` before any SQL runs,
+  /// so every save threw and no signature ever reached the database.
+  static const String _signatureFilePath = '';
+
+  /// Signature rows resolve through `SignatureResolver`, never through the
+  /// gallery or local-file resolvers, so they carry the matching source type
+  /// rather than the column's `platformGallery` default.
+  static const String _signatureSourceType = 'signature';
+
   /// Save a signature image and create media record
   ///
   /// [diveId] - The dive this signature belongs to
   /// [imageBytes] - PNG bytes of the signature
   /// [signerName] - Name of the instructor signing
   /// [signerId] - Optional buddy ID if instructor is in system
+  /// [signedAt] - When it was signed, if before now (a sitting saved later)
   Future<Signature> saveSignature({
     required String diveId,
     required Uint8List imageBytes,
     required String signerName,
     String? signerId,
+    DateTime? signedAt,
   }) async {
     try {
       _log.info('Saving signature for dive: $diveId');
@@ -47,8 +66,11 @@ class SignatureStorageService {
               id: Value(id),
               diveId: Value(diveId),
               imageData: Value(imageBytes),
+              filePath: const Value(_signatureFilePath),
               fileType: const Value(_signatureFileType),
-              takenAt: Value(now.millisecondsSinceEpoch),
+              sourceType: const Value(_signatureSourceType),
+              signatureType: const Value('instructor'),
+              takenAt: Value((signedAt ?? now).millisecondsSinceEpoch),
               signerId: Value(signerId),
               signerName: Value(signerName),
               createdAt: Value(now.millisecondsSinceEpoch),
@@ -71,7 +93,8 @@ class SignatureStorageService {
         imageData: imageBytes,
         signerId: signerId,
         signerName: signerName,
-        signedAt: now,
+        signedAt: signedAt ?? now,
+        type: SignatureType.instructor,
       );
     } catch (e, stackTrace) {
       _log.error(
@@ -116,8 +139,8 @@ class SignatureStorageService {
           .customSelect(
             '''
         SELECT m.* FROM media m
-        INNER JOIN dives d ON m.dive_id = d.id
-        WHERE d.course_id = ? AND m.file_type = ?
+        INNER JOIN dive_courses dc ON dc.dive_id = m.dive_id
+        WHERE dc.course_id = ? AND m.file_type = ?
         ORDER BY m.taken_at DESC
       ''',
             variables: [
@@ -194,6 +217,7 @@ class SignatureStorageService {
     required String buddyId,
     required String buddyName,
     required String role,
+    DateTime? signedAt,
   }) async {
     try {
       _log.info('Saving buddy signature for dive: $diveId, buddy: $buddyId');
@@ -209,8 +233,10 @@ class SignatureStorageService {
               id: Value(id),
               diveId: Value(diveId),
               imageData: Value(imageBytes),
+              filePath: const Value(_signatureFilePath),
               fileType: const Value(_buddySignatureFileType),
-              takenAt: Value(now.millisecondsSinceEpoch),
+              sourceType: const Value(_signatureSourceType),
+              takenAt: Value((signedAt ?? now).millisecondsSinceEpoch),
               signerId: Value(buddyId),
               signerName: Value(buddyName),
               signatureType: const Value('buddy'),
@@ -234,7 +260,7 @@ class SignatureStorageService {
         imageData: imageBytes,
         signerId: buddyId,
         signerName: buddyName,
-        signedAt: now,
+        signedAt: signedAt ?? now,
         type: SignatureType.buddy,
         role: role,
       );
@@ -293,6 +319,44 @@ class SignatureStorageService {
     }
   }
 
+  /// [getAllSignaturesForDive] for many dives at once, keyed by dive id,
+  /// newest first within a dive; a dive with no signature is absent. One
+  /// statement per chunk of ids instead of one per dive, for the logbook
+  /// and course PDFs (issue #1867).
+  Future<Map<String, List<Signature>>> getSignaturesForDives(
+    List<String> diveIds,
+  ) async {
+    if (diveIds.isEmpty) return {};
+    try {
+      final byDive = <String, List<Signature>>{};
+      for (final chunk in seriesIdChunks(diveIds)) {
+        final rows =
+            await (_db.select(_db.media)
+                  ..where(
+                    (t) =>
+                        t.diveId.isIn(chunk) &
+                        (t.fileType.equals(_signatureFileType) |
+                            t.signatureType.equals('buddy')),
+                  )
+                  ..orderBy([(t) => OrderingTerm.desc(t.takenAt)]))
+                .get();
+        for (final row in rows) {
+          byDive
+              .putIfAbsent(row.diveId!, () => [])
+              .add(_mapRowToSignature(row));
+        }
+      }
+      return byDive;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get signatures for ${diveIds.length} dives',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Check if a specific buddy has signed this dive
   Future<bool> hasBuddySigned(String diveId, String buddyId) async {
     try {
@@ -336,10 +400,27 @@ class SignatureStorageService {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
+    // The output is a whole number of pixels, rounded up, because the size
+    // comes from layout constraints and is routinely fractional on a scaled
+    // display: a stroke may sit at x = 607.8 on a 607.5-wide canvas, and
+    // truncating would drop that last column and crop the signature again,
+    // in miniature.
+    //
+    // Everything painted below is measured against these dimensions rather
+    // than the fractional request, so the background reaches the edge of the
+    // image it is filling. Filling only to 607.5 of a 608px-wide bitmap
+    // leaves a transparent strip down the right of an otherwise opaque
+    // signature.
+    final pixelWidth = width.ceil();
+    final pixelHeight = height.ceil();
+
     // Draw background if specified
     if (backgroundColor != null) {
       final bgPaint = Paint()..color = backgroundColor;
-      canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, pixelWidth.toDouble(), pixelHeight.toDouble()),
+        bgPaint,
+      );
     }
 
     // Draw strokes
@@ -363,9 +444,8 @@ class SignatureStorageService {
       canvas.drawPath(path, paint);
     }
 
-    // Convert to image
     final picture = recorder.endRecording();
-    final image = await picture.toImage(width.toInt(), height.toInt());
+    final image = await picture.toImage(pixelWidth, pixelHeight);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
 
     return byteData!.buffer.asUint8List();

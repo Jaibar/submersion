@@ -1,11 +1,77 @@
-import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
+import 'package:submersion/features/certifications/domain/certification_title.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/certification_agencies/presentation/certification_entry_display.dart';
+
+/// Minutes string for a logbook Duration field (#644).
+///
+/// Uses [Dive.measuredRuntime] (runtime, then exit-entry, then profile), never
+/// bottomTime: the logbook Duration must show the total dive duration, which
+/// bottom time understates.
+String pdfDiveDurationMinutes(Dive dive) =>
+    '${dive.measuredRuntime?.inMinutes ?? '-'}';
+
+/// [pdfDiveDurationMinutes] with its unit, for a template's Time field, or a
+/// bare dash when no runtime is known: a dash takes no unit.
+String pdfDiveDurationCompact(Dive dive, AppLocalizations l10n) {
+  final minutes = dive.measuredRuntime?.inMinutes;
+  return minutes == null ? '-' : l10n.pdf_minutesCompact('$minutes');
+}
+
+/// Sum of measured runtimes for summary and total rows (#644, #3304).
+Duration pdfTotalRuntime(List<Dive> dives) => dives.fold<Duration>(
+  Duration.zero,
+  (sum, d) => sum + (d.measuredRuntime ?? Duration.zero),
+);
+
+/// Deepest recorded depth in meters, or 0 when no dive records one.
+///
+/// Shared so the summary page and the templates that print their own stat
+/// boxes cannot drift apart on what "max depth" means.
+double pdfMaxDepth(List<Dive> dives) => dives
+    .where((d) => d.maxDepth != null)
+    .map((d) => d.maxDepth!)
+    .fold<double>(0, (max, depth) => depth > max ? depth : max);
+
+/// A cylinder's start-to-end pressure range, with the unit printed once.
+///
+/// The range prints whatever the diver recorded, so one endpoint may be the
+/// formatter's `--` placeholder. Both endpoints are therefore rendered as
+/// bare values around a spaced separator: appending an already-united
+/// `formatPressure` to a bare `formatPressureValue` produced `200---` on a
+/// half-filled pair (the separator and the placeholder running together) and
+/// dropped the unit entirely, since the placeholder carries none.
+///
+/// Returns the plain placeholder when the cylinder records no pressure at
+/// all, rather than a unit with nothing in front of it.
+String pdfPressureRange(UnitFormatter units, double? start, double? end) {
+  if (start == null && end == null) return '--';
+  return '${units.formatPressureValue(start)} - '
+      '${units.formatPressureValue(end)} ${units.pressureSymbol}';
+}
+
+/// Letter-spacing for [text]: [spacing], or none when [text] is in a script
+/// whose letters join (#2252).
+///
+/// Tracked-out headings are a Latin typographic habit. Spacing Arabic letters
+/// apart breaks the joins between them, so a heading printed that way reads
+/// as a row of isolated letters.
+double pdfTracking(String text, double spacing) =>
+    _joiningScript.hasMatch(text) ? 0 : spacing;
+
+/// Arabic, Arabic Supplement, Arabic Extended-A and the presentation forms.
+final _joiningScript = RegExp(
+  '[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]',
+);
 
 /// Shared PDF components used across multiple templates.
 ///
@@ -13,20 +79,6 @@ import 'package:submersion/features/signatures/domain/entities/signature.dart';
 /// common elements like headers, info chips, signatures, and
 /// certification cards.
 class PdfSharedComponents {
-  static final _dateFormat = DateFormat('yyyy-MM-dd');
-  static final _timeFormat = DateFormat('HH:mm');
-  static final _dateTimeFormat = DateFormat('yyyy-MM-dd HH:mm');
-
-  /// Format a date for display.
-  static String formatDate(DateTime date) => _dateFormat.format(date);
-
-  /// Format a time for display.
-  static String formatTime(DateTime time) => _timeFormat.format(time);
-
-  /// Format a date and time for display.
-  static String formatDateTime(DateTime dateTime) =>
-      _dateTimeFormat.format(dateTime);
-
   /// Build a small info chip with label and value.
   static pw.Widget buildInfoChip(String label, String value) {
     return pw.Column(
@@ -38,7 +90,10 @@ class PdfSharedComponents {
         ),
         pw.Text(
           value,
-          style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
+          style: const pw.TextStyle(
+            fontSize: 11,
+            fontWeight: pw.FontWeight.bold,
+          ),
         ),
       ],
     );
@@ -54,7 +109,10 @@ class PdfSharedComponents {
           pw.Text(label, style: const pw.TextStyle(fontSize: 14)),
           pw.Text(
             value,
-            style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+            style: const pw.TextStyle(
+              fontSize: 14,
+              fontWeight: pw.FontWeight.bold,
+            ),
           ),
         ],
       ),
@@ -62,7 +120,11 @@ class PdfSharedComponents {
   }
 
   /// Build a signature block for display in PDF.
-  static pw.Widget buildSignatureBlock(Signature signature) {
+  static pw.Widget buildSignatureBlock(
+    Signature signature, {
+    required PdfDateFormatter dates,
+    required AppLocalizations l10n,
+  }) {
     pw.ImageProvider? signatureImage;
     if (signature.hasImage) {
       try {
@@ -92,7 +154,7 @@ class PdfSharedComponents {
               height: 30,
               child: pw.Center(
                 child: pw.Text(
-                  '[Signature]',
+                  l10n.pdf_signaturePlaceholder,
                   style: const pw.TextStyle(
                     fontSize: 8,
                     color: PdfColors.grey500,
@@ -103,16 +165,21 @@ class PdfSharedComponents {
           pw.SizedBox(height: 2),
           pw.Text(
             signature.signerName,
-            style: pw.TextStyle(fontSize: 7, fontWeight: pw.FontWeight.bold),
+            style: const pw.TextStyle(
+              fontSize: 7,
+              fontWeight: pw.FontWeight.bold,
+            ),
             textAlign: pw.TextAlign.center,
           ),
           pw.Text(
-            signature.isBuddySignature ? 'Buddy' : 'Instructor',
+            signature.isBuddySignature
+                ? l10n.pdf_signerBuddy
+                : l10n.pdf_signerInstructor,
             style: const pw.TextStyle(fontSize: 6, color: PdfColors.grey600),
             textAlign: pw.TextAlign.center,
           ),
           pw.Text(
-            formatDate(signature.signedAt),
+            dates.date(signature.signedAt),
             style: const pw.TextStyle(fontSize: 6, color: PdfColors.grey600),
             textAlign: pw.TextAlign.center,
           ),
@@ -123,7 +190,7 @@ class PdfSharedComponents {
 
   /// Build a larger signature block for professional template.
   static pw.Widget buildLargeSignatureBlock({
-    String label = 'Signature',
+    required String label,
     Signature? signature,
     double width = 150,
     double height = 60,
@@ -145,7 +212,7 @@ class PdfSharedComponents {
         children: [
           pw.Text(
             label,
-            style: pw.TextStyle(
+            style: const pw.TextStyle(
               fontSize: 8,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.grey700,
@@ -180,10 +247,7 @@ class PdfSharedComponents {
   }
 
   /// Build an empty stamp area box for professional template.
-  static pw.Widget buildStampArea({
-    double size = 100,
-    String label = 'Official Stamp',
-  }) {
+  static pw.Widget buildStampArea({required String label, double size = 100}) {
     return pw.Container(
       width: size,
       height: size + 16,
@@ -192,7 +256,7 @@ class PdfSharedComponents {
         children: [
           pw.Text(
             label,
-            style: pw.TextStyle(
+            style: const pw.TextStyle(
               fontSize: 8,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.grey700,
@@ -226,50 +290,60 @@ class PdfSharedComponents {
   /// Displays certifications with their scanned card images (if available).
   /// For agency-specific templates, certifications from that agency are
   /// highlighted.
-  static pw.Widget buildCertificationCardsPage({
+  /// Certification cards as a flat widget list for a [pw.MultiPage] body.
+  ///
+  /// Returns a list rather than a single column so the pdf package can break
+  /// between cards. Callers previously placed one `pw.Column` on a fixed
+  /// `pw.Page`, which cannot paginate: a diver with more certifications than
+  /// fit on one page silently lost the remainder (#1017).
+  static List<pw.Widget> buildCertificationCardsBody({
     required List<Certification> certifications,
+    CertificationCatalog? certificationCatalog,
+    required PdfDateFormatter dates,
+    required AppLocalizations l10n,
     Diver? diver,
     String? highlightAgency,
     PdfColor accentColor = PdfColors.blue800,
   }) {
-    return pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.Text(
-          'Certifications',
-          style: pw.TextStyle(
-            fontSize: 24,
-            fontWeight: pw.FontWeight.bold,
-            color: accentColor,
-          ),
+    return [
+      pw.Text(
+        l10n.pdf_certifications,
+        style: pw.TextStyle(
+          fontSize: 24,
+          fontWeight: pw.FontWeight.bold,
+          color: accentColor,
         ),
-        if (diver != null) ...[
-          pw.SizedBox(height: 8),
-          pw.Text(
-            diver.name,
-            style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey700),
-          ),
-        ],
-        pw.SizedBox(height: 16),
-        pw.Divider(color: PdfColors.grey300),
-        pw.SizedBox(height: 16),
-        ...certifications.map(
-          (cert) => _buildCertificationCard(
-            cert,
-            isHighlighted:
-                highlightAgency != null &&
-                cert.agency.name.toLowerCase().contains(
-                  highlightAgency.toLowerCase(),
-                ),
-            accentColor: accentColor,
-          ),
+      ),
+      if (diver != null) ...[
+        pw.SizedBox(height: 8),
+        pw.Text(
+          diver.name,
+          style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey700),
         ),
       ],
-    );
+      pw.SizedBox(height: 16),
+      pw.Divider(color: PdfColors.grey300),
+      pw.SizedBox(height: 16),
+      ...certifications.map(
+        (cert) => _buildCertificationCard(
+          cert,
+          dates: dates,
+          l10n: l10n,
+          catalog: certificationCatalog ?? CertificationCatalog.builtInOnly,
+          isHighlighted:
+              highlightAgency != null &&
+              cert.agency.toLowerCase().contains(highlightAgency.toLowerCase()),
+          accentColor: accentColor,
+        ),
+      ),
+    ];
   }
 
   static pw.Widget _buildCertificationCard(
     Certification cert, {
+    required PdfDateFormatter dates,
+    required CertificationCatalog catalog,
+    required AppLocalizations l10n,
     bool isHighlighted = false,
     PdfColor accentColor = PdfColors.blue800,
   }) {
@@ -314,7 +388,7 @@ class PdfSharedComponents {
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
                     pw.Text(
-                      cert.name,
+                      certificationTitle(cert, catalog: catalog),
                       style: pw.TextStyle(
                         fontSize: 14,
                         fontWeight: pw.FontWeight.bold,
@@ -323,7 +397,7 @@ class PdfSharedComponents {
                     ),
                     pw.SizedBox(height: 4),
                     pw.Text(
-                      cert.agency.displayName,
+                      catalog.agency(cert.agency).localizedName(l10n),
                       style: const pw.TextStyle(
                         fontSize: 12,
                         color: PdfColors.grey600,
@@ -332,7 +406,9 @@ class PdfSharedComponents {
                   ],
                 ),
               ),
-              if (cert.level != null)
+              // Only when the title above is a custom name -- otherwise the
+              // title already is the certification.
+              if (certificationSubtitle(cert, catalog: catalog) != null)
                 pw.Container(
                   padding: const pw.EdgeInsets.symmetric(
                     horizontal: 8,
@@ -343,7 +419,7 @@ class PdfSharedComponents {
                     borderRadius: pw.BorderRadius.circular(4),
                   ),
                   child: pw.Text(
-                    cert.level!.displayName,
+                    certificationSubtitle(cert, catalog: catalog)!,
                     style: pw.TextStyle(
                       fontSize: 10,
                       fontWeight: pw.FontWeight.bold,
@@ -361,7 +437,7 @@ class PdfSharedComponents {
             children: [
               if (cert.cardNumber != null) ...[
                 pw.Text(
-                  'Card #: ${cert.cardNumber}',
+                  l10n.pdf_cardNumber(cert.cardNumber!),
                   style: const pw.TextStyle(
                     fontSize: 10,
                     color: PdfColors.grey600,
@@ -371,12 +447,22 @@ class PdfSharedComponents {
               ],
               if (cert.issueDate != null)
                 pw.Text(
-                  'Issued: ${formatDate(cert.issueDate!)}',
+                  l10n.pdf_certIssued(dates.date(cert.issueDate!)),
                   style: const pw.TextStyle(
                     fontSize: 10,
                     color: PdfColors.grey600,
                   ),
                 ),
+              if (cert.expiryDate != null) ...[
+                pw.SizedBox(width: 16),
+                pw.Text(
+                  l10n.pdf_certExpires(dates.date(cert.expiryDate!)),
+                  style: const pw.TextStyle(
+                    fontSize: 10,
+                    color: PdfColors.grey600,
+                  ),
+                ),
+              ],
             ],
           ),
           // Card images
@@ -389,7 +475,7 @@ class PdfSharedComponents {
                     child: pw.Column(
                       children: [
                         pw.Text(
-                          'Front',
+                          l10n.pdf_cardFront,
                           style: const pw.TextStyle(
                             fontSize: 8,
                             color: PdfColors.grey500,
@@ -418,7 +504,7 @@ class PdfSharedComponents {
                     child: pw.Column(
                       children: [
                         pw.Text(
-                          'Back',
+                          l10n.pdf_cardBack,
                           style: const pw.TextStyle(
                             fontSize: 8,
                             color: PdfColors.grey500,
@@ -453,11 +539,26 @@ class PdfSharedComponents {
     required String title,
     required int diveCount,
     required PdfPageFormat pageFormat,
+    required PdfDateFormatter dates,
+    required AppLocalizations l10n,
+    required DateTime generatedAt,
     DateTime? firstDiveDate,
     DateTime? lastDiveDate,
     Diver? diver,
     PdfColor accentColor = PdfColors.blue800,
   }) {
+    // Callers pass dives newest-first (getAllDives) or oldest-first depending
+    // on the path, so order the pair here rather than trusting the caller.
+    // Otherwise the cover contradicts the summary page, which sorts. Ordering
+    // once here fixes every template at the same time, which is why it lives
+    // on the shared cover rather than at the call sites.
+    final reversed =
+        firstDiveDate != null &&
+        lastDiveDate != null &&
+        firstDiveDate.isAfter(lastDiveDate);
+    final rangeStart = reversed ? lastDiveDate : firstDiveDate;
+    final rangeEnd = reversed ? firstDiveDate : lastDiveDate;
+
     return pw.Center(
       child: pw.Column(
         mainAxisAlignment: pw.MainAxisAlignment.center,
@@ -478,16 +579,19 @@ class PdfSharedComponents {
             ),
           ],
           pw.SizedBox(height: 24),
-          pw.Text('$diveCount Dives', style: const pw.TextStyle(fontSize: 24)),
+          pw.Text(
+            l10n.pdf_coverDiveCount(diveCount),
+            style: const pw.TextStyle(fontSize: 24),
+          ),
           pw.SizedBox(height: 10),
-          if (firstDiveDate != null && lastDiveDate != null)
+          if (rangeStart != null && rangeEnd != null)
             pw.Text(
-              '${formatDate(firstDiveDate)} - ${formatDate(lastDiveDate)}',
+              '${dates.date(rangeStart)} - ${dates.date(rangeEnd)}',
               style: const pw.TextStyle(fontSize: 16),
             ),
           pw.SizedBox(height: 40),
           pw.Text(
-            'Generated on ${formatDateTime(DateTime.now())}',
+            l10n.pdf_generatedOn(dates.dateTime(generatedAt)),
             style: const pw.TextStyle(fontSize: 12, color: PdfColors.grey600),
           ),
         ],
@@ -498,19 +602,24 @@ class PdfSharedComponents {
   /// Build a summary page with dive statistics.
   static pw.Widget buildSummaryPage({
     required List<Dive> dives,
+    required PdfDateFormatter dates,
+    required UnitFormatter units,
+    required AppLocalizations l10n,
     PdfColor accentColor = PdfColors.blue800,
   }) {
     if (dives.isEmpty) {
-      return pw.Center(child: pw.Text('No dives to summarize'));
+      return pw.Center(child: pw.Text(l10n.pdf_noDivesToSummarize));
     }
 
-    final totalDiveTime = dives
-        .where((d) => d.bottomTime != null)
-        .fold<Duration>(Duration.zero, (sum, d) => sum + d.bottomTime!);
-    final maxDepth = dives
-        .where((d) => d.maxDepth != null)
-        .map((d) => d.maxDepth!)
-        .fold<double>(0, (max, depth) => depth > max ? depth : max);
+    // Sorted rather than taken from the ends of the list: callers pass dives
+    // newest-first (getAllDives) or oldest-first depending on the path, and
+    // the summary must report the true range either way.
+    final orderedDates = dives.map((d) => d.dateTime).toList()..sort();
+    final firstDive = orderedDates.first;
+    final lastDive = orderedDates.last;
+
+    final totalDiveTime = pdfTotalRuntime(dives);
+    final maxDepth = pdfMaxDepth(dives);
     final avgDepth = dives.where((d) => d.avgDepth != null).isEmpty
         ? 0.0
         : dives
@@ -523,7 +632,7 @@ class PdfSharedComponents {
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
         pw.Text(
-          'Summary',
+          l10n.pdf_summary,
           style: pw.TextStyle(
             fontSize: 24,
             fontWeight: pw.FontWeight.bold,
@@ -533,15 +642,20 @@ class PdfSharedComponents {
         pw.SizedBox(height: 20),
         pw.Divider(),
         pw.SizedBox(height: 20),
-        buildStatRow('Total Dives', '${dives.length}'),
+        buildStatRow(l10n.pdf_totalDives, '${dives.length}'),
+        buildStatRow(l10n.pdf_firstDive, dates.date(firstDive)),
+        buildStatRow(l10n.pdf_lastDive, dates.date(lastDive)),
         buildStatRow(
-          'Total Dive Time',
-          '${totalDiveTime.inHours}h ${totalDiveTime.inMinutes % 60}m',
+          l10n.pdf_totalDiveTime,
+          l10n.pdf_hoursMinutes(
+            '${totalDiveTime.inHours}',
+            '${totalDiveTime.inMinutes % 60}',
+          ),
         ),
-        buildStatRow('Deepest Dive', '${maxDepth.toStringAsFixed(1)}m'),
-        buildStatRow('Average Depth', '${avgDepth.toStringAsFixed(1)}m'),
+        buildStatRow(l10n.pdf_deepestDive, units.formatDepth(maxDepth)),
+        buildStatRow(l10n.pdf_averageDepth, units.formatDepth(avgDepth)),
         buildStatRow(
-          'Unique Sites',
+          l10n.pdf_uniqueSites,
           '${dives.map((d) => d.site?.id).where((id) => id != null).toSet().length}',
         ),
       ],
@@ -558,7 +672,7 @@ class PdfSharedComponents {
     // Use asterisks for compatibility - Unicode stars may not render with default fonts
     return pw.Text(
       '${'*' * rating}${'.' * (5 - rating)}',
-      style: pw.TextStyle(
+      style: const pw.TextStyle(
         fontSize: 12,
         fontWeight: pw.FontWeight.bold,
         color: PdfColors.amber,

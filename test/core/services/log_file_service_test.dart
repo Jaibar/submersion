@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:submersion/core/models/log_entry.dart';
 import 'package:submersion/core/services/log_file_service.dart';
 
@@ -29,7 +30,7 @@ void main() {
       );
       await service.writeLine(entry.toLogLine());
 
-      final logFile = File('${tempDir.path}/submersion.log');
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
       expect(logFile.existsSync(), isTrue);
 
       final content = await logFile.readAsString();
@@ -56,7 +57,9 @@ void main() {
         ).toLogLine(),
       );
 
-      final lines = await File('${tempDir.path}/submersion.log').readAsLines();
+      final lines = await File(
+        p.join(tempDir.path, 'submersion.log'),
+      ).readAsLines();
       expect(lines.length, 2);
       expect(lines[0], contains('First'));
       expect(lines[1], contains('Second'));
@@ -91,7 +94,7 @@ void main() {
     test('readEntries skips malformed lines', () async {
       await service.initialize();
 
-      final logFile = File('${tempDir.path}/submersion.log');
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
       await logFile.writeAsString(
         '[2026-03-27T14:00:00.000] [BLE] [INFO] Good line\n'
         'this is garbage\n'
@@ -124,13 +127,13 @@ void main() {
 
       await service.clearLog();
 
-      final logFile = File('${tempDir.path}/submersion.log');
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
       expect(logFile.existsSync(), isFalse);
     });
 
     test('logFilePath returns correct path', () async {
       await service.initialize();
-      expect(service.logFilePath, '${tempDir.path}/submersion.log');
+      expect(service.logFilePath, p.join(tempDir.path, 'submersion.log'));
     });
 
     test('rotates file when exceeding max size', () async {
@@ -153,7 +156,7 @@ void main() {
         );
       }
 
-      final logFile = File('${tempDir.path}/submersion.log');
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
       final size = await logFile.length();
 
       // After rotation, file should be roughly half of max or less
@@ -162,6 +165,101 @@ void main() {
       // Should still contain the most recent entries
       final content = await logFile.readAsString();
       expect(content, contains('number 19'));
+    });
+
+    // Issue #4572: the background isolate appends to the app's file; only the
+    // app trims it, so two isolates never rewrite one file at once.
+    test('an instance that does not rotate only appends', () async {
+      final appendOnly = LogFileService(
+        logDirectory: tempDir.path,
+        maxFileSizeBytes: 200,
+        rotates: false,
+      );
+      await appendOnly.initialize();
+
+      for (var i = 0; i < 20; i++) {
+        await appendOnly.writeLine('Log message number $i with some padding');
+      }
+
+      final content = await File(
+        p.join(tempDir.path, 'submersion.log'),
+      ).readAsString();
+      expect(content.length, greaterThan(200));
+      expect(content, contains('number 0 '));
+      expect(content, contains('number 19'));
+    });
+
+    // Android can run scheduled backups for weeks without the app opening, so
+    // the background instance trims an oversized file once, before it writes,
+    // or nothing would bound the file in that time.
+    test('an instance that does not rotate trims an oversized file when it '
+        'starts', () async {
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
+      await logFile.writeAsString(
+        [for (var i = 0; i < 20; i++) 'Old line $i with some padding\n'].join(),
+      );
+      final appendOnly = LogFileService(
+        logDirectory: tempDir.path,
+        maxFileSizeBytes: 200,
+        rotates: false,
+      );
+      await appendOnly.initialize();
+
+      final trimmed = await logFile.readAsString();
+      expect(trimmed.length, lessThan(200));
+      expect(trimmed, isNot(contains('Old line 0 ')));
+      expect(trimmed, contains('Old line 19'));
+
+      await appendOnly.writeLine('New line');
+      expect(await logFile.readAsString(), '${trimmed}New line\n');
+    });
+
+    // The file is now written for every user, not only in debug mode (#1826),
+    // so one malformed byte (a device name, a native message) must not stop
+    // rotation, which would let the file grow without bound.
+    test('rotates a file that holds malformed UTF-8', () async {
+      final smallService = LogFileService(
+        logDirectory: tempDir.path,
+        maxFileSizeBytes: 200,
+      );
+      await smallService.initialize();
+      File(smallService.logFilePath).writeAsBytesSync([
+        ...'[2026-03-27T14:00:00.000] [BLE] [WARN] bad '.codeUnits,
+        0xC3,
+        0x28,
+        0x0A,
+      ]);
+
+      for (var i = 0; i < 20; i++) {
+        await smallService.writeLine(
+          LogEntry(
+            timestamp: DateTime(2026, 3, 27, 14, 0, i, 0),
+            category: LogCategory.app,
+            level: LogLevel.warning,
+            message: 'Log message number $i with some padding text',
+          ).toLogLine(),
+        );
+      }
+
+      final logFile = File(smallService.logFilePath);
+      expect(await logFile.length(), lessThan(200));
+      expect(await logFile.readAsString(), contains('number 19'));
+    });
+
+    test('readEntries tolerates malformed UTF-8', () async {
+      await service.initialize();
+      File(service.logFilePath).writeAsBytesSync([
+        ...'[2026-03-27T14:00:00.000] [BLE] [WARN] bad '.codeUnits,
+        0xC3,
+        0x28,
+        0x0A,
+        ...'[2026-03-27T14:00:01.000] [APP] [ERROR] good\n'.codeUnits,
+      ]);
+
+      final entries = await service.readEntries();
+
+      expect(entries.map((e) => e.level), [LogLevel.warning, LogLevel.error]);
+      expect(entries.last.message, 'good');
     });
 
     group('initialization guard', () {
@@ -203,18 +301,32 @@ void main() {
           ),
         );
       });
+
+      test('readLines throws StateError if not initialized', () async {
+        expect(
+          () => service.readLines(),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              contains('initialize()'),
+            ),
+          ),
+        );
+      });
     });
 
     test('writeLine silently swallows IOException', () async {
       await service.initialize();
 
-      // Make the log directory a file so writes will fail with an IOException
-      final logFile = File('${tempDir.path}/submersion.log');
+      // Put a directory where the log file goes so writes fail with an
+      // IOException
+      final logFile = File(p.join(tempDir.path, 'submersion.log'));
       await logFile.writeAsString('existing content\n');
       // Delete log file and replace path with a directory so File.writeAsString
       // throws an IOException (cannot write to a path that is a directory).
       await logFile.delete();
-      await Directory('${tempDir.path}/submersion.log').create();
+      await Directory(p.join(tempDir.path, 'submersion.log')).create();
 
       // Should not throw even though writing will fail
       await expectLater(service.writeLine('this should not crash'), completes);

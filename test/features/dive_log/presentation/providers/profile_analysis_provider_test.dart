@@ -1,22 +1,57 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/ccr_gas_schedule.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+import 'package:submersion/features/divers/data/repositories/diver_repository.dart'
+    as divers;
+import 'package:submersion/features/divers/domain/entities/diver.dart'
+    as domain;
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class _SettingsNotifier extends StateNotifier<AppSettings>
-    implements SettingsNotifier {
-  _SettingsNotifier() : super(const AppSettings());
+late SharedPreferences _prefs;
+
+class _FakeDiverRepository extends divers.DiverRepository {
+  @override
+  Future<domain.Diver?> getDiverById(String id) async => null;
 
   @override
-  Future<void> setMapStyle(MapStyle style) async =>
-      state = state.copyWith(mapStyle: style);
+  Future<domain.Diver?> getDefaultDiver() async => null;
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  Future<String?> getActiveDiverIdFromSettings() async => null;
+
+  @override
+  Future<void> setActiveDiverIdInSettings(String? diverId) async {}
+}
+
+class _FakeDiverSettingsRepository extends DiverSettingsRepository {
+  @override
+  Future<AppSettings> getOrCreateSettingsForDiver(
+    String diverId, {
+    AppSettings? defaultSettings,
+  }) async {
+    return const AppSettings(notificationsEnabled: false);
+  }
+
+  @override
+  Future<void> updateSettingsForDiver(
+    String diverId,
+    AppSettings settings, {
+    AppSettings? previous,
+  }) async {}
+}
+
+class _SettingsNotifier extends SettingsNotifier {
+  _SettingsNotifier(Ref ref) : super(_FakeDiverSettingsRepository(), ref);
 }
 
 /// Generate a simple square-profile dive for testing:
@@ -56,7 +91,868 @@ List<DiveProfilePoint> _generateSquareProfile({
   return points;
 }
 
+Dive makeDive({
+  String id = 'test-dive',
+  DateTime? dateTime,
+  List<DiveTank> tanks = const [],
+  GasMix? diluentGas,
+  DiveMode diveMode = DiveMode.oc,
+  List<DiveProfilePoint> profile = const [],
+}) {
+  return Dive(
+    id: id,
+    dateTime: dateTime ?? DateTime.utc(2026, 7, 12),
+    tanks: tanks,
+    diluentGas: diluentGas,
+    diveMode: diveMode,
+    profile: profile,
+  );
+}
+
 void main() {
+  setUpAll(() async {
+    SharedPreferences.setMockInitialValues({});
+    _prefs = await SharedPreferences.getInstance();
+  });
+
+  group('resolveCcrDiluentMix', () {
+    DiveTank tank(GasMix mix, TankRole role) =>
+        DiveTank(id: role.name, gasMix: mix, role: role);
+
+    test('prefers the diluent-role tank over the first tank', () {
+      final dive = makeDive(
+        tanks: [
+          tank(const GasMix(o2: 40), TankRole.backGas),
+          tank(const GasMix(), TankRole.diluent), // air
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive).o2, 21);
+    });
+
+    test('falls back to dive.diluentGas when no diluent tank', () {
+      final dive = makeDive(
+        tanks: [tank(const GasMix(o2: 40), TankRole.backGas)],
+        diluentGas: const GasMix(o2: 18, he: 45),
+      );
+      expect(resolveCcrDiluentMix(dive).he, 45);
+    });
+
+    test('skips O2-supply and bailout tanks in the positional fallback', () {
+      final dive = makeDive(
+        tanks: [
+          tank(const GasMix(o2: 100), TankRole.oxygenSupply),
+          tank(const GasMix(o2: 50), TankRole.bailout),
+          tank(const GasMix(o2: 18, he: 45), TankRole.backGas),
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive).o2, 18);
+    });
+
+    test('skips an untagged pure-O2 tank in the positional fallback', () {
+      // File imports leave the O2 supply untagged (back gas); taking it as
+      // the diluent would load the loop with no inert gas at all.
+      final dive = makeDive(
+        tanks: const [
+          DiveTank(id: 'o2', gasMix: GasMix(o2: 100)),
+          DiveTank(id: 'dil', gasMix: GasMix(o2: 21, he: 35)),
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive).he, 35);
+    });
+
+    test('resolves from the analysed computer tanks when given', () {
+      final dive = makeDive(
+        tanks: [
+          tank(const GasMix(o2: 10, he: 50), TankRole.diluent),
+          const DiveTank(
+            id: 'mine',
+            gasMix: GasMix(o2: 21, he: 35),
+            role: TankRole.diluent,
+          ),
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive, tanks: [dive.tanks[1]]).he, 35);
+    });
+
+    test('prefers an untagged diluent over a tagged open-circuit cylinder', () {
+      // The switch classifier reads Deco/Stage as open circuit and an
+      // untagged cylinder as the diluent; the seed must agree with it.
+      final dive = makeDive(
+        tanks: [
+          tank(const GasMix(o2: 50), TankRole.deco),
+          const DiveTank(id: 'dil', gasMix: GasMix(o2: 21, he: 35)),
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive).he, 35);
+    });
+
+    test('falls back to a tagged open-circuit cylinder when no diluent is '
+        'known, skipping the O2 supply and bailouts', () {
+      final dive = makeDive(
+        tanks: [
+          tank(const GasMix(o2: 100), TankRole.oxygenSupply),
+          tank(const GasMix(o2: 21, he: 35), TankRole.bailout),
+          tank(const GasMix(o2: 50), TankRole.deco),
+        ],
+      );
+      expect(resolveCcrDiluentMix(dive).o2, 50);
+    });
+
+    test('defaults to air with no usable tanks', () {
+      final dive = makeDive(tanks: []);
+      expect(resolveCcrDiluentMix(dive).isAir, isTrue);
+    });
+  });
+
+  group('activeGasUsageSegments', () {
+    const profile = [
+      DiveProfilePoint(timestamp: 10, depth: 20),
+      DiveProfilePoint(timestamp: 1200, depth: 20),
+    ];
+    GasSwitchWithTank switchTo(String tankId, String computerId) =>
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs-$tankId',
+            diveId: 'test-dive',
+            timestamp: 600,
+            tankId: tankId,
+            computerId: computerId,
+            createdAt: DateTime.utc(2026),
+          ),
+          tankName: tankId,
+          gasMix: 'mix',
+          o2Fraction: 0.5,
+        );
+    final dive = makeDive(
+      diveMode: DiveMode.ccr,
+      tanks: const [
+        DiveTank(
+          id: 'controller-diluent',
+          computerId: 'controller',
+          gasMix: GasMix(o2: 10, he: 70),
+          role: TankRole.diluent,
+        ),
+        DiveTank(
+          id: 'controller-bailout',
+          computerId: 'controller',
+          gasMix: GasMix(o2: 50),
+          role: TankRole.bailout,
+          order: 1,
+        ),
+        DiveTank(
+          id: 'backup-diluent',
+          computerId: 'backup',
+          gasMix: GasMix(),
+          role: TankRole.diluent,
+          order: 2,
+        ),
+      ],
+    );
+
+    test('leaves out another computer\'s switches', () {
+      final segments = activeGasUsageSegments(
+        dive,
+        gasSwitches: [switchTo('controller-bailout', 'controller')],
+        profile: profile,
+        computerId: 'backup',
+      );
+
+      expect(segments.single.gasMix.isAir, isTrue);
+    });
+
+    test('keeps the viewed computer\'s own switches', () {
+      final segments = activeGasUsageSegments(
+        dive,
+        gasSwitches: [switchTo('controller-bailout', 'controller')],
+        profile: profile,
+        computerId: 'controller',
+      );
+
+      expect(segments.map((s) => s.gasMix.o2), [10, 50]);
+    });
+
+    test('with no computer in view, keeps every switch', () {
+      final segments = activeGasUsageSegments(
+        dive,
+        gasSwitches: [switchTo('controller-bailout', 'controller')],
+        profile: profile,
+      );
+
+      expect(segments, hasLength(2));
+    });
+
+    test('off the loop, starts on the viewed computer\'s own cylinder', () {
+      final openCircuit = makeDive(
+        tanks: const [
+          DiveTank(id: 'a', computerId: 'a', gasMix: GasMix(o2: 32)),
+          DiveTank(id: 'b', computerId: 'b', gasMix: GasMix(), order: 1),
+        ],
+      );
+
+      final segments = activeGasUsageSegments(
+        openCircuit,
+        gasSwitches: null,
+        profile: profile,
+        computerId: 'b',
+      );
+
+      expect(segments.single.gasMix.isAir, isTrue);
+    });
+
+    test('off the loop, a diluent-tagged cylinder does not take the start', () {
+      final openCircuit = makeDive(
+        tanks: const [
+          DiveTank(id: 'back', gasMix: GasMix(o2: 32)),
+          DiveTank(
+            id: 'tagged',
+            gasMix: GasMix(),
+            role: TankRole.diluent,
+            order: 1,
+          ),
+        ],
+      );
+
+      final segments = activeGasUsageSegments(
+        openCircuit,
+        gasSwitches: null,
+        profile: profile,
+      );
+
+      expect(segments.single.gasMix.o2, 32);
+    });
+
+    test('a computer with no cylinders of its own has no timeline', () {
+      final segments = activeGasUsageSegments(
+        dive,
+        gasSwitches: null,
+        profile: profile,
+        computerId: 'other',
+      );
+
+      expect(segments, isEmpty);
+    });
+  });
+
+  group('rebreatherLoopGas', () {
+    const stage = DiveTank(
+      id: 'stage',
+      gasMix: GasMix(o2: 40),
+      role: TankRole.stage,
+    );
+
+    test('is the diluent the deco model uses on a rebreather dive', () {
+      final dive = makeDive(
+        tanks: const [stage],
+        diluentGas: const GasMix(),
+        diveMode: DiveMode.ccr,
+      );
+      expect(rebreatherLoopGas(dive), const GasMix());
+    });
+
+    test('is null off the loop', () {
+      final dive = makeDive(tanks: const [stage], diluentGas: const GasMix());
+      expect(rebreatherLoopGas(dive), isNull);
+    });
+
+    test('reads the cylinders of the computer in view', () {
+      final dive = makeDive(
+        tanks: const [
+          DiveTank(
+            id: 'controller',
+            computerId: 'controller',
+            gasMix: GasMix(o2: 10, he: 70),
+            role: TankRole.diluent,
+          ),
+          DiveTank(
+            id: 'perdix',
+            computerId: 'perdix',
+            gasMix: GasMix(),
+            role: TankRole.diluent,
+          ),
+        ],
+        diveMode: DiveMode.ccr,
+      );
+
+      expect(rebreatherLoopGas(dive, 'perdix'), const GasMix());
+      expect(rebreatherLoopGas(dive, 'controller')?.he, 70);
+    });
+
+    test('is null when the log records no gas the loop could run on', () {
+      final dive = makeDive(
+        tanks: const [
+          DiveTank(
+            id: 'bailout',
+            gasMix: GasMix(o2: 32),
+            role: TankRole.bailout,
+          ),
+        ],
+        diveMode: DiveMode.ccr,
+      );
+      expect(rebreatherLoopGas(dive), isNull);
+    });
+  });
+
+  group('buildCcrProfileGasSegments', () {
+    const times = [0, 60, 120, 180, 240];
+    const air = GasMix(); // 21/0
+
+    test(
+      'flat curve yields one segment with diluent fractions and setpoint',
+      () {
+        final segments = buildCcrProfileGasSegments(
+          timestamps: times,
+          loopPpO2Curve: const [1.3, 1.3, 1.3, 1.3, 1.3],
+          diluentMix: const GasMix(o2: 18, he: 45),
+        );
+        expect(segments, hasLength(1));
+        expect(segments!.first.setpoint, 1.3);
+        expect(segments.first.fHe, closeTo(0.45, 1e-9));
+        expect(segments.first.fN2, closeTo(0.37, 1e-9));
+      },
+    );
+
+    test('a setpoint switch beyond the tolerance starts a new segment', () {
+      final segments = buildCcrProfileGasSegments(
+        timestamps: times,
+        loopPpO2Curve: const [0.7, 0.7, 1.3, 1.3, 1.3],
+        diluentMix: air,
+      )!;
+      expect(segments, hasLength(2));
+      expect(segments[0].setpoint, 0.7);
+      expect(segments[1].startTimestamp, 120);
+      expect(segments[1].setpoint, 1.3);
+    });
+
+    test('measured noise within the tolerance stays one segment', () {
+      final segments = buildCcrProfileGasSegments(
+        timestamps: times,
+        loopPpO2Curve: const [1.30, 1.28, 1.32, 1.27, 1.31],
+        diluentMix: air,
+      );
+      expect(segments, hasLength(1));
+    });
+
+    test('no curve falls back to a constant fallback setpoint', () {
+      final segments = buildCcrProfileGasSegments(
+        timestamps: times,
+        loopPpO2Curve: null,
+        diluentMix: air,
+        fallbackSetpoint: 1.2,
+      );
+      expect(segments, hasLength(1));
+      expect(segments!.first.setpoint, 1.2);
+    });
+
+    test('no loop ppO2 information at all returns null (legacy path)', () {
+      expect(
+        buildCcrProfileGasSegments(
+          timestamps: times,
+          loopPpO2Curve: null,
+          diluentMix: air,
+        ),
+        isNull,
+      );
+    });
+  });
+
+  group('buildProfileGasSegments', () {
+    test('defaults to air when dive has no tanks', () {
+      final dive = Dive(
+        id: 'dive-no-tanks',
+        dateTime: DateTime.utc(2026, 3, 31),
+      );
+
+      final segments = buildProfileGasSegments(dive, const []);
+
+      expect(segments, hasLength(1));
+      expect(segments.single.startTimestamp, equals(0));
+      expect(segments.single.fN2, closeTo(airN2Fraction, 0.000001));
+      expect(segments.single.fHe, closeTo(0.0, 0.000001));
+    });
+
+    test('returns primary tank gas when there are no switches', () {
+      final dive = Dive(
+        id: 'dive-1',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [DiveTank(id: 'tank-air', gasMix: GasMix(o2: 21, he: 0))],
+      );
+
+      final segments = buildProfileGasSegments(dive, const []);
+
+      expect(segments, hasLength(1));
+      expect(segments.single.startTimestamp, equals(0));
+      expect(segments.single.fN2, closeTo(airN2Fraction, 0.000001));
+      expect(segments.single.fHe, closeTo(0.0, 0.000001));
+    });
+
+    test(
+      'prefers backgas over the first tank when tanks are ordered oddly',
+      () {
+        final dive = Dive(
+          id: 'dive-role-order',
+          dateTime: DateTime.utc(2026, 3, 31),
+          tanks: const [
+            DiveTank(
+              id: 'tank-stage',
+              role: TankRole.stage,
+              gasMix: GasMix(o2: 50, he: 0),
+            ),
+            DiveTank(
+              id: 'tank-backgas',
+              role: TankRole.backGas,
+              gasMix: GasMix(o2: 21, he: 0),
+            ),
+          ],
+        );
+
+        final segments = buildProfileGasSegments(dive, const []);
+
+        expect(segments, hasLength(1));
+        expect(segments.single.startTimestamp, equals(0));
+        expect(segments.single.fN2, closeTo(airN2Fraction, 0.000001));
+        expect(segments.single.fHe, closeTo(0.0, 0.000001));
+      },
+    );
+
+    test('seeds the first segment from a non-air primary tank mix', () {
+      // Every other primary-tank test here starts on air, which takes the
+      // isAir branch of the fN2 ternary; a nitrox primary with no switches
+      // exercises the other branch, computed from o2/he directly.
+      final dive = Dive(
+        id: 'dive-nitrox-primary',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(id: 'tank-ean32', gasMix: GasMix(o2: 32, he: 0)),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(dive, const []);
+
+      expect(segments, hasLength(1));
+      expect(segments.single.fN2, closeTo(0.68, 0.000001));
+      expect(segments.single.fHe, closeTo(0.0, 0.000001));
+    });
+
+    test('falls back to the first tank when none is role backGas', () {
+      final dive = Dive(
+        id: 'dive-no-backgas-role',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(
+            id: 'tank-deco',
+            role: TankRole.deco,
+            gasMix: GasMix(o2: 50, he: 0),
+          ),
+          DiveTank(
+            id: 'tank-bailout',
+            role: TankRole.bailout,
+            gasMix: GasMix(o2: 21, he: 0),
+          ),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(dive, const []);
+
+      // No backGas-role tank exists, so the seed falls back to the first
+      // tank in list order (the deco tank), not the bailout tank.
+      expect(segments, hasLength(1));
+      expect(segments.single.fN2, closeTo(0.5, 0.000001));
+    });
+
+    test('adds sorted switch segments using switch tank gas mixes', () {
+      final dive = Dive(
+        id: 'dive-2',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(id: 'tank-air', gasMix: GasMix(o2: 21, he: 0)),
+          DiveTank(id: 'tank-ean32', gasMix: GasMix(o2: 32, he: 0)),
+          DiveTank(id: 'tank-tx50', gasMix: GasMix(o2: 50, he: 0)),
+        ],
+      );
+
+      final switches = [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-2',
+            diveId: dive.id,
+            timestamp: 1200,
+            tankId: 'tank-tx50',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: '50%',
+          gasMix: 'EAN50',
+          o2Fraction: 0.50,
+        ),
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-1',
+            diveId: dive.id,
+            timestamp: 600,
+            tankId: 'tank-ean32',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: '32%',
+          gasMix: 'EAN32',
+          o2Fraction: 0.32,
+        ),
+      ];
+
+      final segments = buildProfileGasSegments(dive, switches);
+
+      expect(segments, hasLength(3));
+      expect(segments[0].startTimestamp, equals(0));
+      expect(segments[0].fN2, closeTo(airN2Fraction, 0.000001));
+      expect(segments[1].startTimestamp, equals(600));
+      expect(segments[1].fN2, closeTo(0.68, 0.000001));
+      expect(segments[2].startTimestamp, equals(1200));
+      expect(segments[2].fN2, closeTo(0.5, 0.000001));
+    });
+
+    test('later switch replaces earlier one at the same timestamp', () {
+      final dive = Dive(
+        id: 'dive-same-time',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(id: 'tank-air', gasMix: GasMix(o2: 21, he: 0)),
+          DiveTank(id: 'tank-ean32', gasMix: GasMix(o2: 32, he: 0)),
+          DiveTank(id: 'tank-ean50', gasMix: GasMix(o2: 50, he: 0)),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(dive, [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-1',
+            diveId: dive.id,
+            timestamp: 600,
+            tankId: 'tank-ean32',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: '32%',
+          gasMix: 'EAN32',
+          o2Fraction: 0.32,
+        ),
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-2',
+            diveId: dive.id,
+            timestamp: 600,
+            tankId: 'tank-ean50',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: '50%',
+          gasMix: 'EAN50',
+          o2Fraction: 0.50,
+        ),
+      ]);
+
+      expect(segments, hasLength(2));
+      expect(segments[1].startTimestamp, equals(600));
+      expect(segments[1].fN2, closeTo(0.5, 0.000001));
+      expect(segments[1].fHe, closeTo(0.0, 0.000001));
+    });
+
+    test('treats an existing default-air tank as an air segment', () {
+      final dive = Dive(
+        id: 'dive-air-default',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(id: 'tank-1', gasMix: GasMix()),
+          DiveTank(id: 'tank-2', gasMix: GasMix()),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(dive, [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-air',
+            diveId: dive.id,
+            timestamp: 300,
+            tankId: 'tank-2',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: 'Backgas 2',
+          gasMix: 'Air',
+          o2Fraction: 0.21,
+          heFraction: 0.0,
+        ),
+      ]);
+
+      expect(segments, hasLength(2));
+      expect(segments[1].fN2, closeTo(airN2Fraction, 0.000001));
+    });
+
+    test('tanks: override seeds the t=0 segment from that computer\'s own '
+        'backgas, not dive.tanks\' (issue: combined-dive analysis picking up '
+        'the wrong computer\'s tank)', () {
+      // Two computers on one merged dive: computer A's backgas is air,
+      // computer B's is EAN32. dive.tanks lists B first, so without the
+      // tanks: override the t=0 segment would wrongly seed from B's gas
+      // while analyzing A's own profile.
+      final dive = Dive(
+        id: 'dive-multi-computer',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(
+            id: 'tank-b',
+            computerId: 'computer-b',
+            gasMix: GasMix(o2: 32, he: 0),
+          ),
+          DiveTank(
+            id: 'tank-a',
+            computerId: 'computer-a',
+            gasMix: GasMix(o2: 21, he: 0),
+          ),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(
+        dive,
+        const [],
+        tanks: dive.tanks.where((t) => t.computerId == 'computer-a').toList(),
+      );
+
+      expect(segments, hasLength(1));
+      expect(segments.single.fN2, closeTo(airN2Fraction, 0.000001));
+    });
+
+    test('startTimestamp: seeds the first segment before a negative-offset '
+        'secondary computer\'s own first sample (issue: combined-dive '
+        'analysis throwing "gasSegments.first.startTimestamp must be less '
+        'than or equal to the first profile timestamp")', () {
+      // A secondary computer switched on before the merged dive's t=0
+      // reference point: its own bucket's first sample is at -30, so the
+      // schedule must start there too, not at a hardcoded 0.
+      final dive = Dive(
+        id: 'dive-negative-start',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [DiveTank(id: 'tank-air', gasMix: GasMix(o2: 21))],
+      );
+
+      final segments = buildProfileGasSegments(
+        dive,
+        const [],
+        startTimestamp: -30,
+      );
+
+      expect(segments, hasLength(1));
+      expect(segments.single.startTimestamp, equals(-30));
+    });
+
+    test('startTimestamp: drops switches timestamped before the schedule '
+        'start rather than leaving the list non-monotonic', () {
+      final dive = Dive(
+        id: 'dive-negative-start-switch',
+        dateTime: DateTime.utc(2026, 3, 31),
+        tanks: const [
+          DiveTank(id: 'tank-air', gasMix: GasMix(o2: 21)),
+          DiveTank(id: 'tank-ean32', gasMix: GasMix(o2: 32)),
+        ],
+      );
+
+      final segments = buildProfileGasSegments(dive, [
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'switch-before-start',
+            diveId: dive.id,
+            timestamp: -60,
+            tankId: 'tank-ean32',
+            createdAt: DateTime.utc(2026, 3, 31),
+          ),
+          tankName: '32%',
+          gasMix: 'EAN32',
+          o2Fraction: 0.32,
+        ),
+      ], startTimestamp: -30);
+
+      expect(segments, hasLength(1));
+      expect(segments.single.startTimestamp, equals(-30));
+      expect(segments.single.fN2, closeTo(airN2Fraction, 0.000001));
+    });
+  });
+
+  group('combineMultiTankPressures', () {
+    test('returns the tank pressure series when the tank has no volume', () {
+      // Reproduces a Shearwater Teric import: per-sample tank pressure is
+      // present, but cylinder volume is unknown (dive computers log pressure,
+      // not tank size). SAC on the profile graph is shown in bar/min and does
+      // not require volume, so a pressure series must still be produced.
+      const tank = DiveTank(id: 'tank-1', gasMix: GasMix(o2: 21, he: 0));
+      final tankPressures = {
+        'tank-1': const [
+          TankPressurePoint(tankId: 'tank-1', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'tank-1', timestamp: 60, pressure: 190),
+          TankPressurePoint(tankId: 'tank-1', timestamp: 120, pressure: 180),
+        ],
+      };
+
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 60, 120],
+        tankPressures: tankPressures,
+        tanks: const [tank],
+      );
+
+      expect(result, isNotNull);
+      expect(result, hasLength(3));
+      expect(result![0], closeTo(200, 0.001));
+      expect(result[1], closeTo(190, 0.001));
+      expect(result[2], closeTo(180, 0.001));
+    });
+
+    test('weights tanks by volume when volumes are present', () {
+      // Tank A (10 L) drops 200 -> 100; tank B (20 L) holds at 200. The
+      // combined series must be volume-weighted, not a plain average:
+      //   t=60: (100*10 + 200*20) / 30 = 166.67  (plain average would be 150).
+      const tankA = DiveTank(id: 'a', volume: 10, gasMix: GasMix());
+      const tankB = DiveTank(id: 'b', volume: 20, gasMix: GasMix());
+      final tankPressures = {
+        'a': const [
+          TankPressurePoint(tankId: 'a', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'a', timestamp: 60, pressure: 100),
+        ],
+        'b': const [
+          TankPressurePoint(tankId: 'b', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'b', timestamp: 60, pressure: 200),
+        ],
+      };
+
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 60],
+        tankPressures: tankPressures,
+        tanks: const [tankA, tankB],
+      );
+
+      expect(result, isNotNull);
+      expect(result![0], closeTo(200, 0.01));
+      expect(result[1], closeTo(166.667, 0.01));
+    });
+
+    test('weights tanks equally when none has a volume', () {
+      // Same pressures as the volume-weighted case but with no volumes: the
+      // fallback weights tanks equally, so t=60 is (100 + 200) / 2 = 150.
+      const tankA = DiveTank(id: 'a', gasMix: GasMix());
+      const tankB = DiveTank(id: 'b', gasMix: GasMix());
+      final tankPressures = {
+        'a': const [
+          TankPressurePoint(tankId: 'a', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'a', timestamp: 60, pressure: 100),
+        ],
+        'b': const [
+          TankPressurePoint(tankId: 'b', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'b', timestamp: 60, pressure: 200),
+        ],
+      };
+
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 60],
+        tankPressures: tankPressures,
+        tanks: const [tankA, tankB],
+      );
+
+      expect(result, isNotNull);
+      expect(result![0], closeTo(200, 0.01));
+      expect(result[1], closeTo(150, 0.01));
+    });
+
+    test('interpolates between pressure points (O(N) merge-walk)', () {
+      // Single tank, points at t=0 (200 bar) and t=100 (100 bar). At t=50 the
+      // pressure is linearly interpolated: 200 + (100-200)*(50/100) = 150.
+      const tank = DiveTank(id: 'tank-1', gasMix: GasMix());
+      final tankPressures = {
+        'tank-1': const [
+          TankPressurePoint(tankId: 'tank-1', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'tank-1', timestamp: 100, pressure: 100),
+        ],
+      };
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 50, 100],
+        tankPressures: tankPressures,
+        tanks: const [tank],
+      );
+      expect(result, isNotNull);
+      expect(result![0], closeTo(200, 0.001));
+      expect(result[1], closeTo(150, 0.001));
+      expect(result[2], closeTo(100, 0.001));
+    });
+
+    test('uses the first point for timestamps before the series starts', () {
+      const tank = DiveTank(id: 'tank-1', gasMix: GasMix());
+      final tankPressures = {
+        'tank-1': const [
+          TankPressurePoint(tankId: 'tank-1', timestamp: 10, pressure: 200),
+          TankPressurePoint(tankId: 'tank-1', timestamp: 20, pressure: 180),
+        ],
+      };
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 10, 20],
+        tankPressures: tankPressures,
+        tanks: const [tank],
+      );
+      expect(result, isNotNull);
+      expect(result![0], closeTo(200, 0.001)); // before first -> first pressure
+      expect(result[1], closeTo(200, 0.001));
+      expect(result[2], closeTo(180, 0.001));
+    });
+
+    test('holds the last point for timestamps past the series end', () {
+      const tank = DiveTank(id: 'tank-1', gasMix: GasMix());
+      final tankPressures = {
+        'tank-1': const [
+          TankPressurePoint(tankId: 'tank-1', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'tank-1', timestamp: 10, pressure: 180),
+        ],
+      };
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 10, 50],
+        tankPressures: tankPressures,
+        tanks: const [tank],
+      );
+      expect(result, isNotNull);
+      expect(result![0], closeTo(200, 0.001));
+      expect(result[1], closeTo(180, 0.001));
+      expect(result[2], closeTo(180, 0.001)); // past end -> last pressure
+    });
+
+    test('returns null when no tank pressure data is available', () {
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 60],
+        tankPressures: const {},
+        tanks: const [DiveTank(id: 'tank-1', gasMix: GasMix())],
+      );
+
+      expect(result, isNull);
+    });
+
+    test('still produces SAC when pressure tank_id no longer matches a tank', () {
+      // Regression for #276: dive-scoped pressure is fetched by dive id, but a
+      // re-import / reparse can re-key the dive's tanks with fresh UUIDs. The
+      // pressure rows then reference a tank id the dive no longer has, and the
+      // SAC join silently drops them ("un-keyed"). Since the pressure is already
+      // scoped to this dive, it must still produce a curve.
+      const currentTank = DiveTank(id: 'tank-new', gasMix: GasMix());
+      final tankPressures = {
+        'tank-old': const [
+          TankPressurePoint(tankId: 'tank-old', timestamp: 0, pressure: 200),
+          TankPressurePoint(tankId: 'tank-old', timestamp: 60, pressure: 190),
+          TankPressurePoint(tankId: 'tank-old', timestamp: 120, pressure: 180),
+        ],
+      };
+
+      final result = combineMultiTankPressures(
+        timestamps: const [0, 60, 120],
+        tankPressures: tankPressures,
+        tanks: const [currentTank],
+      );
+
+      expect(result, isNotNull);
+      final combined = result!;
+      expect(combined, hasLength(3));
+      expect(combined[0], closeTo(200, 0.001));
+      expect(combined[1], closeTo(190, 0.001));
+      expect(combined[2], closeTo(180, 0.001));
+    });
+  });
+
   group('ProfileAnalysisService - Gradient Factor override', () {
     test('different GF values produce different NDL curves', () {
       // Conservative GF 30/70
@@ -240,6 +1136,151 @@ void main() {
       expect(sourceInfo.cnsActual, MetricDataSource.calculated);
     });
 
+    test('CCR: computer ppO2 wins, labeled as not-average', () {
+      final profile = baseProfile
+          .map((p) => p.copyWith(ppO2: 1.3, o2Sensor1: 1.1, setpoint: 0.7))
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.ppO2Curve.first, 1.3);
+      expect(result.ppO2FromSensorAverage, isFalse);
+      // Cells still exposed for the tooltip.
+      expect(result.o2SensorCurves, isNotNull);
+      expect(result.o2SensorCurves!.first.first, 1.1);
+    });
+
+    test('CCR: no computer ppO2 -> cell average, labeled as average', () {
+      final profile = baseProfile
+          .map(
+            (p) => p.copyWith(o2Sensor1: 1.2, o2Sensor2: 1.3, o2Sensor3: 1.4),
+          )
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      // (1.2 + 1.3 + 1.4) / 3 = 1.3
+      expect(result.ppO2Curve.first, closeTo(1.3, 1e-9));
+      expect(result.ppO2FromSensorAverage, isTrue);
+      expect(result.o2SensorCurves!.length, 3);
+    });
+
+    test('CCR: sensor gaps hold last cell value, never drop to setpoint', () {
+      // Cells on every other sample, setpoint 0.7 on all. The cell-less samples
+      // must carry the cell value forward, not jump back to the setpoint.
+      final profile = <DiveProfilePoint>[];
+      for (var i = 0; i < baseProfile.length; i++) {
+        final p = baseProfile[i].copyWith(setpoint: 0.7);
+        profile.add(i.isEven ? p.copyWith(o2Sensor1: 1.3) : p);
+      }
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.ppO2Curve.every((v) => v == 1.3), isTrue);
+      expect(result.ppO2Curve.any((v) => v == 0.7), isFalse);
+      expect(result.ppO2FromSensorAverage, isTrue);
+    });
+
+    test('CCR: only setpoint -> ppO2 from setpoint, never OC', () {
+      final profile = baseProfile
+          .map((p) => p.copyWith(setpoint: 1.3))
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.ppO2Curve.every((v) => v == 1.3), isTrue);
+      expect(result.ppO2FromSensorAverage, isFalse);
+      expect(result.o2SensorCurves, isNull);
+    });
+
+    test('O2 cell millivolts are exposed as per-cell curves', () {
+      final profile = baseProfile
+          .map(
+            (p) => p.copyWith(
+              ppO2: 1.19,
+              o2SensorMv1: 58,
+              o2SensorMv2: 61,
+              o2SensorMv3: 43,
+            ),
+          )
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.o2CellMvCurves, isNotNull);
+      expect(result.o2CellMvCurves!.length, 3);
+      expect(result.o2CellMvCurves![0].first, 58);
+      expect(result.o2CellMvCurves![2].first, 43);
+    });
+
+    test(
+      'a silent lower cell keeps its slot so higher cells stay numbered',
+      () {
+        // Cell 2 reports nothing for the whole dive. Dropping it would shift
+        // cell 3 down to index 1 and mislabel it in the tooltip and legend, so
+        // it is padded with an all-null curve instead.
+        final profile = baseProfile
+            .map((p) => p.copyWith(o2SensorMv1: 58, o2SensorMv3: 43))
+            .toList();
+
+        final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+        expect(result.o2CellMvCurves!.length, 3);
+        expect(result.o2CellMvCurves![0].first, 58);
+        expect(result.o2CellMvCurves![1], everyElement(isNull));
+        expect(result.o2CellMvCurves![2].first, 43);
+      },
+    );
+
+    test('millivolt curves survive with no ppO2, cells or setpoint', () {
+      // Issue #810 in full: an untrusted calibration means no per-cell bar
+      // value, so resolveRebreatherPpO2 bails and the overlay early-returns.
+      // The millivolt curves must not be lost on that path.
+      final profile = baseProfile
+          .map((p) => p.copyWith(o2SensorMv1: 58, o2SensorMv2: 61))
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      // No ppO2 was resolved, so nothing about the ppO2 overlay changed.
+      expect(result.ppO2FromSensorAverage, isFalse);
+      expect(result.o2SensorCurves, isNull);
+      expect(result.o2CellMvCurves, isNotNull);
+      expect(result.o2CellMvCurves!.length, 2);
+      expect(result.o2CellMvCurves![1].first, 61);
+    });
+
+    test('a millivolt gap stays null rather than carrying the last value', () {
+      // A cell that stops reporting must break its line, not interpolate.
+      final profile = <DiveProfilePoint>[];
+      for (var i = 0; i < baseProfile.length; i++) {
+        profile.add(
+          i.isEven ? baseProfile[i].copyWith(o2SensorMv1: 58) : baseProfile[i],
+        );
+      }
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.o2CellMvCurves![0][0], 58);
+      expect(result.o2CellMvCurves![0][1], isNull);
+    });
+
+    test('no millivolt data leaves the curves null', () {
+      final profile = baseProfile
+          .map((p) => p.copyWith(o2Sensor1: 1.1, ppO2: 1.1))
+          .toList();
+
+      final (result, _) = overlayComputerDecoData(baseAnalysis, profile);
+
+      expect(result.o2SensorCurves, isNotNull);
+      expect(result.o2CellMvCurves, isNull);
+    });
+
+    test('OC (no setpoint/cells/ppO2) leaves ppO2 curve untouched', () {
+      final (result, _) = overlayComputerDecoData(baseAnalysis, baseProfile);
+      expect(result.ppO2Curve, equals(baseAnalysis.ppO2Curve));
+    });
+
     test('overlays computer NDL when available', () {
       // Add computer NDL to some profile points
       final profileWithNdl = <DiveProfilePoint>[];
@@ -260,7 +1301,7 @@ void main() {
       // Points with computer NDL should use computer value
       expect(result.ndlCurve[150], equals(600));
 
-      // Points without computer NDL should use calculated value
+      // Points without computer NDL should fall back to calculated values
       expect(result.ndlCurve[50], equals(baseAnalysis.ndlCurve[50]));
 
       expect(sourceInfo.ndlActual, MetricDataSource.computer);
@@ -285,7 +1326,7 @@ void main() {
       // Points with computer ceiling should use computer value
       expect(result.ceilingCurve[250], closeTo(3.0, 0.001));
 
-      // Points without computer ceiling should use calculated value
+      // Points without computer ceiling should fall back to calculated values
       expect(
         result.ceilingCurve[50],
         closeTo(baseAnalysis.ceilingCurve[50], 0.001),
@@ -313,7 +1354,7 @@ void main() {
       // Points with computer TTS should use computer value
       expect(result.ttsCurve![200], equals(120));
 
-      // Points without computer TTS should use calculated value
+      // Points without computer TTS should fall back to calculated values
       expect(result.ttsCurve![50], equals(baseAnalysis.ttsCurve![50]));
 
       expect(sourceInfo.ttsActual, MetricDataSource.computer);
@@ -338,43 +1379,40 @@ void main() {
       // Points with computer CNS should use computer value
       expect(result.cnsCurve![150], closeTo(25.0, 0.001));
 
-      // Points without computer CNS should use calculated value
+      // Points without computer CNS should fall back to calculated values
       expect(result.cnsCurve![50], closeTo(baseAnalysis.cnsCurve![50], 0.001));
 
       expect(sourceInfo.cnsActual, MetricDataSource.computer);
     });
 
-    test(
-      'handles mixed computer data - some points have data, some do not',
-      () {
-        // Alternate: every other point has computer NDL
-        final profileMixed = <DiveProfilePoint>[];
-        for (int i = 0; i < baseProfile.length; i++) {
-          if (i % 2 == 0 && i >= 60 && i < 660) {
-            profileMixed.add(baseProfile[i].copyWith(ndl: 777));
-          } else {
-            profileMixed.add(baseProfile[i]);
-          }
+    test('handles mixed computer data - some points have data, some do not', () {
+      // Alternate: every other point has computer NDL
+      final profileMixed = <DiveProfilePoint>[];
+      for (int i = 0; i < baseProfile.length; i++) {
+        if (i % 2 == 0 && i >= 60 && i < 660) {
+          profileMixed.add(baseProfile[i].copyWith(ndl: 777));
+        } else {
+          profileMixed.add(baseProfile[i]);
         }
+      }
 
-        final (result, sourceInfo) = overlayComputerDecoData(
-          baseAnalysis,
-          profileMixed,
-          ndlSource: MetricDataSource.computer,
-          ceilingSource: MetricDataSource.computer,
-          ttsSource: MetricDataSource.computer,
-          cnsSource: MetricDataSource.computer,
-        );
+      final (result, sourceInfo) = overlayComputerDecoData(
+        baseAnalysis,
+        profileMixed,
+        ndlSource: MetricDataSource.computer,
+        ceilingSource: MetricDataSource.computer,
+        ttsSource: MetricDataSource.computer,
+        cnsSource: MetricDataSource.computer,
+      );
 
-        // Even indices in range should have computer value
-        expect(result.ndlCurve[100], equals(777));
+      // Even indices in range should have computer value
+      expect(result.ndlCurve[100], equals(777));
 
-        // Odd indices should use calculated value
-        expect(result.ndlCurve[101], equals(baseAnalysis.ndlCurve[101]));
+      // Odd indices without computer data should fall back to calculated values
+      expect(result.ndlCurve[101], equals(baseAnalysis.ndlCurve[101]));
 
-        expect(sourceInfo.ndlActual, MetricDataSource.computer);
-      },
-    );
+      expect(sourceInfo.ndlActual, MetricDataSource.computer);
+    });
 
     test('overlays multiple curves simultaneously', () {
       final profileMulti = <DiveProfilePoint>[];
@@ -503,7 +1541,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
-          settingsProvider.overrideWith((ref) => _SettingsNotifier()),
+          sharedPreferencesProvider.overrideWithValue(_prefs),
+          diverRepositoryProvider.overrideWithValue(_FakeDiverRepository()),
+          settingsProvider.overrideWith((ref) => _SettingsNotifier(ref)),
         ],
       );
       addTearDown(container.dispose);
@@ -522,7 +1562,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
-          settingsProvider.overrideWith((ref) => _SettingsNotifier()),
+          sharedPreferencesProvider.overrideWithValue(_prefs),
+          diverRepositoryProvider.overrideWithValue(_FakeDiverRepository()),
+          settingsProvider.overrideWith((ref) => _SettingsNotifier(ref)),
         ],
       );
       addTearDown(container.dispose);
@@ -530,5 +1572,170 @@ void main() {
       final result = container.read(diveProfileAnalysisProvider(dive));
       expect(result, isNull);
     });
+
+    test('always overlays the raw DC deco stop band (decoStopSource: computer '
+        'is wired at this call site)', () {
+      // diveProfileAnalysisProvider always prefers computer-reported data
+      // (used by widgets that render a dive independently of the legend's
+      // session toggles). 4.5 m is not a multiple of the 3 m stop spacing
+      // the calculated curve quantizes to, and this profile is far too
+      // shallow/brief to owe any calculated decompression, so 4.5 can only
+      // reach the result if overlayComputerDecoData's decoStopSource
+      // parameter is actually passed as computer at this call site.
+      final profile = [
+        const DiveProfilePoint(timestamp: 0, depth: 0),
+        const DiveProfilePoint(timestamp: 30, depth: 20, ceiling: 4.5),
+        const DiveProfilePoint(timestamp: 60, depth: 20, ceiling: 4.5),
+        const DiveProfilePoint(timestamp: 90, depth: 0),
+      ];
+      final dive = Dive(
+        id: 'dc-ceiling-dive',
+        dateTime: DateTime(2025, 1, 1),
+        profile: profile,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(_prefs),
+          diverRepositoryProvider.overrideWithValue(_FakeDiverRepository()),
+          settingsProvider.overrideWith((ref) => _SettingsNotifier(ref)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = container.read(diveProfileAnalysisProvider(dive));
+
+      expect(result, isNotNull);
+      expect(result!.decoStopCurve, [0.0, 4.5, 4.5, 0.0]);
+    });
+
+    test(
+      'CCR dive analysis loads on the loop, not the first tank (issue #455)',
+      () async {
+        // 44 m square profile at setpoint 1.3, air diluent, EAN40 first tank.
+        final profile = [
+          for (final (t, d) in [
+            (0, 0.0),
+            (180, 44.0),
+            (1200, 44.0),
+            (2400, 44.0),
+            (2700, 0.0),
+          ])
+            DiveProfilePoint(timestamp: t, depth: d, setpoint: 1.3),
+        ];
+        final ccrDive = makeDive(
+          diveMode: DiveMode.ccr,
+          profile: profile,
+          tanks: const [
+            DiveTank(id: 'bg', gasMix: GasMix(o2: 40), role: TankRole.backGas),
+            DiveTank(id: 'dil', gasMix: GasMix(), role: TankRole.diluent),
+          ],
+        );
+        // Identical dive analyzed as if the segments were absent (legacy
+        // model): first tank EAN40 open circuit.
+        final legacyDive = makeDive(
+          diveMode: DiveMode.oc,
+          profile: profile,
+          tanks: const [
+            DiveTank(id: 'bg', gasMix: GasMix(o2: 40), role: TankRole.backGas),
+            DiveTank(id: 'dil', gasMix: GasMix(), role: TankRole.diluent),
+          ],
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            sharedPreferencesProvider.overrideWithValue(_prefs),
+            diverRepositoryProvider.overrideWithValue(_FakeDiverRepository()),
+            settingsProvider.overrideWith((ref) => _SettingsNotifier(ref)),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final ccr = container.read(diveProfileAnalysisProvider(ccrDive));
+        final legacy = container.read(diveProfileAnalysisProvider(legacyDive));
+
+        expect(ccr, isNotNull);
+        // Loop at 1.3 over air diluent at 44 m loads more N2 than OC EAN40:
+        // the CCR TTS at the last bottom sample exceeds the legacy value.
+        expect(ccr!.ttsCurve![3], greaterThan(legacy!.ttsCurve![3]));
+      },
+    );
+  });
+
+  group('buildAvailableGases forCcrBailout', () {
+    final dive = makeDive(
+      diveMode: DiveMode.ccr,
+      tanks: const [
+        DiveTank(id: 'dil', gasMix: GasMix(), role: TankRole.diluent),
+        DiveTank(
+          id: 'o2',
+          gasMix: GasMix(o2: 100),
+          role: TankRole.oxygenSupply,
+        ),
+        DiveTank(
+          id: 'bail',
+          gasMix: GasMix(o2: 21, he: 35),
+          role: TankRole.bailout,
+        ),
+        DiveTank(id: 'deco', gasMix: GasMix(o2: 50), role: TankRole.deco),
+      ],
+    );
+
+    for (final gasSet in AscentGasSet.values) {
+      test('drops the diluent but keeps the O2 supply (${gasSet.name})', () {
+        final gases = buildAvailableGases(
+          dive,
+          maxPpO2: 1.6,
+          gasSet: gasSet,
+          forCcrBailout: true,
+        );
+        expect(gases.map((g) => g.fO2), [
+          closeTo(1.0, 1e-9),
+          closeTo(0.21, 1e-9),
+          closeTo(0.5, 1e-9),
+        ]);
+      });
+    }
+
+    test('uses only the given tanks', () {
+      final gases = buildAvailableGases(
+        dive,
+        maxPpO2: 1.6,
+        gasSet: AscentGasSet.allCarried,
+        forCcrBailout: true,
+        tanks: [dive.tanks[2]],
+      );
+      expect(gases.map((g) => g.fO2), [closeTo(0.21, 1e-9)]);
+    });
+
+    // An untagged (back gas) cylinder is read the way the CCR switch
+    // classifier reads it: pure O2 is the O2 supply, anything else the
+    // diluent.
+    final untaggedDive = makeDive(
+      diveMode: DiveMode.ccr,
+      tanks: const [
+        DiveTank(id: 'dil', gasMix: GasMix(o2: 32)),
+        DiveTank(id: 'o2', gasMix: GasMix(o2: 100)),
+        DiveTank(
+          id: 'bail',
+          gasMix: GasMix(o2: 21, he: 35),
+          role: TankRole.bailout,
+        ),
+      ],
+    );
+    for (final gasSet in AscentGasSet.values) {
+      test('reads untagged cylinders as the CCR roles (${gasSet.name})', () {
+        final gases = buildAvailableGases(
+          untaggedDive,
+          maxPpO2: 1.6,
+          gasSet: gasSet,
+          forCcrBailout: true,
+        );
+        expect(gases.map((g) => g.fO2), [
+          closeTo(1.0, 1e-9),
+          closeTo(0.21, 1e-9),
+        ]);
+      });
+    }
   });
 }

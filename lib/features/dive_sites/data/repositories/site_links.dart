@@ -1,0 +1,194 @@
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_children.dart';
+import 'package:submersion/features/divers/data/repositories/item_shares_repository.dart';
+import 'package:submersion/features/divers/data/repositories/profile_hides_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_row_restore.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+
+/// How many dives and dive plans a delete of some sites would leave without
+/// a site (issue #1952), for its confirmation.
+class SiteUsage {
+  final int dives;
+  final int plans;
+
+  const SiteUsage({this.dives = 0, this.plans = 0});
+}
+
+/// Everything a site delete cleared or removed with the sites, so an undo
+/// can put it back: dive and plan links, hides, cascaded children and
+/// media.
+class SiteLinks {
+  /// Dive id -> the site it was logged at.
+  final Map<String, String> diveSiteIds;
+
+  /// Dive plan id -> the site it was set at.
+  final Map<String, String> planSiteIds;
+
+  /// The `updated_at` the delete stamped on every row it cleared. A row
+  /// whose stamp differs was edited since, and the undo leaves it alone.
+  final int clearedAt;
+
+  /// Every profile's hide of the sites (issue #2680): the owner's delete
+  /// removes them, so its undo puts them back.
+  final List<ProfileHide> hides;
+
+  /// The profiles the sites were shared with one by one (issue #2151): the
+  /// delete removes the share rows, so its undo puts them back.
+  final List<ItemShare> shares;
+
+  /// The sites' species, features, types and tags (issue #2718).
+  final SiteChildren children;
+
+  /// The site-only media the delete removed (issue #2718).
+  final MediaRowsSnapshot media;
+
+  /// Media id -> the site it was linked to, for every media row at the
+  /// sites: the ones the delete removed and the ones it only unlinked.
+  final Map<String, String> mediaSiteIds;
+
+  /// The sites' documents and pages, captured by an undoable delete
+  /// (issue #2613).
+  final List<DocumentSnapshotEntry> documents;
+
+  const SiteLinks({
+    this.documents = const [],
+    this.diveSiteIds = const {},
+    this.planSiteIds = const {},
+    this.clearedAt = 0,
+    this.hides = const [],
+    this.shares = const [],
+    this.children = const SiteChildren(),
+    this.media = const MediaRowsSnapshot(),
+    this.mediaSiteIds = const {},
+  });
+
+  SiteLinks copyWith({
+    List<DocumentSnapshotEntry>? documents,
+    Map<String, String>? diveSiteIds,
+    Map<String, String>? planSiteIds,
+    int? clearedAt,
+    List<ProfileHide>? hides,
+    List<ItemShare>? shares,
+    SiteChildren? children,
+    MediaRowsSnapshot? media,
+    Map<String, String>? mediaSiteIds,
+  }) => SiteLinks(
+    documents: documents ?? this.documents,
+    diveSiteIds: diveSiteIds ?? this.diveSiteIds,
+    planSiteIds: planSiteIds ?? this.planSiteIds,
+    clearedAt: clearedAt ?? this.clearedAt,
+    hides: hides ?? this.hides,
+    shares: shares ?? this.shares,
+    children: children ?? this.children,
+    media: media ?? this.media,
+    mediaSiteIds: mediaSiteIds ?? this.mediaSiteIds,
+  );
+}
+
+/// Counts every dive and plan at [siteIds]. Every dive counts, excluded and
+/// planned ones included: the delete clears them all.
+Future<SiteUsage> countLinksToSites(
+  AppDatabase db,
+  List<String> siteIds,
+) async {
+  if (siteIds.isEmpty) return const SiteUsage();
+  final diveCount = db.dives.id.count();
+  final planCount = db.divePlans.id.count();
+  final dives =
+      await (db.selectOnly(db.dives)
+            ..addColumns([diveCount])
+            ..where(db.dives.siteId.isIn(siteIds)))
+          .map((row) => row.read(diveCount))
+          .getSingle();
+  final plans =
+      await (db.selectOnly(db.divePlans)
+            ..addColumns([planCount])
+            ..where(db.divePlans.siteId.isIn(siteIds)))
+          .map((row) => row.read(planCount))
+          .getSingle();
+  return SiteUsage(dives: dives ?? 0, plans: plans ?? 0);
+}
+
+/// Reads the links every dive and plan holds to [siteIds], as a delete that
+/// stamps its clears with [clearedAt] is about to clear them. Run it inside
+/// the delete's transaction, so the undo covers exactly the rows cleared.
+Future<SiteLinks> readLinksToSites(
+  AppDatabase db,
+  List<String> siteIds, {
+  required int clearedAt,
+}) async {
+  if (siteIds.isEmpty) return SiteLinks(clearedAt: clearedAt);
+  final dives =
+      await (db.selectOnly(db.dives)
+            ..addColumns([db.dives.id, db.dives.siteId])
+            ..where(db.dives.siteId.isIn(siteIds)))
+          .get();
+  final plans =
+      await (db.selectOnly(db.divePlans)
+            ..addColumns([db.divePlans.id, db.divePlans.siteId])
+            ..where(db.divePlans.siteId.isIn(siteIds)))
+          .get();
+  return SiteLinks(
+    diveSiteIds: {
+      for (final row in dives)
+        row.read(db.dives.id)!: row.read(db.dives.siteId)!,
+    },
+    planSiteIds: {
+      for (final row in plans)
+        row.read(db.divePlans.id)!: row.read(db.divePlans.siteId)!,
+    },
+    clearedAt: clearedAt,
+  );
+}
+
+/// Points the dives and plans of [links] back at their sites, which must
+/// exist again, stamping and marking each row it changes. Only a row still
+/// exactly as the delete left it is restored: one deleted, given another
+/// site, or saved again since carries a newer choice the undo must not
+/// overwrite.
+Future<void> restoreLinksToSites(
+  AppDatabase db,
+  SyncRepository syncRepository,
+  SiteLinks links, {
+  required int now,
+}) => db.transaction(() async {
+  for (final MapEntry(key: id, value: siteId) in links.diveSiteIds.entries) {
+    final changed =
+        await (db.update(db.dives)..where(
+              (t) =>
+                  t.id.equals(id) &
+                  t.siteId.isNull() &
+                  t.updatedAt.equals(links.clearedAt),
+            ))
+            .write(
+              DivesCompanion(siteId: Value(siteId), updatedAt: Value(now)),
+            );
+    if (changed == 0) continue;
+    await syncRepository.markRecordPending(
+      entityType: 'dives',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+  }
+  for (final MapEntry(key: id, value: siteId) in links.planSiteIds.entries) {
+    final changed =
+        await (db.update(db.divePlans)..where(
+              (t) =>
+                  t.id.equals(id) &
+                  t.siteId.isNull() &
+                  t.updatedAt.equals(links.clearedAt),
+            ))
+            .write(
+              DivePlansCompanion(siteId: Value(siteId), updatedAt: Value(now)),
+            );
+    if (changed == 0) continue;
+    await syncRepository.markRecordPending(
+      entityType: 'divePlans',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+  }
+});

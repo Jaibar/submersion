@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart'
     as domain;
 import 'package:uuid/uuid.dart';
@@ -10,6 +11,19 @@ class DiveCustomFieldRepository {
   static const _uuid = Uuid();
 
   DiveCustomFieldRepository(this._db);
+
+  /// Emits whenever the custom-field rows a query could return change.
+  ///
+  /// Watches `dives` as well as `dive_custom_fields` because
+  /// [getDistinctKeysForDiver] joins the two: deleting a dive removes its
+  /// custom fields by cascade, which changes the suggestion set without the
+  /// `dive_custom_fields` table being written directly.
+  Stream<void> watchCustomFieldsChanges() => _db.tableUpdates(
+    TableUpdateQuery.allOf([
+      TableUpdateQuery.onTable(_db.diveCustomFields),
+      TableUpdateQuery.onTable(_db.dives),
+    ]),
+  );
 
   /// Get all custom fields for a single dive, ordered by sort order.
   Future<List<domain.DiveCustomField>> getFieldsForDive(String diveId) async {
@@ -81,12 +95,15 @@ class DiveCustomFieldRepository {
           'SELECT DISTINCT cf.field_key FROM dive_custom_fields cf '
           'INNER JOIN dives d ON cf.dive_id = d.id '
           'WHERE d.diver_id = ? '
-          'ORDER BY cf.field_key',
+          'ORDER BY cf.field_key COLLATE NOCASE',
           variables: [Variable(diverId)],
         )
         .get();
 
-    return result.map((row) => row.data['field_key'] as String).toList();
+    return sortedByText(
+      result.map((row) => row.data['field_key'] as String),
+      (key) => key,
+    );
   }
 
   domain.DiveCustomField _mapRowToField(DiveCustomField row) {

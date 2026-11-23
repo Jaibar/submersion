@@ -1,0 +1,322 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'package:submersion/core/utils/log_failure.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/safety_finding.dart';
+import 'package:submersion/features/dive_log/presentation/info/safety_review_info.dart';
+import 'package:submersion/features/dive_log/presentation/providers/safety_review_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/collapsible_section.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/safety_finding_highlight.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/safety_finding_text.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_detail/editing/dive_safety_sitting.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
+
+/// Whether [review] has any finding to show, with the review [enabled] and
+/// the diver's [disabled] rules filtered out.
+///
+/// Shared with [DiveSafetySummarySection] so the section that decides
+/// whether to reserve space for [SafetyReviewSection] and the widget that
+/// decides whether to render it agree on the same answer.
+bool hasVisibleSafetyFindings(
+  SafetyReview? review, {
+  required bool enabled,
+  required Set<String> disabled,
+}) {
+  if (!enabled || review == null) return false;
+  return review.findings.any((f) => !disabled.contains(f.ruleId.dbValue));
+}
+
+/// Dive detail section listing the post-dive safety review findings.
+///
+/// Tone rules (safety-features spec): neutral wording and iconography, no
+/// alarm red, per-finding dismiss plus a footer action that dismisses (or
+/// restores) the whole dive at once. Collapses to nothing when the review is
+/// disabled, absent, or has no findings to show; pairs with
+/// [DiveSafetySummarySection], which owns the space above the pair.
+class SafetyReviewSection extends ConsumerStatefulWidget {
+  final String diveId;
+
+  /// The open Safety review card's sitting (issue #4527): dismissing and
+  /// restoring go there, held until Save. On a page that offers editing
+  /// and with no sitting given, the findings read only.
+  final EditSession<Dive>? editing;
+
+  const SafetyReviewSection({required this.diveId, this.editing, super.key});
+
+  @override
+  ConsumerState<SafetyReviewSection> createState() =>
+      _SafetyReviewSectionState();
+}
+
+class _SafetyReviewSectionState extends ConsumerState<SafetyReviewSection> {
+  bool _expanded = true;
+  bool _showDismissed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = ref.watch(safetyReviewEnabledProvider);
+    final disabled = ref.watch(safetyReviewDisabledRulesProvider);
+    final stored = ref.watch(safetyReviewProvider(widget.diveId)).value;
+    final scope = RecordEditScope.maybeOf<Dive>(context);
+    final editing = widget.editing;
+    final session = editing ?? scope?.session;
+    // A page that offers editing changes findings in the open card only;
+    // during a sitting every view shows its dismissals. Off such a page the
+    // card dismisses at once: the planner's logged dive results show it with
+    // no dive lock (issue #4673), so that path stays.
+    final readOnly = scope != null && editing == null;
+    final review = stored == null || session == null
+        ? stored
+        : reviewInSitting(session, stored);
+    if (!hasVisibleSafetyFindings(
+      review,
+      enabled: enabled,
+      disabled: disabled,
+    )) {
+      return const SizedBox.shrink();
+    }
+
+    final visible = review!.findings
+        .where((f) => !disabled.contains(f.ruleId.dbValue))
+        .toList();
+    final active = visible.where((f) => !f.isDismissed).toList();
+    final dismissed = visible.where((f) => f.isDismissed).toList();
+
+    final l10n = context.l10n;
+    final units = ref.watch(unitFormatterProvider);
+    final selectedFinding = ref.watch(
+      selectedSafetyFindingProvider(widget.diveId),
+    );
+
+    return CollapsibleSection(
+      title: l10n.safetyReview_sectionTitle,
+      icon: Icons.health_and_safety_outlined,
+      trailing: Text(
+        l10n.safetyReview_findingCount(active.length),
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+      // Its pencil, while the dive is unlocked: in the header's actions,
+      // which show expanded as well as collapsed.
+      headerActions: RecordCardPencil(
+        cardTitle: l10n.safetyReview_sectionTitle,
+      ),
+      isExpanded: _expanded,
+      onToggle: (expanded) => setState(() => _expanded = expanded),
+      info: (context) => safetyReviewInfo(
+        context.l10n,
+        infoUnits(context),
+        rules: {for (final finding in active) finding.ruleId},
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final finding in active)
+            _FindingTile(
+              finding: finding,
+              units: units,
+              selected: selectedFinding?.id == finding.id,
+              onTap: _tapHandlerFor(finding),
+              onDismissChanged: readOnly
+                  ? null
+                  : (dismissed) => _setDismissed(finding, dismissed),
+            ),
+          // Footer: the dismissed-findings toggle on the left, the bulk
+          // action on the right. The bulk action flips to "restore all"
+          // once nothing active is left, so the row never offers a no-op.
+          //
+          // OverflowBar, not Row: after a "dismiss all" both controls are on
+          // screen at once, and in the longer locales that pair does not fit
+          // a narrow phone. OverflowBar stacks them instead of overflowing.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: OverflowBar(
+              alignment: dismissed.isEmpty
+                  ? MainAxisAlignment.end
+                  : MainAxisAlignment.spaceBetween,
+              overflowAlignment: OverflowBarAlignment.end,
+              children: [
+                if (dismissed.isNotEmpty)
+                  TextButton(
+                    onPressed: () =>
+                        setState(() => _showDismissed = !_showDismissed),
+                    child: Text(
+                      l10n.safetyReview_showDismissed(dismissed.length),
+                    ),
+                  ),
+                if (!readOnly)
+                  TextButton(
+                    onPressed: () => _onBulkPressed(
+                      active.isNotEmpty,
+                      active.isNotEmpty ? active : dismissed,
+                    ),
+                    child: Text(
+                      active.isNotEmpty
+                          ? l10n.safetyReview_dismissAll
+                          : l10n.safetyReview_restoreAll,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (dismissed.isNotEmpty && _showDismissed)
+            for (final finding in dismissed)
+              Opacity(
+                opacity: 0.6,
+                child: _FindingTile(
+                  finding: finding,
+                  units: units,
+                  selected: selectedFinding?.id == finding.id,
+                  onTap: _tapHandlerFor(finding),
+                  onDismissChanged: readOnly
+                      ? null
+                      : (dismissed) => _setDismissed(finding, dismissed),
+                ),
+              ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
+  /// Tap toggles chart highlighting; findings without a start timestamp
+  /// (nullable in storage) cannot be placed on the time axis and stay inert.
+  /// A missing end timestamp is fine: the chart treats it as an instant.
+  VoidCallback? _tapHandlerFor(SafetyFinding finding) {
+    if (finding.startTimestamp == null) return null;
+    return () => _toggleSelected(finding);
+  }
+
+  void _toggleSelected(SafetyFinding finding) {
+    final notifier = ref.read(
+      selectedSafetyFindingProvider(widget.diveId).notifier,
+    );
+    final wasSelected = notifier.state?.id == finding.id;
+    notifier.state = wasSelected ? null : finding;
+    if (wasSelected) return;
+    // Bring the profile chart (fixed near the top of the page) into view so
+    // the highlight is visible immediately. Works for both the master-detail
+    // retained controller and a standalone page's internal controller.
+    Scrollable.maybeOf(context)?.position.animateTo(
+      0,
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeInOutCubic,
+    );
+  }
+
+  Future<void> _setDismissed(SafetyFinding finding, bool dismissed) async {
+    final editing = widget.editing;
+    if (editing != null) {
+      setFindingDismissed(editing, finding, dismissed: dismissed);
+      return;
+    }
+    // At once: the planner's logged dive results, which have no dive lock.
+    return setSafetyFindingDismissed(
+      ref,
+      finding: finding,
+      dismissed: dismissed,
+    );
+  }
+
+  /// Dismisses every active finding on the dive, or restores every dismissed
+  /// one when nothing is active. Scoped to the enabled rules, so findings the
+  /// diver has hidden in settings are left as they are.
+  ///
+  /// The button callback cannot await, so a failed write would otherwise reach
+  /// the zone handler with no clue where it came from; logFailure attributes
+  /// it. The list simply does not change, which is the user-visible signal.
+  void _onBulkPressed(bool dismissed, List<SafetyFinding> findings) {
+    final editing = widget.editing;
+    if (editing != null) {
+      setAllFindingsDismissed(editing, findings, dismissed: dismissed);
+      return;
+    }
+    logFailure(
+      setAllSafetyFindingsDismissed(
+        ref,
+        diveId: widget.diveId,
+        dismissed: dismissed,
+      ),
+      _SafetyReviewSectionState,
+      dismissed ? 'dismiss all safety findings' : 'restore all safety findings',
+    );
+  }
+}
+
+class _FindingTile extends StatelessWidget {
+  final SafetyFinding finding;
+  final UnitFormatter units;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  /// Null reads only: the dive is locked, or the card closed in a sitting.
+  final ValueChanged<bool>? onDismissChanged;
+
+  const _FindingTile({
+    required this.finding,
+    required this.units,
+    required this.selected,
+    required this.onTap,
+    required this.onDismissChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final colorScheme = Theme.of(context).colorScheme;
+    final severityColor = safetySeverityColor(finding.severity, colorScheme);
+
+    return ListTile(
+      dense: true,
+      selected: selected,
+      selectedTileColor: severityColor.withValues(alpha: 0.08),
+      onTap: onTap,
+      leading: Icon(_iconFor(finding.severity), size: 20, color: severityColor),
+      title: Text(safetyFindingTitle(finding, l10n, units)),
+      subtitle: finding.startTimestamp != null && finding.endTimestamp != null
+          ? Text(
+              l10n.safetyReview_timeRange(
+                _runTime(finding.startTimestamp!),
+                _runTime(finding.endTimestamp!),
+              ),
+            )
+          : null,
+      trailing: switch (onDismissChanged) {
+        null => null,
+        final change => IconButton(
+          icon: Icon(
+            finding.isDismissed ? Icons.undo : Icons.close,
+            size: 18,
+            color: colorScheme.onSurfaceVariant,
+          ),
+          tooltip: finding.isDismissed
+              ? l10n.safetyReview_restore
+              : l10n.safetyReview_dismiss,
+          onPressed: () => change(!finding.isDismissed),
+        ),
+      },
+    );
+  }
+
+  IconData _iconFor(SafetySeverity severity) {
+    return switch (severity) {
+      SafetySeverity.info => Icons.info_outline,
+      SafetySeverity.caution => Icons.report_problem_outlined,
+      SafetySeverity.significant => Icons.report_problem_outlined,
+    };
+  }
+
+  String _runTime(int timestampSeconds) {
+    final minutes = timestampSeconds ~/ 60;
+    final seconds = timestampSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+}

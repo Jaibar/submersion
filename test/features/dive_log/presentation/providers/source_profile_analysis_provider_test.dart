@@ -1,0 +1,557 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart'
+    show AppDatabase, DiveComputersCompanion, GasSwitchesCompanion;
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/source_profile.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+
+import '../../../../helpers/analysis_pipeline_overrides.dart';
+import '../../../../helpers/test_database.dart';
+
+late SharedPreferences _prefs;
+
+/// A simple descending-then-flat profile with [count] samples spaced
+/// [stepSeconds] apart, starting at [startOffsetSeconds].
+List<DiveProfilePoint> _profile(
+  int count, {
+  int stepSeconds = 2,
+  int startOffsetSeconds = 0,
+}) {
+  return List.generate(
+    count,
+    (i) => DiveProfilePoint(
+      timestamp: startOffsetSeconds + i * stepSeconds,
+      depth: i < count / 2 ? i * 0.4 : (count - 1 - i) * 0.4,
+    ),
+  );
+}
+
+void main() {
+  late AppDatabase db;
+
+  setUpAll(() async {
+    SharedPreferences.setMockInitialValues({});
+    _prefs = await SharedPreferences.getInstance();
+  });
+
+  setUp(() async {
+    // Real in-memory DB so repository-backed lookups inside the analysis
+    // pipeline (surface interval, events, gas switches) resolve cleanly.
+    db = await setUpTestDatabase();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  DiveDataSource source(String id, String? computerId, bool isPrimary) {
+    final now = DateTime(2026, 5, 7);
+    return DiveDataSource(
+      id: id,
+      diveId: 'dive-1',
+      computerId: computerId,
+      isPrimary: isPrimary,
+      importedAt: now,
+      createdAt: now,
+    );
+  }
+
+  test('primary analysis on a multi-source dive is computed from the primary '
+      'source bucket, not the merged dive.profile', () async {
+    // Legacy-shaped data: dive.profile holds BOTH computers' samples
+    // interleaved (both flagged primary by an older consolidation),
+    // while the per-source buckets hold 100 samples each. The chart
+    // plots the bucket, so the analysis must be computed over it too --
+    // index-pairing a 200-sample analysis against a 100-sample chart
+    // profile stretches every curve to ~2x its true duration.
+    final primaryBucket = _profile(100);
+    final secondaryBucket = _profile(100, startOffsetSeconds: 1);
+    final merged = [...primaryBucket, ...secondaryBucket]
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      profile: merged,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+        diveDataSourcesProvider('dive-1').overrideWith(
+          (ref) async => [
+            source('src-a', 'dc-a', true),
+            source('src-b', 'dc-b', false),
+          ],
+        ),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            'src-a': SourceProfile(
+              sourceId: 'src-a',
+              computerId: 'dc-a',
+              isEdited: false,
+              points: primaryBucket,
+            ),
+            'src-b': SourceProfile(
+              sourceId: 'src-b',
+              computerId: 'dc-b',
+              isEdited: false,
+              points: secondaryBucket,
+            ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    // sourceId null = "the primary source".
+    final primaryAnalysis = await container.read(
+      sourceProfileAnalysisProvider((diveId: 'dive-1', sourceId: null)).future,
+    );
+
+    expect(primaryAnalysis, isNotNull);
+    expect(primaryAnalysis!.ascentRates.length, primaryBucket.length);
+
+    // The explicit primary id resolves identically.
+    final byId = await container.read(
+      sourceProfileAnalysisProvider((
+        diveId: 'dive-1',
+        sourceId: 'src-a',
+      )).future,
+    );
+    expect(byId!.ascentRates.length, primaryBucket.length);
+  });
+
+  test('a stale source id resolves to the primary bucket, not the merged '
+      'dive.profile (#543)', () async {
+    // The active-source selection can outlive its source row (a split). The
+    // chart resolves that to the primary; the analysis must follow, or its
+    // merged-length curves get index-paired with the primary's bucket.
+    final primaryBucket = _profile(100);
+    final secondaryBucket = _profile(100, startOffsetSeconds: 1);
+    final merged = [...primaryBucket, ...secondaryBucket]
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      profile: merged,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+        diveDataSourcesProvider('dive-1').overrideWith(
+          (ref) async => [
+            source('src-a', 'dc-a', true),
+            source('src-b', 'dc-b', false),
+          ],
+        ),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            'src-a': SourceProfile(
+              sourceId: 'src-a',
+              computerId: 'dc-a',
+              isEdited: false,
+              points: primaryBucket,
+            ),
+            'src-b': SourceProfile(
+              sourceId: 'src-b',
+              computerId: 'dc-b',
+              isEdited: false,
+              points: secondaryBucket,
+            ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final analysis = await container.read(
+      sourceProfileAnalysisProvider((
+        diveId: 'dive-1',
+        sourceId: 'src-gone',
+      )).future,
+    );
+
+    expect(analysis, isNotNull);
+    expect(analysis!.ascentRates.length, primaryBucket.length);
+  });
+
+  // usesPerSourceRendering, the rule every profile surface picks its series
+  // with, is false for the sequential halves of a Combine even though there
+  // are two sources (#1451): those surfaces draw the merged dive.profile,
+  // because drawing one half would hide the rest of the dive. A source count
+  // does not see that, so the analysis was computed over the primary half and
+  // index-paired against a chart showing the whole dive: every curve ran out
+  // halfway along, and the ones that did land were on the wrong samples.
+  test('a Combine\'s sequential halves analyse the merged dive.profile the '
+      'chart actually draws (#1451)', () async {
+    // Non-overlapping: the halves meet end to end, exactly what a Combine
+    // produces and what sourceProfilesAreSequential detects.
+    final firstHalf = _profile(100);
+    final secondHalf = _profile(100, startOffsetSeconds: 200);
+    final merged = [...firstHalf, ...secondHalf];
+
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      profile: merged,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+        diveDataSourcesProvider('dive-1').overrideWith(
+          (ref) async => [
+            source('src-a', 'dc-a', true),
+            source('src-b', 'dc-b', false),
+          ],
+        ),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            'src-a': SourceProfile(
+              sourceId: 'src-a',
+              computerId: 'dc-a',
+              isEdited: false,
+              points: firstHalf,
+            ),
+            'src-b': SourceProfile(
+              sourceId: 'src-b',
+              computerId: 'dc-b',
+              isEdited: false,
+              points: secondHalf,
+            ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final analysis = await container.read(
+      sourceProfileAnalysisProvider((diveId: 'dive-1', sourceId: null)).future,
+    );
+
+    expect(analysis, isNotNull);
+    // The whole dive, not one half of it.
+    expect(analysis!.ascentRates.length, merged.length);
+  });
+
+  test('single-source dives keep using dive.profile', () async {
+    final profile = _profile(80);
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      profile: profile,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+        diveDataSourcesProvider(
+          'dive-1',
+        ).overrideWith((ref) async => [source('src-a', 'dc-a', true)]),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            'src-a': SourceProfile(
+              sourceId: 'src-a',
+              computerId: 'dc-a',
+              isEdited: false,
+              points: profile,
+            ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final analysis = await container.read(
+      sourceProfileAnalysisProvider((diveId: 'dive-1', sourceId: null)).future,
+    );
+
+    expect(analysis, isNotNull);
+    expect(analysis!.ascentRates.length, profile.length);
+  });
+
+  /// A dive whose `dive.profile` is [merged], with [sources] and their
+  /// per-source [buckets].
+  ProviderContainer diveWith({
+    required List<DiveProfilePoint> merged,
+    required List<DiveDataSource> sources,
+    required Map<String, List<DiveProfilePoint>> buckets,
+  }) {
+    final byId = {for (final s in sources) s.id: s};
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith(
+          (ref) async => Dive(
+            id: 'dive-1',
+            dateTime: DateTime(2026, 5, 7),
+            profile: merged,
+          ),
+        ),
+        diveDataSourcesProvider('dive-1').overrideWith((ref) async => sources),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            for (final entry in buckets.entries)
+              entry.key: SourceProfile(
+                sourceId: entry.key,
+                computerId: byId[entry.key]!.computerId,
+                isEdited: false,
+                points: entry.value,
+              ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    return container;
+  }
+
+  // Every reader of the dive-level analysis (the safety review, the residual
+  // CNS and tissue chain into the next dive, the deco classification, the
+  // planner) used to get both computers' samples interleaved by timestamp,
+  // whose neighbouring samples disagree by the computers' clock offset (#2888).
+  test('the dive-level analysis of a multi-source dive replays the primary '
+      "source's own samples, not both computers' interleaved", () async {
+    final primaryBucket = _profile(100);
+    final secondaryBucket = _profile(100, startOffsetSeconds: 1);
+    final container = diveWith(
+      merged: [...primaryBucket, ...secondaryBucket]
+        ..sort((a, b) => a.timestamp.compareTo(b.timestamp)),
+      sources: [source('src-a', 'dc-a', true), source('src-b', 'dc-b', false)],
+      buckets: {'src-a': primaryBucket, 'src-b': secondaryBucket},
+    );
+
+    final analysis = await container.read(
+      profileAnalysisProvider('dive-1').future,
+    );
+
+    expect(analysis, isNotNull);
+    expect(analysis!.ascentRates.length, primaryBucket.length);
+  });
+
+  test("the primary's per-source analysis is the dive-level one, whichever "
+      'key names it', () async {
+    final primaryBucket = _profile(100);
+    final secondaryBucket = _profile(100, startOffsetSeconds: 1);
+    final container = diveWith(
+      merged: [...primaryBucket, ...secondaryBucket]
+        ..sort((a, b) => a.timestamp.compareTo(b.timestamp)),
+      sources: [source('src-a', 'dc-a', true), source('src-b', 'dc-b', false)],
+      buckets: {'src-a': primaryBucket, 'src-b': secondaryBucket},
+    );
+
+    final diveLevel = await container.read(
+      profileAnalysisProvider('dive-1').future,
+    );
+    // The chart reads (sourceId: null) by default and the primary's own id
+    // once its chip is tapped; neither replays the samples a second time.
+    for (final sourceId in [null, 'src-a', 'src-gone']) {
+      final perSource = await container.read(
+        sourceProfileAnalysisProvider((
+          diveId: 'dive-1',
+          sourceId: sourceId,
+        )).future,
+      );
+      expect(identical(perSource, diveLevel), isTrue, reason: '$sourceId');
+    }
+    final secondary = await container.read(
+      sourceProfileAnalysisProvider((
+        diveId: 'dive-1',
+        sourceId: 'src-b',
+      )).future,
+    );
+    expect(identical(secondary, diveLevel), isFalse);
+  });
+
+  test('a primary that owns no samples analyses dive.profile when only one '
+      'other source recorded the dive', () async {
+    final recorded = _profile(100);
+    final container = diveWith(
+      merged: recorded,
+      sources: [source('src-a', null, true), source('src-b', 'dc-b', false)],
+      buckets: {'src-a': const [], 'src-b': recorded},
+    );
+
+    final analysis = await container.read(
+      profileAnalysisProvider('dive-1').future,
+    );
+
+    expect(analysis, isNotNull);
+    expect(analysis!.ascentRates.length, recorded.length);
+  });
+
+  test('a primary that owns no samples is not analysed over the other '
+      "sources' samples interleaved", () async {
+    final b = _profile(100);
+    final c = _profile(100, startOffsetSeconds: 1);
+    final container = diveWith(
+      merged: [...b, ...c]..sort((x, y) => x.timestamp.compareTo(y.timestamp)),
+      sources: [
+        source('src-a', null, true),
+        source('src-b', 'dc-b', false),
+        source('src-c', 'dc-c', false),
+      ],
+      buckets: {'src-a': const [], 'src-b': b, 'src-c': c},
+    );
+
+    expect(
+      await container.read(profileAnalysisProvider('dive-1').future),
+      isNull,
+    );
+  });
+
+  test('a computer-scoped analysis only applies gas switches on tanks it '
+      'owns, not another computer\'s', () async {
+    // Two computers, each with its own back-gas tank and its own logged gas
+    // switch. Requesting src-a's analysis must scope
+    // getGasSwitchesForDive's results to tank-a's switch only -- mixing in
+    // tank-b's switch (on a different clock/tank) would corrupt src-a's gas
+    // schedule.
+    final primaryBucket = _profile(60);
+    final secondaryBucket = _profile(60);
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      profile: [...primaryBucket, ...secondaryBucket],
+      tanks: const [
+        DiveTank(id: 'tank-a', computerId: 'dc-a', gasMix: GasMix(o2: 21)),
+        DiveTank(id: 'tank-b', computerId: 'dc-b', gasMix: GasMix(o2: 32)),
+      ],
+    );
+
+    final now = DateTime.utc(2026, 5, 7).millisecondsSinceEpoch;
+
+    // dive_tanks.computer_id and gas_switches.dive_id both carry foreign
+    // keys (to dive_computers and dives respectively), so the computers and
+    // the dive itself have to be persisted -- not just handed to the
+    // provider via analysisDiveProvider's override -- before the tanks and
+    // switches referencing them can be inserted.
+    for (final id in ['dc-a', 'dc-b']) {
+      await db
+          .into(db.diveComputers)
+          .insert(
+            DiveComputersCompanion.insert(
+              id: id,
+              name: id,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+    }
+    await DiveRepository().createDive(dive);
+
+    await db
+        .into(db.gasSwitches)
+        .insert(
+          GasSwitchesCompanion.insert(
+            id: 'switch-a',
+            diveId: dive.id,
+            timestamp: 60,
+            tankId: 'tank-a',
+            createdAt: now,
+          ),
+        );
+    await db
+        .into(db.gasSwitches)
+        .insert(
+          GasSwitchesCompanion.insert(
+            id: 'switch-b',
+            diveId: dive.id,
+            timestamp: 90,
+            tankId: 'tank-b',
+            createdAt: now,
+          ),
+        );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+        diveDataSourcesProvider('dive-1').overrideWith(
+          (ref) async => [
+            source('src-a', 'dc-a', true),
+            source('src-b', 'dc-b', false),
+          ],
+        ),
+        sourceProfilesProvider('dive-1').overrideWith(
+          (ref) async => {
+            'src-a': SourceProfile(
+              sourceId: 'src-a',
+              computerId: 'dc-a',
+              isEdited: false,
+              points: primaryBucket,
+            ),
+            'src-b': SourceProfile(
+              sourceId: 'src-b',
+              computerId: 'dc-b',
+              isEdited: false,
+              points: secondaryBucket,
+            ),
+          },
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final srcA = await container.read(
+      sourceProfileAnalysisProvider((
+        diveId: 'dive-1',
+        sourceId: 'src-a',
+      )).future,
+    );
+    final srcB = await container.read(
+      sourceProfileAnalysisProvider((
+        diveId: 'dive-1',
+        sourceId: 'src-b',
+      )).future,
+    );
+
+    expect(srcA, isNotNull);
+    expect(srcB, isNotNull);
+  });
+
+  test('a CCR dive computes its gas segments from the loop setpoint, not '
+      'buildProfileGasSegments', () async {
+    final profile = [
+      for (final (t, d) in [(0, 0.0), (180, 30.0), (600, 30.0), (900, 0.0)])
+        DiveProfilePoint(timestamp: t, depth: d, setpoint: 1.3),
+    ];
+    final dive = Dive(
+      id: 'dive-1',
+      dateTime: DateTime(2026, 5, 7),
+      diveMode: DiveMode.ccr,
+      profile: profile,
+      tanks: const [
+        DiveTank(id: 'bg', gasMix: GasMix(o2: 40), role: TankRole.backGas),
+        DiveTank(id: 'dil', gasMix: GasMix(), role: TankRole.diluent),
+      ],
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        ...analysisPipelineOverrides(_prefs),
+        analysisDiveProvider('dive-1').overrideWith((ref) async => dive),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final analysis = await container.read(
+      profileAnalysisProvider('dive-1').future,
+    );
+
+    expect(analysis, isNotNull);
+    expect(analysis!.ttsCurve, isNotNull);
+  });
+}

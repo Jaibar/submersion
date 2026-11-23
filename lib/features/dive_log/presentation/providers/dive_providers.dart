@@ -1,43 +1,121 @@
+import 'dart:async';
+
+import 'package:submersion/core/utils/local_day_changes.dart';
+import 'package:submersion/core/constants/dive_search.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
+import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/performance/perf_timer.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/logger_service.dart';
 
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/features/change_log/presentation/providers/change_log_providers.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_custom_field_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/sql/dive_weight_sql.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/data/services/dive_bulk_delete_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_merge_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_source_removal_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_split_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_uncombine_service.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_data_retention.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_list_loader.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_profile_batcher.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
 import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
+import 'package:submersion/features/dive_log/domain/entities/source_profile.dart'
+    as domain;
+import 'package:submersion/features/dive_log/domain/entities/profile_series_revision.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
 import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
-import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/dive_log/query/dive_filter_query.dart';
+import 'package:submersion/features/dive_log/query/dive_query_entity.dart';
+import 'package:submersion/features/dive_log/presentation/providers/filter_aware_tick.dart';
+import 'package:submersion/features/dive_log/presentation/providers/narrow_dives.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_cache_awaits.dart';
 
 // Re-export DiveFilterState so existing imports continue to work
 export 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
+// Re-export diveRepositoryProvider (declared in its own dependency-only module
+// to avoid import cycles) so existing consumers can keep importing it from here.
+export 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 
 /// Dive filter state provider
 final diveFilterProvider = StateProvider<DiveFilterState>(
   (ref) => const DiveFilterState(),
 );
 
-/// Dive sort state provider
-final diveSortProvider = StateProvider<SortState<DiveSortField>>(
-  (ref) => const SortState(
-    field: DiveSortField.date,
-    direction: SortDirection.descending,
-  ),
+/// The tables the dive list's filter reads, compiled once per filter rather
+/// than once by every widget and keeper that asks (the dive list's
+/// counterpart of `insightsFilterTablesProvider`).
+final diveFilterTablesProvider = Provider<Set<String>>(
+  (ref) => diveFilterTablesTouched(ref.watch(diveFilterProvider)),
 );
 
-/// Filtered dives provider - applies current filter to dive list
+/// Dive sort state provider
+///
+/// Comes back as the diver left it (issue #3748): the active diver's saved
+/// sort, or the starting order below when there is none (or this build
+/// cannot read it). Change it through `ListArrangementWrites`.
+final diveSortProvider = Provider<SortState<DiveSortField>>(
+  (ref) =>
+      decodeSortState(
+        ref.watch(settingsProvider.select((s) => s.listArrangements.diveSort)),
+        DiveSortField.values,
+      ) ??
+      const SortState(
+        field: DiveSortField.date,
+        direction: SortDirection.descending,
+      ),
+);
+
+/// The ids [filter] keeps, resolved in SQL through the one compiled query
+/// every dive path shares (#2365), or null when the filter has no active
+/// axes so the hydrated list passes through untouched.
+///
+/// Keyed on the filter INSTANCE (the sheet replaces the state on every
+/// edit), so a changed filter lands on a fresh instance that starts
+/// loading rather than briefly reusing the previous filter's ids, while a
+/// write to a table the query read invalidates the same instance and keeps
+/// its value until the new one arrives, so the list never blanks. Follows
+/// exactly the tables the compiled query touched: a synced buddy link, a
+/// weight row or an attribute-only save refreshes it without a dives
+/// write.
+final queryFilteredDiveIdsProvider = FutureProvider.autoDispose
+    .family<Set<String>?, DiveFilterState>((ref, filter) async {
+      if (!filter.hasActiveFilters) return null;
+      final diverId = ref.watch(currentDiverIdProvider);
+      final repository = ref.watch(diveRepositoryProvider);
+      // Compiled once: the same object names the tables to follow and is
+      // the query the repository runs.
+      final compiled = compileDiveFilter(filter, rootAlias: 'd');
+      await awaitQueryCachesIfRead(ref, compiled.tablesTouched);
+      ref.invalidateSelfWhen(repository.watchTables(compiled.tablesTouched));
+      return repository.getDiveIdsForQuery(compiled, diverId: diverId);
+    });
+
+/// Filtered dives provider: the hydrated list narrowed to the ids the
+/// compiled filter keeps. No axis is evaluated in Dart any more; the
+/// repository answers every one in SQL, in step with the paginated list
+/// and Statistics.
 final filteredDivesProvider = Provider<AsyncValue<List<domain.Dive>>>((ref) {
   final divesAsync = ref.watch(diveListNotifierProvider);
   final filter = ref.watch(diveFilterProvider);
-
-  return divesAsync.whenData((dives) => filter.apply(dives));
+  return narrowDivesByIds(
+    divesAsync,
+    ref.watch(queryFilteredDiveIdsProvider(filter)),
+  );
 });
 
 /// Sorted and filtered dives provider - applies sort after filter
@@ -50,6 +128,58 @@ final sortedFilteredDivesProvider = Provider<AsyncValue<List<domain.Dive>>>((
   return divesAsync.whenData((dives) => _applySorting(dives, sort));
 });
 
+/// A dive's adjacent ids in the current filter+sort order.
+typedef DiveNeighbors = ({String? previousId, String? nextId});
+
+/// All dive ids in the active filter+sort order -- the source for previous/next
+/// navigation from the detail page. IDs only (not full dives), so it stays
+/// cheap even on large libraries. Recomputes when filter/sort/diver change.
+///
+/// Also self-invalidates on the dives tick. Nothing in the app invalidated this
+/// chain, so after merging from the detail page the id list still contained the
+/// merged-away dive and "next" navigated to a dive that no longer existed;
+/// autoDispose only rescued it once the page closed (issue #974).
+final orderedDiveIdsProvider = FutureProvider.autoDispose<List<String>>((
+  ref,
+) async {
+  final diverId = ref.watch(currentDiverIdProvider);
+  final filter = ref.watch(diveFilterProvider);
+  final sort = ref.watch(diveSortProvider);
+  final repository = ref.watch(diveRepositoryProvider);
+  // ONE debounced tick over `dives` plus whatever else the compiled filter
+  // reads (#2365): the buddy tables under a buddy filter (#1915), the gear
+  // tables under an attribute condition (#1805). One stream, not two, so a
+  // junction write followed by the dive write recomputes the ids once.
+  final touched = diveFilterTablesTouched(filter);
+  await awaitQueryCachesIfRead(ref, touched);
+  final extra = touched.difference({'dives'});
+  ref.invalidateSelfWhen(
+    extra.isEmpty
+        ? repository.watchDivesChanges()
+        : repository.watchTables({'dives', ...extra}),
+  );
+  return repository.getOrderedDiveIds(
+    diverId: diverId,
+    filter: filter,
+    sort: sort,
+  );
+});
+
+/// The previous/next dive ids adjacent to [diveId] in the current list order.
+/// Both are null when the dive is not in the current filtered list.
+final diveNeighborsProvider = Provider.family<DiveNeighbors, String>((
+  ref,
+  diveId,
+) {
+  final ids = ref.watch(orderedDiveIdsProvider).valueOrNull ?? const <String>[];
+  final index = ids.indexOf(diveId);
+  if (index < 0) return (previousId: null, nextId: null);
+  return (
+    previousId: index > 0 ? ids[index - 1] : null,
+    nextId: index < ids.length - 1 ? ids[index + 1] : null,
+  );
+});
+
 /// Apply sorting to a list of dives
 List<domain.Dive> _applySorting(
   List<domain.Dive> dives,
@@ -57,6 +187,7 @@ List<domain.Dive> _applySorting(
 ) {
   return PerfTimer.measureSync('applySorting', () {
     final sorted = List<domain.Dive>.from(dives);
+    final collator = TextCollator();
 
     sorted.sort((a, b) {
       int comparison;
@@ -67,7 +198,7 @@ List<domain.Dive> _applySorting(
         case DiveSortField.date:
           comparison = a.dateTime.compareTo(b.dateTime);
         case DiveSortField.site:
-          comparison = (a.site?.name ?? '').compareTo(b.site?.name ?? '');
+          comparison = collator.compare(a.site?.name ?? '', b.site?.name ?? '');
         case DiveSortField.depth:
           comparison = (a.maxDepth ?? 0).compareTo(b.maxDepth ?? 0);
         case DiveSortField.bottomTime:
@@ -94,11 +225,6 @@ List<domain.Dive> _applySorting(
   });
 }
 
-/// Repository provider
-final diveRepositoryProvider = Provider<DiveRepository>((ref) {
-  return DiveRepository();
-});
-
 /// Custom field repository singleton
 final diveCustomFieldRepositoryProvider = Provider<DiveCustomFieldRepository>((
   ref,
@@ -106,48 +232,144 @@ final diveCustomFieldRepositoryProvider = Provider<DiveCustomFieldRepository>((
   return DiveCustomFieldRepository(DatabaseService.instance.database);
 });
 
+/// Sequential dive-combine service singleton (#449).
+final diveMergeServiceProvider = Provider<DiveMergeService>((ref) {
+  return DiveMergeService(ref.watch(diveRepositoryProvider));
+});
+
+/// Multi-computer consolidation service singleton.
+final diveConsolidationServiceProvider = Provider<DiveConsolidationService>((
+  ref,
+) {
+  return DiveConsolidationService(ref.watch(diveRepositoryProvider));
+});
+
+/// Split-a-source-into-its-own-dive service singleton (inverse of
+/// consolidation).
+final diveSplitServiceProvider = Provider<DiveSplitService>((ref) {
+  return DiveSplitService(ref.watch(diveRepositoryProvider));
+});
+
+/// Remove-a-source-from-a-dive service singleton (issue #4393).
+final diveSourceRemovalServiceProvider = Provider<DiveSourceRemovalService>(
+  (ref) => DiveSourceRemovalService(),
+);
+
+/// Separate-a-combined-dive service singleton (inverse of combine).
+final diveUncombineServiceProvider = Provider<DiveUncombineService>((ref) {
+  return DiveUncombineService(ref.watch(diveRepositoryProvider));
+});
+
+/// How many segments a dive's provenance rows read as: 2 or more means a
+/// Combine stitched it together and it can be separated again (issue #1504).
+///
+/// One for an ordinary dive, however many sources it has, and zero for a dive
+/// with no provenance rows at all.
+final diveSegmentCountProvider = FutureProvider.family<int, String>((
+  ref,
+  diveId,
+) async {
+  final service = ref.watch(diveUncombineServiceProvider);
+  // The same tick diveDataSourcesProvider uses: the answer is a function of
+  // the dive's provenance rows and its profile samples.
+  ref.invalidateSelfWhen(
+    ref.watch(diveRepositoryProvider).watchAnalysisInputChanges(),
+  );
+  return (await service.plan(diveId)).length;
+});
+
 /// Autocomplete suggestions: distinct keys this diver has used
 final customFieldKeySuggestionsProvider =
     FutureProvider.family<List<String>, String>((ref, diverId) async {
       final repository = ref.watch(diveCustomFieldRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchCustomFieldsChanges());
       return repository.getDistinctKeysForDiver(diverId);
     });
 
-/// All dives list provider (filtered by current diver)
+/// Holds [divesProvider]'s list across its rebuilds.
+final _divesLoaderProvider = Provider<DiveListLoader>((ref) {
+  final loader = DiveListLoader(ref.watch(diveRepositoryProvider));
+  ref.onDispose(loader.cancel);
+  return loader;
+});
+
+/// All dives list provider (filtered by current diver).
+///
+/// A [FutureProvider] that self-invalidates whenever the `dives` table is
+/// written (e.g. after a sync applies remote changes), so the list refreshes
+/// while imperative `ref.read(divesProvider.future)` reads still resolve. A
+/// rebuild costs what changed: see [DiveListLoader].
 final divesProvider = FutureProvider<List<domain.Dive>>((ref) async {
   final repository = ref.watch(diveRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
-  return repository.getAllDives(diverId: currentDiverId);
+  ref.invalidateSelfWhen(repository.watchDivesChanges());
+  return ref.watch(_divesLoaderProvider).latest(diverId: currentDiverId);
 });
 
-/// Single dive provider
-final diveProvider = FutureProvider.family<domain.Dive?, String>((
+/// Single dive provider.
+///
+/// Self-invalidates whenever any table feeding the dive detail page is written
+/// (see [DiveRepository.watchDiveDetailChanges]), so the detail refreshes when a
+/// sync applies a remote edit. Sync writes the DB directly, bypassing the
+/// notifier/edit paths that invalidate this provider on local edits -- without
+/// this the detail would keep showing the pre-sync value while the list (which
+/// self-invalidates on dives-table writes) already shows the new one. The
+/// hydrated [domain.Dive] embeds tanks, tank pressures, profile, and equipment,
+/// so this must watch more than just the `dives` table.
+final diveProvider = FutureProvider.autoDispose.family<domain.Dive?, String>((
   ref,
   id,
 ) async {
+  retainDiveData(ref);
   final repository = ref.watch(diveRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
   return repository.getDiveById(id);
 });
 
 /// Dive profile provider - for lazy loading profiles in list views
-final diveProfileProvider =
-    FutureProvider.family<List<domain.DiveProfilePoint>, String>((
-      ref,
-      diveId,
-    ) async {
+final diveProfileProvider = FutureProvider.autoDispose
+    .family<List<domain.DiveProfilePoint>, String>((ref, diveId) async {
+      retainDiveData(ref);
       final repository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
       return repository.getDiveProfile(diveId);
     });
 
-/// Profiles grouped by source (computer ID / 'user-edited' / 'original').
-/// Used for multi-computer toggle rendering in the dive profile chart.
-final profilesBySourceProvider =
-    FutureProvider.family<Map<String?, List<domain.DiveProfilePoint>>, String>((
+/// Profiles grouped by owning data source (active-source model). Keys are
+/// dive_data_sources ids, primary source first; null-computerId rows are
+/// attributed to the primary source so no source ever renders as unknown.
+final sourceProfilesProvider = FutureProvider.autoDispose
+    .family<Map<String, domain.SourceProfile>, String>((ref, diveId) async {
+      retainDiveData(ref);
+      final repository = ref.watch(diveRepositoryProvider);
+      // Analysis-input tick: this hydration feeds sourceProfileAnalysisProvider
+      // and reads only profile/source tables, so the broad detail tick (which
+      // includes media) re-ran the per-source analysis after viewing a photo.
+      ref.invalidateSelfWhen(repository.watchAnalysisInputChanges());
+      return repository.getProfilesByDataSource(diveId);
+    });
+
+/// Metadata-only profile revision history for one dive, newest first.
+final profileSeriesHistoryProvider =
+    FutureProvider.family<List<ProfileSeriesRevision>, String>((
       ref,
       diveId,
     ) async {
       final repository = ref.watch(diveRepositoryProvider);
-      return repository.getProfilesBySource(diveId);
+      ref.invalidateSelfWhen(repository.watchAnalysisInputChanges());
+      return repository.getProfileHistory(diveId);
+    });
+
+/// Whether a dive has any stored profile series, readable or not (#4112).
+///
+/// A dive read with an unreadable series has an empty profile, just like one
+/// logged without samples; only the second may be drawn as an estimate. Null
+/// (loading or failed) means draw nothing.
+final diveHasProfileSeriesProvider = FutureProvider.autoDispose
+    .family<bool, String>((ref, diveId) async {
+      final repository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchAnalysisInputChanges());
+      return repository.hasProfileSeries(diveId);
     });
 
 /// Batch profile cache for mini charts in the dive list.
@@ -157,56 +379,220 @@ final profilesBySourceProvider =
 final batchProfileCacheProvider =
     StateProvider<Map<String, List<domain.DiveProfilePoint>>>((ref) => {});
 
-/// Version counter for statistics cache invalidation.
+/// Adds [profiles] to the batch profile cache behind [cache].
 ///
-/// All statistics providers watch this. Bumping the version causes all of them
-/// to re-fetch, while keepAlive prevents disposal between navigations.
-final statisticsVersionProvider = StateProvider<int>((ref) => 0);
+/// Merges into the cache as it is when the batch lands, never into a copy
+/// read before the fetch was awaited. Batches overlap: a list page's profiles
+/// can still be summarising when the next page's land, and writing the older
+/// snapshot back would drop the newer page's entries and blank those cards'
+/// mini charts (#3506). Existing entries keep their list instances, which is
+/// what lets a card watching only its own entry skip the rebuild.
+///
+/// An empty answer (a dive without samples, #4112) only fills a dive with no
+/// entry yet. Asked again on every list load, it would otherwise write a
+/// fresh map that runs every card's selector for no change; and the list and
+/// the dashboard can ask for the same dive at once, so an older empty answer
+/// landing after a newer profile must not replace it.
+///
+/// A dive in [requested] that the answer leaves out (its series is
+/// unreadable, or the read failed) is unknown again: an empty entry for it
+/// is dropped, so its card stops drawing an estimate for a dive that may
+/// well have samples. An entry with samples stays.
+void mergeIntoBatchProfileCache(
+  StateController<Map<String, List<domain.DiveProfilePoint>>> cache,
+  Map<String, List<domain.DiveProfilePoint>> profiles, {
+  Iterable<String> requested = const [],
+}) {
+  final current = cache.state;
+  final changed = {
+    for (final entry in profiles.entries)
+      if (entry.value.isNotEmpty || !current.containsKey(entry.key))
+        entry.key: entry.value,
+  };
+  final forgotten = {
+    for (final id in requested)
+      if (!profiles.containsKey(id) && (current[id]?.isEmpty ?? false)) id,
+  };
+  if (changed.isEmpty && forgotten.isEmpty) return;
+  cache.state = {
+    for (final entry in current.entries)
+      if (!forgotten.contains(entry.key)) entry.key: entry.value,
+    ...changed,
+  };
+}
 
-/// Statistics provider (filtered by current diver)
+/// Statistics provider (filtered by current diver).
+///
+/// Feeds the Home key numbers and depth panels (total dives, etc.).
+/// Self-invalidates whenever the `dives` table is written -- e.g. a dive
+/// computer import or an iCloud sync applying remote changes directly to the DB
+/// -- so those totals refresh without an app restart, using the same
+/// dives-table tick the dive list and [divesProvider] already use. The
+/// dashboard's recent-dives section was already reactive (its providers read
+/// [divesProvider], which self-invalidates on the same tick); these headline
+/// totals were the remaining gap (issue #217).
 final diveStatisticsProvider = FutureProvider<DiveStatistics>((ref) async {
   final repository = ref.watch(diveRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
+  // Every table the query reads, so a site rename refreshes Most Visited
+  // Sites without waiting for a dive write.
+  ref.invalidateSelfWhen(
+    repository.watchTables(DiveRepository.statisticsTickTables),
+  );
+  // divesThisYear reads the clock once per build (#2600).
+  ref.invalidateSelfWhen(localDayChanges());
   return repository.getStatistics(diverId: currentDiverId);
 });
 
-/// Dive records (superlatives) provider (filtered by current diver)
+/// Sort fields under which a trip's dives stay contiguous.
+///
+/// Both are chronological in practice, so a trip forms a single run whichever
+/// direction the sort runs in. Under any other sort a trip scatters, and
+/// grouping would fragment a 14-dive trip into a dozen one-dive headers, which
+/// is noisier than no grouping at all (issue #1193).
+const Set<DiveSortField> kChronologicalDiveSortFields = {
+  DiveSortField.date,
+  DiveSortField.diveNumber,
+};
+
+/// Whether the dive list should render trip group headers right now.
+///
+/// The toggle alone is not enough: grouping also needs a chronological sort
+/// and a card view mode. One place to reason about it, rather than the same
+/// three conditions repeated at every call site.
+final diveListGroupingEnabledProvider = Provider<bool>((ref) {
+  if (!ref.watch(diveListGroupTripsProvider)) return false;
+  final sort = ref.watch(diveSortProvider);
+  if (!kChronologicalDiveSortFields.contains(sort.field)) return false;
+  return ref.watch(diveListViewModeProvider) != ListViewMode.table;
+});
+
+/// Whether grouping is off *because of the sort*, rather than for any other
+/// reason.
+///
+/// Deliberately independent of the view mode. The paused notice blames the
+/// sort by name, so it must not appear when the real reason is something else:
+/// table mode ignores grouping by design, and saying "grouping is off while
+/// sorted by Date" there would be wrong twice over. Today the table never
+/// reaches the list body at all, but that is an early return in another
+/// method, which is too far away to rely on.
+final diveListGroupingPausedBySortProvider = Provider<bool>((ref) {
+  if (!ref.watch(diveListGroupTripsProvider)) return false;
+  final sort = ref.watch(diveSortProvider);
+  return !kChronologicalDiveSortFields.contains(sort.field);
+});
+
+/// Total dives per trip, keyed by trip id, for the dive list's group headers.
+///
+/// One query for the entire list rather than one per header. Takes the same
+/// dives tick as [diveStatisticsProvider] above, so assigning a dive to a
+/// trip, deleting one, or a sync pull corrects every header count without a
+/// manual invalidate.
+///
+/// Unfiltered on purpose: the header reads "6 of 14", and the 14 is the
+/// trip's real size, not its size under the current view filter (#1193).
+final tripDiveCountsProvider = FutureProvider<Map<String, int>>((ref) async {
+  final repository = ref.watch(diveRepositoryProvider);
+  final diverId = ref.watch(currentDiverIdProvider);
+  ref.invalidateSelfWhen(repository.watchDivesChanges());
+  return repository.getTripDiveCounts(diverId: diverId);
+});
+
+/// Dive records (superlatives) provider (filtered by current diver).
+///
+/// Takes the same dives tick as [diveStatisticsProvider] directly above, for
+/// the same reason it cites (issue #217): a merge, a bulk delete, or a sync
+/// pull rewrites the superlatives without going through any notifier. Until
+/// #974 this was rescued only by the refresh buttons on the records page.
 final diveRecordsProvider = FutureProvider<DiveRecords>((ref) async {
   final repository = ref.watch(diveRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
+  // Every table the query reads, so a site rename refreshes each record's
+  // site name without waiting for a dive write.
+  ref.invalidateSelfWhen(
+    repository.watchTables(DiveRepository.statisticsTickTables),
+  );
   return repository.getRecords(diverId: currentDiverId);
 });
 
-/// Next dive number provider (filtered by current diver)
+/// Next dive number provider (filtered by current diver).
+///
+/// Not autoDispose, and the import wizard's review step watches it, so without
+/// the tick a stale number rendered for the rest of the app's life -- long
+/// enough to number two dives the same after an import or sync added dives.
 final nextDiveNumberProvider = FutureProvider<int>((ref) async {
-  final repository = ref.watch(diveRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
-  return repository.getNextDiveNumber(diverId: currentDiverId);
+  return ref.watch(nextDiveNumberForDiverProvider(currentDiverId).future);
 });
 
-/// Search results provider
-final diveSearchProvider = FutureProvider.family<List<domain.Dive>, String>((
+/// The next dive number in [diverId]'s log, for a download sent to a profile
+/// other than the active one (issue #2050).
+final nextDiveNumberForDiverProvider = FutureProvider.family<int, String?>((
+  ref,
+  diverId,
+) async {
+  final repository = ref.watch(diveRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDivesChanges());
+  return repository.getNextDiveNumber(diverId: diverId);
+});
+
+/// Search results provider.
+///
+/// Returns lightweight [DiveSummary] rows for display. Fetches one more than
+/// [kDiveSearchResultLimit] so the UI can distinguish a truncated result
+/// (more matches exist) from an exact one and render the "showing first N"
+/// notice only when results were actually cut.
+final diveSearchProvider = FutureProvider.family<List<DiveSummary>, String>((
   ref,
   query,
 ) async {
+  // Trim so a whitespace-only query short-circuits here instead of
+  // debouncing and hitting the repository on a hot UI path.
+  if (query.trim().isEmpty) return const [];
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
-  if (query.isEmpty) {
-    return ref.watch(divesProvider).value ?? [];
-  }
   final repository = ref.watch(diveRepositoryProvider);
-  return repository.searchDives(query, diverId: validatedDiverId);
+  // The summary row's tables plus every table the text search reads, so a
+  // rename of a dive type, tag, buddy, site or center re-runs an open search
+  // rather than waiting for an unrelated dive write (#2884).
+  ref.invalidateSelfWhen(
+    repository.watchTables({
+      ...DiveRepository.diveListTickTables,
+      ...diveQueryEntity.textSearchTables,
+    }),
+  );
+  return repository.searchDiveSummaries(
+    query,
+    diverId: validatedDiverId,
+    limit: kDiveSearchResultLimit + 1,
+    disabledSafetyRules: ref.watch(safetyReviewDisabledRulesProvider),
+  );
+});
+
+/// The logbook's bulk Delete and its Undo.
+final diveBulkDeleteServiceProvider = Provider<DiveBulkDeleteService>((ref) {
+  final documents = ref.watch(documentMutationsProvider);
+  return DiveBulkDeleteService(
+    dives: ref.watch(diveRepositoryProvider),
+    changeLog: ref.watch(changeLogRepositoryProvider),
+    revert: ref.watch(changeLogRevertServiceProvider),
+    restoreDocuments: documents.restoreSnapshot,
+  );
 });
 
 /// Dive list notifier for mutations
 class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
   final DiveRepository _repository;
+
   final Ref _ref;
   String? _currentDiverId;
+  late final DiveListLoader _list;
 
   DiveListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
+    _list = DiveListLoader(_repository);
+    _ref.onDispose(_list.cancel);
     // Watch for changes to current diver
     _currentDiverId = _ref.read(currentDiverIdProvider);
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
@@ -216,18 +602,67 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
       }
     });
     _loadDives();
+
+    // Reload silently when the `dives` table is written directly (e.g. a sync
+    // applies remote changes) without going through this notifier's mutation
+    // methods. Silent so a multi-write sync doesn't flash a loading spinner,
+    // and page-preserving so a local edit-save doesn't shrink the list out
+    // from under the diver (#1610).
+    //
+    // filteredDivesProvider narrows this list by a SQL id set that joins
+    // whatever tables the filter names; a write to one of them (a synced
+    // buddy link, a weight row) changes the answer without a dives write,
+    // so the tick follows the filter's tables beyond `dives` (#1915).
+    //
+    // The table's Total weight reads each dive's weight rows and the lead its
+    // weights gear carries (`Dive.recordedWeightKg`, #4442). A synced weight
+    // row or an edit of a weights item's dry weight writes only those tables,
+    // so they are in the base tick beside `dives`, as one debounced stream.
+    final divesTick = FilterAwareTick(
+      plain: () => _repository.watchTables(_listBaseTables),
+      baseTables: _listBaseTables,
+      watchTables: _repository.watchTables,
+      onTick: _silentReload,
+    );
+    Set<String> extra(DiveFilterState f) =>
+        diveFilterTablesTouched(f).difference(_listBaseTables);
+    _ref.listen<DiveFilterState>(diveFilterProvider, (previous, next) {
+      divesTick.follow(extra(next));
+    });
+    divesTick.follow(extra(_ref.read(diveFilterProvider)));
+    _ref.onDispose(divesTick.cancel);
   }
+
+  /// What the hydrated list's rows read that a write can change without
+  /// touching `dives`, and that the list ticks on whatever the filter.
+  static const _listBaseTables = {'dives', ...recordedWeightTables};
 
   Future<void> _loadDives() async {
     state = const AsyncValue.loading();
     try {
-      final dives = await _repository.getAllDives(diverId: _currentDiverId);
-      state = AsyncValue.data(dives);
+      final dives = await _list.load(diverId: _currentDiverId);
+      if (!mounted) return;
+      if (dives != null) state = AsyncValue.data(dives);
       // Keep divesProvider in sync so downstream FutureProviders
       // (recentDivesProvider, dashboard stats, etc.) automatically refresh.
+      // A silent reload that overtook this load does not do this for it.
       _ref.invalidate(divesProvider);
     } catch (e, st) {
       state = AsyncValue.error(e, st);
+    }
+  }
+
+  /// Refresh the list without flashing a loading spinner. Mirrors [_loadDives]
+  /// but never sets `state = AsyncValue.loading()`, so table-change ticks from
+  /// a sync update the data in place instead of flickering the UI, and it
+  /// costs what the tick changed rather than the whole logbook (#3815). A tick
+  /// that changed nothing the list holds leaves the state alone.
+  Future<void> _silentReload() async {
+    try {
+      final dives = await _list.refresh(diverId: _currentDiverId);
+      if (dives != null && mounted) state = AsyncValue.data(dives);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
     }
   }
 
@@ -235,16 +670,16 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
     await _loadDives();
   }
 
-  /// Invalidate trip and dive center providers for a dive
+  /// [_silentReload] for a caller that has just written, so the list stays on
+  /// screen and the reload costs what the write changed.
+  Future<void> reloadQuietly() => _silentReload();
+
+  /// Invalidate trip providers for a dive
   void _invalidateRelatedProviders(domain.Dive dive) {
     // Invalidate trip stats if dive has a trip (check both tripId and trip object)
     final tripId = dive.tripId ?? dive.trip?.id;
     if (tripId != null) {
       _ref.invalidate(tripWithStatsProvider(tripId));
-    }
-    // Invalidate dive center count if dive has a dive center
-    if (dive.diveCenter != null) {
-      _ref.invalidate(diveCenterDiveCountProvider(dive.diveCenter!.id));
     }
     // Refresh the trip list notifier (it's a StateNotifier so needs explicit refresh)
     _ref.read(tripListNotifierProvider.notifier).refresh();
@@ -253,14 +688,18 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
   }
 
   Future<domain.Dive> addDive(domain.Dive dive) async {
-    // Ensure the dive is assigned to the current diver (if diver exists)
+    // Ensure the dive is assigned to the current diver (if diver exists).
+    // Read the diver once, at the call: a switch while the check below
+    // awaits must not hand the dive to a diver nobody validated, or one the
+    // caller never prepared it for (a site it may see, #2392).
+    final diverId = _currentDiverId;
     var diveWithDiver = dive;
-    if (dive.diverId == null && _currentDiverId != null) {
+    if (dive.diverId == null && diverId != null) {
       // Verify the diver exists before assigning to avoid FK constraint errors
       final diverRepository = _ref.read(diverRepositoryProvider);
-      final diverExists = await diverRepository.getDiverById(_currentDiverId!);
+      final diverExists = await diverRepository.getDiverById(diverId);
       if (diverExists != null) {
-        diveWithDiver = dive.copyWith(diverId: _currentDiverId);
+        diveWithDiver = dive.copyWith(diverId: diverId);
       }
     }
     final newDive = await _repository.createDive(diveWithDiver);
@@ -268,9 +707,10 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
     // If the dive was created without a dive number, renumber all dives
     // chronologically to ensure proper ordering. Scope to this diver so
     // we don't disturb other profiles' per-diver numbering.
-    if (dive.diveNumber == null) {
+    // A planned dive stays unnumbered until it is promoted (issue #2002).
+    if (dive.diveNumber == null && !dive.isPlanned && !dive.isDraft) {
       await _repository.assignMissingDiveNumbers(
-        diverId: newDive.diverId ?? _currentDiverId,
+        diverId: newDive.diverId ?? diverId,
       );
       _ref.invalidate(diveNumberingInfoProvider);
     }
@@ -304,36 +744,6 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
     _ref.invalidate(diveStatisticsProvider);
     _ref.invalidate(diveNumberingInfoProvider);
     if (dive != null) {
-      _invalidateRelatedProviders(dive);
-    }
-  }
-
-  /// Bulk delete multiple dives
-  /// Returns the deleted dives for potential undo
-  Future<List<domain.Dive>> bulkDeleteDives(List<String> ids) async {
-    // Get the dives before deleting for undo capability
-    final divesToDelete = await _repository.getDivesByIds(ids);
-    await _repository.bulkDeleteDives(ids);
-    await _loadDives();
-    _ref.invalidate(diveStatisticsProvider);
-    _ref.invalidate(diveNumberingInfoProvider);
-    // Invalidate related providers for all deleted dives
-    for (final dive in divesToDelete) {
-      _invalidateRelatedProviders(dive);
-    }
-    return divesToDelete;
-  }
-
-  /// Restore multiple dives (for undo functionality)
-  Future<void> restoreDives(List<domain.Dive> dives) async {
-    for (final dive in dives) {
-      await _repository.createDive(dive);
-    }
-    await _loadDives();
-    _ref.invalidate(diveStatisticsProvider);
-    _ref.invalidate(diveNumberingInfoProvider);
-    // Invalidate related providers for all restored dives
-    for (final dive in dives) {
       _invalidateRelatedProviders(dive);
     }
   }
@@ -404,13 +814,39 @@ final diveListNotifierProvider =
 ///
 /// Loads [DiveSummary] objects in pages of 50, with SQL-level filtering.
 /// Automatically reloads when the current diver or filter state changes.
+final _log = LoggerService.forClass(PaginatedDiveListNotifier);
+
 class PaginatedDiveListNotifier
     extends StateNotifier<AsyncValue<PaginatedDiveListState>> {
   final DiveRepository _repository;
   final Ref _ref;
   String? _currentDiverId;
+
+  /// Counts active-diver switches, so an operation spanning an await can tell
+  /// the loaded rows changed owner under it, even across a switch back.
+  int _diverSwitches = 0;
   int _currentOffset = 0;
+  int _revision = 0;
   static const _pageSize = 50;
+
+  /// Rows a [loadThrough] jumped over without preloading their profiles. A
+  /// silent reload leaves them out too, so the next table tick does not
+  /// fetch what the jump deliberately skipped; their cards fetch their own.
+  /// Cleared when the rows reload from the top.
+  Set<String> _jumpedOverIds = const {};
+
+  /// Serializes every operation that rewrites the loaded rows.
+  ///
+  /// A reload and a page load each snapshot the list before awaiting their
+  /// query, so interleaving them lets whichever lands last overwrite the
+  /// other's work: the reload truncates the page just appended, or the page
+  /// append reinstates the rows the reload just refreshed. Running them one at
+  /// a time means each reads a snapshot that is still current when it writes.
+  Future<void> _pagingQueue = Future<void>.value();
+
+  /// Counts filter changes, so only the newest queued first-page load for
+  /// them runs; each reads the filter when it runs, so the others repeat it.
+  int _filterLoads = 0;
 
   PaginatedDiveListNotifier(this._repository, this._ref)
     : super(const AsyncValue.loading()) {
@@ -418,20 +854,80 @@ class PaginatedDiveListNotifier
     _ref.listen<String?>(currentDiverIdProvider, (previous, next) {
       if (previous != next) {
         _currentDiverId = next;
+        _diverSwitches++;
         loadFirstPage();
       }
     });
     _ref.listen<DiveFilterState>(diveFilterProvider, (previous, next) {
       if (previous != next) {
-        loadFirstPage();
+        _followFilterTicks(next);
+        // The search row re-runs the list on every typing pause (#2773):
+        // keep the rows on screen until the new ones arrive.
+        final searchOnly =
+            previous != null &&
+            previous.copyWith(
+                  query: next.query,
+                  clearQuery: next.query == null,
+                  axesSuspended: next.axesSuspended,
+                ) ==
+                next;
+        final load = ++_filterLoads;
+        _enqueuePaging(() async {
+          // A later change is queued too: it runs the same latest filter,
+          // so this one would only repeat the query.
+          if (load != _filterLoads) return;
+          await _loadFirstPage(quiet: searchOnly);
+        });
       }
     });
+    _followFilterTicks(_ref.read(diveFilterProvider));
+    _ref.onDispose(_listTick.cancel);
     _ref.listen<SortState<DiveSortField>>(diveSortProvider, (previous, next) {
       if (previous != next) {
         loadFirstPage();
       }
     });
+    // The per-page safety-finding count excludes disabled rules, so a rule
+    // toggle changes the badge counts. Reload silently (no spinner) to keep the
+    // list badges aligned with SafetyReviewSection without a visible flicker.
+    _ref.listen<Set<String>>(safetyReviewDisabledRulesProvider, (
+      previous,
+      next,
+    ) {
+      if (previous != next) {
+        _silentReloadLoadedPages();
+      }
+    });
     loadFirstPage();
+  }
+
+  /// Reloads silently when a table the list renders from is written directly
+  /// (e.g. a sync applies remote changes) without going through this
+  /// notifier's mutation methods. Silent so a multi-write sync doesn't flash
+  /// a loading spinner.
+  ///
+  /// The list tick, not the dives one: the summary query joins sites and
+  /// trips, so a trip rename or a site rename changes what is on screen
+  /// without touching the dives table (#1193).
+  late final _listTick = FilterAwareTick(
+    plain: _repository.watchDiveListChanges,
+    baseTables: DiveRepository.diveListTickTables,
+    watchTables: _repository.watchTables,
+    onTick: _silentReloadLoadedPages,
+  );
+
+  /// Follows the tables the compiled filter reads beyond the list tick's
+  /// own set (#2365): `dive_buddies` and `buddies` under a buddy filter
+  /// (#1915), the gear tables under an attribute condition (#1805),
+  /// `dive_weights` under `weights:none`, and so on. Without such a filter
+  /// only the plain list tick is watched, so an unfiltered list never
+  /// reloads for those writes.
+  void _followFilterTicks(DiveFilterState filter) {
+    _listTick.follow(
+      diveFilterTablesTouched(
+        filter,
+      ).difference(DiveRepository.diveListTickTables),
+    );
   }
 
   bool get _isDateSort {
@@ -439,45 +935,207 @@ class PaginatedDiveListNotifier
     return sort.field == DiveSortField.date;
   }
 
-  Future<void> loadFirstPage() async {
-    state = const AsyncValue.loading();
+  /// Runs [op] after every paging operation queued before it.
+  ///
+  /// The returned future carries [op]'s own error; the queue keeps a swallowed
+  /// copy so one failed load cannot wedge every load after it.
+  Future<void> _enqueuePaging(Future<void> Function() op) {
+    final next = _pagingQueue.then((_) => op());
+    _pagingQueue = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> loadFirstPage() => _enqueuePaging(_loadFirstPage);
+
+  /// Whether the loaded rows came from a filtered query. An add or an edit
+  /// can then move a dive into or out of the filter, which only the query can
+  /// tell, so those reload the loaded pages rather than patch them (#2669).
+  bool get _loadedUnderFilter =>
+      state.valueOrNull?.unfilteredTotalCount != null;
+
+  /// An optimistic change to [PaginatedDiveListState.unfilteredTotalCount],
+  /// which stays null for rows loaded with no filter active.
+  static int? _shifted(int? count, int by) => count == null ? null : count + by;
+
+  /// A filter naming gear.serviceDue reads the service cache, and one naming
+  /// deco reads the computed deco verdicts: each load waits for those it
+  /// reads to mirror their engine, so no page shows an empty cache or the
+  /// previous diver's verdicts (#2365, #4461).
+  Future<void> _awaitQueryCaches(DiveFilterState filter) =>
+      awaitQueryCachesIfRead(
+        _ref,
+        diveFilterTablesTouched(filter),
+        hold: false,
+      );
+
+  /// A [quiet] load keeps the current rows until the new first page lands,
+  /// instead of showing a spinner.
+  Future<void> _loadFirstPage({bool quiet = false}) async {
+    // Queued work can reach its turn after the notifier is gone: this provider
+    // is invalidated from half a dozen places (imports, merges, renumbering),
+    // and writing state on a disposed StateNotifier throws.
+    if (!mounted) return;
+    if (!quiet || !state.hasValue) state = const AsyncValue.loading();
     _currentOffset = 0;
     try {
       final filter = _ref.read(diveFilterProvider);
       final sort = _ref.read(diveSortProvider);
+      await _awaitQueryCaches(filter);
+      if (!mounted) return;
       final results = await Future.wait([
         _repository.getDiveSummaries(
           diverId: _currentDiverId,
           filter: filter,
           sort: sort,
           limit: _pageSize,
+          disabledSafetyRules: _ref.read(safetyReviewDisabledRulesProvider),
         ),
         _repository.getDiveCount(diverId: _currentDiverId, filter: filter),
+        if (filter.hasActiveFilters)
+          _repository.getDiveCount(diverId: _currentDiverId),
       ]);
       final dives = results[0] as List<DiveSummary>;
       final totalCount = results[1] as int;
+      final unfilteredTotalCount = filter.hasActiveFilters
+          ? results[2] as int
+          : null;
       _currentOffset = dives.length;
 
+      if (!mounted) return;
+      _jumpedOverIds = const {};
       state = AsyncValue.data(
         PaginatedDiveListState(
           dives: dives,
           hasMore: dives.length >= _pageSize,
           nextCursor: _isDateSort ? _cursorFromLastDive(dives) : null,
           totalCount: totalCount,
+          unfilteredTotalCount: unfilteredTotalCount,
+          revision: ++_revision,
         ),
       );
       // Pre-load downsampled profiles for mini charts (fire and forget)
       _loadBatchProfiles(dives.map((d) => d.id).toList());
     } catch (e, st) {
-      state = AsyncValue.error(e, st);
+      if (mounted) state = AsyncValue.error(e, st);
     }
   }
 
-  Future<void> loadNextPage() async {
+  Future<void> loadNextPage() {
     final current = state.valueOrNull;
-    if (current == null || current.isLoadingMore || !current.hasMore) return;
+    // Cheap pre-check so a burst of scroll notifications cannot queue the same
+    // page a hundred times. The queued body re-reads the state and decides for
+    // real, since anything ahead of it in the queue may have changed the list.
+    if (current == null || current.isLoadingMore || !current.hasMore) {
+      return Future<void>.value();
+    }
+    // Flip the spinner on now rather than when the queue reaches this load, so
+    // the trailing row reflects the request the diver just made.
+    state = AsyncValue.data(
+      current.copyWith(isLoadingMore: true, loadMoreFailed: false),
+    );
+    return _enqueuePaging(_loadNextPage);
+  }
 
-    state = AsyncValue.data(current.copyWith(isLoadingMore: true));
+  Future<void> _loadNextPage() async {
+    if (!mounted) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (!current.hasMore) {
+      // A reload ahead of this one reached the end of the list.
+      if (current.isLoadingMore) {
+        state = AsyncValue.data(current.copyWith(isLoadingMore: false));
+      }
+      return;
+    }
+    await _appendRows(current, limit: _pageSize);
+  }
+
+  /// Loads every row from the end of the list through the dive at
+  /// [targetIndex] of the list order in one query, and reports whether
+  /// [diveId] is loaded afterwards.
+  Future<bool> loadThrough(String diveId, {required int targetIndex}) async {
+    await _enqueuePaging(() async {
+      if (!mounted) return;
+      final current = state.valueOrNull;
+      if (current == null || !current.hasMore) return;
+      if (current.dives.any((d) => d.id == diveId)) return;
+      final missing = targetIndex + 1 - current.dives.length;
+      if (missing <= 0) return;
+      await _appendRows(current, limit: missing + _pageSize, jump: true);
+    });
+    return state.valueOrNull?.dives.any((d) => d.id == diveId) ?? false;
+  }
+
+  /// Pages forward until [diveId] is loaded or the list runs out, and reports
+  /// whether it is loaded, for a dive number typed in search (#3744), whose
+  /// place in the list nothing has worked out. Queued like every load, so it
+  /// runs behind a reload asked for just before it, such as the search
+  /// clearing. Each read asks for twice the last, so a dive deep in a long
+  /// log takes a handful of reads rather than one per page.
+  Future<bool> loadUntil(String diveId) async {
+    await _enqueuePaging(() async {
+      // A change of query meanwhile queues its own reload behind this; the
+      // rows read so far no longer answer it, so stop rather than page the
+      // new query from the old one's cursor.
+      final filterLoads = _filterLoads;
+      final diverSwitches = _diverSwitches;
+      final sort = _ref.read(diveSortProvider);
+      bool queryChanged() =>
+          filterLoads != _filterLoads ||
+          diverSwitches != _diverSwitches ||
+          sort != _ref.read(diveSortProvider);
+      var limit = _pageSize;
+      while (mounted && !queryChanged()) {
+        final current = state.valueOrNull;
+        if (current == null || !current.hasMore) return;
+        if (current.dives.any((d) => d.id == diveId)) return;
+        await _appendRows(current, limit: limit, jump: true);
+        // A failed read raises the flag; the Retry row takes it from there.
+        if (state.valueOrNull?.loadMoreFailed ?? true) return;
+        limit *= 2;
+      }
+    });
+    final dives = state.valueOrNull?.dives ?? const <DiveSummary>[];
+    final index = dives.indexWhere((d) => d.id == diveId);
+    if (index < 0) return false;
+    // A read preloads profiles for its last rows, but a doubled read can end
+    // well past the dive: preload the rows the list lands on instead.
+    const half = _jumpProfileWindow ~/ 2;
+    final around = dives.sublist(
+      (index - half).clamp(0, index),
+      (index + half).clamp(index + 1, dives.length),
+    );
+    _loadBatchProfiles([for (final d in around) d.id]);
+    return true;
+  }
+
+  /// Loads every row past the end of the list in one query, so End in the
+  /// list reaches the last dive rather than the last loaded one (#3302).
+  /// Asks for a page more than the count left; a count lagging rows written
+  /// since leaves that read full, and the next one picks up the rest.
+  Future<void> loadRest() => _enqueuePaging(() async {
+    while (mounted) {
+      final current = state.valueOrNull;
+      if (current == null || !current.hasMore) return;
+      final missing = current.totalCount - current.dives.length;
+      await _appendRows(
+        current,
+        limit: (missing > 0 ? missing : 0) + _pageSize,
+        jump: true,
+      );
+      // A failed read raises the flag; the Retry row takes it from there.
+      if (state.valueOrNull?.loadMoreFailed ?? true) return;
+    }
+  });
+
+  /// A [jump] comes from [loadThrough] or [loadRest]: it keeps the spinner
+  /// flag of a page load queued behind it, and preloads profiles around its
+  /// target only.
+  Future<void> _appendRows(
+    PaginatedDiveListState current, {
+    required int limit,
+    bool jump = false,
+  }) async {
     try {
       final filter = _ref.read(diveFilterProvider);
       final sort = _ref.read(diveSortProvider);
@@ -487,43 +1145,166 @@ class PaginatedDiveListNotifier
         sort: sort,
         cursor: _isDateSort ? current.nextCursor : null,
         offset: _isDateSort ? null : _currentOffset,
-        limit: _pageSize,
+        limit: limit,
+        disabledSafetyRules: _ref.read(safetyReviewDisabledRulesProvider),
       );
       _currentOffset += newDives.length;
 
+      // A reload that ran while this page was queued may already hold some of
+      // these rows; appending by id keeps the list from showing them twice.
+      final loadedIds = current.dives.map((d) => d.id).toSet();
+      final added = newDives
+          .where((d) => !loadedIds.contains(d.id))
+          .toList(growable: false);
+
+      if (!mounted) return;
+      final loadingMore = jump && (state.valueOrNull?.isLoadingMore ?? false);
       state = AsyncValue.data(
         current.copyWith(
-          dives: [...current.dives, ...newDives],
-          isLoadingMore: false,
-          hasMore: newDives.length >= _pageSize,
+          dives: [...current.dives, ...added],
+          isLoadingMore: loadingMore,
+          hasMore: newDives.length >= limit,
           nextCursor: _isDateSort ? _cursorFromLastDive(newDives) : null,
+          loadMoreFailed: false,
         ),
       );
-      // Pre-load downsampled profiles for the new page
-      _loadBatchProfiles(newDives.map((d) => d.id).toList());
-    } catch (_) {
-      state = AsyncValue.data(current.copyWith(isLoadingMore: false));
+      final ids = added.map((d) => d.id).toList();
+      if (jump && ids.length > _jumpProfileWindow) {
+        final cut = ids.length - _jumpProfileWindow;
+        _jumpedOverIds = {..._jumpedOverIds, ...ids.take(cut)};
+        _loadBatchProfiles(ids.sublist(cut));
+      } else {
+        _loadBatchProfiles(ids);
+      }
+    } catch (e, stackTrace) {
+      _log.error(
+        jump ? 'Failed to load dives for a jump' : 'Failed to load a page',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      // Record the failure rather than silently going idle: the trailing row
+      // must be able to offer a retry instead of spinning on nothing (#1610).
+      if (mounted) {
+        final loadingMore = jump && (state.valueOrNull?.isLoadingMore ?? false);
+        state = AsyncValue.data(
+          current.copyWith(isLoadingMore: loadingMore, loadMoreFailed: true),
+        );
+      }
     }
   }
 
-  /// Load downsampled profiles for a batch of dive IDs and merge into cache.
-  Future<void> _loadBatchProfiles(List<String> diveIds) async {
-    if (diveIds.isEmpty) return;
-    // Skip IDs already in cache
-    final cache = _ref.read(batchProfileCacheProvider);
-    final uncached = diveIds.where((id) => !cache.containsKey(id)).toList();
-    if (uncached.isEmpty) return;
+  /// A jump preloads profiles for its last rows only, where its target sits;
+  /// the cards jumped over fetch their own when they are built.
+  static const _jumpProfileWindow = 100;
 
-    final profiles = await _repository.getBatchProfileSummaries(uncached);
-    // Merge into cache (immutable update)
-    _ref.read(batchProfileCacheProvider.notifier).state = {
-      ...cache,
-      ...profiles,
-    };
+  /// Loads downsampled profiles for a batch of dive IDs into the cache,
+  /// through the batcher the cards share.
+  ///
+  /// Every caller starts this and walks away. [mounted] is checked first
+  /// because reading through the Ref of a disposed container throws (app
+  /// teardown); the batcher guards its own await.
+  Future<void> _loadBatchProfiles(List<String> diveIds) async {
+    if (diveIds.isEmpty || !mounted) return;
+    await _ref.read(diveProfileBatcherProvider).load(diveIds);
   }
 
   Future<void> refresh() async {
     await loadFirstPage();
+  }
+
+  /// Re-reads the loaded pages in place, for a write to a table the list
+  /// tick does not watch. A links-only buddy conversion writes just
+  /// `dive_buddies`, which the buddy filters read (#1831).
+  Future<void> reloadLoadedPages() => _silentReloadLoadedPages();
+
+  /// Reload every page already loaded, without flashing a loading spinner.
+  ///
+  /// Mirrors [loadFirstPage] (same diver/filter/sort params, re-read from the
+  /// top) but never sets `state = AsyncValue.loading()`, so table-change ticks
+  /// from a sync update the data in place instead of flickering the UI.
+  ///
+  /// It refetches as many rows as are currently loaded, not a single page.
+  /// Shrinking back to page one drops every row the diver scrolled past, puts
+  /// the trailing "loading more" row back under their cursor with nothing
+  /// below it to scroll toward, and throws the scroll offset away -- which is
+  /// what made the list appear to hang after an edit was saved (#1610), since
+  /// the notifier's own writes tick this stream too.
+  ///
+  /// One row beyond the loaded count is fetched purely to decide [hasMore], so
+  /// a fully loaded list does not sprout a spinner row that no further page
+  /// could ever clear.
+  ///
+  /// Queued behind any page load already running, so the two cannot overwrite
+  /// each other's rows.
+  Future<void> _silentReloadLoadedPages() =>
+      _enqueuePaging(_silentReloadLoadedPagesNow);
+
+  Future<void> _silentReloadLoadedPagesNow() async {
+    if (!mounted) return;
+    final loadedCount = state.valueOrNull?.dives.length ?? 0;
+    final limit = loadedCount > _pageSize ? loadedCount : _pageSize;
+    _currentOffset = 0;
+    try {
+      final filter = _ref.read(diveFilterProvider);
+      final sort = _ref.read(diveSortProvider);
+      await _awaitQueryCaches(filter);
+      if (!mounted) return;
+      final results = await Future.wait([
+        _repository.getDiveSummaries(
+          diverId: _currentDiverId,
+          filter: filter,
+          sort: sort,
+          limit: limit + 1,
+          disabledSafetyRules: _ref.read(safetyReviewDisabledRulesProvider),
+        ),
+        _repository.getDiveCount(diverId: _currentDiverId, filter: filter),
+        if (filter.hasActiveFilters)
+          _repository.getDiveCount(diverId: _currentDiverId),
+      ]);
+      final fetched = results[0] as List<DiveSummary>;
+      final totalCount = results[1] as int;
+      final unfilteredTotalCount = filter.hasActiveFilters
+          ? results[2] as int
+          : null;
+      final hasMore = fetched.length > limit;
+      final dives = hasMore ? fetched.sublist(0, limit) : fetched;
+      _currentOffset = dives.length;
+
+      if (!mounted) return;
+      // Read at apply time, not before the await: loadNextPage flips
+      // isLoadingMore synchronously and queues its body behind this reload,
+      // so the flags can change while this query is running.
+      //
+      // Both are carried over rather than reset. isLoadingMore still marks a
+      // page load queued behind this one -- dropping it blinks the spinner
+      // off and lets the stranded-loader kick queue a second load for a page
+      // already coming. loadMoreFailed still marks a next page that could not
+      // be fetched, which refreshing the rows already loaded says nothing
+      // about -- dropping it swaps the retry row back for a spinner the kick
+      // then declines to touch, which is the dead end this all started from
+      // (#1610).
+      final flags = state.valueOrNull;
+      state = AsyncValue.data(
+        PaginatedDiveListState(
+          dives: dives,
+          hasMore: hasMore,
+          nextCursor: _isDateSort ? _cursorFromLastDive(dives) : null,
+          totalCount: totalCount,
+          unfilteredTotalCount: unfilteredTotalCount,
+          isLoadingMore: flags?.isLoadingMore ?? false,
+          loadMoreFailed: flags?.loadMoreFailed ?? false,
+          revision: ++_revision,
+        ),
+      );
+      // Pre-load downsampled profiles for mini charts (fire and forget),
+      // except the rows a jump skipped.
+      _loadBatchProfiles([
+        for (final d in dives)
+          if (!_jumpedOverIds.contains(d.id)) d.id,
+      ]);
+    } catch (e, st) {
+      if (mounted) state = AsyncValue.error(e, st);
+    }
   }
 
   DiveSummaryCursor? _cursorFromLastDive(List<DiveSummary> dives) {
@@ -545,9 +1326,6 @@ class PaginatedDiveListNotifier
     if (tripId != null) {
       _ref.invalidate(tripWithStatsProvider(tripId));
     }
-    if (dive.diveCenter != null) {
-      _ref.invalidate(diveCenterDiveCountProvider(dive.diveCenter!.id));
-    }
     _ref.read(tripListNotifierProvider.notifier).refresh();
     _ref.invalidate(allTripsWithStatsProvider);
   }
@@ -560,34 +1338,73 @@ class PaginatedDiveListNotifier
     _ref.invalidate(diveListNotifierProvider);
   }
 
-  /// Bump the statistics version to invalidate all cached stats providers,
-  /// and also invalidate the dive-level stats provider.
+  /// Invalidate the dive-level stats provider.
+  ///
+  /// Every other statistics provider now self-invalidates on
+  /// [InsightsRepository.watchInsightsChanges], so there is no version
+  /// counter to bump (issue #974).
   void _invalidateStatistics() {
     _ref.invalidate(diveStatisticsProvider);
-    _ref.read(statisticsVersionProvider.notifier).state++;
   }
 
   Future<domain.Dive> addDive(domain.Dive dive) async {
+    // Read the diver once, at the call: see DiveListNotifier.addDive.
+    final diverId = _currentDiverId;
+    final diverSwitches = _diverSwitches;
     var diveWithDiver = dive;
-    if (dive.diverId == null && _currentDiverId != null) {
+    if (dive.diverId == null && diverId != null) {
       final diverRepository = _ref.read(diverRepositoryProvider);
-      final diverExists = await diverRepository.getDiverById(_currentDiverId!);
+      final diverExists = await diverRepository.getDiverById(diverId);
       if (diverExists != null) {
-        diveWithDiver = dive.copyWith(diverId: _currentDiverId);
+        diveWithDiver = dive.copyWith(diverId: diverId);
       }
     }
     final newDive = await _repository.createDive(diveWithDiver);
 
-    if (dive.diveNumber == null) {
+    // A planned dive stays unnumbered until it is promoted (issue #2002).
+    if (dive.diveNumber == null && !dive.isPlanned && !dive.isDraft) {
       await _repository.assignMissingDiveNumbers(
-        diverId: newDive.diverId ?? _currentDiverId,
+        diverId: newDive.diverId ?? diverId,
       );
-      _ref.invalidate(diveNumberingInfoProvider);
     }
 
-    // Optimistic: prepend new summary and bump totalCount
+    // After a switch the loaded rows are another diver's (or the same
+    // diver's, reloaded, after a switch back): reload rather than prepend a
+    // dive that does not belong or is already in.
+    await _showCreated(newDive, reload: _diverSwitches != diverSwitches);
+    return newDive;
+  }
+
+  /// Shows [created] in the list, after it was written by something other
+  /// than [addDive]: a new dive's sitting creates its dive inside its own
+  /// transaction (issue #4527, plan 8) and needs the refresh alone.
+  Future<void> refreshAfterCreate(domain.Dive created) async {
+    // A dive made for another diver than the list's reloads the list, as a
+    // switch during addDive does.
+    await _showCreated(
+      created,
+      reload: created.diverId != null && created.diverId != _currentDiverId,
+    );
+  }
+
+  /// What a create owes the list: the new row, its counts, and every
+  /// provider a new dive changes. [reload] reads the list again instead of
+  /// prepending: the loaded rows belong to another diver than the dive.
+  Future<void> _showCreated(domain.Dive newDive, {required bool reload}) async {
+    // The dive may have been numbered, or have moved the next number.
+    _ref.invalidate(diveNumberingInfoProvider);
+
+    // Optimistic: prepend new summary and bump totalCount, onto the list of
+    // the dive's own diver only.
+    //
+    // Under a filter the new dive may not match it, so the rows and both
+    // counts come from the query instead, without a spinner (#2669).
     final current = state.valueOrNull;
-    if (current != null) {
+    if (reload) {
+      await loadFirstPage();
+    } else if (_loadedUnderFilter) {
+      await _silentReloadLoadedPages();
+    } else if (current != null) {
       final summary = DiveSummary.fromDive(newDive);
       state = AsyncValue.data(
         current.copyWith(
@@ -602,19 +1419,32 @@ class PaginatedDiveListNotifier
     _invalidateStatistics();
     _invalidateRelatedProviders(newDive);
     _invalidateOldProvider();
-    return newDive;
   }
 
   Future<void> updateDive(domain.Dive dive) async {
     final oldDive = await _repository.getDiveById(dive.id);
     await _repository.updateDive(dive);
+    await refreshAfterWrite(before: oldDive, after: dive);
+  }
 
-    // Optimistic: replace the item in the list by ID
+  /// Refreshes the list and every provider that depends on a dive, after
+  /// [after] was written by something other than [updateDive]: an editing
+  /// sitting writes inside its own transaction and needs the refresh alone.
+  /// [before] is the dive as it was, so what it used to belong to (its old
+  /// trip, say) is refreshed too.
+  Future<void> refreshAfterWrite({
+    required domain.Dive? before,
+    required domain.Dive after,
+  }) async {
+    // Optimistic: replace the item in the list by ID, unless a filter decides
+    // whether the edited dive still belongs in it.
     final current = state.valueOrNull;
-    if (current != null) {
-      final summary = DiveSummary.fromDive(dive);
+    if (_loadedUnderFilter) {
+      await _silentReloadLoadedPages();
+    } else if (current != null) {
+      final summary = DiveSummary.fromDive(after);
       final updated = current.dives.map((d) {
-        return d.id == dive.id ? summary : d;
+        return d.id == after.id ? summary : d;
       }).toList();
       state = AsyncValue.data(current.copyWith(dives: updated));
     } else {
@@ -622,9 +1452,9 @@ class PaginatedDiveListNotifier
     }
 
     _invalidateStatistics();
-    _ref.invalidate(diveProvider(dive.id));
-    if (oldDive != null) _invalidateRelatedProviders(oldDive);
-    _invalidateRelatedProviders(dive);
+    _ref.invalidate(diveProvider(after.id));
+    if (before != null) _invalidateRelatedProviders(before);
+    _invalidateRelatedProviders(after);
     _invalidateOldProvider();
   }
 
@@ -639,6 +1469,7 @@ class PaginatedDiveListNotifier
         current.copyWith(
           dives: current.dives.where((d) => d.id != id).toList(),
           totalCount: current.totalCount - 1,
+          unfilteredTotalCount: _shifted(current.unfilteredTotalCount, -1),
         ),
       );
     } else {
@@ -651,9 +1482,9 @@ class PaginatedDiveListNotifier
     _invalidateOldProvider();
   }
 
-  Future<List<domain.Dive>> bulkDeleteDives(List<String> ids) async {
-    final divesToDelete = await _repository.getDivesByIds(ids);
-    await _repository.bulkDeleteDives(ids);
+  /// Deletes [ids] and returns what [restoreDives] needs to undo it.
+  Future<DeletedDives> bulkDeleteDives(List<String> ids) async {
+    final deleted = await _ref.read(diveBulkDeleteServiceProvider).delete(ids);
 
     // Optimistic: remove items by IDs
     final idSet = ids.toSet();
@@ -663,6 +1494,10 @@ class PaginatedDiveListNotifier
         current.copyWith(
           dives: current.dives.where((d) => !idSet.contains(d.id)).toList(),
           totalCount: current.totalCount - ids.length,
+          unfilteredTotalCount: _shifted(
+            current.unfilteredTotalCount,
+            -ids.length,
+          ),
         ),
       );
     } else {
@@ -671,25 +1506,27 @@ class PaginatedDiveListNotifier
 
     _invalidateStatistics();
     _ref.invalidate(diveNumberingInfoProvider);
-    for (final dive in divesToDelete) {
+    for (final dive in deleted.dives) {
       _invalidateRelatedProviders(dive);
     }
     _invalidateOldProvider();
-    return divesToDelete;
+    return deleted;
   }
 
-  Future<void> restoreDives(List<domain.Dive> dives) async {
-    for (final dive in dives) {
-      await _repository.createDive(dive);
-    }
+  /// Undoes a [bulkDeleteDives]. Returns false when some of it was lost.
+  Future<bool> restoreDives(DeletedDives deleted) async {
+    final complete = await _ref
+        .read(diveBulkDeleteServiceProvider)
+        .restore(deleted);
     // Restore is complex (ordering), reload first page
     await loadFirstPage();
     _invalidateStatistics();
     _ref.invalidate(diveNumberingInfoProvider);
-    for (final dive in dives) {
+    for (final dive in deleted.dives) {
       _invalidateRelatedProviders(dive);
     }
     _invalidateOldProvider();
+    return complete;
   }
 
   Future<void> toggleFavorite(String diveId) async {
@@ -703,6 +1540,7 @@ class PaginatedDiveListNotifier
     }
 
     await _repository.toggleFavorite(diveId);
+    if (_loadedUnderFilter) await _silentReloadLoadedPages();
     _ref.invalidate(diveProvider(diveId));
     _invalidateOldProvider();
   }
@@ -718,6 +1556,7 @@ class PaginatedDiveListNotifier
     }
 
     await _repository.setFavorite(diveId, isFavorite);
+    if (_loadedUnderFilter) await _silentReloadLoadedPages();
     _ref.invalidate(diveProvider(diveId));
     _invalidateOldProvider();
   }
@@ -771,32 +1610,17 @@ final allDivesForTableProvider = Provider<AsyncValue<List<domain.Dive>>>((ref) {
   return ref.watch(sortedFilteredDivesProvider);
 });
 
-/// Pre-computed surface intervals for the table view.
-///
-/// Sorts dives chronologically and computes the gap between consecutive
-/// dives (previous exit -> current entry). The first dive in the list
-/// gets a null interval.
-final surfaceIntervalsProvider = Provider<Map<String, Duration?>>((ref) {
-  final divesAsync = ref.watch(allDivesForTableProvider);
-  return divesAsync.whenOrNull(
-        data: (dives) {
-          final sorted = [...dives]
-            ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
-          final intervals = <String, Duration?>{};
-          for (var i = 0; i < sorted.length; i++) {
-            if (i == 0) {
-              intervals[sorted[i].id] = null;
-            } else {
-              final prevExit = sorted[i - 1].exitTime ?? sorted[i - 1].dateTime;
-              final thisEntry = sorted[i].entryTime ?? sorted[i].dateTime;
-              intervals[sorted[i].id] = thisEntry.difference(prevExit);
-            }
-          }
-          return intervals;
-        },
-      ) ??
-      {};
-});
+/// Every dive's surface interval for the table (#2984), over the whole log
+/// so a filter never changes the dive a gap is measured from. Reloaded on
+/// writes to `dives` (entry, exit, runtime) and to what a measured runtime
+/// reads, whose span stands in for a missing runtime, and nothing else.
+/// Auto-disposed, so nothing re-queries the whole log once the table closes.
+final diveSurfaceIntervalsProvider =
+    FutureProvider.autoDispose<Map<String, Duration?>>((ref) async {
+      final repository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchMeasuredRuntimeChanges());
+      return repository.getSurfaceIntervals();
+    });
 
 /// Provider for getting the surface interval to the previous dive
 final surfaceIntervalProvider = FutureProvider.family<Duration?, String>((
@@ -804,6 +1628,7 @@ final surfaceIntervalProvider = FutureProvider.family<Duration?, String>((
   diveId,
 ) async {
   final repository = ref.watch(diveRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
   return repository.getSurfaceInterval(diveId);
 });
 
@@ -815,6 +1640,7 @@ final diveNumberingInfoProvider = FutureProvider<DiveNumberingInfo>((
   final validatedDiverId = await ref.watch(
     validatedCurrentDiverIdProvider.future,
   );
+  ref.invalidateSelfWhen(repository.watchDivesChanges());
   return repository.getDiveNumberingInfo(diverId: validatedDiverId);
 });
 
@@ -828,12 +1654,19 @@ final tankPressureRepositoryProvider = Provider<TankPressureRepository>((ref) {
 /// Returns a map where keys are tank IDs and values are lists of
 /// pressure points sorted by timestamp. Used for multi-tank pressure
 /// visualization in the dive profile chart.
-final tankPressuresProvider =
-    FutureProvider.family<Map<String, List<domain.TankPressurePoint>>, String>((
+final tankPressuresProvider = FutureProvider.autoDispose
+    .family<Map<String, List<domain.TankPressurePoint>>, String>((
       ref,
       diveId,
     ) async {
+      retainDiveData(ref);
       final repository = ref.watch(tankPressureRepositoryProvider);
+      // Analysis-input tick covers tank_pressure_series (and the dives
+      // cascade); the broad detail tick made every pressure curve re-query
+      // on unrelated writes such as media.
+      ref.invalidateSelfWhen(
+        ref.watch(diveRepositoryProvider).watchAnalysisInputChanges(),
+      );
       return repository.getTankPressuresForDive(diveId);
     });
 
@@ -842,6 +1675,10 @@ final tankPressuresProvider =
 final diveDataSourcesProvider =
     FutureProvider.family<List<DiveDataSource>, String>((ref, diveId) async {
       final repository = ref.watch(diveRepositoryProvider);
+      // Analysis-input tick: reads dive_data_sources/dive_computers only, and
+      // sourceProfileAnalysisProvider watches this, so the broad detail tick
+      // re-ran the per-source analysis on unrelated writes such as media.
+      ref.invalidateSelfWhen(repository.watchAnalysisInputChanges());
       return repository.getDataSources(diveId);
     });
 
@@ -851,5 +1688,6 @@ final isMultiDataSourceDiveProvider = FutureProvider.family<bool, String>((
   diveId,
 ) async {
   final repository = ref.watch(diveRepositoryProvider);
+  ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
   return repository.hasMultipleDataSources(diveId);
 });

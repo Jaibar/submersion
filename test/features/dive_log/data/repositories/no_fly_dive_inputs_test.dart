@@ -1,0 +1,398 @@
+import 'package:drift/drift.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late AppDatabase db;
+  late DiveRepository repository;
+  late ProfileSeriesRepository seriesRepository;
+  final now = DateTime.utc(2026, 7, 17, 12);
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+    repository = DiveRepository();
+    seriesRepository = ProfileSeriesRepository();
+  });
+
+  tearDown(() => tearDownTestDatabase());
+
+  Future<void> insertDive(
+    String id, {
+    DateTime? exitTime,
+    DateTime? entryTime,
+    int? runtimeSeconds,
+    String? diverId,
+    bool isPlanned = false,
+    String? outingId,
+  }) async {
+    final created = now.millisecondsSinceEpoch;
+    await db
+        .into(db.dives)
+        .insert(
+          DivesCompanion(
+            id: Value(id),
+            diverId: Value(diverId),
+            diveDateTime: Value(
+              (entryTime ?? exitTime ?? now).millisecondsSinceEpoch,
+            ),
+            entryTime: Value(entryTime?.millisecondsSinceEpoch),
+            exitTime: Value(exitTime?.millisecondsSinceEpoch),
+            runtime: Value(runtimeSeconds),
+            isPlanned: Value(isPlanned),
+            outingId: Value(outingId),
+            createdAt: Value(created),
+            updatedAt: Value(created),
+          ),
+        );
+  }
+
+  Future<void> insertProfilePoint(
+    String diveId, {
+    int? decoType,
+    double? ceiling,
+  }) async {
+    await seriesRepository.insertSeries(
+      diveId: diveId,
+      samples: [
+        ProfileSample(
+          timestamp: 60,
+          depth: 20.0,
+          decoType: decoType,
+          ceiling: ceiling,
+        ),
+      ],
+      now: now.millisecondsSinceEpoch,
+    );
+  }
+
+  test('returns dives ending after the cutoff with deco flags', () async {
+    final since = now.subtract(const Duration(hours: 48));
+
+    // Recent dive with explicit exit time, deco profile sample.
+    await insertDive(
+      'recent-deco',
+      exitTime: now.subtract(const Duration(hours: 2)),
+    );
+    await insertProfilePoint('recent-deco', decoType: 2);
+
+    // Recent dive with end derived from entry + runtime, clean profile.
+    await insertDive(
+      'recent-clean',
+      entryTime: now.subtract(const Duration(hours: 6)),
+      runtimeSeconds: 3600,
+    );
+    await insertProfilePoint('recent-clean', decoType: 0, ceiling: 0);
+
+    // Old dive outside the window.
+    await insertDive('old', exitTime: now.subtract(const Duration(hours: 72)));
+    await insertProfilePoint('old', decoType: 2);
+
+    final inputs = await repository.getNoFlyDiveInputs(since: since);
+    final byEnd = {for (final i in inputs) i.endTime.millisecondsSinceEpoch: i};
+
+    expect(inputs, hasLength(2));
+    final decoEnd = now
+        .subtract(const Duration(hours: 2))
+        .millisecondsSinceEpoch;
+    final cleanEnd = now
+        .subtract(const Duration(hours: 5))
+        .millisecondsSinceEpoch;
+    expect(byEnd[decoEnd]!.hadDecoObligation, isTrue);
+    expect(byEnd[cleanEnd]!.hadDecoObligation, isFalse);
+  });
+
+  test('ceiling > 0 also counts as deco', () async {
+    await insertDive(
+      'ceiling-dive',
+      exitTime: now.subtract(const Duration(hours: 1)),
+    );
+    await insertProfilePoint('ceiling-dive', ceiling: 3.0);
+
+    final inputs = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(inputs.single.hadDecoObligation, isTrue);
+  });
+
+  test('a safety stop ceiling on a series with deco types is no deco '
+      '(#2550)', () async {
+    // A series stored before the import fix kept a safety stop's depth as
+    // its ceiling. The computer reported deco types and never a deco stop,
+    // so the dive had no obligation: the same rule the Deco filter uses.
+    await insertDive(
+      'safety-stop-dive',
+      exitTime: now.subtract(const Duration(hours: 1)),
+    );
+    await insertProfilePoint('safety-stop-dive', decoType: 1, ceiling: 5.0);
+
+    final inputs = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(inputs.single.hadDecoObligation, isFalse);
+  });
+
+  test('a ceiling-only source keeps its deco when a second computer on the '
+      'dive records deco types and no deco stop', () async {
+    // Two computers disagree: a FIT import logs only a ceiling (no deco
+    // types), a second computer logs NDL throughout. The ceiling-only
+    // series still recorded an obligation, and the no-fly window must not
+    // shrink because the other computer stayed out of deco.
+    await insertDive(
+      'two-computers',
+      exitTime: now.subtract(const Duration(hours: 1)),
+    );
+    await insertProfilePoint('two-computers', ceiling: 3.0);
+    await seriesRepository.insertSeries(
+      diveId: 'two-computers',
+      isPrimary: false,
+      samples: const [ProfileSample(timestamp: 60, depth: 20.0, decoType: 0)],
+      now: now.millisecondsSinceEpoch,
+    );
+
+    final inputs = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(inputs.single.hadDecoObligation, isTrue);
+  });
+
+  test('a recorded deco stop event counts as deco', () async {
+    await insertDive(
+      'event-deco',
+      exitTime: now.subtract(const Duration(hours: 1)),
+    );
+    await db
+        .into(db.diveProfileEvents)
+        .insert(
+          DiveProfileEventsCompanion.insert(
+            id: 'evt-1',
+            diveId: 'event-deco',
+            timestamp: 600,
+            eventType: 'decoStopStart',
+            createdAt: now.millisecondsSinceEpoch,
+          ),
+        );
+
+    final inputs = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(inputs.single.hadDecoObligation, isTrue);
+  });
+
+  test('dive without profile counts as no-deco', () async {
+    await insertDive('bare', exitTime: now.subtract(const Duration(hours: 1)));
+    final inputs = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(inputs.single.hadDecoObligation, isFalse);
+  });
+
+  group('a plan that was never dived (#3924)', () {
+    final since = now.subtract(const Duration(hours: 48));
+
+    Future<void> insertPastPlan(String id) => insertDive(
+      id,
+      entryTime: now.subtract(const Duration(hours: 3)),
+      exitTime: now.subtract(const Duration(hours: 2)),
+      runtimeSeconds: 3600,
+      isPlanned: true,
+    );
+
+    test('adds no dive once its planned time has passed', () async {
+      await insertPastPlan('plan');
+
+      expect(await repository.getNoFlyDiveInputs(since: since), isEmpty);
+    });
+
+    test('its planned deco does not escalate a real dive', () async {
+      await insertPastPlan('plan');
+      await insertProfilePoint('plan', decoType: 2);
+      await insertDive(
+        'real',
+        exitTime: now.subtract(const Duration(hours: 5)),
+      );
+
+      final inputs = await repository.getNoFlyDiveInputs(since: since);
+
+      expect(inputs.single.hadDecoObligation, isFalse);
+      expect(inputs.single.endTime, now.subtract(const Duration(hours: 5)));
+    });
+
+    test('counts from the moment it is marked executed', () async {
+      await insertPastPlan('plan');
+
+      await repository.convertPlanToActualDive('plan');
+
+      expect(await repository.getNoFlyDiveInputs(since: since), hasLength(1));
+    });
+  });
+
+  group('a dive mirrored to a buddy, awaiting their download (#3924)', () {
+    final since = now.subtract(const Duration(hours: 48));
+    final exit = now.subtract(const Duration(hours: 2));
+
+    test('counts once a dive on its outing was logged', () async {
+      await insertDive('source', exitTime: exit, outingId: 'outing');
+      await insertDive(
+        'mirror',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      expect(await repository.getNoFlyDiveInputs(since: since), hasLength(2));
+    });
+
+    test('carries the deco obligation of the dive it came from', () async {
+      await insertDive('source', exitTime: exit, outingId: 'outing');
+      await insertProfilePoint('source', decoType: 2);
+      await insertDive(
+        'mirror',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      final inputs = await repository.getNoFlyDiveInputs(since: since);
+
+      expect(inputs.map((i) => i.hadDecoObligation), [isTrue, isTrue]);
+    });
+
+    test('carries a deco stop event from the dive it came from', () async {
+      await insertDive('source', exitTime: exit, outingId: 'outing');
+      await db
+          .into(db.diveProfileEvents)
+          .insert(
+            DiveProfileEventsCompanion.insert(
+              id: 'evt-mirror',
+              diveId: 'source',
+              timestamp: 600,
+              eventType: 'decoStopStart',
+              createdAt: now.millisecondsSinceEpoch,
+            ),
+          );
+      await insertDive(
+        'mirror',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      final inputs = await repository.getNoFlyDiveInputs(since: since);
+
+      expect(inputs.map((i) => i.hadDecoObligation), [isTrue, isTrue]);
+    });
+
+    test('does not read a plan on its outing for deco', () async {
+      await insertDive('source', exitTime: exit, outingId: 'outing');
+      await insertDive(
+        'sketch',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+      await insertProfilePoint('sketch', decoType: 2);
+      await insertDive(
+        'mirror',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      final inputs = await repository.getNoFlyDiveInputs(since: since);
+      final deco = inputs.where((i) => i.hadDecoObligation);
+
+      // The sketch reads its own profile; the source and the other mirror
+      // have nothing to read.
+      expect(deco, hasLength(1));
+    });
+
+    test(
+      'ends with the dive it came from when that has only a runtime',
+      () async {
+        final entry = now.subtract(const Duration(hours: 3));
+        await insertDive(
+          'source',
+          entryTime: entry,
+          runtimeSeconds: 3600,
+          outingId: 'outing',
+        );
+        await insertDive(
+          'mirror',
+          entryTime: entry,
+          isPlanned: true,
+          outingId: 'outing',
+        );
+
+        final inputs = await repository.getNoFlyDiveInputs(since: since);
+
+        expect(
+          inputs.map((i) => i.endTime),
+          everyElement(now.subtract(const Duration(hours: 2))),
+        );
+      },
+    );
+
+    test('ends with the dive it came from when that gained an exit', () async {
+      final entry = now.subtract(const Duration(hours: 3));
+      await insertDive(
+        'source',
+        entryTime: entry,
+        exitTime: exit,
+        outingId: 'outing',
+      );
+      await insertDive(
+        'mirror',
+        entryTime: entry,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      final inputs = await repository.getNoFlyDiveInputs(since: since);
+
+      expect(inputs.map((i) => i.endTime), everyElement(exit));
+    });
+
+    test('stays out while every dive on its outing is a plan', () async {
+      await insertDive(
+        'source',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+      await insertDive(
+        'mirror',
+        exitTime: exit,
+        isPlanned: true,
+        outingId: 'outing',
+      );
+
+      expect(await repository.getNoFlyDiveInputs(since: since), isEmpty);
+    });
+  });
+
+  test('passing a diverId scopes the query to that diver', () async {
+    // A dive with no diver assigned must not surface when the query is scoped
+    // to a specific diver (exercises the diver_id WHERE clause).
+    await insertDive(
+      'unowned',
+      exitTime: now.subtract(const Duration(hours: 1)),
+    );
+
+    final scoped = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+      diverId: 'diver-1',
+    );
+    expect(scoped, isEmpty);
+
+    // Without a diver filter the same dive is returned.
+    final unscoped = await repository.getNoFlyDiveInputs(
+      since: now.subtract(const Duration(hours: 48)),
+    );
+    expect(unscoped, hasLength(1));
+  });
+}

@@ -7,7 +7,11 @@ import 'package:submersion/core/constants/enums.dart';
 class ServiceRecord {
   final String id;
   final String equipmentId;
-  final ServiceType serviceType;
+  final ServiceCategory serviceCategory;
+
+  /// The service kind (clock) the record fulfils (issue #2651); null when
+  /// untagged.
+  final String? serviceKindId;
   final DateTime serviceDate;
   final String? provider;
   final double? cost;
@@ -18,7 +22,8 @@ class ServiceRecord {
   const ServiceRecord({
     required this.id,
     required this.equipmentId,
-    required this.serviceType,
+    required this.serviceCategory,
+    this.serviceKindId,
     required this.serviceDate,
     this.provider,
     this.cost,

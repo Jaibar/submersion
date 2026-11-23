@@ -4,6 +4,7 @@ import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
+import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart'
     as domain;
 
@@ -39,6 +40,50 @@ void main() {
   });
 
   group('SpeciesRepository', () {
+    test(
+      'watchSpeciesChanges emits when the species table is written',
+      () async {
+        // Subscribe first, then write: the tick must fire so the species list
+        // providers (allSpeciesProvider / SpeciesListNotifier) refresh after a
+        // sync writes species rows directly.
+        final firstTick = repository.watchSpeciesChanges().first.timeout(
+          const Duration(seconds: 5),
+        );
+        await repository.createSpecies(
+          commonName: 'Synced Species',
+          scientificName: 'Synced sp',
+          category: SpeciesCategory.fish,
+          taxonomyClass: 'Test',
+          description: 'x',
+        );
+        await firstTick; // throws on timeout if the tick never fired
+        final all = await repository.getAllSpecies();
+        expect(all.any((s) => s.commonName == 'Synced Species'), isTrue);
+      },
+    );
+
+    test('getAllSpecies keeps categories grouped and folds case and accents '
+        'within each (issue #2038)', () async {
+      const mine = {'zebra moray', 'Écureuil fish', 'angelfish', 'Brain'};
+      for (final (name, category) in [
+        ('zebra moray', SpeciesCategory.fish),
+        ('Écureuil fish', SpeciesCategory.fish),
+        ('angelfish', SpeciesCategory.fish),
+        ('Brain', SpeciesCategory.coral),
+      ]) {
+        await repository.createSpecies(commonName: name, category: category);
+      }
+
+      final ordered = (await repository.getAllSpecies())
+          .map((s) => s.commonName)
+          .where(mine.contains)
+          .toList();
+
+      // SQL orders by category name first ("coral" < "fish"), which the
+      // Dart re-sort must preserve.
+      expect(ordered, ['Brain', 'angelfish', 'Écureuil fish', 'zebra moray']);
+    });
+
     group('CRUD operations', () {
       test(
         'createSpecies creates a custom species with generated ID',
@@ -300,6 +345,7 @@ void main() {
           final sighting = await repository.addSighting(
             diveId: diveId,
             speciesId: testSpecies.id,
+            abundance: SightingAbundance.exact,
             count: 3,
             notes: 'Spotted near coral',
           );
@@ -323,6 +369,7 @@ void main() {
         await repository.addSighting(
           diveId: diveId,
           speciesId: species2.id,
+          abundance: SightingAbundance.exact,
           count: 2,
         );
 
@@ -388,6 +435,96 @@ void main() {
           expect(found.scientificName, 'Mobula birostris');
         },
       );
+
+      test('matches a name with non-ASCII capitals', () async {
+        // SQLite's LOWER folds ASCII only, so a needle lowered in Dart
+        // ("étoile") never equalled LOWER("Étoile") and a twin was created.
+        final created = await repository.createSpecies(
+          commonName: 'Étoile de mer',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        final found = await repository.getOrCreateSpecies(
+          commonName: 'Étoile de mer',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        expect(found.id, created.id);
+      });
+
+      test('matches when only an accented letter differs in case', () async {
+        final created = await repository.createSpecies(
+          commonName: 'étoile de mer',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        final found = await repository.getOrCreateSpecies(
+          commonName: 'Étoile de mer',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        expect(found.id, created.id);
+      });
+
+      // #3032: the issue's own case, an import naming the stored species
+      // with a different word case.
+      test('matches a name that starts with an accented capital', () async {
+        final created = await repository.createSpecies(
+          commonName: 'Éponge pinceau',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        final found = await repository.getOrCreateSpecies(
+          commonName: 'Éponge Pinceau',
+          category: SpeciesCategory.other,
+        );
+
+        expect(found.id, created.id);
+        expect(found.commonName, 'Éponge pinceau');
+      });
+
+      test('matches an all-capital name with an accented letter', () async {
+        final created = await repository.createSpecies(
+          commonName: 'ÖRNFISK',
+          category: SpeciesCategory.fish,
+        );
+
+        final found = await repository.getOrCreateSpecies(
+          commonName: 'örnfisk',
+          category: SpeciesCategory.other,
+        );
+
+        expect(found.id, created.id);
+      });
+    });
+
+    group('findSpeciesByScientificName', () {
+      test('matches a name with a non-ASCII capital', () async {
+        final created = await repository.createSpecies(
+          commonName: 'Test species',
+          scientificName: 'Ébria tripartita',
+          category: SpeciesCategory.other,
+        );
+
+        final found = await repository.findSpeciesByScientificName(
+          'ébria TRIPARTITA',
+        );
+
+        expect(found?.id, created.id);
+      });
+    });
+
+    group('searchSpecies with accented capitals', () {
+      test('finds a name by its accented first word in any case', () async {
+        await repository.createSpecies(
+          commonName: 'Éponge pinceau',
+          category: SpeciesCategory.invertebrate,
+        );
+
+        expect(await repository.searchSpecies('Éponge'), hasLength(1));
+        expect(await repository.searchSpecies('éponge'), hasLength(1));
+        expect(await repository.searchSpecies('ÉPONGE'), hasLength(1));
+      });
     });
   });
 }

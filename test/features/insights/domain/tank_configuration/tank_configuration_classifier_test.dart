@@ -1,0 +1,295 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
+import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration_classifier.dart';
+
+/// Issue #3421: every dive sorts into one base configuration, read only from
+/// its existing tanks, and counts under each extra that applies.
+void main() {
+  var nextId = 0;
+  DiveTank tank(
+    TankRole role, {
+    double o2 = 21.0,
+    double he = 0.0,
+    double? volume,
+    String? name,
+    String? presetName,
+    double? start,
+    double? end,
+  }) => DiveTank(
+    id: 't${nextId++}',
+    role: role,
+    gasMix: GasMix(o2: o2, he: he),
+    volume: volume,
+    name: name,
+    presetName: presetName,
+    startPressure: start,
+    endPressure: end,
+  );
+
+  TankConfigurationResult classify(
+    List<DiveTank> tanks, {
+    DiveMode mode = DiveMode.oc,
+    List<({String tankId, int timestamp})> switches = const [],
+    bool hasProfile = true,
+  }) => classifyTankConfiguration(
+    TankConfigurationDive(
+      diveMode: mode,
+      tanks: tanks,
+      gasSwitches: switches,
+      hasProfile: hasProfile,
+    ),
+  );
+
+  group('base configuration', () {
+    test('no tanks', () {
+      final r = classify(const []);
+      expect(r.base, TankBaseConfiguration.noTanks);
+      expect(r.extras, isEmpty);
+    });
+
+    test('ccr mode with untagged tanks is a rebreather', () {
+      final r = classify([tank(TankRole.backGas)], mode: DiveMode.ccr);
+      expect(r.base, TankBaseConfiguration.rebreather);
+    });
+
+    test('oc mode with a diluent tank is a rebreather', () {
+      final r = classify([tank(TankRole.diluent)]);
+      expect(r.base, TankBaseConfiguration.rebreather);
+    });
+
+    test('diluent plus sidemountLeft is a rebreather (precedence)', () {
+      final r = classify([
+        tank(TankRole.diluent),
+        tank(TankRole.sidemountLeft),
+      ]);
+      expect(r.base, TankBaseConfiguration.rebreather);
+    });
+
+    test('one sidemountLeft tank is sidemount', () {
+      final r = classify([tank(TankRole.sidemountLeft)]);
+      expect(r.base, TankBaseConfiguration.sidemount);
+    });
+
+    test('sidemount pair plus a stage is sidemount with stages', () {
+      final r = classify([
+        tank(TankRole.sidemountLeft),
+        tank(TankRole.sidemountRight),
+        tank(TankRole.stage, o2: 50),
+      ]);
+      expect(r.base, TankBaseConfiguration.sidemount);
+      expect(r.extras, {TankConfigurationExtra.stages});
+    });
+
+    test('one twin set cylinder is twin backmount', () {
+      final r = classify([tank(TankRole.twinSet)]);
+      expect(r.base, TankBaseConfiguration.twinBackmount);
+    });
+
+    test('a twin set plus a deco bottle is twin backmount with deco gas', () {
+      final r = classify([tank(TankRole.twinSet), tank(TankRole.deco, o2: 50)]);
+      expect(r.base, TankBaseConfiguration.twinBackmount);
+      expect(r.extras, contains(TankConfigurationExtra.decoGas));
+    });
+
+    test('two backGas on one gas are single backmount', () {
+      final r = classify([
+        tank(TankRole.backGas),
+        tank(TankRole.backGas, o2: 21.3),
+      ]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('two backGas on air and EAN32 are single backmount', () {
+      final r = classify([
+        tank(TankRole.backGas),
+        tank(TankRole.backGas, o2: 32),
+      ]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('one backGas of 24 L is single backmount', () {
+      final r = classify([tank(TankRole.backGas, volume: 24)]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('a backGas named D12 is single backmount', () {
+      final r = classify([tank(TankRole.backGas, name: 'D12')]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('a twin set in ccr mode is a rebreather', () {
+      final r = classify([tank(TankRole.twinSet)], mode: DiveMode.ccr);
+      expect(r.base, TankBaseConfiguration.rebreather);
+    });
+
+    test('one backGas of 18 L is single backmount', () {
+      final r = classify([tank(TankRole.backGas, volume: 18)]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('one backGas with no volume is single backmount', () {
+      final r = classify([tank(TankRole.backGas)]);
+      expect(r.base, TankBaseConfiguration.singleBackmount);
+    });
+
+    test('only a stage tank is other with stages', () {
+      final r = classify([tank(TankRole.stage)]);
+      expect(r.base, TankBaseConfiguration.other);
+      expect(r.extras, {TankConfigurationExtra.stages});
+    });
+
+    test('only a pony is other with no extras', () {
+      final r = classify([tank(TankRole.pony)]);
+      expect(r.base, TankBaseConfiguration.other);
+      expect(r.extras, isEmpty);
+    });
+  });
+
+  group('extras', () {
+    test('a deco tank adds deco gas', () {
+      final r = classify([tank(TankRole.backGas), tank(TankRole.deco, o2: 50)]);
+      expect(r.extras, contains(TankConfigurationExtra.decoGas));
+    });
+
+    test('a deco gas switched to is multi-gas', () {
+      final back = tank(TankRole.backGas, start: 200, end: 60);
+      final deco = tank(TankRole.deco, o2: 50);
+      final r = classify(
+        [back, deco],
+        switches: [(tankId: deco.id, timestamp: 1800)],
+      );
+      expect(r.extras, contains(TankConfigurationExtra.multiGas));
+    });
+
+    test('an untouched air and EAN32 download is not multi-gas', () {
+      final r = classify([
+        tank(TankRole.backGas),
+        tank(TankRole.backGas, o2: 32),
+      ]);
+      expect(r.extras, isNot(contains(TankConfigurationExtra.multiGas)));
+    });
+
+    test('a hand-logged dive with two gases is multi-gas', () {
+      final r = classify([
+        tank(TankRole.backGas),
+        tank(TankRole.backGas, o2: 32),
+      ], hasProfile: false);
+      expect(r.extras, contains(TankConfigurationExtra.multiGas));
+    });
+
+    test('a sidemount pair on one gas is not multi-gas', () {
+      final r = classify([
+        tank(TankRole.sidemountLeft, o2: 32, start: 200, end: 100),
+        tank(TankRole.sidemountRight, o2: 32, start: 200, end: 110),
+      ]);
+      expect(r.extras, isNot(contains(TankConfigurationExtra.multiGas)));
+    });
+
+    test('a ccr diluent and oxygen supply are not multi-gas', () {
+      final r = classify([
+        tank(TankRole.diluent, start: 200, end: 150),
+        tank(TankRole.oxygenSupply, o2: 100, start: 200, end: 120),
+      ], mode: DiveMode.ccr);
+      expect(r.extras, isNot(contains(TankConfigurationExtra.multiGas)));
+    });
+
+    test('EAN32 and 32.4 both breathed are one gas', () {
+      final r = classify([
+        tank(TankRole.backGas, o2: 32, start: 200, end: 100),
+        tank(TankRole.stage, o2: 32.4, start: 200, end: 120),
+      ]);
+      expect(r.extras, isNot(contains(TankConfigurationExtra.multiGas)));
+    });
+
+    test('EAN32 and EAN33 both breathed are multi-gas', () {
+      final r = classify([
+        tank(TankRole.backGas, o2: 32, start: 200, end: 100),
+        tank(TankRole.stage, o2: 33, start: 200, end: 120),
+      ]);
+      expect(r.extras, contains(TankConfigurationExtra.multiGas));
+    });
+  });
+
+  test('fromGroups adds each group under its base and every extra', () {
+    final stats = TankConfigurationStats.fromGroups([
+      (
+        result: (
+          base: TankBaseConfiguration.sidemount,
+          extras: {TankConfigurationExtra.stages},
+        ),
+        dives: 3,
+      ),
+      (
+        result: (
+          base: TankBaseConfiguration.sidemount,
+          extras: {
+            TankConfigurationExtra.stages,
+            TankConfigurationExtra.decoGas,
+          },
+        ),
+        dives: 2,
+      ),
+      (
+        result: (
+          base: TankBaseConfiguration.noTanks,
+          extras: const <TankConfigurationExtra>{},
+        ),
+        dives: 1,
+      ),
+    ]);
+    expect(stats.totalDives, 6);
+    expect(stats.baseCounts, {
+      TankBaseConfiguration.sidemount: 5,
+      TankBaseConfiguration.noTanks: 1,
+    });
+    expect(stats.extraCounts, {
+      TankConfigurationExtra.stages: 5,
+      TankConfigurationExtra.decoGas: 2,
+    });
+  });
+
+  // A suit inflation bottle is not breathing gas (issue #4243).
+  group('a suit inflation bottle', () {
+    test('adds no gas to a hand-logged single', () {
+      final result = classify([
+        tank(TankRole.suitInflation, o2: 21),
+        tank(TankRole.backGas, o2: 32),
+      ], hasProfile: false);
+
+      expect(result.base, TankBaseConfiguration.singleBackmount);
+      expect(result.extras, isEmpty);
+    });
+
+    test('adds no gas when it dropped', () {
+      final result = classify([
+        tank(TankRole.backGas, o2: 32, start: 200, end: 60),
+        tank(TankRole.suitInflation, o2: 21, start: 200, end: 150),
+      ]);
+
+      expect(result.extras, isNot(contains(TankConfigurationExtra.multiGas)));
+    });
+
+    test('a switch to it counts against the cylinder on its mix', () {
+      // Every other reading moves the switch to the air stage, so the stage
+      // was breathed and the dive used two gases.
+      final left = tank(TankRole.sidemountLeft, o2: 32);
+      final stage = tank(TankRole.stage, o2: 21);
+      final suit = tank(TankRole.suitInflation, o2: 21);
+      final result = classify(
+        [left, stage, suit],
+        switches: [(tankId: suit.id, timestamp: 1800)],
+      );
+
+      expect(result.extras, contains(TankConfigurationExtra.multiGas));
+    });
+
+    test('alone is no tanks', () {
+      expect(
+        classify([tank(TankRole.suitInflation)]).base,
+        TankBaseConfiguration.noTanks,
+      );
+    });
+  });
+}

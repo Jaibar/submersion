@@ -1,8 +1,12 @@
 #include "dive_computer_host_api_impl.h"
 
+#include "ble_connect_failure.h"
 #include "dive_converter.h"
+#include "native_logger.h"
 #include "serial_scanner.h"
+#include "usbhid_enumerator.h"
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,16 +14,138 @@
 #include <string>
 #include <vector>
 
+namespace {
+
+constexpr wchar_t kDispatchWindowClass[] =
+    L"LibdivecomputerPluginDispatchWindow";
+
+// Private to the plugin's own message-only window, so it cannot collide
+// with the WM_APP offsets other plugins post to the runner's top-level
+// window (see windows/runner/flutter_window.cpp).
+constexpr UINT kRunPendingTasksMessage = WM_APP;
+
+}  // namespace
+
 namespace libdivecomputer_plugin {
 
 DiveComputerHostApiImpl::DiveComputerHostApiImpl(
     flutter::BinaryMessenger* messenger)
     : flutter_api_(
-          std::make_unique<DiveComputerFlutterApi>(messenger)) {}
+          std::make_unique<DiveComputerFlutterApi>(messenger)) {
+    // Registration runs on the platform thread, so this window, and every
+    // message posted to it, belongs to that thread's message loop.
+    HINSTANCE instance = GetModuleHandle(nullptr);
+    WNDCLASSEXW window_class = {};
+    window_class.cbSize = sizeof(window_class);
+    window_class.lpfnWndProc = &DiveComputerHostApiImpl::DispatchWindowProc;
+    window_class.hInstance = instance;
+    window_class.lpszClassName = kDispatchWindowClass;
+    // Fails with ERROR_CLASS_ALREADY_EXISTS for a second engine, which can
+    // reuse the class as is.
+    RegisterClassExW(&window_class);
+    dispatch_window_ =
+        CreateWindowExW(0, kDispatchWindowClass, L"", 0, 0, 0, 0, 0,
+                        HWND_MESSAGE, nullptr, instance, nullptr);
+    if (dispatch_window_) {
+        SetWindowLongPtrW(dispatch_window_, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(this));
+    }
+
+    NativeLogger::SetFlutterApi(
+        flutter_api_.get(), [this](std::function<void()> task) {
+            PostToPlatformThread(std::move(task));
+        });
+    garmin_mtp_ = std::make_unique<garmin_mtp::GarminMtpHostApiImpl>(
+        [this](std::function<void()> task) {
+            PostToPlatformThread(std::move(task));
+        });
+    garmin_mtp::GarminMtpHostApi::SetUp(messenger, garmin_mtp_.get());
+
+    if (!dispatch_window_) {
+        NativeLogger::Error("APP",
+                            "Could not create the dispatch window; callbacks "
+                            "will run on the calling thread");
+    }
+}
 
 DiveComputerHostApiImpl::~DiveComputerHostApiImpl() {
+    {
+        // Under the lock PostToPlatformThread checks it under: once this is
+        // set, no callback can be between its check and its post, so the
+        // window below cannot go while one is still about to use it.
+        std::lock_guard<std::mutex> lock(task_mutex_);
+        shutting_down_ = true;
+    }
+    // Their callbacks capture `this` and post through the dispatch window,
+    // so both stop before it goes: the serial scanner joins its thread, the
+    // BLE scanner revokes its watcher handlers.
+    ble_scanner_.reset();
+    serial_scanner_.reset();
+    // Joins the MTP worker, which posts its replies the same way.
+    garmin_mtp_.reset();
     if (download_thread_.joinable()) {
         download_thread_.join();
+    }
+    if (dispatch_window_) {
+        // A wakeup still in the queue must not reach a destroyed object.
+        SetWindowLongPtrW(dispatch_window_, GWLP_USERDATA, 0);
+        DestroyWindow(dispatch_window_);
+        dispatch_window_ = nullptr;
+    }
+    // After the download thread is joined, so nothing can be mid-log, and
+    // before flutter_api_ is destroyed with this object.
+    NativeLogger::SetFlutterApi(nullptr);
+}
+
+LRESULT CALLBACK DiveComputerHostApiImpl::DispatchWindowProc(HWND hwnd,
+                                                             UINT message,
+                                                             WPARAM wparam,
+                                                             LPARAM lparam) {
+    if (message == kRunPendingTasksMessage) {
+        auto* self = reinterpret_cast<DiveComputerHostApiImpl*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (self) self->RunPendingTasks();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void DiveComputerHostApiImpl::PostToPlatformThread(
+    std::function<void()> task) {
+    {
+        // The check, the push and the post all under the lock the destructor
+        // sets shutting_down_ under, so the window outlives every post.
+        std::lock_guard<std::mutex> lock(task_mutex_);
+        if (shutting_down_) return;
+        if (dispatch_window_) {
+            pending_tasks_.push(std::move(task));
+            // A failed post stays unpending, so the next task retries it.
+            if (!wakeup_pending_) {
+                wakeup_pending_ = PostMessageW(dispatch_window_,
+                                               kRunPendingTasksMessage, 0,
+                                               0) != 0;
+            }
+            return;
+        }
+    }
+    // Only when the window could not be created (logged above); running
+    // inline beats dropping the call. Outside the lock: the task can log,
+    // and logging posts through here again.
+    task();
+}
+
+void DiveComputerHostApiImpl::RunPendingTasks() {
+    std::queue<std::function<void()>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(task_mutex_);
+        std::swap(tasks, pending_tasks_);
+        // Cleared with the swap: a task queued from here on, even by one of
+        // the tasks below, needs a wakeup of its own.
+        wakeup_pending_ = false;
+    }
+    while (!tasks.empty()) {
+        tasks.front()();
+        tasks.pop();
     }
 }
 
@@ -41,6 +167,15 @@ void DiveComputerHostApiImpl::GetDeviceDescriptors(
             transports.push_back(
                 flutter::CustomEncodableValue(TransportType::kBle));
         }
+        // USB HID is reported as USB, which is the cable the user is
+        // holding; the app has no separate HID transfer mode and does not
+        // want one.
+        //
+        // It was suppressed until issue #1271, because advertising a
+        // transport with nothing behind it sent HID-only devices (the Suunto
+        // EON Steel family) into the serial path's "No USB serial ports
+        // found" dead end (#143). UsbHidIoStream is that missing transport,
+        // so the bit can be told the truth again.
         if (info.transports & (LIBDC_TRANSPORT_USB | LIBDC_TRANSPORT_USBHID)) {
             transports.push_back(
                 flutter::CustomEncodableValue(TransportType::kUsb));
@@ -56,7 +191,8 @@ void DiveComputerHostApiImpl::GetDeviceDescriptors(
 
         descriptors.push_back(flutter::CustomEncodableValue(DeviceDescriptor(
             std::string(info.vendor), std::string(info.product),
-            static_cast<int64_t>(info.model), transports)));
+            static_cast<int64_t>(info.model), transports,
+            info.delivers_oldest_first != 0)));
     }
     libdc_descriptor_iterator_free(iter);
 
@@ -71,14 +207,35 @@ void DiveComputerHostApiImpl::StartDiscovery(
             ble_scanner_ = std::make_unique<BleScanner>();
             ble_scanner_->SetOnDeviceDiscovered(
                 [this](DiscoveredDevice device) {
-                    flutter_api_->OnDeviceDiscovered(
-                        device, [] {}, [](const auto&) {});
+                    PostToPlatformThread([this, device = std::move(device)] {
+                        flutter_api_->OnDeviceDiscovered(
+                            device, [] {}, [](const auto&) {});
+                    });
                 });
             ble_scanner_->SetOnComplete([this]() {
-                flutter_api_->OnDiscoveryComplete(
-                    [] {}, [](const auto&) {});
+                PostToPlatformThread([this] {
+                    flutter_api_->OnDiscoveryComplete(
+                        [] {}, [](const auto&) {});
+                });
             });
-            ble_scanner_->Start();
+            std::optional<BleScanner::StartFailure> failure =
+                ble_scanner_->Start();
+            if (failure.has_value()) {
+                ble_scanner_.reset();
+                // The Dart side matches bluetooth_unavailable to tell the user
+                // Bluetooth is off, rather than showing the HRESULT (issue
+                // #2507). Any other refusal keeps Android's generic code.
+                if (failure->radio_unavailable) {
+                    result(FlutterError(
+                        "bluetooth_unavailable",
+                        "Bluetooth is unavailable: " + failure->reason));
+                } else {
+                    result(FlutterError(
+                        "discovery_error",
+                        "Failed to start discovery: " + failure->reason));
+                }
+                break;
+            }
             result(std::nullopt);
             break;
         }
@@ -87,12 +244,16 @@ void DiveComputerHostApiImpl::StartDiscovery(
             serial_scanner_ = std::make_unique<SerialScanner>();
             serial_scanner_->SetOnDeviceDiscovered(
                 [this](DiscoveredDevice device) {
-                    flutter_api_->OnDeviceDiscovered(
-                        device, [] {}, [](const auto&) {});
+                    PostToPlatformThread([this, device = std::move(device)] {
+                        flutter_api_->OnDeviceDiscovered(
+                            device, [] {}, [](const auto&) {});
+                    });
                 });
             serial_scanner_->SetOnComplete([this]() {
-                flutter_api_->OnDiscoveryComplete(
-                    [] {}, [](const auto&) {});
+                PostToPlatformThread([this] {
+                    flutter_api_->OnDiscoveryComplete(
+                        [] {}, [](const auto&) {});
+                });
             });
             serial_scanner_->Start();
             result(std::nullopt);
@@ -120,6 +281,7 @@ std::optional<FlutterError> DiveComputerHostApiImpl::StopDiscovery() {
 void DiveComputerHostApiImpl::StartDownload(
     const DiscoveredDevice& device,
     const std::string* fingerprint,
+    bool sync_clock,
     std::function<void(std::optional<FlutterError> reply)> result) {
     // Acknowledge start immediately.
     result(std::nullopt);
@@ -128,18 +290,24 @@ void DiveComputerHostApiImpl::StartDownload(
     if (download_thread_.joinable()) {
         download_thread_.join();
     }
+    // Cleared here, before the thread exists, rather than inside it: a
+    // cancel that arrives before the download thread reaches its connect
+    // would otherwise be wiped out and the connect would wait out its
+    // retry window anyway.
+    connect_cancelled_.store(false);
 
     // Copy device and fingerprint for the background thread (pointer would dangle).
     DiscoveredDevice device_copy = device;
     std::optional<std::string> fp_copy =
         fingerprint ? std::optional<std::string>(*fingerprint) : std::nullopt;
     download_thread_ = std::thread(
-        [this, dev = std::move(device_copy), fp = std::move(fp_copy)]() {
-            PerformDownload(dev, fp);
+        [this, dev = std::move(device_copy), fp = std::move(fp_copy), sync_clock]() {
+            PerformDownload(dev, fp, sync_clock);
         });
 }
 
 std::optional<FlutterError> DiveComputerHostApiImpl::CancelDownload() {
+    connect_cancelled_.store(true);
     if (download_session_) {
         libdc_download_cancel(download_session_);
     }
@@ -160,8 +328,41 @@ void DiveComputerHostApiImpl::ParseRawDiveData(
     int64_t model,
     const std::vector<uint8_t>& data,
     std::function<void(ErrorOr<ParsedDive> reply)> result) {
-    result(FlutterError("UNSUPPORTED",
-                        "Raw dive parsing not yet implemented on Windows"));
+    // model arrives as an int64 across the Pigeon boundary but libdivecomputer
+    // expects an unsigned int descriptor id. Reject out-of-range values up front
+    // so a corrupt/unexpected model yields a clear error instead of a silently
+    // wrapped cast and a misleading "no descriptor" failure downstream.
+    // UINT_MAX (not std::numeric_limits::max()) avoids the windows.h max() macro,
+    // and the signed 64-bit bound keeps the comparison free of /W4 warnings.
+    constexpr int64_t kMaxModel = UINT_MAX;
+    if (model < 0 || model > kMaxModel) {
+        result(FlutterError(
+            "PARSE_ERROR",
+            "Invalid dive computer model number: " + std::to_string(model)));
+        return;
+    }
+
+    libdc_parsed_dive_t dive = {};
+    char error_buf[256] = {};
+
+    int rc = libdc_parse_raw_dive(
+        vendor.c_str(), product.c_str(),
+        static_cast<unsigned int>(model),
+        data.data(), static_cast<unsigned int>(data.size()),
+        &dive, error_buf, sizeof(error_buf));
+
+    if (rc != 0) {
+        std::string msg = std::string("Failed to parse raw dive data: ") + error_buf;
+        free(dive.samples);
+        free(dive.events);
+        result(FlutterError("PARSE_ERROR", msg));
+        return;
+    }
+
+    auto parsed = ConvertParsedDive(dive);
+    free(dive.samples);
+    free(dive.events);
+    result(parsed);
 }
 
 ErrorOr<std::string> DiveComputerHostApiImpl::GetLibdivecomputerVersion() {
@@ -173,16 +374,34 @@ ErrorOr<std::string> DiveComputerHostApiImpl::GetLibdivecomputerVersion() {
 
 void DiveComputerHostApiImpl::PerformDownload(
     const DiscoveredDevice& device,
-    const std::optional<std::string>& fingerprint) {
+    const std::optional<std::string>& fingerprint,
+    bool sync_clock) {
+    // Only the serial/USB and BLE paths below have a byte pipe, and the
+    // routing further down treats everything that is not serial or USB as
+    // BLE, so an infrared device would try to connect over Bluetooth.
+    // Reject it as Android and Darwin do (issue #2841).
+    if (device.transport() == TransportType::kInfrared) {
+        PostToPlatformThread([this] {
+            flutter_api_->OnError(
+                DiveComputerError(
+                    "unsupported_transport",
+                    "Infrared transport is not supported on Windows"),
+                [] {}, [](const auto&) {});
+        });
+        return;
+    }
+
     // Create download session. The session holds a dc_context_t (logging) and a
     // cancelled flag. It is intentionally reused across multiple libdc_download_run
     // calls during multi-port probing — each call creates its own internal state.
     auto* session = libdc_download_session_new();
     if (!session) {
-        flutter_api_->OnError(
-            DiveComputerError("session_failed",
-                              "Failed to create download session"),
-            [] {}, [](const auto&) {});
+        PostToPlatformThread([this] {
+            flutter_api_->OnError(
+                DiveComputerError("session_failed",
+                                  "Failed to create download session"),
+                [] {}, [](const auto&) {});
+        });
         return;
     }
     download_session_ = session;
@@ -201,11 +420,14 @@ void DiveComputerHostApiImpl::PerformDownload(
     dl_callbacks.on_progress = [](unsigned int current, unsigned int maximum,
                                   void* ud) {
         auto* ctx = static_cast<DownloadContext*>(ud);
-        ctx->self->flutter_api_->OnDownloadProgress(
-            DownloadProgress(static_cast<int64_t>(current),
-                             static_cast<int64_t>(maximum),
-                             "downloading"),
-            [] {}, [](const auto&) {});
+        auto* self = ctx->self;
+        self->PostToPlatformThread([self, current, maximum] {
+            self->flutter_api_->OnDownloadProgress(
+                DownloadProgress(static_cast<int64_t>(current),
+                                 static_cast<int64_t>(maximum),
+                                 "downloading"),
+                [] {}, [](const auto&) {});
+        });
     };
     dl_callbacks.on_dive = [](const libdc_parsed_dive_t* dive, void* ud) {
         auto* ctx = static_cast<DownloadContext*>(ud);
@@ -214,8 +436,11 @@ void DiveComputerHostApiImpl::PerformDownload(
         if (ctx->buffer_dives) {
             ctx->buffered_dives.push_back(std::move(parsed));
         } else {
-            ctx->self->flutter_api_->OnDiveDownloaded(
-                parsed, [] {}, [](const auto&) {});
+            auto* self = ctx->self;
+            self->PostToPlatformThread([self, parsed = std::move(parsed)] {
+                self->flutter_api_->OnDiveDownloaded(
+                    parsed, [] {}, [](const auto&) {});
+            });
         }
     };
     dl_callbacks.userdata = &dl_ctx;
@@ -251,72 +476,160 @@ void DiveComputerHostApiImpl::PerformDownload(
     int rc = -1;
     unsigned int serial = 0;
     unsigned int firmware = 0;
+    libdc_clock_sync_status_t clock_sync = LIBDC_CLOCK_SYNC_NOT_REQUESTED;
     char error_buf[256] = {};
 
     if (device.transport() == TransportType::kSerial ||
         device.transport() == TransportType::kUsb) {
-        // Build list of candidate serial ports.
-        std::vector<std::string> ports_to_try;
-        std::string address = device.address();
-        bool is_com_port = (address.size() >= 4 &&
-            _strnicmp(address.c_str(), "COM", 3) == 0 &&
-            address[3] >= '0' && address[3] <= '9');
+        // One thing worth trying as the byte pipe for this download.
+        //
+        // The transport is carried per candidate rather than per download
+        // because the drivers branch on it: a USB HID computer framed as
+        // serial never completes its handshake.
+        struct DownloadCandidate {
+            bool is_hid = false;
+            std::string port;
+            UsbHidDevice hid;
+            std::string label;
+            unsigned int transport = LIBDC_TRANSPORT_SERIAL;
+        };
 
-        if (is_com_port) {
-            ports_to_try.push_back(address);
-        } else {
-            ports_to_try = EnumerateAvailableSerialPorts();
+        std::vector<DownloadCandidate> candidates;
+
+        // USB HID computers first. A HID-only model (the Scubapro G2 family,
+        // the Suunto EON Steel family) has no serial port to find, and
+        // probing unrelated ports before it would write dive-computer
+        // handshake bytes at hardware that is not the target (issue #1271).
+        const unsigned int descriptor_transports = libdc_descriptor_transports(
+            device.vendor().c_str(), device.product().c_str(),
+            static_cast<unsigned int>(device.model()));
+        const bool hid_capable =
+            (descriptor_transports & LIBDC_TRANSPORT_USBHID) != 0;
+        // Hardware whose only wired transport is HID. Probing serial ports for
+        // it would write dive-computer handshake bytes at unrelated hardware
+        // and could only ever fail, so the list stops at the HID candidates.
+        const bool hid_only =
+            hid_capable &&
+            (descriptor_transports &
+             (LIBDC_TRANSPORT_SERIAL | LIBDC_TRANSPORT_USB)) == 0;
+        if (hid_capable) {
+            auto hid_devices = EnumerateMatchingUsbHidDevices(
+                [&device](unsigned short vendor_id, unsigned short product_id) {
+                    return libdc_usbhid_match(
+                               device.vendor().c_str(),
+                               device.product().c_str(),
+                               static_cast<unsigned int>(device.model()),
+                               vendor_id, product_id) != 0;
+                },
+                nullptr);
+            for (auto& hid : hid_devices) {
+                DownloadCandidate candidate;
+                candidate.is_hid = true;
+                candidate.label = hid.DisplayName() + " (USB HID)";
+                candidate.transport = LIBDC_TRANSPORT_USBHID;
+                candidate.hid = std::move(hid);
+                candidates.push_back(std::move(candidate));
+            }
         }
 
-        // Try each candidate port with a full download attempt.
-        // Simply opening a port is not enough — many ports open successfully
-        // even when they are not the target dive computer.
+        // Build list of candidate serial ports.
+        if (!hid_only) {
+            std::vector<std::string> ports_to_try;
+            std::string address = device.address();
+            bool is_com_port = (address.size() >= 4 &&
+                _strnicmp(address.c_str(), "COM", 3) == 0 &&
+                address[3] >= '0' && address[3] <= '9');
+
+            if (is_com_port) {
+                ports_to_try.push_back(address);
+            } else {
+                ports_to_try = EnumerateAvailableSerialPorts();
+            }
+            for (const auto& port : ports_to_try) {
+                DownloadCandidate candidate;
+                candidate.port = port;
+                candidate.label = port;
+                candidates.push_back(std::move(candidate));
+            }
+        }
+
+        // Try each candidate with a full download attempt. Simply opening one
+        // is not enough: many serial ports open successfully even when they
+        // are not the target dive computer.
         std::string probe_log;
         bool any_opened = false;
-        // Buffer dives when probing multiple ports to avoid dispatching
-        // phantom dives from a wrong port to Flutter.
-        dl_ctx.buffer_dives = (ports_to_try.size() > 1);
-        for (const auto& port : ports_to_try) {
+        // Buffer dives when probing more than one candidate to avoid
+        // dispatching phantom dives from a wrong one to Flutter.
+        dl_ctx.buffer_dives = (candidates.size() > 1);
+        for (const auto& candidate : candidates) {
             dl_ctx.buffered_dives.clear();
-            serial_stream_ = std::make_unique<SerialIoStream>();
-            if (!serial_stream_->Open(port)) {
-                probe_log += "  " + port + ": failed to open\n";
-                serial_stream_.reset();
-                continue;
+
+            libdc_io_callbacks_t io_callbacks = {};
+            if (candidate.is_hid) {
+                usbhid_stream_ = std::make_unique<UsbHidIoStream>();
+                const std::string reason = usbhid_stream_->Open(candidate.hid);
+                if (!reason.empty()) {
+                    probe_log += "  " + candidate.label + ": " + reason + "\n";
+                    usbhid_stream_.reset();
+                    continue;
+                }
+                io_callbacks = usbhid_stream_->MakeCallbacks();
+            } else {
+                serial_stream_ = std::make_unique<SerialIoStream>();
+                if (!serial_stream_->Open(candidate.port)) {
+                    probe_log += "  " + candidate.label + ": failed to open\n";
+                    serial_stream_.reset();
+                    continue;
+                }
+                io_callbacks = serial_stream_->MakeCallbacks();
             }
 
-            libdc_io_callbacks_t io_callbacks = serial_stream_->MakeCallbacks();
             serial = 0;
             firmware = 0;
+            clock_sync = LIBDC_CLOCK_SYNC_NOT_REQUESTED;
             memset(error_buf, 0, sizeof(error_buf));
 
             rc = libdc_download_run(
                 session,
                 device.vendor().c_str(), device.product().c_str(),
                 static_cast<unsigned int>(device.model()),
-                transport_value,
+                candidate.transport,
                 &io_callbacks,
                 fp_bytes.empty() ? nullptr : fp_bytes.data(),
                 static_cast<unsigned int>(fp_bytes.size()),
+                sync_clock ? 1 : 0,
                 &dl_callbacks,
-                &serial, &firmware,
+                &serial, &firmware, &clock_sync,
                 error_buf, sizeof(error_buf));
 
             serial_stream_.reset();
+            usbhid_stream_.reset();
             any_opened = true;
 
             if (rc == 0 || rc == LIBDC_STATUS_CANCELLED) {
                 break;
             }
-            probe_log += "  " + port + ": download failed (rc=" +
+            probe_log += "  " + candidate.label + ": download failed (rc=" +
                          std::to_string(rc) + ")\n";
         }
 
-        if (ports_to_try.empty()) {
-            flutter_api_->OnError(
-                DiveComputerError("no_serial_ports",
-                    "No USB serial ports found. Is the dive computer connected and powered on?"),
-                [] {}, [](const auto&) {});
+        if (candidates.empty()) {
+            // A HID-only model has no serial port to go looking for, so the
+            // serial wording would send the user hunting for the wrong thing.
+            const std::string code =
+                hid_capable ? "no_usb_device" : "no_serial_ports";
+            const std::string message =
+                hid_capable
+                    ? "No " + device.product() +
+                          " found over USB. Is it connected to this computer "
+                          "and powered on?"
+                    : "No USB serial ports found. Is the dive computer "
+                      "connected and powered on?";
+            PostToPlatformThread([this, code, message] {
+                flutter_api_->OnError(
+                    DiveComputerError(code, message),
+                    [] {}, [](const auto&) {});
+            });
             libdc_download_session_free(session);
             download_session_ = nullptr;
             return;
@@ -326,11 +639,13 @@ void DiveComputerHostApiImpl::PerformDownload(
         // error message so users can share it with developers.
         if (!any_opened || (rc != 0 && !probe_log.empty())) {
             std::string msg = probe_log.empty()
-                ? "No dive computer found on any serial port."
-                : "No dive computer found. Ports tried:\n" + probe_log;
-            flutter_api_->OnError(
-                DiveComputerError("connect_failed", msg),
-                [] {}, [](const auto&) {});
+                ? "No dive computer found on any USB or serial connection."
+                : "No dive computer found. Tried:\n" + probe_log;
+            PostToPlatformThread([this, msg] {
+                flutter_api_->OnError(
+                    DiveComputerError("connect_failed", msg),
+                    [] {}, [](const auto&) {});
+            });
             libdc_download_session_free(session);
             download_session_ = nullptr;
             return;
@@ -338,53 +653,55 @@ void DiveComputerHostApiImpl::PerformDownload(
 
         // Flush buffered dives to Flutter after a successful probe.
         for (auto& dive : dl_ctx.buffered_dives) {
-            flutter_api_->OnDiveDownloaded(
-                dive, [] {}, [](const auto&) {});
+            PostToPlatformThread([this, dive] {
+                flutter_api_->OnDiveDownloaded(
+                    dive, [] {}, [](const auto&) {});
+            });
         }
         dl_ctx.buffered_dives.clear();
         dl_ctx.buffer_dives = false;
     } else {
-        // BLE transport.
+        // Bluetooth: LE, or Classic RFCOMM for a dual-mode computer whose LE
+        // side Windows will not finish discovering (issue #4094).
         if (ble_scanner_) {
             ble_scanner_->Stop();
             ble_scanner_.reset();
         }
 
-        uint64_t ble_address = std::strtoull(
-            device.address().c_str(), nullptr, 16);
-        ble_stream_ = std::make_unique<BleIoStream>();
-        ble_stream_->SetDeviceAddress(device.address());
-        ble_stream_->SetOnPinCodeRequired(
-            [this](const std::string& address) {
-                flutter_api_->OnPinCodeRequired(
-                    address, [] {}, [](const auto&) {});
+        const BluetoothConnection connection = ConnectBluetooth(device);
+        if (!connection.connected) {
+            PostToPlatformThread([this, connection] {
+                flutter_api_->OnError(
+                    DiveComputerError(connection.error_code,
+                                      connection.error_message),
+                    [] {}, [](const auto&) {});
             });
-        if (!ble_stream_->ConnectAndDiscover(ble_address)) {
-            flutter_api_->OnError(
-                DiveComputerError("connect_failed",
-                                  "Failed to connect to device"),
-                [] {}, [](const auto&) {});
             libdc_download_session_free(session);
             download_session_ = nullptr;
-            ble_stream_.reset();
             return;
         }
 
-        libdc_io_callbacks_t io_callbacks = ble_stream_->MakeCallbacks();
+        libdc_io_callbacks_t io_callbacks =
+            connection.classic ? classic_stream_->MakeCallbacks()
+                               : ble_stream_->MakeCallbacks();
 
+        // The Shearwater driver frames packets differently over BLE, so the
+        // Classic stream has to be run as Bluetooth Classic.
         rc = libdc_download_run(
             session,
             device.vendor().c_str(), device.product().c_str(),
             static_cast<unsigned int>(device.model()),
-            transport_value,
+            connection.classic ? LIBDC_TRANSPORT_BLUETOOTH : transport_value,
             &io_callbacks,
             fp_bytes.empty() ? nullptr : fp_bytes.data(),
             static_cast<unsigned int>(fp_bytes.size()),
+            sync_clock ? 1 : 0,
             &dl_callbacks,
-            &serial, &firmware,
+            &serial, &firmware, &clock_sync,
             error_buf, sizeof(error_buf));
 
         ble_stream_.reset();
+        classic_stream_.reset();
     }
 
     // Format device info.
@@ -394,18 +711,45 @@ void DiveComputerHostApiImpl::PerformDownload(
     std::optional<std::string> firmware_str =
         (firmware > 0) ? std::optional<std::string>(std::to_string(firmware))
                        : std::nullopt;
+    // Null means no sync was requested, so the Dart side shows no line.
+    std::optional<std::string> clock_sync_str =
+        (clock_sync != LIBDC_CLOCK_SYNC_NOT_REQUESTED)
+            ? std::optional<std::string>(libdc_clock_sync_status_name(clock_sync))
+            : std::nullopt;
+
+    // The model the device named about itself (issue #422), read before the
+    // session is freed.
+    char reported_buf[64] = {};
+    unsigned int reported_model_code = 0;
+    std::optional<std::string> reported_product;
+    std::optional<int64_t> reported_model;
+    if (libdc_download_session_reported_device(session, reported_buf,
+                                               sizeof(reported_buf),
+                                               &reported_model_code) != 0) {
+        reported_product = std::string(reported_buf);
+        reported_model = static_cast<int64_t>(reported_model_code);
+    }
 
     // Report completion or error.
     if (rc == 0 || rc == LIBDC_STATUS_CANCELLED) {
-        flutter_api_->OnDownloadComplete(
-            0,
-            serial_str ? &*serial_str : nullptr,
-            firmware_str ? &*firmware_str : nullptr,
-            [] {}, [](const auto&) {});
+        PostToPlatformThread([this, serial_str, firmware_str, clock_sync_str,
+                              reported_product, reported_model] {
+            flutter_api_->OnDownloadComplete(
+                0,
+                serial_str ? &*serial_str : nullptr,
+                firmware_str ? &*firmware_str : nullptr,
+                clock_sync_str ? &*clock_sync_str : nullptr,
+                reported_product ? &*reported_product : nullptr,
+                reported_model ? &*reported_model : nullptr,
+                [] {}, [](const auto&) {});
+        });
     } else {
-        flutter_api_->OnError(
-            DiveComputerError("download_error", std::string(error_buf)),
-            [] {}, [](const auto&) {});
+        std::string error_message(error_buf);
+        PostToPlatformThread([this, error_message] {
+            flutter_api_->OnError(
+                DiveComputerError("download_error", error_message),
+                [] {}, [](const auto&) {});
+        });
     }
 
     // Cleanup.

@@ -3,8 +3,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/accessibility/semantic_helpers.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/core/utils/currency.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/models/equipment_filter_state.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_status_indicator.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
 
 /// Summary widget shown when no equipment is selected.
 class EquipmentSummaryWidget extends ConsumerWidget {
@@ -13,7 +22,10 @@ class EquipmentSummaryWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final allEquipmentAsync = ref.watch(allEquipmentProvider);
-    final serviceDueAsync = ref.watch(serviceDueEquipmentProvider);
+    // The summary counts everything with a clock due, both severities.
+    final serviceDueAsync = ref.watch(
+      serviceDueEquipmentProvider(ServiceDueFilter.any),
+    );
 
     return Scaffold(
       body: SingleChildScrollView(
@@ -77,21 +89,68 @@ class EquipmentSummaryWidget extends ConsumerWidget {
   Widget _buildOverview(
     BuildContext context,
     WidgetRef ref,
-    List equipment,
-    List serviceDue,
+    List<EquipmentItem> equipment,
+    List<EquipmentItem> serviceDue,
   ) {
+    // serviceDue mixes due-soon and overdue items, so the section reads red
+    // only when something is actually overdue and amber otherwise.
+    final dueClocks = ref.watch(dueClocksProvider).value ?? const [];
+    final anyOverdue = dueClocks.any(
+      (c) => c.status.severity == ServiceClockSeverity.overdue,
+    );
+    // Keyed by item so each row can render its own severity: the card's
+    // swatch is the worst across the section, which made an overdue item
+    // and a due-soon item look identical (#2260).
+    //
+    // Reduced with isMoreUrgentClock rather than written as a map
+    // comprehension: an item with several clocks appears several times, and
+    // a comprehension keeps the LAST, which is the least urgent given this
+    // list arrives worst-first. Ranking explicitly also stops the row
+    // depending on how dueClocksProvider happens to sort.
+    final clockByItemId = <String, DueClock>{};
+    for (final c in dueClocks) {
+      final held = clockByItemId[c.item.id];
+      if (held == null || isMoreUrgentClock(c.status, held.status)) {
+        clockByItemId[c.item.id] = c;
+      }
+    }
+    final status = StatusColors.of(context);
+    final serviceSwatch = anyOverdue ? status.alert : status.warn;
+
+    // Wishlist gear (#2025) is not owned: it gets its own count and value
+    // cards and stays out of the kit's totals and recent list.
+    final owned = [
+      for (final e in equipment)
+        if (!e.isWanted) e,
+    ];
+    final wanted = [
+      for (final e in equipment)
+        if (e.isWanted) e,
+    ];
+    final fallbackCurrency = ref.watch(defaultCurrencyProvider);
+
     // Calculate stats
     int activeCount = 0;
-    double totalValue = 0;
-
-    for (final item in equipment) {
+    for (final item in owned) {
       if (item.isActive) {
         activeCount++;
       }
-      if (item.purchasePrice != null) {
-        totalValue += item.purchasePrice;
-      }
     }
+
+    // Equipment can be priced in different currencies, so totals are kept
+    // per currency rather than added into one figure under a single symbol.
+    final totalsByCurrency = sumByCurrency<dynamic>(
+      owned,
+      amountOf: (item) => item.purchasePrice as double?,
+      currencyOf: (item) => item.purchaseCurrency as String,
+      fallbackCode: fallbackCurrency,
+    );
+    final wantedByCurrency = sumByCurrency<dynamic>(
+      wanted,
+      amountOf: (item) => item.purchasePrice as double?,
+      currencyOf: (item) => item.purchaseCurrency as String,
+      fallbackCode: fallbackCurrency,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -110,7 +169,7 @@ class EquipmentSummaryWidget extends ConsumerWidget {
             _buildStatCard(
               context,
               icon: Icons.backpack,
-              value: '${equipment.length}',
+              value: '${owned.length}',
               label: context.l10n.equipment_summary_totalItems,
               color: Colors.blue,
             ),
@@ -127,25 +186,53 @@ class EquipmentSummaryWidget extends ConsumerWidget {
                 icon: Icons.build,
                 value: '${serviceDue.length}',
                 label: context.l10n.equipment_summary_serviceDue,
-                color: Colors.red,
+                color: serviceSwatch.accent,
               ),
-            if (totalValue > 0)
+            for (final entry in totalsByCurrency)
+              if (entry.value > 0)
+                _buildStatCard(
+                  context,
+                  icon: Icons.attach_money,
+                  value:
+                      '${currencySymbol(entry.key)}${entry.value.toStringAsFixed(0)}',
+                  // The ISO code, not just the symbol: intl renders USD and
+                  // CAD alike as "$", so two totals were indistinguishable
+                  // (#1519).
+                  label: context.l10n.equipment_summary_totalValue(entry.key),
+                  color: Colors.orange,
+                ),
+            if (wanted.isNotEmpty)
               _buildStatCard(
                 context,
-                icon: Icons.attach_money,
-                value: '\$${totalValue.toStringAsFixed(0)}',
-                label: context.l10n.equipment_summary_totalValue,
-                color: Colors.orange,
+                icon: Icons.shopping_bag_outlined,
+                value: '${wanted.length}',
+                label: context.l10n.enum_equipmentStatus_wanted,
+                color: Colors.purple,
               ),
+            for (final entry in wantedByCurrency)
+              if (entry.value > 0)
+                _buildStatCard(
+                  context,
+                  icon: Icons.shopping_bag_outlined,
+                  value:
+                      '${currencySymbol(entry.key)}${entry.value.toStringAsFixed(0)}',
+                  label: context.l10n.equipment_summary_wantedValue(entry.key),
+                  color: Colors.purple,
+                ),
           ],
         ),
         if (serviceDue.isNotEmpty) ...[
           const SizedBox(height: 24),
-          _buildServiceDueSection(context, serviceDue),
+          _buildServiceDueSection(
+            context,
+            serviceDue,
+            serviceSwatch,
+            clockByItemId,
+          ),
         ],
-        if (equipment.isNotEmpty) ...[
+        if (owned.isNotEmpty) ...[
           const SizedBox(height: 24),
-          _buildEquipmentListPreview(context, equipment),
+          _buildEquipmentListPreview(context, owned),
         ],
       ],
     );
@@ -200,13 +287,18 @@ class EquipmentSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildServiceDueSection(BuildContext context, List serviceDue) {
+  Widget _buildServiceDueSection(
+    BuildContext context,
+    List<EquipmentItem> serviceDue,
+    StatusSwatch swatch,
+    Map<String, DueClock> clockByItemId,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            const Icon(Icons.warning, size: 20, color: Colors.red),
+            Icon(Icons.warning, size: 20, color: swatch.accent),
             const SizedBox(width: 8),
             Text(
               context.l10n.equipment_summary_serviceDueTitle,
@@ -218,38 +310,50 @@ class EquipmentSummaryWidget extends ConsumerWidget {
         ),
         const SizedBox(height: 12),
         Card(
-          color: Theme.of(context).colorScheme.errorContainer,
+          color: swatch.container,
           child: Column(
             children: serviceDue.take(3).map((item) {
               return Semantics(
                 button: true,
-                label: '${item.name}, ${item.type.displayName}, service due',
+                label: context.l10n.equipment_summary_serviceDueSemanticLabel(
+                  item.name,
+                  item.type.localizedName(context.l10n),
+                ),
                 child: ListTile(
+                  // A solid accent badge, so it stands out on the card; the
+                  // onAccent-colored glyph holds 3:1 on it. Not container:
+                  // that only read as a glyph while light containers were
+                  // pale, and it would vanish now they are solid.
                   leading: CircleAvatar(
-                    backgroundColor: Theme.of(context).colorScheme.error,
-                    child: Icon(
-                      Icons.build,
-                      color: Theme.of(context).colorScheme.onError,
-                      size: 20,
-                    ),
+                    backgroundColor: swatch.accent,
+                    child: Icon(Icons.build, color: swatch.onAccent, size: 20),
                   ),
                   title: Text(
                     item.name,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onErrorContainer,
-                    ),
+                    style: TextStyle(color: swatch.onContainer),
                   ),
-                  subtitle: Text(
-                    item.type.displayName,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onErrorContainer,
-                    ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        item.type.localizedName(context.l10n),
+                        style: TextStyle(color: swatch.onContainer),
+                      ),
+                      if (clockByItemId[item.id] case final due?)
+                        ServiceStatusIndicator(
+                          clock: (
+                            ownerId: due.item.id,
+                            ownerName: due.item.name,
+                            status: due.status,
+                          ),
+                          subjectId: item.id,
+                          color: swatch.onContainer,
+                        ),
+                    ],
                   ),
                   trailing: ExcludeSemantics(
-                    child: Icon(
-                      Icons.chevron_right,
-                      color: Theme.of(context).colorScheme.onErrorContainer,
-                    ),
+                    child: Icon(Icons.chevron_right, color: swatch.onContainer),
                   ),
                   onTap: () {
                     final state = GoRouterState.of(context);
@@ -265,7 +369,10 @@ class EquipmentSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildEquipmentListPreview(BuildContext context, List equipment) {
+  Widget _buildEquipmentListPreview(
+    BuildContext context,
+    List<EquipmentItem> equipment,
+  ) {
     final previewItems = equipment.take(3).toList();
 
     return Column(
@@ -283,7 +390,10 @@ class EquipmentSummaryWidget extends ConsumerWidget {
             children: previewItems.map((item) {
               return Semantics(
                 button: true,
-                label: '${item.name}, ${item.type.displayName}',
+                label: context.l10n.equipment_summary_recentSemanticLabel(
+                  item.name,
+                  item.type.localizedName(context.l10n),
+                ),
                 child: ListTile(
                   leading: CircleAvatar(
                     backgroundColor: Theme.of(
@@ -295,7 +405,7 @@ class EquipmentSummaryWidget extends ConsumerWidget {
                     ),
                   ),
                   title: Text(item.name),
-                  subtitle: Text(item.type.displayName),
+                  subtitle: Text(item.type.localizedName(context.l10n)),
                   trailing: const ExcludeSemantics(
                     child: Icon(Icons.chevron_right),
                   ),

@@ -1,212 +1,117 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
-import 'package:submersion/features/media/data/services/photo_picker_service.dart';
-import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 import 'package:submersion/features/media/presentation/pages/trip_photo_viewer_page.dart';
-import 'package:submersion/features/media/presentation/providers/media_providers.dart';
-import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
-import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
-import 'package:submersion/features/media/presentation/widgets/scan_results_dialog.dart';
-import 'package:submersion/features/media/presentation/widgets/unavailable_photo_placeholder.dart';
+import 'package:submersion/features/media/presentation/widgets/media_item_view.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_media_providers.dart';
-import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/helpers/trip_scan_in_sitting.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_held_photos.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
 
 /// Full gallery page showing all photos for a trip, organized by dive.
+///
+/// Its Scan follows the trip's lock, as a dive's fullscreen profile does
+/// (issue #4527): handed the trip page's open sitting ([sitting]) it scans
+/// into that sitting and shows what it holds; otherwise (a locked trip, or
+/// opened by its address) it offers no Scan.
 class TripGalleryPage extends ConsumerWidget {
   final String tripId;
   final String? initialMediaId;
 
-  const TripGalleryPage({super.key, required this.tripId, this.initialMediaId});
+  /// The trip page's sitting, when the gallery was pushed during one.
+  final RecordEditController<Trip>? sitting;
+
+  const TripGalleryPage({
+    super.key,
+    required this.tripId,
+    this.initialMediaId,
+    this.sitting,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final sitting = this.sitting;
+    if (sitting == null) {
+      return _scaffold(context, ref, null);
+    }
+    // Followed, so the Scan goes when the sitting ends underneath.
+    // A Consumer of its own, so the media watched are watched by the
+    // element that rebuilds with the sitting.
+    return ListenableBuilder(
+      listenable: sitting,
+      builder: (context, _) => Consumer(
+        builder: (context, ref, _) => _scaffold(
+          context,
+          ref,
+          sitting.isUnlocked ? sitting.session : null,
+        ),
+      ),
+    );
+  }
+
+  Widget _scaffold(
+    BuildContext context,
+    WidgetRef ref,
+    EditSession<Trip>? session,
+  ) {
     final mediaByDiveAsync = ref.watch(mediaForTripProvider(tripId));
 
     return Scaffold(
       appBar: AppBar(
         title: Text(context.l10n.trips_gallery_appBar_title),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.photo_camera),
-            tooltip: context.l10n.trips_gallery_tooltip_scan,
-            onPressed: () => _showScanDialog(context, ref),
-          ),
+          if (session != null)
+            IconButton(
+              icon: const Icon(Icons.photo_camera),
+              tooltip: context.l10n.trips_gallery_tooltip_scan,
+              onPressed: () => scanTripPhotosInSitting(context, ref, session),
+            ),
         ],
       ),
       body: mediaByDiveAsync.when(
         data: (mediaByDive) {
+          final held = session == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                  child: TripHeldPhotos(session: session),
+                );
           if (mediaByDive.isEmpty) {
-            return const _EmptyGallery();
+            return held == null
+                ? const _EmptyGallery()
+                : Column(
+                    children: [
+                      held,
+                      const Expanded(child: _EmptyGallery()),
+                    ],
+                  );
           }
-          return _GalleryContent(
+          final content = _GalleryContent(
             tripId: tripId,
             mediaByDive: mediaByDive,
             initialMediaId: initialMediaId,
           );
+          return held == null
+              ? content
+              : Column(
+                  children: [
+                    held,
+                    Expanded(child: content),
+                  ],
+                );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stack) => Center(
-          child: Text(context.l10n.trips_gallery_error_loading('$error')),
-        ),
+        // The repository logs the failure; the diver gets a plain line.
+        error: (_, _) =>
+            Center(child: Text(context.l10n.trips_gallery_error_loading)),
       ),
     );
-  }
-
-  Future<void> _showScanDialog(BuildContext context, WidgetRef ref) async {
-    // Show loading indicator
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    try {
-      // Get trip and dives
-      final trip = await ref.read(tripByIdProvider(tripId).future);
-      if (trip == null) {
-        if (context.mounted) Navigator.of(context).pop();
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(context.l10n.trips_gallery_tripNotFound)),
-          );
-        }
-        return;
-      }
-
-      final dives = await ref.read(divesForTripProvider(tripId).future);
-
-      if (dives.isEmpty) {
-        if (context.mounted) Navigator.of(context).pop();
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(context.l10n.trips_gallery_addDivesFirst)),
-          );
-        }
-        return;
-      }
-
-      // Get existing asset IDs to filter out
-      final mediaByDive = await ref.read(mediaForTripProvider(tripId).future);
-      final existingIds = <String>{};
-      for (final mediaList in mediaByDive.values) {
-        for (final item in mediaList) {
-          if (item.platformAssetId != null) {
-            existingIds.add(item.platformAssetId!);
-          }
-        }
-      }
-
-      // Scan gallery
-      final photoPickerService = ref.read(photoPickerServiceProvider);
-      final result = await TripMediaScanner.scanGalleryForTrip(
-        dives: dives,
-        tripStartDate: trip.startDate,
-        tripEndDate: trip.endDate,
-        existingAssetIds: existingIds,
-        photoPickerService: photoPickerService,
-      );
-
-      if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss loading
-
-      if (result == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.trips_gallery_accessDenied)),
-        );
-        return;
-      }
-
-      // Show results dialog
-      final dialogResult = await showScanResultsDialog(
-        context: context,
-        scanResult: result,
-      );
-
-      if (dialogResult.confirmed != true) return;
-      if (!context.mounted) return;
-
-      // Import selected photos
-      await _importPhotos(context, ref, dialogResult.selectedPhotos);
-    } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(context.l10n.trips_gallery_errorScanning('$e')),
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _importPhotos(
-    BuildContext context,
-    WidgetRef ref,
-    Map<Dive, List<AssetInfo>> photosByDive,
-  ) async {
-    // Show progress
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        content: Row(
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(width: 16),
-            Text(context.l10n.trips_gallery_linkingPhotos),
-          ],
-        ),
-      ),
-    );
-
-    try {
-      final importService = ref.read(mediaImportServiceProvider);
-      int totalImported = 0;
-
-      for (final entry in photosByDive.entries) {
-        final dive = entry.key;
-        final assets = entry.value;
-
-        final result = await importService.importPhotosForDive(
-          selectedAssets: assets,
-          dive: dive,
-        );
-
-        totalImported += result.imported.length;
-
-        // Invalidate media providers for this dive
-        ref.invalidate(mediaForDiveProvider(dive.id));
-        ref.invalidate(mediaCountForDiveProvider(dive.id));
-      }
-
-      // Invalidate trip-level providers
-      ref.invalidate(mediaForTripProvider(tripId));
-      ref.invalidate(mediaCountForTripProvider(tripId));
-      ref.invalidate(flatMediaListForTripProvider(tripId));
-
-      if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss progress
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.trips_gallery_linkedPhotos(totalImported)),
-        ),
-      );
-    } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(context.l10n.trips_gallery_errorLinking('$e')),
-          ),
-        );
-      }
-    }
   }
 }
 
@@ -284,7 +189,7 @@ class _GalleryContent extends StatelessWidget {
 }
 
 /// ExpansionTile section for photos from a single dive.
-class _DivePhotoSection extends StatelessWidget {
+class _DivePhotoSection extends ConsumerWidget {
   final String tripId;
   final Dive dive;
   final List<MediaItem> media;
@@ -296,21 +201,29 @@ class _DivePhotoSection extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final dateFormat = DateFormat.MMMd();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final units = ref.watch(unitFormatterProvider);
     final siteName =
         dive.site?.name ?? context.l10n.trips_detail_dives_unknownSite;
     final diveNumber = dive.diveNumber ?? '-';
     final photoCount = media.length;
-    final photoLabel = photoCount == 1 ? 'photo' : 'photos';
+    final photoLabel = context.l10n.trips_gallery_diveSection_photoCount(
+      photoCount,
+    );
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       child: ExpansionTile(
         initiallyExpanded: true,
-        title: Text('Dive #$diveNumber - $siteName'),
+        title: Text(
+          context.l10n.trips_gallery_diveSection_title(diveNumber, siteName),
+        ),
         subtitle: Text(
-          '${dateFormat.format(dive.dateTime)} ($photoCount $photoLabel)',
+          context.l10n.trips_gallery_diveSection_subtitle(
+            units.formatMonthDay(dive.dateTime),
+            photoCount,
+            photoLabel,
+          ),
         ),
         children: [
           Padding(
@@ -349,36 +262,44 @@ class _PhotoGrid extends StatelessWidget {
 }
 
 /// Individual thumbnail in the grid.
-class _GridThumbnail extends ConsumerWidget {
+class _GridThumbnail extends StatelessWidget {
   final String tripId;
   final MediaItem item;
 
   const _GridThumbnail({required this.tripId, required this.item});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    final mediaType = item.isVideo ? 'Video' : 'Photo';
-    final statusStr = item.isOrphaned ? ', missing from device' : '';
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    // Availability-agnostic on purpose: the tile always tries to render the
+    // photo, so a label that read the orphan flag would announce "missing"
+    // over a thumbnail the resolver chain just served. When nothing can serve
+    // the row, UnavailableMediaPlaceholder carries its own reason text.
+    final semanticsLabel = item.isVideo
+        ? l10n.trips_gallery_thumbnail_video
+        : l10n.trips_gallery_thumbnail_photo;
 
     return Semantics(
       button: true,
-      label: '$mediaType thumbnail$statusStr. Tap to view full screen',
+      label: semanticsLabel,
       child: GestureDetector(
-        onTap: () => _openViewer(context, ref),
+        onTap: () => _openViewer(context),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // Thumbnail or placeholder
-              if (item.isOrphaned)
-                _buildOrphanedPlaceholder(colorScheme)
-              else if (item.platformAssetId != null)
-                _buildResolvedThumbnail(ref, colorScheme)
-              else
-                _buildPlaceholder(colorScheme),
+              // Every row renders through MediaItemView, orphaned or not:
+              // the flag is a persisted claim that may be stale or written
+              // by a device that never had the file, and the resolver chain
+              // (origin, then media store) can still serve the photo. See
+              // MediaThumbnailTile for the full reasoning (#1409).
+              MediaItemView(
+                item: item,
+                thumbnail: true,
+                targetSize: const Size(200, 200),
+                fit: BoxFit.cover,
+              ),
 
               // Video icon (top-right)
               if (item.isVideo)
@@ -405,65 +326,12 @@ class _GridThumbnail extends ConsumerWidget {
     );
   }
 
-  void _openViewer(BuildContext context, WidgetRef ref) {
+  void _openViewer(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute(
         fullscreenDialog: true,
         builder: (_) =>
             TripPhotoViewerPage(tripId: tripId, initialMediaId: item.id),
-      ),
-    );
-  }
-
-  Widget _buildResolvedThumbnail(WidgetRef ref, ColorScheme colorScheme) {
-    final resultAsync = ref.watch(resolvedThumbnailProvider(item));
-
-    return resultAsync.when(
-      data: (result) {
-        if (result.isUnavailable) {
-          return const UnavailablePhotoPlaceholder();
-        }
-        if (result.bytes == null) {
-          return _buildPlaceholder(colorScheme);
-        }
-        return Image.memory(
-          result.bytes!,
-          fit: BoxFit.cover,
-          cacheWidth: 200,
-          cacheHeight: 200,
-          errorBuilder: (context, error, stack) =>
-              _buildPlaceholder(colorScheme),
-        );
-      },
-      loading: () => Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      ),
-      error: (error, stack) => _buildPlaceholder(colorScheme),
-    );
-  }
-
-  Widget _buildPlaceholder(ColorScheme colorScheme) {
-    return Container(
-      color: colorScheme.surfaceContainerHighest,
-      child: Icon(Icons.photo, color: colorScheme.onSurfaceVariant),
-    );
-  }
-
-  Widget _buildOrphanedPlaceholder(ColorScheme colorScheme) {
-    return Container(
-      color: colorScheme.errorContainer,
-      child: Center(
-        child: Icon(
-          Icons.broken_image_outlined,
-          color: colorScheme.onErrorContainer,
-        ),
       ),
     );
   }

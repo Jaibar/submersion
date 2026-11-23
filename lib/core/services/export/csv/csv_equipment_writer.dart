@@ -1,0 +1,129 @@
+import 'package:csv/csv.dart';
+
+import 'package:submersion/core/services/export/csv/codec/csv_attribute_codec.dart';
+import 'package:submersion/core/services/export/csv/codec/csv_column.dart';
+import 'package:submersion/core/services/export/csv/codec/csv_export_units.dart';
+import 'package:submersion/core/services/export/csv/codec/csv_list_codec.dart';
+import 'package:submersion/core/services/export/csv/codec/csv_text.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_colors.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+
+/// Writes the equipment CSV. [write]'s `componentNames` maps an assembly's
+/// id to its parts' names in template order (issue #1487), and `tagNames`
+/// maps an item's id to its tag names (issue #1942), and `locationNames`
+/// its current place's name (v268); items absent from any of them get an
+/// empty cell. Both lists use the list codec. Free-text cells
+/// go through [sanitizeCsvField] so a spreadsheet never evaluates them as
+/// formulas; the importer reverses it.
+class CsvEquipmentWriter {
+  CsvEquipmentWriter(this.units);
+
+  final CsvExportUnits units;
+
+  // Curated keys already covered by dedicated columns; excluded from the
+  // combined Attributes column to avoid duplication. Custom fields are never
+  // excluded even if their key collides with one of these, because the
+  // dedicated columns read curated attributes only, so a custom "size"
+  // would otherwise be dropped from the export entirely.
+  static const _dedicatedAttrKeys = {
+    EquipmentAttrKeys.size,
+    EquipmentAttrKeys.thicknessMm,
+    EquipmentAttrKeys.buoyancyKg,
+    EquipmentAttrKeys.dryWeightKg,
+  };
+
+  String _date(DateTime? date) => date == null ? '' : units.date(date);
+
+  String write(
+    List<EquipmentItem> equipment, {
+    Map<String, List<String>> componentNames = const {},
+    Map<String, List<String>> tagNames = const {},
+    Map<String, String> locationNames = const {},
+  }) {
+    final rows = <List<dynamic>>[
+      [
+        'Name',
+        'Type',
+        'Brand',
+        'Model',
+        'Serial Number',
+        'Size',
+        'Thickness',
+        units.dateHeader('Purchase Date'),
+        units.dateHeader('Last Service'),
+        units.dateHeader('Next Service Due'),
+        units.header(CsvColumns.buoyancy),
+        units.header(CsvColumns.dryWeight),
+        'Attributes',
+        'Components',
+        'Tags',
+        'Active',
+        'Notes',
+        // Appended (v268), like the restored site columns of #2201, so a
+        // reader taking the older columns by offset is unaffected.
+        'Location',
+        // Appended for the same reason. The currency is blank with no price,
+        // since every item defaults to one whether or not it was priced.
+        'Purchase Price',
+        'Purchase Currency',
+      ],
+    ];
+
+    for (final item in equipment) {
+      rows.add([
+        sanitizeCsvField(item.name),
+        item.type.displayName,
+        sanitizeCsvField(item.brand),
+        sanitizeCsvField(item.model),
+        sanitizeCsvField(item.serialNumber),
+        sanitizeCsvField(item.size),
+        sanitizeCsvField(item.thickness),
+        _date(item.purchaseDate),
+        _date(item.lastServiceDate),
+        _date(item.nextServiceDue),
+        units.value(CsvColumns.buoyancy, item.buoyancyKg),
+        units.value(CsvColumns.dryWeight, item.weightKg),
+        sanitizeCsvField(
+          joinAttributePairs(
+            // A colour on a type without one is the diver's own field
+            // (issue #2520), so it exports as one.
+            keepStrayColorAsCustom(item.type, item.attributes)
+                .where(
+                  (a) =>
+                      a.hasValue &&
+                      (a.isCustom ||
+                          (!_dedicatedAttrKeys.contains(a.key) &&
+                              !EquipmentAttributeCatalog.isSystemKey(a.key))),
+                )
+                .map(
+                  (a) => formatAttributePair(
+                    a,
+                    units,
+                    workingPressureBar: item.workingPressureBar,
+                  ),
+                ),
+          ),
+        ),
+        sanitizeCsvField(
+          componentNames[item.id] == null
+              ? null
+              : joinCsvList(componentNames[item.id]!),
+        ),
+        sanitizeCsvField(
+          tagNames[item.id] == null ? null : joinCsvList(tagNames[item.id]!),
+        ),
+        item.isActive ? 'Yes' : 'No',
+        // Raw, line breaks and all: Submersion reads this file back (#3683).
+        sanitizeCsvField(item.notes),
+        sanitizeCsvField(locationNames[item.id]),
+        item.purchasePrice?.toString() ?? '',
+        item.purchasePrice == null
+            ? ''
+            : sanitizeCsvField(item.purchaseCurrency),
+      ]);
+    }
+
+    return const ListToCsvConverter().convert(rows);
+  }
+}

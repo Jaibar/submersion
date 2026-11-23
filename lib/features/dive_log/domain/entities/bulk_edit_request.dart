@@ -1,0 +1,200 @@
+import 'package:submersion/core/constants/enums.dart' show TankRole, WeightType;
+import 'package:submersion/core/database/database.dart' show DivesCompanion;
+import 'package:submersion/features/buddies/domain/entities/buddy.dart'
+    show BuddyWithRole;
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    show DiveTank;
+import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart'
+    show DiveWeight;
+import 'package:submersion/features/marine_life/domain/entities/species.dart'
+    show Sighting;
+
+/// How a collection edit is applied across the selected dives.
+///
+/// [update] edits the rows a dive already has instead of inserting or deleting
+/// any. Only tanks support it today (see [TankSpecsOp]); every other collection
+/// rejects it, the same way owned collections reject [remove].
+enum BulkCollectionMode { add, remove, replace, update }
+
+/// One collection mutation in a bulk edit. Sealed so the service can switch
+/// over every variant exhaustively.
+sealed class BulkCollectionOp {
+  const BulkCollectionOp();
+}
+
+class TagsOp extends BulkCollectionOp {
+  final BulkCollectionMode mode;
+  final List<String> tagIds;
+  const TagsOp({required this.mode, required this.tagIds});
+}
+
+class DiveTypesOp extends BulkCollectionOp {
+  final BulkCollectionMode mode; // add | remove | replace
+  final List<String> diveTypeIds;
+  const DiveTypesOp({required this.mode, required this.diveTypeIds});
+}
+
+/// A dive's training courses (issue #2515).
+class DiveCoursesOp extends BulkCollectionOp {
+  final BulkCollectionMode mode; // add | remove | replace
+  final List<String> courseIds;
+  const DiveCoursesOp({required this.mode, required this.courseIds});
+}
+
+class EquipmentOp extends BulkCollectionOp {
+  final BulkCollectionMode mode;
+  final List<String> equipmentIds;
+
+  /// Add mode only: the set these items came from, which every row they
+  /// write carries, as when a set is used on one dive (#4284).
+  final String? viaSetId;
+
+  const EquipmentOp({
+    required this.mode,
+    required this.equipmentIds,
+    this.viaSetId,
+  });
+}
+
+/// Whole equipment sets on every selected dive (#4284): [BulkCollectionMode.add]
+/// puts on each set's current items tagged with the set, and
+/// [BulkCollectionMode.remove] takes off the rows a set brought, with what
+/// is attached through them. Gear added any other way is untouched. The
+/// other modes are rejected.
+class EquipmentSetsOp extends BulkCollectionOp {
+  final BulkCollectionMode mode;
+  final List<String> setIds;
+  const EquipmentSetsOp({required this.mode, required this.setIds});
+}
+
+class BuddiesOp extends BulkCollectionOp {
+  final BulkCollectionMode mode;
+  // For remove, the buddy ids are read from each entry's .buddy.id.
+  final List<BuddyWithRole> buddies;
+
+  /// Add mode only: whether each entry's role replaces the role on links that
+  /// already exist. False for a membership-only add, where the user asked for
+  /// the buddy on every dive but never touched their role (#893).
+  final bool overwriteRole;
+
+  const BuddiesOp({
+    required this.mode,
+    required this.buddies,
+    this.overwriteRole = true,
+  });
+}
+
+/// The diver's own roles on every selected dive, replaced by [roleIds]
+/// (issue #1221). Replace is the only mode: the gated "My role" row sets
+/// exactly the picked set, as every gated field does.
+class DiverRolesOp extends BulkCollectionOp {
+  final List<String> roleIds;
+  const DiverRolesOp({required this.roleIds});
+}
+
+/// Links every selected dive to [siteId], or unlinks them when it is null
+/// (issue #3657). Each dive gets what picking the site on it alone gives it:
+/// the site's water type, entry/exit methods and dive types snap on per dive,
+/// under the rules of `DiveRepository.setSite`. The service applies it before
+/// the scalars and the other ops, so a row the diver set in the same edit wins.
+class SiteOp extends BulkCollectionOp {
+  final String? siteId;
+  const SiteOp({required this.siteId});
+}
+
+class TanksOp extends BulkCollectionOp {
+  final BulkCollectionMode mode; // add | replace
+  final List<DiveTank> tanks;
+  final bool onlyIfEmpty;
+  const TanksOp({
+    required this.mode,
+    required this.tanks,
+    this.onlyIfEmpty = false,
+  });
+}
+
+/// One editable attribute of a cylinder, used as a field mask by [TankSpecsOp].
+///
+/// Start and end pressure are deliberately absent: the whole point of an
+/// in-place spec update is that measured pressure data survives it (#797).
+/// [gasMix] covers the o2 and he columns together, since a mix is meaningless
+/// split in half.
+enum TankSpecField {
+  preset,
+  role,
+  volume,
+  workingPressure,
+  material,
+  gasMix,
+  name,
+}
+
+/// Overwrite selected attributes of the tanks each dive already has, leaving
+/// every other column (start/end pressure above all) as it was.
+///
+/// Unlike [TanksOp] this carries a field mask rather than a list of tanks:
+/// [specs] is a template whose values are read only for the fields named in
+/// [fields]. Dives with no tanks are skipped; nothing is inserted or deleted,
+/// so tank_pressure_series and gas_switches keep their rows.
+class TankSpecsOp extends BulkCollectionOp {
+  final DiveTank specs;
+  final Set<TankSpecField> fields;
+
+  /// A role per tank position, read only when [fields] has
+  /// [TankSpecField.role] (issue #4412): the dive's first tank by order takes
+  /// the first role, and so on, in place of [specs]' single role. A dive whose
+  /// tanks do not line up (see `slotRolesForDive`) keeps its roles, while
+  /// every other field in [fields] still applies to it. Null means the
+  /// template role goes to every tank.
+  final List<TankRole>? slotRoles;
+
+  const TankSpecsOp({
+    required this.specs,
+    required this.fields,
+    this.slotRoles,
+  });
+}
+
+class WeightsOp extends BulkCollectionOp {
+  final BulkCollectionMode mode; // add | replace
+  final List<DiveWeight> weights;
+  const WeightsOp({required this.mode, required this.weights});
+}
+
+/// One dive's single weight row, set in place (issue #3422): the table
+/// editor's weight cell. [amountKg] null drops the row; a dive with no row
+/// gets one of [newRowType]. Applied per dive, so a dive with two or more
+/// rows throws rather than guess which one the cell meant.
+class WeightAmountOp extends BulkCollectionOp {
+  final double? amountKg;
+  final WeightType newRowType;
+  const WeightAmountOp({
+    required this.amountKg,
+    this.newRowType = WeightType.belt,
+  });
+}
+
+class SightingsOp extends BulkCollectionOp {
+  final BulkCollectionMode mode; // add | replace
+  final List<Sighting> sightings;
+  const SightingsOp({required this.mode, required this.sightings});
+}
+
+/// A single bulk edit: a partial scalar companion (only enabled columns are
+/// present), an optional notes-append, and zero or more collection ops.
+class BulkEditRequest {
+  final List<String> diveIds;
+  final DivesCompanion scalars;
+  final String? notesAppend;
+  final List<BulkCollectionOp> ops;
+
+  const BulkEditRequest({
+    required this.diveIds,
+    this.scalars = const DivesCompanion(),
+    this.notesAppend,
+    this.ops = const [],
+  });
+
+  /// True when at least one column of [scalars] is present (non-absent).
+  bool get hasScalarChanges => scalars.toColumns(false).isNotEmpty;
+}

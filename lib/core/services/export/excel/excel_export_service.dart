@@ -1,22 +1,35 @@
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:excel/excel.dart' as xl;
+import 'package:excel_community/excel_community.dart' as xl;
 import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/services/export/excel/maintenance_excel_export_service.dart';
+import 'package:submersion/core/services/export/excel/observations_excel_export_service.dart';
+import 'package:submersion/core/services/export/excel/pre_dive_excel_export_service.dart';
 import 'package:submersion/core/services/export/shared/file_export_utils.dart';
+import 'package:submersion/core/services/export/shared/gas_percent_cells.dart';
 import 'package:submersion/core/services/export/shared/unit_converters.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/dive_participant_names.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/entry_method_list.dart';
+import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+import 'package:submersion/core/text/markdown/notes_plain_text.dart';
 
 /// Handles Excel export with multiple worksheet sheets.
 class ExcelExportService {
   final _dateFormat = DateFormat('yyyy-MM-dd');
   final _timeFormat = DateFormat('HH:mm');
+  final _preDive = PreDiveExcelExportService();
+  final _maintenance = MaintenanceExcelExportService();
+  final _observations = ObservationsExcelExportService();
 
   /// Export all dive data to Excel format and share via system sheet.
   ///
@@ -34,6 +47,14 @@ class ExcelExportService {
     required PressureUnit pressureUnit,
     required VolumeUnit volumeUnit,
     required DateFormatPreference dateFormat,
+    List<PreDiveSession> preDiveSessions = const [],
+    Map<String, List<PreDiveSessionItem>> preDiveItemsBySession = const {},
+    Map<String, List<PreDiveSessionSection>> preDiveSectionsBySession =
+        const {},
+    List<MaintenanceLogRow> maintenanceRows = const [],
+    Map<String, List<String>> componentNames = const {},
+    List<ObservationExportRow> observationRows = const [],
+    Map<String, DiveTypeEntity> diveTypesById = const {},
   }) async {
     final bytes = await generateExcelBytes(
       dives: dives,
@@ -44,6 +65,13 @@ class ExcelExportService {
       pressureUnit: pressureUnit,
       volumeUnit: volumeUnit,
       dateFormat: dateFormat,
+      preDiveSessions: preDiveSessions,
+      preDiveItemsBySession: preDiveItemsBySession,
+      preDiveSectionsBySession: preDiveSectionsBySession,
+      maintenanceRows: maintenanceRows,
+      componentNames: componentNames,
+      observationRows: observationRows,
+      diveTypesById: diveTypesById,
     );
 
     final dateStr = _dateFormat.format(DateTime.now());
@@ -66,14 +94,21 @@ class ExcelExportService {
     required PressureUnit pressureUnit,
     required VolumeUnit volumeUnit,
     required DateFormatPreference dateFormat,
+    List<PreDiveSession> preDiveSessions = const [],
+    Map<String, List<PreDiveSessionItem>> preDiveItemsBySession = const {},
+    Map<String, List<PreDiveSessionSection>> preDiveSectionsBySession =
+        const {},
+    List<MaintenanceLogRow> maintenanceRows = const [],
+    Map<String, List<String>> componentNames = const {},
+    List<ObservationExportRow> observationRows = const [],
+    Map<String, DiveTypeEntity> diveTypesById = const {},
   }) async {
     final excel = xl.Excel.createExcel();
-
-    excel.delete('Sheet1');
 
     _buildDivesSheet(
       excel,
       dives,
+      diveTypesById,
       depthUnit,
       temperatureUnit,
       pressureUnit,
@@ -81,7 +116,32 @@ class ExcelExportService {
       dateFormat,
     );
     _buildSitesSheet(excel, sites, depthUnit);
-    _buildEquipmentSheet(excel, equipment, dateFormat);
+    _buildEquipmentSheet(excel, equipment, dateFormat, componentNames);
+    _preDive.buildSheets(
+      excel,
+      sessions: preDiveSessions,
+      itemsBySession: preDiveItemsBySession,
+      sectionsBySession: preDiveSectionsBySession,
+      dateFormat: dateFormat,
+    );
+    // Only when there is history to carry, so a library with no service
+    // records does not gain an empty sheet.
+    if (maintenanceRows.isNotEmpty) {
+      _maintenance.buildSheet(
+        excel,
+        rows: maintenanceRows,
+        dateFormat: dateFormat,
+      );
+    }
+    // Same guard: a library with no check-ins does not gain an empty sheet
+    // (condition phase 3a).
+    if (observationRows.isNotEmpty) {
+      _observations.buildSheet(
+        excel,
+        rows: observationRows,
+        dateFormat: dateFormat,
+      );
+    }
     _buildStatisticsSheet(
       excel,
       dives,
@@ -89,7 +149,13 @@ class ExcelExportService {
       equipment,
       depthUnit,
       temperatureUnit,
+      dateFormat,
     );
+
+    // Removed only once real sheets exist: the excel package will not delete a
+    // workbook's last remaining sheet, so deleting up front left a stray empty
+    // "Sheet1" in every export.
+    excel.delete('Sheet1');
 
     final bytes = excel.encode();
     if (bytes == null) {
@@ -109,6 +175,14 @@ class ExcelExportService {
     required PressureUnit pressureUnit,
     required VolumeUnit volumeUnit,
     required DateFormatPreference dateFormat,
+    List<PreDiveSession> preDiveSessions = const [],
+    Map<String, List<PreDiveSessionItem>> preDiveItemsBySession = const {},
+    Map<String, List<PreDiveSessionSection>> preDiveSectionsBySession =
+        const {},
+    List<MaintenanceLogRow> maintenanceRows = const [],
+    Map<String, List<String>> componentNames = const {},
+    List<ObservationExportRow> observationRows = const [],
+    Map<String, DiveTypeEntity> diveTypesById = const {},
   }) async {
     final bytes = await generateExcelBytes(
       dives: dives,
@@ -119,27 +193,31 @@ class ExcelExportService {
       pressureUnit: pressureUnit,
       volumeUnit: volumeUnit,
       dateFormat: dateFormat,
+      preDiveSessions: preDiveSessions,
+      preDiveItemsBySession: preDiveItemsBySession,
+      preDiveSectionsBySession: preDiveSectionsBySession,
+      maintenanceRows: maintenanceRows,
+      componentNames: componentNames,
+      observationRows: observationRows,
+      diveTypesById: diveTypesById,
     );
 
     final dateStr = _dateFormat.format(DateTime.now());
     final fileName = 'submersion_export_$dateStr.xlsx';
 
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.export);
+
     final result = await FilePicker.saveFile(
       dialogTitle: 'Save Excel File',
       fileName: fileName,
       type: FileType.custom,
-      allowedExtensions: ['xlsx'],
       bytes: Uint8List.fromList(bytes),
+      mimeType:
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
 
     if (result == null) return null;
-
-    if (!Platform.isAndroid) {
-      final file = File(result);
-      await file.writeAsBytes(Uint8List.fromList(bytes));
-    }
-
-    return result;
+    return savedFileLocation(result);
   }
 
   // ==================== Sheet Builders ====================
@@ -147,6 +225,7 @@ class ExcelExportService {
   void _buildDivesSheet(
     xl.Excel excel,
     List<Dive> dives,
+    Map<String, DiveTypeEntity> diveTypesById,
     DepthUnit depthUnit,
     TemperatureUnit temperatureUnit,
     PressureUnit pressureUnit,
@@ -167,7 +246,13 @@ class ExcelExportService {
       'Runtime (min)',
       'Water Temp (${temperatureUnit.symbol})',
       'Air Temp (${temperatureUnit.symbol})',
-      'Visibility',
+      // Split at v144: the measured distance is machine-readable, the rating
+      // column carries a pre-v144 dive's bucket label.
+      'Visibility (m)',
+      'Visibility Rating',
+      // A band-picked dive's range (issue #3226).
+      'Visibility Min (m)',
+      'Visibility Max (m)',
       'Dive Type',
       'Dive Mode',
       'Buddy',
@@ -185,6 +270,10 @@ class ExcelExportService {
       'Precipitation',
       'Humidity (%)',
       'Weather Description',
+      'Dive Operator',
+      'Boat Name',
+      'Boat Captain',
+      'Surface Conditions',
     ];
 
     for (var col = 0; col < headers.length; col++) {
@@ -197,8 +286,9 @@ class ExcelExportService {
 
     for (var row = 0; row < dives.length; row++) {
       final dive = dives[row];
-      final tank = dive.tanks.isNotEmpty ? dive.tanks.first : null;
-
+      // The first breathing cylinder, never a suit inflation bottle (#4243).
+      final tank = dive.breathingTanks.firstOrNull;
+      final gas = gasMixCells(tank?.gasMix);
       final rowData = <dynamic>[
         dive.diveNumber ?? '',
         formatDateForExport(dive.dateTime, dateFormat),
@@ -208,27 +298,40 @@ class ExcelExportService {
         convertDepth(dive.maxDepth, depthUnit),
         convertDepth(dive.avgDepth, depthUnit),
         dive.bottomTime?.inMinutes ?? '',
-        dive.runtime?.inMinutes ?? '',
+        dive.measuredRuntime?.inMinutes ?? '',
         convertTemperature(dive.waterTemp, temperatureUnit),
         convertTemperature(dive.airTemp, temperatureUnit),
+        dive.visibilityMeters?.toStringAsFixed(1) ?? '',
         dive.visibility?.displayName ?? '',
-        dive.diveTypeName,
+        // Empty beside a measurement, which every reader prefers.
+        if (dive.visibilityMeters == null) ...[
+          dive.visibilityMinMeters?.toStringAsFixed(1) ?? '',
+          dive.visibilityMaxMeters?.toStringAsFixed(1) ?? '',
+        ] else ...[
+          '',
+          '',
+        ],
+        dive.diveTypeNamesFrom(diveTypesById).join('; '),
         dive.diveMode.displayName,
-        dive.buddy,
-        dive.diveMaster,
+        dive.resolvedBuddyNames,
+        dive.resolvedDiveMasterNames,
         dive.rating ?? '',
         convertPressure(tank?.startPressure, pressureUnit),
         convertPressure(tank?.endPressure, pressureUnit),
         convertVolume(tank?.volume, volumeUnit),
-        tank?.gasMix.o2.toStringAsFixed(0) ?? '',
-        tank?.gasMix.he.toStringAsFixed(0) ?? '',
-        dive.notes.replaceAll('\n', ' '),
+        gas?.o2 ?? '',
+        gas?.he ?? '',
+        markdownToPlainText(dive.notes).replaceAll('\n', ' '),
         dive.windSpeed?.toStringAsFixed(1) ?? '',
         dive.windDirection?.displayName ?? '',
         dive.cloudCover?.displayName ?? '',
         dive.precipitation?.displayName ?? '',
         dive.humidity?.toStringAsFixed(0) ?? '',
         dive.weatherDescription ?? '',
+        dive.diveOperator ?? '',
+        dive.boatName ?? '',
+        dive.boatCaptain ?? '',
+        dive.surfaceConditions ?? '',
       ];
 
       for (var col = 0; col < rowData.length; col++) {
@@ -291,15 +394,17 @@ class ExcelExportService {
         site.location?.longitude.toStringAsFixed(6) ?? '',
         convertDepth(site.minDepth, depthUnit),
         convertDepth(site.maxDepth, depthUnit),
-        site.conditions?.waterType ?? '',
-        site.conditions?.typicalCurrent ?? '',
-        site.conditions?.entryType ?? '',
+        site.waterType?.displayName ?? '',
+        // Typical current has no backing column; the header position is kept
+        // so existing consumers of this sheet keep their column offsets.
+        '',
+        joinEntryMethodNames(site.entryMethods, (m) => m.displayName),
         site.difficulty?.displayName ?? '',
         site.rating?.toStringAsFixed(1) ?? '',
-        site.description.replaceAll('\n', ' '),
+        markdownToPlainText(site.description).replaceAll('\n', ' '),
         site.hazards ?? '',
-        site.accessNotes ?? '',
-        site.notes.replaceAll('\n', ' '),
+        markdownToPlainText(site.accessNotes ?? '').replaceAll('\n', ' '),
+        markdownToPlainText(site.notes).replaceAll('\n', ' '),
       ];
 
       for (var col = 0; col < rowData.length; col++) {
@@ -321,6 +426,7 @@ class ExcelExportService {
     xl.Excel excel,
     List<EquipmentItem> equipment,
     DateFormatPreference dateFormat,
+    Map<String, List<String>> componentNames,
   ) {
     final sheet = excel['Equipment'];
 
@@ -332,6 +438,7 @@ class ExcelExportService {
       'Serial Number',
       'Size',
       'Status',
+      'Components',
       'Purchase Date',
       'Last Service',
       'Next Service Due',
@@ -358,6 +465,7 @@ class ExcelExportService {
         item.serialNumber ?? '',
         item.size ?? '',
         item.status.displayName,
+        componentNames[item.id]?.join('; ') ?? '',
         item.purchaseDate != null
             ? formatDateForExport(item.purchaseDate!, dateFormat)
             : '',
@@ -368,7 +476,7 @@ class ExcelExportService {
             ? formatDateForExport(item.nextServiceDue!, dateFormat)
             : '',
         item.isActive ? 'Yes' : 'No',
-        item.notes.replaceAll('\n', ' '),
+        markdownToPlainText(item.notes).replaceAll('\n', ' '),
       ];
 
       for (var col = 0; col < rowData.length; col++) {
@@ -393,6 +501,7 @@ class ExcelExportService {
     List<EquipmentItem> equipment,
     DepthUnit depthUnit,
     TemperatureUnit temperatureUnit,
+    DateFormatPreference dateFormat,
   ) {
     final sheet = excel['Statistics'];
     var currentRow = 0;
@@ -445,8 +554,15 @@ class ExcelExportService {
 
       final sortedDives = [...dives]
         ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
-      addStat('First Dive', _dateFormat.format(sortedDives.first.dateTime));
-      addStat('Last Dive', _dateFormat.format(sortedDives.last.dateTime));
+      // Human-read summary cells, unlike the ISO stamps used for filenames.
+      addStat(
+        'First Dive',
+        formatDateForExport(sortedDives.first.dateTime, dateFormat),
+      );
+      addStat(
+        'Last Dive',
+        formatDateForExport(sortedDives.last.dateTime, dateFormat),
+      );
 
       final deepestDive = dives.reduce(
         (a, b) => (a.maxDepth ?? 0) > (b.maxDepth ?? 0) ? a : b,
@@ -458,12 +574,12 @@ class ExcelExportService {
 
       final longestDive = dives.reduce(
         (a, b) =>
-            (a.effectiveRuntime?.inSeconds ?? 0) >
-                (b.effectiveRuntime?.inSeconds ?? 0)
+            (a.measuredRuntime?.inSeconds ?? 0) >
+                (b.measuredRuntime?.inSeconds ?? 0)
             ? a
             : b,
       );
-      final longestRuntime = longestDive.effectiveRuntime;
+      final longestRuntime = longestDive.measuredRuntime;
       if (longestRuntime != null) {
         addStat('Longest Dive', '${longestRuntime.inMinutes} min');
       }
@@ -568,8 +684,7 @@ class ExcelExportService {
           ccrCount++;
         } else if (dive.diveMode == DiveMode.scr) {
           scrCount++;
-        } else if (dive.tanks.isNotEmpty) {
-          final primaryTank = dive.tanks.first;
+        } else if (dive.breathingTanks case [final primaryTank, ...]) {
           if (primaryTank.gasMix.he > 0) {
             trimixCount++;
           } else if (primaryTank.gasMix.o2 > 22) {
@@ -597,15 +712,21 @@ class ExcelExportService {
       currentRow++;
 
       final nightDives = dives
-          .where((d) => d.diveTypeName.toLowerCase().contains('night'))
+          .where(
+            (d) => d.diveTypeIds.any((t) => t.toLowerCase().contains('night')),
+          )
           .length;
       final deepDives = dives.where((d) => (d.maxDepth ?? 0) > 30).length;
       final coldDives = dives.where((d) => (d.waterTemp ?? 100) < 10).length;
       final driftDives = dives
-          .where((d) => d.diveTypeName.toLowerCase().contains('drift'))
+          .where(
+            (d) => d.diveTypeIds.any((t) => t.toLowerCase().contains('drift')),
+          )
           .length;
       final wrecks = dives
-          .where((d) => d.diveTypeName.toLowerCase().contains('wreck'))
+          .where(
+            (d) => d.diveTypeIds.any((t) => t.toLowerCase().contains('wreck')),
+          )
           .length;
 
       addStat('Night Dives', nightDives);

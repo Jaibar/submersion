@@ -1,50 +1,160 @@
+import 'dart:typed_data';
+
+import 'package:characters/characters.dart';
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/certification_agencies/domain/certification_catalog.dart';
+import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
 
 /// Dive buddy entity
 class Buddy extends Equatable {
   final String id;
   final String? diverId;
+
+  /// The local diver profile this buddy is (issue #2002). Null for a buddy
+  /// with no profile on this library. Not the owner: that is [diverId].
+  final String? linkedDiverId;
   final String name;
   final String? email;
   final String? phone;
-  final CertificationLevel? certificationLevel;
-  final CertificationAgency? certificationAgency;
+
+  /// Where the buddy is from, as the diver wrote it (issue #4457).
+  final String? country;
+
+  /// The ISO 3166-1 alpha-2 code read from [country], or null when the text
+  /// names no country. The repository keeps it in step with [country].
+  final String? countryCode;
+
+  /// The primary certification's level and agency ids (built-in enum names
+  /// or custom ids, issue #690).
+  final String? certificationLevel;
+  final String? certificationAgency;
+
+  /// The primary certification's on-screen title -- its "Name on the card"
+  /// when that says more than the agency/level pair, otherwise the derived
+  /// title. Derived at hydration alongside [certificationLevel] (issue #1303);
+  /// null on the raw row and whenever the buddy has no certification.
+  final String? certificationTitle;
   final String? photoPath;
+
+  /// Profile photo: a 512x512 square JPEG. Supersedes [photoPath].
+  final Uint8List? photo;
   final String notes;
+  final bool isFavorite;
+
+  /// Kept out of the buddy rankings (issue #3624). Dives with this buddy
+  /// still count as buddy dives.
+  final bool excludedFromRankings;
   final DateTime createdAt;
   final DateTime updatedAt;
+
+  /// Buddy card swap (issue #3728): the id of the person whose card this
+  /// buddy came from, so a later swap updates this buddy.
+  final String? cardId;
+  final String? socialHandle;
+
+  /// What the buddy's card said, as of [cardReceivedAt]. Only a card writes
+  /// these. [cardDivingSince] carries a year.
+  final int? cardDiveCount;
+  final DateTime? cardDivingSince;
+  final DateTime? cardLastDive;
+  final DateTime? cardReceivedAt;
 
   const Buddy({
     required this.id,
     this.diverId,
+    this.linkedDiverId,
     required this.name,
     this.email,
     this.phone,
+    this.country,
+    this.countryCode,
     this.certificationLevel,
     this.certificationAgency,
+    this.certificationTitle,
     this.photoPath,
+    this.photo,
     this.notes = '',
+    this.isFavorite = false,
+    this.excludedFromRankings = false,
     required this.createdAt,
     required this.updatedAt,
+    this.cardId,
+    this.socialHandle,
+    this.cardDiveCount,
+    this.cardDivingSince,
+    this.cardLastDive,
+    this.cardReceivedAt,
   });
+
+  /// Whether any figure from a buddy card is set.
+  bool get hasCardDetails =>
+      cardDiveCount != null ||
+      cardDivingSince != null ||
+      cardLastDive != null ||
+      cardReceivedAt != null;
+
+  /// The primary level's English name, from the built-in catalog. A custom
+  /// level is named through certificationTitle, which hydration derives.
+  String? get _levelName {
+    final level = certificationLevel;
+    if (level == null) return null;
+    return CertificationCatalog.builtInOnly.level(level).interchangeName;
+  }
 
   /// Display name with certification info
   String get displayName {
-    if (certificationLevel != null) {
-      return '$name (${certificationLevel!.displayName})';
+    final cert = certificationTitle ?? _levelName;
+    return cert == null ? name : '$name ($cert)';
+  }
+
+  /// The certification line for list tiles: the title, followed by the agency
+  /// unless the agency is [CertificationAgency.other] (whose "Other" says
+  /// nothing) or already part of the title. Null when the buddy has no
+  /// certification. Issue #1303.
+  String? get certificationLine {
+    final title = certificationTitle ?? _levelName;
+    final agency = certificationAgency;
+    final agencyName = agency == null
+        ? null
+        : CertificationCatalog.builtInOnly.agency(agency).interchangeName;
+    if (title == null) {
+      return agency == null || agency == CertificationAgency.other.name
+          ? null
+          : agencyName;
     }
-    return name;
+    if (agency == null || agency == CertificationAgency.other.name) {
+      return title;
+    }
+    // A stored "Name on the card" often already spells out the agency in its
+    // own casing/spacing ("Padi Rescue Diver", "PADI - Rescue Diver"), so
+    // compare loosely to avoid appending the agency a second time.
+    String loose(String s) =>
+        s.toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+    if (loose(title).contains(loose(agencyName!))) {
+      return title;
+    }
+    return '$title · $agencyName';
   }
 
   /// Get initials for avatar
-  String get initials {
-    final parts = name.trim().split(' ');
-    if (parts.length >= 2) {
-      return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
-    }
-    return name.isNotEmpty ? name[0].toUpperCase() : '?';
+  String get initials => initialsOf(name);
+
+  /// The first letters of [name]'s first and last words, or of its only
+  /// word; `?` for a blank name. Shared with the buddy card swap screens
+  /// (issue #3728), so a diver's avatar matches before and after a swap.
+  static String initialsOf(String name) {
+    final words = name
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (words.isEmpty) return '?';
+    String first(String word) => word.characters.first.toUpperCase();
+    return words.length >= 2
+        ? '${first(words.first)}${first(words.last)}'
+        : first(words.first);
   }
 
   /// Check if buddy has contact info
@@ -57,28 +167,124 @@ class Buddy extends Equatable {
   Buddy copyWith({
     String? id,
     String? diverId,
+    String? linkedDiverId,
     String? name,
     String? email,
     String? phone,
-    CertificationLevel? certificationLevel,
-    CertificationAgency? certificationAgency,
+    String? country,
+    String? countryCode,
+    bool clearCountry = false,
+    String? certificationLevel,
+    String? certificationAgency,
+    String? certificationTitle,
     String? photoPath,
+    Uint8List? photo,
     String? notes,
+    bool? isFavorite,
+    bool? excludedFromRankings,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? cardId,
+    String? socialHandle,
+    int? cardDiveCount,
+    DateTime? cardDivingSince,
+    DateTime? cardLastDive,
+    DateTime? cardReceivedAt,
   }) {
     return Buddy(
       id: id ?? this.id,
       diverId: diverId ?? this.diverId,
+      linkedDiverId: linkedDiverId ?? this.linkedDiverId,
       name: name ?? this.name,
       email: email ?? this.email,
       phone: phone ?? this.phone,
+      // [clearCountry] removes both: copyWith keeps a field on a null
+      // argument, so clearing needs its own flag.
+      country: clearCountry ? null : country ?? this.country,
+      countryCode: clearCountry ? null : countryCode ?? this.countryCode,
       certificationLevel: certificationLevel ?? this.certificationLevel,
       certificationAgency: certificationAgency ?? this.certificationAgency,
+      certificationTitle: certificationTitle ?? this.certificationTitle,
       photoPath: photoPath ?? this.photoPath,
+      photo: photo ?? this.photo,
       notes: notes ?? this.notes,
+      isFavorite: isFavorite ?? this.isFavorite,
+      excludedFromRankings: excludedFromRankings ?? this.excludedFromRankings,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      cardId: cardId ?? this.cardId,
+      socialHandle: socialHandle ?? this.socialHandle,
+      cardDiveCount: cardDiveCount ?? this.cardDiveCount,
+      cardDivingSince: cardDivingSince ?? this.cardDivingSince,
+      cardLastDive: cardLastDive ?? this.cardLastDive,
+      cardReceivedAt: cardReceivedAt ?? this.cardReceivedAt,
+    );
+  }
+
+  /// Create a copy with the profile photo explicitly removed.
+  ///
+  /// [copyWith] uses the plain `??` idiom, so `copyWith(photo: null)` keeps
+  /// the current value rather than clearing it. This mirrors
+  /// `Certification.clearPhotos`, which solves the same problem for the
+  /// certification card blobs.
+  Buddy clearPhoto() {
+    return Buddy(
+      id: id,
+      diverId: diverId,
+      linkedDiverId: linkedDiverId,
+      name: name,
+      email: email,
+      phone: phone,
+      country: country,
+      countryCode: countryCode,
+      certificationLevel: certificationLevel,
+      certificationAgency: certificationAgency,
+      certificationTitle: certificationTitle,
+      photoPath: photoPath,
+      photo: null,
+      notes: notes,
+      isFavorite: isFavorite,
+      excludedFromRankings: excludedFromRankings,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      cardId: cardId,
+      socialHandle: socialHandle,
+      cardDiveCount: cardDiveCount,
+      cardDivingSince: cardDivingSince,
+      cardLastDive: cardLastDive,
+      cardReceivedAt: cardReceivedAt,
+    );
+  }
+
+  /// Create a copy with the profile link removed. [copyWith] keeps the
+  /// current value on a null argument, so clearing needs its own method,
+  /// as [clearPhoto] does for the photo.
+  Buddy clearLinkedDiver() {
+    return Buddy(
+      id: id,
+      diverId: diverId,
+      linkedDiverId: null,
+      name: name,
+      email: email,
+      phone: phone,
+      country: country,
+      countryCode: countryCode,
+      certificationLevel: certificationLevel,
+      certificationAgency: certificationAgency,
+      certificationTitle: certificationTitle,
+      photoPath: photoPath,
+      photo: photo,
+      notes: notes,
+      isFavorite: isFavorite,
+      excludedFromRankings: excludedFromRankings,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      cardId: cardId,
+      socialHandle: socialHandle,
+      cardDiveCount: cardDiveCount,
+      cardDivingSince: cardDivingSince,
+      cardLastDive: cardLastDive,
+      cardReceivedAt: cardReceivedAt,
     );
   }
 
@@ -86,25 +292,49 @@ class Buddy extends Equatable {
   List<Object?> get props => [
     id,
     diverId,
+    linkedDiverId,
     name,
     email,
     phone,
+    country,
+    countryCode,
     certificationLevel,
     certificationAgency,
+    certificationTitle,
     photoPath,
+    photo,
     notes,
+    isFavorite,
+    excludedFromRankings,
     createdAt,
     updatedAt,
+    cardId,
+    socialHandle,
+    cardDiveCount,
+    cardDivingSince,
+    cardLastDive,
+    cardReceivedAt,
   ];
 }
 
-/// Buddy with role for a specific dive
+/// Buddy with role for a specific dive. The role is resolved from the
+/// dive_roles table (synthetic for unknown slugs); persistence always uses
+/// [DiveRole.id], never the display name.
 class BuddyWithRole extends Equatable {
   final Buddy buddy;
-  final BuddyRole role;
 
-  const BuddyWithRole({required this.buddy, required this.role});
+  /// Every role this person holds on the dive, in DiveRoleSet order; never
+  /// empty (issue #1221). The first is the primary role `dive_buddies.role`
+  /// holds for older app versions.
+  final List<DiveRole> roles;
+
+  BuddyWithRole({required this.buddy, required this.roles})
+    : assert(roles.isNotEmpty, 'a buddy link always carries a role');
+
+  DiveRole get primaryRole => roles.first;
+
+  List<String> get roleIds => [for (final r in roles) r.id];
 
   @override
-  List<Object?> get props => [buddy, role];
+  List<Object?> get props => [buddy, roles];
 }

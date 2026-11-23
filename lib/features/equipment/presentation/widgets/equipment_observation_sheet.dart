@@ -1,0 +1,750 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:submersion/features/media/presentation/helpers/media_hold.dart';
+import 'package:submersion/features/equipment/presentation/editing/gear_item_check_ins_sitting.dart';
+import 'package:submersion/core/util/wall_clock_utc.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
+import 'package:submersion/features/equipment/data/repositories/gear_photo_repository.dart';
+import 'package:submersion/features/equipment/domain/constants/observation_tag_catalog.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_observation.dart';
+import 'package:submersion/features/equipment/domain/services/observation_defaults.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_observation_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/gear_photo_providers.dart';
+import 'package:submersion/features/equipment/presentation/utils/observation_tag_display.dart';
+import 'package:submersion/features/equipment/presentation/widgets/check_in_photos_row.dart';
+import 'package:submersion/features/equipment/presentation/widgets/observation_near_miss_action.dart';
+import 'package:submersion/features/media/data/services/media_unlink_service.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/providers/media_providers.dart';
+import 'package:submersion/features/media/presentation/widgets/dive_picker_sheet.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/tile_subtitle_action.dart';
+
+export 'package:submersion/features/equipment/domain/services/observation_defaults.dart'
+    show defaultObservedAt;
+
+/// Opens the check-in sheet for [equipment]. With [dive], the sheet lists
+/// and adds observations on that dive; without it (the item page) each new
+/// observation may pick a dive or stay a bench note. With [editing], the
+/// sheet opens straight into the editor for that observation. With
+/// [offerNearMiss] off, rows show no near-miss action: the near-miss form opens
+/// the sheet that way, since it is the report such an action would start.
+///
+/// With [onHold] (the item page's sitting, issue #4527, phase 3) the sheet
+/// opens straight into the editor, for [held] when given or a new check-in,
+/// and writes nothing: Save hands the check-in and the photos added to and
+/// removed from it to [onHold], to be written at the page's Save.
+Future<void> showEquipmentObservationSheet(
+  BuildContext context, {
+  required EquipmentItem equipment,
+  Dive? dive,
+  EquipmentObservation? editing,
+  bool offerNearMiss = true,
+  HeldCheckIn? held,
+  void Function(HeldCheckIn checkIn)? onHold,
+  PhotosHeldElsewhere elsewhere = noPhotosHeldElsewhere,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (_) => _ObservationSheet(
+      equipment: equipment,
+      dive: dive,
+      editing: editing,
+      offerNearMiss: offerNearMiss,
+      held: held,
+      onHold: onHold,
+      elsewhere: elsewhere,
+    ),
+  );
+}
+
+/// Asks before deleting [observation], then deletes it. Shared by the
+/// sheet's rows and the item page's check-in card.
+Future<void> confirmDeleteObservation(
+  BuildContext context,
+  WidgetRef ref,
+  EquipmentObservation observation,
+) async {
+  final l10n = context.l10n;
+  // The check-in's photos go with it (issue #3355); the files stay.
+  // A failed read must not block the delete; any photo left behind still
+  // shows in the Gear gallery, where it can be removed by hand.
+  List<MediaItem> photos;
+  try {
+    photos = await ref
+        .read(gearPhotoRepositoryProvider)
+        .photosForObservation(observation.id);
+  } catch (_) {
+    photos = const [];
+  }
+  if (!context.mounted) return;
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      content: Text(
+        photos.isEmpty
+            ? l10n.equipmentObservation_sheet_deleteConfirm
+            : l10n.equipment_photos_deleteCheckInWithPhotos(photos.length),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: Text(l10n.equipmentObservation_sheet_cancel),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: Text(l10n.common_action_delete),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+  await ref.read(equipmentObservationRepositoryProvider).delete(observation.id);
+  if (photos.isNotEmpty) {
+    try {
+      await ref.read(mediaUnlinkServiceProvider).unlinkFromEquipment([
+        for (final m in photos) m.id,
+      ]);
+    } catch (_) {
+      // The check-in is gone; its photos now count as identification
+      // photos on the gear page, where they can be removed by hand.
+    }
+  }
+  scheduleConditionFindingsRefresh([observation.equipmentId]);
+}
+
+class _ObservationSheet extends ConsumerStatefulWidget {
+  final EquipmentItem equipment;
+  final Dive? dive;
+  final EquipmentObservation? editing;
+  final bool offerNearMiss;
+  final HeldCheckIn? held;
+  final void Function(HeldCheckIn checkIn)? onHold;
+
+  /// The photos the sitting holds outside this check-in: a pick of one it
+  /// adds there is left out, as the item has it already; one it unlinks
+  /// there may be picked again.
+  final PhotosHeldElsewhere elsewhere;
+
+  const _ObservationSheet({
+    required this.equipment,
+    this.dive,
+    this.editing,
+    required this.offerNearMiss,
+    this.held,
+    this.onHold,
+    this.elsewhere = noPhotosHeldElsewhere,
+  });
+
+  @override
+  ConsumerState<_ObservationSheet> createState() => _ObservationSheetState();
+}
+
+class _ObservationSheetState extends ConsumerState<_ObservationSheet> {
+  /// Null while the list shows; a draft while the editor shows.
+  _Draft? _draft;
+
+  /// True from the first Save tap until the write finishes, so a second
+  /// tap cannot write the check-in twice.
+  bool _saving = false;
+
+  /// Read up front: a sheet dismissed mid-edit still has to unlink what a
+  /// new check-in gathered, and `ref` is gone by then.
+  late final MediaUnlinkService _unlink;
+  late final GearPhotoRepository _gearPhotos;
+
+  @override
+  void initState() {
+    super.initState();
+    _unlink = ref.read(mediaUnlinkServiceProvider);
+    _gearPhotos = ref.read(gearPhotoRepositoryProvider);
+    if (widget.onHold != null) {
+      // Held in the item page's sitting: straight into the editor.
+      _draft = switch (widget.held) {
+        final held? =>
+          _Draft.fromExisting(held.observation)
+            ..added = [...held.added]
+            ..removed = {...held.removedPhotoIds},
+        null => _Draft.fresh(
+          observedAt: asWallClockUtc(DateTime.now()),
+          diveId: null,
+        ),
+      };
+    } else if (widget.editing case final existing?) {
+      _draft = _Draft.fromExisting(existing);
+    }
+  }
+
+  /// Whether the sheet holds its check-in in the item page's sitting.
+  bool get _holding => widget.onHold != null;
+
+  @override
+  void dispose() {
+    // A Save still in flight may yet create the check-in, so its photos
+    // stay; a held check-in wrote none.
+    if (!_saving && !_holding) {
+      if (_draft case final draft?) _discardUnsavedPhotos(draft);
+    }
+    _draft?.note.dispose();
+    super.dispose();
+  }
+
+  /// A new check-in left unsaved takes its photos with it (issue #3355):
+  /// they name a check-in that will never exist. An existing check-in keeps
+  /// its photos, which were linked to it as they were added.
+  Future<void> _discardUnsavedPhotos(_Draft draft) async {
+    if (draft.existing != null) return;
+    try {
+      final photos = await _gearPhotos.photosForObservation(draft.id);
+      if (photos.isEmpty) return;
+      await _unlink.unlinkFromEquipment([for (final m in photos) m.id]);
+    } catch (_) {
+      // Best effort: an orphan check-in photo still shows in the Gear
+      // gallery, where it can be removed by hand.
+    }
+  }
+
+  void _openEditor(_Draft draft) {
+    if (_draft case final previous?) _discardUnsavedPhotos(previous);
+    _draft?.note.dispose();
+    setState(() => _draft = draft);
+  }
+
+  void _closeEditor({bool saved = false}) {
+    // A held check-in has no list behind it: the sheet closes.
+    if (_holding) {
+      Navigator.of(context).pop();
+      return;
+    }
+    if (!saved) {
+      if (_draft case final draft?) _discardUnsavedPhotos(draft);
+    }
+    _draft?.note.dispose();
+    setState(() => _draft = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final dive = widget.dive;
+    final observationsAsync = dive == null
+        ? ref.watch(observationsForEquipmentProvider(widget.equipment.id))
+        : ref.watch(observationsForDiveProvider(dive.id));
+    final observations = [
+      for (final o in observationsAsync.value ?? const <EquipmentObservation>[])
+        if (o.equipmentId == widget.equipment.id) o,
+    ];
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 16,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            l10n.equipmentObservation_sheet_title(widget.equipment.name),
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          // The editor scrolls: an issue shows its tag chips and, off a
+          // dive, the dive and date pickers too, which outgrows a short
+          // window.
+          if (_draft case final draft?)
+            Flexible(
+              child: SingleChildScrollView(
+                child: _Editor(
+                  draft: draft,
+                  equipment: widget.equipment,
+                  hasDive: dive != null,
+                  onCancel: _closeEditor,
+                  onSave: _saving ? null : () => _save(draft),
+                  holding: _holding,
+                  elsewhere: widget.elsewhere,
+                ),
+              ),
+            )
+          else ...[
+            if (observations.isEmpty)
+              Text(
+                dive == null
+                    ? l10n.equipmentObservation_sheet_emptyBench
+                    : l10n.equipmentObservation_sheet_empty,
+                style: Theme.of(context).textTheme.bodyMedium,
+              )
+            else
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final o in observations)
+                      _ObservationTile(
+                        observation: o,
+                        offerNearMiss: widget.offerNearMiss,
+                        onEdit: () => _openEditor(_Draft.fromExisting(o)),
+                        onDelete: () => _delete(o),
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _openEditor(
+                _Draft.fresh(
+                  observedAt: dive == null
+                      ? asWallClockUtc(DateTime.now())
+                      : defaultObservedAt(dive),
+                  diveId: dive?.id,
+                ),
+              ),
+              icon: const Icon(Icons.add),
+              label: Text(l10n.equipmentObservation_sheet_add),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _save(_Draft draft) async {
+    if (_saving) return;
+    final l10n = context.l10n;
+    // A newer peer's tags cannot be shown, but they are still the row's
+    // tags: only an issue with none at all is refused.
+    if (draft.status == ObservationStatus.issue &&
+        draft.tags.isEmpty &&
+        (draft.existing?.unrecognizedTags.isEmpty ?? true)) {
+      setState(() => draft.error = l10n.equipmentObservation_sheet_tagRequired);
+      return;
+    }
+    if (widget.onHold case final hold?) {
+      // A second tap while the diver is read must not hand the check-in
+      // over twice, nor close the page under the sheet.
+      setState(() => _saving = true);
+      try {
+        await _hold(draft, hold);
+      } catch (_) {
+        // As a stored Save: say the check-in was not kept, and keep the
+        // editor open to try again.
+        if (mounted) setState(() => draft.error = l10n.common_error_tryAgain);
+      } finally {
+        if (mounted) setState(() => _saving = false);
+      }
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final repo = ref.read(equipmentObservationRepositoryProvider);
+      final tags = draft.status == ObservationStatus.issue
+          ? draft.tags.toList()
+          : const <ObservationTag>[];
+      final note = draft.note.text.trim();
+      final existing = draft.existing;
+      if (existing == null) {
+        await repo.create(
+          // Chosen when the editor opened, so its photos already name it.
+          id: draft.id,
+          equipmentId: widget.equipment.id,
+          diveId: draft.diveId,
+          // The validated id, as every diver-scoped read uses: a stale raw
+          // id would file the check-in under a diver nobody reads.
+          diverId: await ref.read(validatedCurrentDiverIdProvider.future),
+          observedAt: draft.observedAt,
+          status: draft.status,
+          issueTags: tags,
+          note: note,
+        );
+      } else {
+        await repo.update(
+          existing.copyWith(
+            diveId: draft.diveId,
+            clearDiveId: draft.diveId == null,
+            observedAt: draft.observedAt,
+            status: draft.status,
+            issueTags: tags,
+            note: note,
+          ),
+        );
+      }
+      // Stored findings follow the write even with no item page open.
+      scheduleConditionFindingsRefresh([widget.equipment.id]);
+      if (!mounted) return;
+      _closeEditor(saved: true);
+    } catch (_) {
+      // A concurrent sync can delete the item or dive mid-save. Say the
+      // check-in was not saved and keep the editor open to try again.
+      if (mounted) setState(() => draft.error = l10n.common_error_tryAgain);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _delete(EquipmentObservation observation) =>
+      confirmDeleteObservation(context, ref, observation);
+
+  /// Hands the check-in [draft] makes, and its photo changes, to [hold],
+  /// writing nothing.
+  Future<void> _hold(_Draft draft, void Function(HeldCheckIn) hold) async {
+    final tags = draft.status == ObservationStatus.issue
+        ? draft.tags.toList()
+        : const <ObservationTag>[];
+    final note = draft.note.text.trim();
+    final existing = draft.existing;
+    final now = DateTime.now();
+    final EquipmentObservation observation;
+    if (existing == null) {
+      // The validated id, as every diver-scoped read uses.
+      final diverId = await ref.read(validatedCurrentDiverIdProvider.future);
+      if (!mounted) return;
+      observation = EquipmentObservation(
+        id: draft.id,
+        diverId: diverId,
+        equipmentId: widget.equipment.id,
+        diveId: draft.diveId,
+        observedAt: draft.observedAt,
+        status: draft.status,
+        issueTags: tags,
+        note: note,
+        createdAt: now,
+        updatedAt: now,
+      );
+    } else {
+      observation = existing.copyWith(
+        diveId: draft.diveId,
+        clearDiveId: draft.diveId == null,
+        observedAt: draft.observedAt,
+        status: draft.status,
+        issueTags: tags,
+        note: note,
+      );
+    }
+    hold(
+      HeldCheckIn(
+        observation: observation,
+        added: draft.added,
+        removedPhotoIds: draft.removed,
+      ),
+    );
+    Navigator.of(context).pop();
+  }
+}
+
+/// The editor's working copy. Mutable on purpose: it lives only while the
+/// editor is open and is discarded on Save or Cancel.
+class _Draft {
+  final EquipmentObservation? existing;
+
+  /// The check-in's id: the existing row's, or one chosen now for a new
+  /// check-in so its photos can name it before Save (issue #3355).
+  final String id;
+  ObservationStatus status;
+  final Set<ObservationTag> tags;
+  final TextEditingController note;
+  DateTime observedAt;
+  String? diveId;
+  String? error;
+
+  /// Photos picked and removed while the check-in is held in an item
+  /// page's sitting (issue #4527, phase 3).
+  List<HeldMediaAdd> added = [];
+  Set<String> removed = {};
+
+  _Draft({
+    this.existing,
+    required this.id,
+    required this.status,
+    required this.tags,
+    required this.note,
+    required this.observedAt,
+    this.diveId,
+  });
+
+  factory _Draft.fresh({required DateTime observedAt, String? diveId}) =>
+      _Draft(
+        id: const Uuid().v4(),
+        status: ObservationStatus.ok,
+        tags: {},
+        note: TextEditingController(),
+        observedAt: observedAt,
+        diveId: diveId,
+      );
+
+  factory _Draft.fromExisting(EquipmentObservation o) => _Draft(
+    existing: o,
+    id: o.id,
+    status: o.status,
+    tags: o.issueTags.toSet(),
+    note: TextEditingController(text: o.note),
+    observedAt: o.observedAt,
+    diveId: o.diveId,
+  );
+}
+
+class _Editor extends ConsumerStatefulWidget {
+  final _Draft draft;
+  final EquipmentItem equipment;
+  final bool hasDive;
+  final VoidCallback onCancel;
+
+  /// Null while a save is in flight, which disables the button.
+  final VoidCallback? onSave;
+
+  /// Whether its photos are held in the item page's sitting.
+  final bool holding;
+
+  /// The photos the sitting holds outside this check-in.
+  final PhotosHeldElsewhere elsewhere;
+
+  const _Editor({
+    required this.draft,
+    required this.equipment,
+    required this.hasDive,
+    required this.onCancel,
+    required this.onSave,
+    this.holding = false,
+    this.elsewhere = noPhotosHeldElsewhere,
+  });
+
+  @override
+  ConsumerState<_Editor> createState() => _EditorState();
+}
+
+class _EditorState extends ConsumerState<_Editor> {
+  Future<void> _pickDive() async {
+    final picked = await showDivePickerSheet(context);
+    if (picked == null || !mounted) return;
+    final dive = await ref.read(diveProvider(picked).future);
+    if (!mounted) return;
+    setState(() {
+      widget.draft.diveId = picked;
+      if (dive != null) widget.draft.observedAt = defaultObservedAt(dive);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final draft = widget.draft;
+    final units = ref.watch(unitFormatterProvider);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SegmentedButton<ObservationStatus>(
+          segments: [
+            for (final s in ObservationStatus.values)
+              ButtonSegment(value: s, label: Text(s.localizedName(l10n))),
+          ],
+          selected: {draft.status},
+          onSelectionChanged: (sel) => setState(() {
+            draft.status = sel.first;
+            draft.error = null;
+          }),
+        ),
+        if (draft.status == ObservationStatus.issue) ...[
+          const SizedBox(height: 12),
+          Text(
+            l10n.equipmentObservation_sheet_tagsLabel,
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final tag in observationTagsFor(widget.equipment.type))
+                FilterChip(
+                  label: Text(tag.localizedName(l10n)),
+                  selected: draft.tags.contains(tag),
+                  onSelected: (on) => setState(() {
+                    if (on) {
+                      draft.tags.add(tag);
+                    } else {
+                      draft.tags.remove(tag);
+                    }
+                    draft.error = null;
+                  }),
+                ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 12),
+        TextField(
+          controller: draft.note,
+          decoration: InputDecoration(
+            labelText: l10n.equipmentObservation_sheet_noteLabel,
+          ),
+          maxLines: 3,
+        ),
+        if (!widget.hasDive)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.scuba_diving),
+            title: Text(l10n.equipmentObservation_sheet_diveLabel),
+            // "Pick dive" sits on its own line under the current dive rather
+            // than in trailing: a ListTile lays trailing out at its natural
+            // width first, so a translated label there starves the title
+            // (issue #2717). Only the fixed-width clear button stays there.
+            subtitle: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                draft.diveId == null
+                    ? Text(l10n.equipmentObservation_sheet_noDive)
+                    : _DiveLabel(diveId: draft.diveId!),
+                TileSubtitleAction(
+                  onPressed: _pickDive,
+                  label: l10n.equipmentObservation_sheet_pickDive,
+                ),
+              ],
+            ),
+            // The picker's dismissal keeps the current dive, so going back to
+            // a bench note needs its own control.
+            trailing: draft.diveId == null
+                ? null
+                : IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: l10n.equipmentObservation_sheet_noDive,
+                    onPressed: () => setState(() => draft.diveId = null),
+                  ),
+          ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.event),
+          title: Text(l10n.equipmentObservation_sheet_dateLabel),
+          subtitle: Text(units.formatDateTime(draft.observedAt, l10n: l10n)),
+        ),
+        const SizedBox(height: 4),
+        CheckInPhotosRow(
+          equipmentId: widget.equipment.id,
+          observationId: draft.id,
+          heldAdded: draft.added,
+          elsewhere: widget.elsewhere,
+          heldRemoved: draft.removed,
+          onHeldChanged: widget.holding
+              ? (added, removed) => setState(() {
+                  draft
+                    ..added = added
+                    ..removed = removed;
+                })
+              : null,
+        ),
+        if (draft.error case final error?)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              error,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            TextButton(
+              onPressed: widget.onCancel,
+              child: Text(l10n.equipmentObservation_sheet_cancel),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: widget.onSave,
+              child: Text(l10n.equipmentObservation_sheet_save),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// "Dive #n" for a picked dive, or the plain "Dive" label while it loads
+/// (the id is internal and never shown).
+class _DiveLabel extends ConsumerWidget {
+  final String diveId;
+
+  const _DiveLabel({required this.diveId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final dive = ref.watch(diveProvider(diveId)).value;
+    final number = dive?.diveNumber;
+    // Until the dive resolves, a plain label: the id is internal.
+    return Text(
+      number == null
+          ? context.l10n.equipmentObservation_sheet_diveLabel
+          : context.l10n.equipmentObservation_card_onDive(number),
+    );
+  }
+}
+
+class _ObservationTile extends ConsumerWidget {
+  final EquipmentObservation observation;
+  final bool offerNearMiss;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  const _ObservationTile({
+    required this.observation,
+    required this.offerNearMiss,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final units = ref.watch(unitFormatterProvider);
+    final scheme = Theme.of(context).colorScheme;
+    final title = observation.displayTitle(l10n);
+    final note = observation.noteSummary;
+    final when = units.formatDateTime(observation.observedAt, l10n: l10n);
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        observation.isIssue ? Icons.warning_amber : Icons.check_circle_outline,
+        color: observation.isIssue ? scheme.error : scheme.tertiary,
+      ),
+      title: Text(title),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (note.isNotEmpty)
+            Text(note, maxLines: 1, overflow: TextOverflow.ellipsis),
+          Text(when),
+          if (offerNearMiss)
+            ObservationNearMissAction(observation: observation),
+        ],
+      ),
+      isThreeLine: note.isNotEmpty || (offerNearMiss && observation.isIssue),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.edit_outlined),
+            tooltip: l10n.equipmentObservation_sheet_edit,
+            onPressed: onEdit,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: l10n.equipmentObservation_sheet_delete,
+            onPressed: onDelete,
+          ),
+        ],
+      ),
+    );
+  }
+}

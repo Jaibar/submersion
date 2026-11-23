@@ -1,0 +1,169 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
+
+import 'package:submersion/features/media/data/services/photo_picker_service.dart';
+import 'package:submersion/features/media/data/services/photo_picker_service_desktop.dart';
+import 'package:submersion/features/media/domain/value_objects/taken_at_source.dart';
+
+/// Writes a 4x4 JPEG carrying [dateTimeOriginal] in its EXIF IFD.
+File _jpegWithExifDate(Directory dir, String name, String dateTimeOriginal) {
+  final image = img.Image(width: 4, height: 4);
+  image.exif.exifIfd['DateTimeOriginal'] = dateTimeOriginal;
+  return File('${dir.path}/$name')..writeAsBytesSync(img.encodeJpg(image));
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('getAssetMetadata returns null', () async {
+    final metadata = await PhotoPickerServiceDesktop().getAssetMetadata(
+      'asset-1',
+    );
+
+    expect(metadata, isNull);
+  });
+
+  // Desktop reads files through a dialog, with nothing to prompt for.
+  test('currentPermission is authorized without asking', () async {
+    expect(
+      await PhotoPickerServiceDesktop().currentPermission(),
+      PhotoPermissionStatus.authorized,
+    );
+  });
+
+  group('assetInfoForFile', () {
+    late Directory tempDir;
+    late PhotoPickerServiceDesktop service;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('desktop_picker_');
+      service = PhotoPickerServiceDesktop();
+    });
+
+    tearDown(() async {
+      if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+    });
+
+    test('carries the absolute path so the import can persist it', () {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+
+      final asset = service.assetInfoForFile(file);
+
+      // Without this the row lands with blank path columns and display falls
+      // to photo_manager, which has no Windows backend.
+      expect(asset?.filePath, file.path);
+    });
+
+    test('carries EXIF GPS onto the asset', () {
+      final image = img.Image(width: 4, height: 4);
+      image.exif.gpsIfd.gpsLatitude = 20.5;
+      image.exif.gpsIfd.gpsLatitudeRef = 'N';
+      image.exif.gpsIfd.gpsLongitude = 87.25;
+      image.exif.gpsIfd.gpsLongitudeRef = 'W';
+      final file = File('${tempDir.path}/gps.jpg')
+        ..writeAsBytesSync(img.encodeJpg(image));
+
+      final asset = service.assetInfoForFile(file);
+
+      expect(asset?.latitude, closeTo(20.5, 1e-6));
+      expect(asset?.longitude, closeTo(-87.25, 1e-6));
+    });
+
+    test('leaves GPS null when the file has none', () {
+      final file = _jpegWithExifDate(
+        tempDir,
+        'nogps.jpg',
+        '2025:07:14 17:22:31',
+      );
+      final asset = service.assetInfoForFile(file);
+      expect(asset?.latitude, isNull);
+      expect(asset?.longitude, isNull);
+    });
+
+    test('dates the asset from EXIF capture time, not the file mtime', () {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+      // Copying a card to the PC months later leaves an mtime of the copy
+      // time; reporting that is why in-window photos read as unmatched.
+      file.setLastModifiedSync(DateTime(2025, 11, 2, 9, 15));
+
+      final asset = service.assetInfoForFile(file);
+
+      expect(asset?.createDateTime, DateTime(2025, 7, 14, 17, 22, 31));
+    });
+
+    test('reports capture time as local, matching the AssetInfo contract', () {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+
+      // Consumers (TripMediaScanner, MediaImportService) reinterpret these
+      // components as wall-clock-UTC; a UTC-flagged value double-converts.
+      expect(service.assetInfoForFile(file)?.createDateTime.isUtc, isFalse);
+    });
+
+    test('falls back to the file mtime when no capture time is embedded', () {
+      final file = File('${tempDir.path}/nometa.png')
+        ..writeAsBytesSync(img.encodePng(img.Image(width: 4, height: 4)));
+      file.setLastModifiedSync(DateTime(2025, 11, 2, 9, 15));
+
+      expect(
+        service.assetInfoForFile(file)?.createDateTime,
+        DateTime(2025, 11, 2, 9, 15),
+      );
+    });
+
+    test('records that an embedded capture time dated the asset', () {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+
+      expect(
+        service.assetInfoForFile(file)?.takenAtSource,
+        TakenAtSource.containerMetadata,
+      );
+    });
+
+    test('records that the file mtime dated the asset', () {
+      // An AVI carries no date the readers understand, so the review page
+      // has to be able to say the time is only the file's.
+      final file = File(p.join(tempDir.path, 'clip.avi'))
+        ..writeAsBytesSync([1, 2, 3, 4]);
+
+      expect(
+        service.assetInfoForFile(file)?.takenAtSource,
+        TakenAtSource.fileModifiedTime,
+      );
+    });
+
+    test('records real pixel dimensions for the resolution tiers', () {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+
+      final asset = service.assetInfoForFile(file);
+
+      // matchByTimestampAndDimensions bails on a 0x0 row, so the hardcoded
+      // zeroes silently disabled two of the three resolution tiers.
+      expect(asset?.width, 4);
+      expect(asset?.height, 4);
+    });
+
+    test('returns null for a file that does not exist', () {
+      expect(
+        service.assetInfoForFile(File('${tempDir.path}/gone.jpg')),
+        isNull,
+      );
+    });
+
+    test('classifies known video extensions as video assets', () {
+      final file = File('${tempDir.path}/clip.mp4')..writeAsBytesSync([1, 2]);
+
+      expect(service.assetInfoForFile(file)?.type, AssetType.video);
+    });
+
+    test('resolves the picked path back from the generated asset id', () async {
+      final file = _jpegWithExifDate(tempDir, 'a.jpg', '2025:07:14 17:22:31');
+
+      final asset = service.assetInfoForFile(file)!;
+
+      expect(await service.getFilePath(asset.id), file.path);
+    });
+  });
+}

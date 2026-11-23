@@ -1,5 +1,5 @@
-import 'dart:io';
-
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/domain/entities/storage_config.dart';
@@ -16,33 +16,46 @@ class StoragePlatformCapabilities {
   /// Whether iCloud sync is supported (iOS/macOS only)
   final bool supportsICloud;
 
-  /// Whether Google Drive sync is supported (all platforms)
+  /// Whether Google Drive sync is supported: everywhere except a
+  /// Windows/Linux build with no Desktop-app OAuth client compiled in
   final bool supportsGoogleDrive;
 
   /// Whether this is a desktop platform
   final bool isDesktop;
+
+  /// Whether "custom folder" can only mean an app-specific device volume
+  /// (internal storage or SD card) rather than any folder the user names.
+  ///
+  /// True on Android: a live SQLite file needs a real lockable path for its
+  /// `-wal`/`-shm` byte-range locks, which a Storage Access Framework stream
+  /// cannot provide, so the picker offers app-specific external volumes
+  /// instead of an arbitrary folder. The UI must not promise cloud-synced
+  /// folders there (#311).
+  final bool customFolderIsDeviceVolumeOnly;
 
   const StoragePlatformCapabilities({
     required this.supportsCustomFolder,
     required this.supportsICloud,
     required this.supportsGoogleDrive,
     required this.isDesktop,
+    required this.customFolderIsDeviceVolumeOnly,
   });
 }
 
-/// Platform capabilities provider
+/// Platform capabilities provider, derived from [DeviceCapabilities] so
+/// the storage screens and every other screen agree on what this device can
+/// do. Custom folders are supported on every native platform (macOS and iOS
+/// through security-scoped bookmarks, Windows and Linux through the file
+/// system, Android as app-specific volumes only) and nowhere in a browser.
 final storagePlatformCapabilitiesProvider =
     Provider<StoragePlatformCapabilities>((ref) {
+      final caps = ref.watch(deviceCapabilitiesProvider);
       return StoragePlatformCapabilities(
-        // Custom folder is supported on all platforms:
-        // - macOS: Uses security-scoped bookmarks for persistent access
-        // - iOS: Uses security-scoped bookmarks for iCloud Drive folders
-        // - Windows/Linux: Standard file system access
-        // - Android: Uses Storage Access Framework (SAF)
-        supportsCustomFolder: true,
-        supportsICloud: Platform.isIOS || Platform.isMacOS,
-        supportsGoogleDrive: true, // All platforms
-        isDesktop: Platform.isMacOS || Platform.isWindows || Platform.isLinux,
+        supportsCustomFolder: caps.customDatabaseFolder,
+        supportsICloud: caps.cloudICloud,
+        supportsGoogleDrive: caps.cloudGoogleDrive,
+        isDesktop: HostPlatform.isDesktop,
+        customFolderIsDeviceVolumeOnly: HostPlatform.isAndroid,
       );
     });
 
@@ -139,8 +152,17 @@ class StorageConfigNotifier extends StateNotifier<StorageConfigState> {
   ///
   /// Returns a [FolderPickResultWithBookmark] containing the path and optional
   /// bookmark data (for iOS), or null if cancelled.
-  Future<FolderPickResultWithBookmark?> pickCustomFolder() async {
-    return _locationService.pickCustomFolder();
+  Future<FolderPickResultWithBookmark?> pickCustomFolder({
+    Future<ExternalVolumeOption?> Function(List<ExternalVolumeOption>)? chooser,
+  }) async {
+    _locationService.externalVolumeChooser = chooser;
+    try {
+      return await _locationService.pickCustomFolder();
+    } finally {
+      // Don't let the service retain a UI closure (which captures the page)
+      // beyond this call.
+      _locationService.externalVolumeChooser = null;
+    }
   }
 
   /// Check for existing database at a folder
@@ -330,6 +352,12 @@ final currentDatabasePathProvider = FutureProvider<String>((ref) async {
 });
 
 /// Whether the current storage mode is custom folder
+/// The storage location has been read from disk: until then the config is
+/// the app default, which a custom-folder device is not.
+final storageConfigLoadedProvider = Provider<bool>(
+  (ref) => !ref.watch(storageConfigNotifierProvider.select((s) => s.isLoading)),
+);
+
 final isCustomFolderModeProvider = Provider<bool>((ref) {
   final configState = ref.watch(storageConfigNotifierProvider);
   return configState.config.mode == StorageLocationMode.customFolder;

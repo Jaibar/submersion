@@ -1,24 +1,78 @@
 import 'package:flutter/material.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
 import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
 import 'package:submersion/features/dive_planner/presentation/widgets/segment_editor.dart';
 import 'package:submersion/features/dive_planner/presentation/widgets/simple_plan_dialog.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    show PlanMode;
+import 'package:submersion/features/planner/domain/entities/segment_phase.dart';
+import 'package:submersion/features/planner/domain/services/diluent_switch_time.dart';
+import 'package:submersion/features/planner/domain/services/dive_plan_state_mapper.dart';
+import 'package:submersion/features/planner/domain/services/segment_chain.dart';
+import 'package:submersion/features/planner/domain/services/tank_role_resolver.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart'
+    show planEngineConfigProvider, resolvedPlanEngineConfigProvider;
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Widget for displaying and managing plan segments.
+///
+/// Given a [plan], it shows that plan's segments read-only instead of the
+/// editor's: a logged dive's plan, as it was (issue #3565).
 class SegmentList extends ConsumerWidget {
-  const SegmentList({super.key});
+  const SegmentList({super.key, this.plan});
+
+  final DivePlanState? plan;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final planState = ref.watch(divePlanNotifierProvider);
+    final readOnly = plan != null;
+    final DivePlanState planState = plan ?? ref.watch(divePlanNotifierProvider);
     final theme = Theme.of(context);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
+    // Resolved once per build, not once per row. The state's list order is
+    // the authoring order (stateFromDivePlan sorts, and the notifier keeps
+    // `order` in step with the list), which is what SegmentChain chains.
+    final legs = const SegmentChain().resolve(planState.segments);
+
+    // The configured gas-switch stop time (#3263) inserts a flat stop leg
+    // of its own wherever the dive switches diluent, and
+    // PlanEngine.compute/buildCanvasSeries add it before computing the RT
+    // this list's subtitle claims to match -- so this list must add it too,
+    // or its own RT silently falls behind the computed schedule it promises
+    // to agree with (confirmed: a 5-minute configured gas-switch time never
+    // showed up here at all). A second, separately-resolved chain supplies
+    // just the adjusted runtimeSeconds, looked up by the original segment's
+    // own id below -- withDiluentSwitchTime's inserted stop leg means this
+    // chain is no longer the same length as [legs] and must not be indexed
+    // the same way. expandRateSplitSegments (#3264) is left out here on
+    // purpose: it can ALSO add a leg of its own, which [legs] above must
+    // never see -- this list shows exactly one row per authored segment,
+    // the diver's own typed duration, since edit/delete/reorder key off
+    // that same one-row-per-segment correspondence to [planState.segments].
+    final resolvedPlan = const TankRoleResolver().apply(
+      divePlanFromState(planState),
+    );
+    // A plan shown read-only resolves its own settings, not the editor's.
+    final config = readOnly
+        ? ref.watch(planEngineConfigProvider).resolvedFor(resolvedPlan)
+        : ref.watch(resolvedPlanEngineConfigProvider);
+    final adjustedLegs = const SegmentChain().resolve(
+      withDiluentSwitchTime(
+        resolvedPlan.segments,
+        resolvedPlan,
+        gasSwitchStopSeconds: config.gasSwitchStopSeconds,
+      ),
+    );
+    int runtimeSecondsFor(String segmentId) => adjustedLegs
+        .firstWhere((l) => l.segment.id == segmentId)
+        .runtimeSeconds;
 
     return Card(
       child: Padding(
@@ -31,23 +85,38 @@ class SegmentList extends ConsumerWidget {
               children: [
                 Icon(Icons.timeline, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                Text(
-                  context.l10n.divePlanner_segmentList_title,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.primary,
+                Expanded(
+                  child: Text(
+                    context.l10n.divePlanner_segmentList_title,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      color: theme.colorScheme.primary,
+                    ),
                   ),
                 ),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.add),
-                  tooltip: context.l10n.divePlanner_segmentList_addSegment,
-                  onPressed: () => _showAddSegmentDialog(context, ref),
-                ),
+                if (!readOnly)
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: context.l10n.divePlanner_segmentList_addSegment,
+                    onPressed: () => _showAddSegmentDialog(context, ref),
+                  ),
               ],
             ),
             const SizedBox(height: 8),
 
-            if (planState.segments.isEmpty)
+            if (readOnly)
+              for (final (index, leg) in legs.indexed)
+                _SegmentTile(
+                  key: ValueKey(leg.segment.id),
+                  leg: leg,
+                  runtimeSeconds: runtimeSecondsFor(leg.segment.id),
+                  switchedGas:
+                      index > 0 && legs[index - 1].tankId != leg.tankId,
+                  units: units,
+                  index: index,
+                  selected: false,
+                )
+            else if (planState.segments.isEmpty)
               _EmptyState(
                 onAddSimplePlan: () => _showSimplePlanDialog(context, ref),
               )
@@ -56,18 +125,29 @@ class SegmentList extends ConsumerWidget {
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: planState.segments.length,
-                onReorder: (oldIndex, newIndex) {
+                onReorderItem: (oldIndex, newIndex) {
                   ref
                       .read(divePlanNotifierProvider.notifier)
                       .reorderSegments(oldIndex, newIndex);
                 },
                 itemBuilder: (context, index) {
-                  final segment = planState.segments[index];
+                  final leg = legs[index];
+                  final segment = leg.segment;
                   return _SegmentTile(
                     key: ValueKey(segment.id),
-                    segment: segment,
+                    leg: leg,
+                    runtimeSeconds: runtimeSecondsFor(segment.id),
+                    // A gas switch is not a segment: it is this leg
+                    // breathing a different tank than the one before it.
+                    switchedGas:
+                        index > 0 && legs[index - 1].tankId != leg.tankId,
                     units: units,
                     index: index,
+                    selected:
+                        ref.watch(selectedSegmentIdProvider) == segment.id,
+                    onSelect: () =>
+                        ref.read(selectedSegmentIdProvider.notifier).state =
+                            segment.id,
                     onEdit: () => _showEditSegmentDialog(context, ref, segment),
                     onDelete: () => ref
                         .read(divePlanNotifierProvider.notifier)
@@ -83,11 +163,17 @@ class SegmentList extends ConsumerWidget {
 
   void _showAddSegmentDialog(BuildContext context, WidgetRef ref) {
     final planState = ref.read(divePlanNotifierProvider);
+    final startDepth = planState.segments.isEmpty
+        ? 0.0
+        : planState.segments.last.targetDepth;
 
+    final tanks = _breathableTanks(planState);
     showDialog(
       context: context,
       builder: (context) => SegmentEditor(
-        availableTanks: planState.tanks,
+        startDepth: startDepth,
+        availableTanks: tanks,
+        tankLocked: _tankLocked(planState, tanks),
         onSave: (segment) {
           ref.read(divePlanNotifierProvider.notifier).addSegment(segment);
         },
@@ -95,18 +181,51 @@ class SegmentList extends ConsumerWidget {
     );
   }
 
+  /// The tanks a segment may breathe: on a CCR plan the diluents only --
+  /// bailout is never planned on, and the oxygen slot is never breathed as
+  /// such -- every tank otherwise (#3220). A [segment] already overridden off
+  /// the loop is the exception: it breathes a cylinder directly, so the
+  /// editor offers them all rather than moving it onto a diluent on save
+  /// (#3898). Falls back to the whole list should a CCR plan somehow hold no
+  /// diluent, so the editor always has something to open on.
+  static List<DiveTank> _breathableTanks(
+    DivePlanState planState, {
+    PlanSegment? segment,
+  }) {
+    if (planState.mode != PlanMode.ccr || (segment?.leavesCcrLoop ?? false)) {
+      return planState.tanks;
+    }
+    final diluents = planState.tanks
+        .where((t) => t.role == TankRole.diluent)
+        .toList();
+    return diluents.isEmpty ? planState.tanks : diluents;
+  }
+
+  /// With exactly one diluent on a CCR plan there is nothing to choose.
+  static bool _tankLocked(DivePlanState planState, List<DiveTank> tanks) =>
+      planState.mode == PlanMode.ccr && tanks.length == 1;
+
   void _showEditSegmentDialog(
     BuildContext context,
     WidgetRef ref,
     PlanSegment segment,
   ) {
     final planState = ref.read(divePlanNotifierProvider);
+    // The edit dialog needs the same resolved start depth the profile gives
+    // this segment; the old code passed none, so editing showed 0 m.
+    final index = planState.segments.indexWhere((s) => s.id == segment.id);
+    final startDepth = index > 0
+        ? planState.segments[index - 1].targetDepth
+        : 0.0;
 
+    final tanks = _breathableTanks(planState, segment: segment);
     showDialog(
       context: context,
       builder: (context) => SegmentEditor(
         segment: segment,
-        availableTanks: planState.tanks,
+        startDepth: startDepth,
+        availableTanks: tanks,
+        tankLocked: _tankLocked(planState, tanks),
         onSave: (updated) {
           ref
               .read(divePlanNotifierProvider.notifier)
@@ -125,115 +244,172 @@ class SegmentList extends ConsumerWidget {
 }
 
 class _SegmentTile extends StatelessWidget {
-  final PlanSegment segment;
+  final ResolvedLeg leg;
+
+  /// Elapsed dive time at the end of this leg, same convention as
+  /// [ResolvedLeg.runtimeSeconds] -- but taken from a second chain that
+  /// also carries the configured gas-switch stop time (#3263), so this
+  /// matches the computed deco schedule's RT column even when [leg]'s own
+  /// runtimeSeconds, resolved from the plain authored segments, does not.
+  final int runtimeSeconds;
+  final bool switchedGas;
   final UnitFormatter units;
   final int index;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final bool selected;
+
+  /// All three null show the segment read-only: no selecting, editing,
+  /// deleting or dragging.
+  final VoidCallback? onSelect;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
 
   const _SegmentTile({
     super.key,
-    required this.segment,
+    required this.leg,
+    required this.runtimeSeconds,
+    required this.switchedGas,
     required this.units,
     required this.index,
-    required this.onEdit,
-    required this.onDelete,
+    required this.selected,
+    this.onSelect,
+    this.onEdit,
+    this.onDelete,
   });
+
+  bool get _readOnly => onEdit == null;
+
+  PlanSegment get segment => leg.segment;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return ListTile(
-      leading: _SegmentIcon(type: segment.type),
-      title: Text(_formatDescription()),
-      subtitle: Text(
-        '${segment.durationFormatted} • ${segment.gasMix.name}',
-        style: theme.textTheme.bodySmall,
-      ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            icon: const Icon(Icons.edit, size: 20),
-            tooltip: context.l10n.divePlanner_segmentList_editSegment,
-            onPressed: onEdit,
+    // Edit/delete are pinned to the tile's top-right corner with a Positioned
+    // overlay rather than laid out inside ListTile's title: ListTile centers
+    // a custom title widget as one block, so a Row placed there drifted away
+    // from the corner instead of landing flush against it. The overlay's
+    // right inset matches contentPadding's, so the buttons align with the
+    // trailing drag handle below them. The description reserves the same
+    // width so it wraps around the buttons instead of under them.
+    const compactButton = BoxConstraints.tightFor(width: 28, height: 28);
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.edit, size: 16),
+          padding: EdgeInsets.zero,
+          constraints: compactButton,
+          visualDensity: VisualDensity.compact,
+          tooltip: context.l10n.divePlanner_segmentList_editSegment,
+          onPressed: onEdit,
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete, size: 16),
+          padding: EdgeInsets.zero,
+          constraints: compactButton,
+          visualDensity: VisualDensity.compact,
+          tooltip: context.l10n.divePlanner_segmentList_deleteSegment,
+          onPressed: onDelete,
+        ),
+      ],
+    );
+
+    return Stack(
+      children: [
+        ListTile(
+          contentPadding: const EdgeInsets.only(left: 12, right: 8),
+          horizontalTitleGap: 10,
+          selected: selected,
+          selectedTileColor: theme.colorScheme.primaryContainer.withValues(
+            alpha: 0.35,
           ),
-          IconButton(
-            icon: const Icon(Icons.delete, size: 20),
-            tooltip: context.l10n.divePlanner_segmentList_deleteSegment,
-            onPressed: onDelete,
+          onTap: onSelect,
+          leading: _SegmentIcon(phase: leg.phase),
+          trailing: _readOnly
+              ? null
+              : ReorderableDragStartListener(
+                  index: index,
+                  child: const Icon(Icons.drag_handle, size: 18),
+                ),
+          title: Padding(
+            padding: EdgeInsets.only(right: _readOnly ? 0 : 64),
+            child: Text(
+              _formatDescription(context.l10n),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          ReorderableDragStartListener(
-            index: index,
-            child: const Icon(Icons.drag_handle),
+          subtitle: Text(
+            _formatSubtitle(context.l10n),
+            style: theme.textTheme.bodySmall,
           ),
-        ],
-      ),
+        ),
+        if (!_readOnly) Positioned(top: 6, right: 8, child: actions),
+      ],
     );
   }
 
-  /// Format the segment description with proper unit settings.
-  String _formatDescription() {
-    final startDepth = units.formatDepth(segment.startDepth);
-    final endDepth = units.formatDepth(segment.endDepth);
-    final durationMin = segment.durationSeconds ~/ 60;
+  /// Duration, runtime and gas.
+  ///
+  /// Runtime is the slate's RT column: elapsed dive time at the end of this
+  /// leg, so the diver can read off when they leave each depth without adding
+  /// the durations up in their head. Ceiled to whole minutes to match the
+  /// computed deco schedule's RT column.
+  String _formatSubtitle(AppLocalizations l10n) {
+    final runtime = (runtimeSeconds / 60).ceil();
+    final rt = '${l10n.plannerCanvas_table_runtime} $runtime\u2032';
+    final gas = switchedGas
+        ? l10n.divePlanner_segmentList_gasSwitch(segment.gasMix.name)
+        : segment.gasMix.name;
+    return '${segment.durationFormatted} • $rt • $gas';
+  }
 
-    switch (segment.type) {
-      case SegmentType.descent:
-        return 'Descent $startDepth → $endDepth';
-      case SegmentType.bottom:
-        return 'Bottom $startDepth for $durationMin min';
-      case SegmentType.ascent:
-        return 'Ascent $startDepth → $endDepth';
-      case SegmentType.decoStop:
-        return 'Deco $startDepth for $durationMin min';
-      case SegmentType.gasSwitch:
-        return 'Gas switch to ${segment.gasMix.name}';
-      case SegmentType.safetyStop:
-        return 'Safety stop $startDepth for $durationMin min';
-    }
+  /// Format the leg description with proper unit settings.
+  ///
+  /// Four cases, from the derived phase, where there used to be six from a
+  /// declared type. A flat leg reads as the bottom or as a stop depending on
+  /// where it sits in the profile, which is the chain's call.
+  String _formatDescription(AppLocalizations l10n) {
+    final startDepth = units.formatDepth(leg.startDepth);
+    final endDepth = units.formatDepth(leg.endDepth);
+    final durationMin = leg.durationSeconds ~/ 60;
+
+    return switch (leg.phase) {
+      SegmentPhase.descent => l10n.divePlanner_segmentList_descent(
+        startDepth,
+        endDepth,
+      ),
+      SegmentPhase.level => l10n.divePlanner_segmentList_bottom(
+        endDepth,
+        durationMin,
+      ),
+      SegmentPhase.ascent => l10n.divePlanner_segmentList_ascent(
+        startDepth,
+        endDepth,
+      ),
+      SegmentPhase.stop => l10n.divePlanner_segmentList_deco(
+        endDepth,
+        durationMin,
+      ),
+    };
   }
 }
 
 class _SegmentIcon extends StatelessWidget {
-  final SegmentType type;
+  final SegmentPhase phase;
 
-  const _SegmentIcon({required this.type});
+  const _SegmentIcon({required this.phase});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    IconData icon;
-    Color color;
-
-    switch (type) {
-      case SegmentType.descent:
-        icon = Icons.arrow_downward;
-        color = Colors.blue;
-        break;
-      case SegmentType.bottom:
-        icon = Icons.horizontal_rule;
-        color = theme.colorScheme.primary;
-        break;
-      case SegmentType.ascent:
-        icon = Icons.arrow_upward;
-        color = Colors.green;
-        break;
-      case SegmentType.decoStop:
-        icon = Icons.stop_circle;
-        color = Colors.orange;
-        break;
-      case SegmentType.gasSwitch:
-        icon = Icons.swap_horiz;
-        color = Colors.purple;
-        break;
-      case SegmentType.safetyStop:
-        icon = Icons.pause_circle;
-        color = Colors.teal;
-        break;
-    }
+    final (IconData icon, Color color) = switch (phase) {
+      SegmentPhase.descent => (Icons.arrow_downward, Colors.blue),
+      SegmentPhase.level => (Icons.horizontal_rule, theme.colorScheme.primary),
+      SegmentPhase.ascent => (Icons.arrow_upward, Colors.green),
+      SegmentPhase.stop => (Icons.stop_circle, Colors.orange),
+    };
 
     return CircleAvatar(
       backgroundColor: color.withValues(alpha: 0.2),

@@ -1,0 +1,309 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/deco/schedule_policy.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
+import 'package:submersion/features/planner/domain/services/dive_plan_state_mapper.dart';
+
+void main() {
+  const gas = GasMix(o2: 21);
+  const tank = DiveTank(
+    id: 't1',
+    volume: 11.1,
+    startPressure: 200,
+    gasMix: gas,
+  );
+  final segments = [
+    PlanSegment.hold(
+      id: 's1',
+      depth: 30.0,
+      durationMinutes: 20,
+      tankId: 't1',
+      gasMix: gas,
+    ),
+  ];
+
+  DivePlanState state() => DivePlanState(
+    id: 'p1',
+    name: 'Reef dive',
+    notes: 'Easy one',
+    segments: segments,
+    tanks: [tank],
+    gfLow: 45,
+    gfHigh: 85,
+    sacRate: 17.0,
+    reservePressure: 60.0,
+    altitude: 300.0,
+    surfaceInterval: const Duration(hours: 1),
+    gasSwitchStopSeconds: 90,
+    createdAt: DateTime(2026, 7, 1),
+    updatedAt: DateTime(2026, 7, 5),
+  );
+
+  test('state -> plan -> state round-trips the shared fields', () {
+    final plan = divePlanFromState(state());
+    expect(plan.name, 'Reef dive');
+    expect(plan.sacBottom, 17.0);
+    expect(plan.gfLow, 45);
+    expect(plan.altitude, 300.0);
+    expect(plan.surfaceInterval, const Duration(hours: 1));
+    expect(plan.gasSwitchStopSeconds, 90);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.name, state().name);
+    expect(restored.sacRate, state().sacRate);
+    expect(restored.gfHigh, state().gfHigh);
+    expect(restored.segments, state().segments);
+    expect(restored.tanks, state().tanks);
+    expect(restored.gasSwitchStopSeconds, 90);
+    expect(restored.isDirty, isFalse);
+  });
+
+  test('existing plan preserves fields the legacy state does not carry', () {
+    final existing = domain.DivePlan(
+      id: 'p1',
+      name: 'Old name',
+      gfLow: 30,
+      gfHigh: 70,
+      mode: domain.PlanMode.ccr,
+      descentRate: 20.0,
+      airBreaks: const AirBreakPolicy(),
+      setpointHigh: 1.3,
+      turnPressureRule: domain.TurnPressureRule.thirds,
+      sourceDiveId: 'dive-9',
+      createdAt: DateTime(2026, 6, 1),
+      updatedAt: DateTime(2026, 6, 1),
+    );
+
+    final merged = divePlanFromState(state(), existing: existing);
+    // State-owned fields come from the state (mode/setpoints joined that
+    // set in Phase 4, contingency config in Phase 5, dive links in Phase 6:
+    // the state defaults to OC / null setpoints / no turn rule / no links)...
+    expect(merged.name, 'Reef dive');
+    expect(merged.gfLow, 45);
+    expect(merged.sacBottom, 17.0);
+    expect(merged.mode, domain.PlanMode.oc);
+    expect(merged.setpointHigh, isNull);
+    expect(merged.turnPressureRule, isNull);
+    expect(merged.sourceDiveId, isNull);
+    // descentRate and airBreaks are now STATE-owned (Phase 4 / Phase 7), so
+    // the state's default (unset, follows the diver's Settings - issue
+    // #3552 / no breaks) wins over the existing plan's value.
+    expect(merged.descentRate, isNull);
+    expect(merged.airBreaks, isNull);
+  });
+
+  test('air breaks round-trip through the state', () {
+    final withBreaks = state().copyWith(
+      airBreaks: const AirBreakPolicy(o2Seconds: 720, breakSeconds: 360),
+    );
+    final plan = divePlanFromState(withBreaks);
+    expect(plan.airBreaks, isNotNull);
+    expect(plan.airBreaks!.o2Seconds, 720);
+    expect(plan.airBreaks!.breakSeconds, 360);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.airBreaks, isNotNull);
+    expect(restored.airBreaks!.o2Seconds, 720);
+    expect(restored.airBreaks!.breakSeconds, 360);
+
+    final cleared = restored.copyWith(clearAirBreaks: true);
+    final unset = divePlanFromState(cleared, existing: plan);
+    expect(unset.airBreaks, isNull);
+  });
+
+  test('water type round-trips through the state', () {
+    final typed = state().copyWith(waterType: WaterType.fresh);
+    final plan = divePlanFromState(typed);
+    expect(plan.waterType, WaterType.fresh);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.waterType, WaterType.fresh);
+
+    final cleared = restored.copyWith(clearWaterType: true);
+    final merged = divePlanFromState(cleared, existing: plan);
+    expect(merged.waterType, isNull);
+  });
+
+  test('custom salinity round-trips through the state', () {
+    final typed = state().copyWith(salinityPpt: 20.0);
+    final plan = divePlanFromState(typed);
+    expect(plan.salinityPpt, 20.0);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.salinityPpt, 20.0);
+
+    final cleared = restored.copyWith(clearSalinityPpt: true);
+    final merged = divePlanFromState(cleared, existing: plan);
+    expect(merged.salinityPpt, isNull);
+  });
+
+  test('ascent and descent rate round-trip through the state', () {
+    final rated = state().copyWith(ascentRate: 6.0, descentRate: 24.0);
+    final plan = divePlanFromState(rated);
+    expect(plan.ascentRate, 6.0);
+    expect(plan.descentRate, 24.0);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.ascentRate, 6.0);
+    expect(restored.descentRate, 24.0);
+  });
+
+  test('dive links round-trip through the state', () {
+    final linkedState = state().copyWith(
+      sourceDiveId: 'dive-9',
+      linkedDiveId: 'dive-12',
+    );
+    final plan = divePlanFromState(linkedState);
+    expect(plan.sourceDiveId, 'dive-9');
+    expect(plan.linkedDiveId, 'dive-12');
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.sourceDiveId, 'dive-9');
+    expect(restored.linkedDiveId, 'dive-12');
+
+    final cleared = restored.copyWith(
+      clearSourceDiveId: true,
+      clearLinkedDiveId: true,
+    );
+    final unlinked = divePlanFromState(cleared, existing: plan);
+    expect(unlinked.sourceDiveId, isNull);
+    expect(unlinked.linkedDiveId, isNull);
+  });
+
+  test('mode and setpoints round-trip through the state', () {
+    final ccrState = state().copyWith(
+      mode: domain.PlanMode.ccr,
+      setpointLow: 0.7,
+      setpointHigh: 1.4,
+      setpointSwitchDepth: 12.0,
+    );
+    final plan = divePlanFromState(ccrState);
+    expect(plan.mode, domain.PlanMode.ccr);
+    expect(plan.setpointHigh, 1.4);
+    expect(plan.setpointSwitchDepth, 12.0);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.mode, domain.PlanMode.ccr);
+    expect(restored.setpointLow, 0.7);
+    expect(restored.setpointHigh, 1.4);
+    expect(restored.setpointSwitchDepth, 12.0);
+  });
+
+  test('null state fields clear stale values from the existing plan', () {
+    final existing = domain.DivePlan(
+      id: 'p1',
+      name: 'Old',
+      gfLow: 30,
+      gfHigh: 70,
+      altitude: 2000.0,
+      siteId: 'site-1',
+      surfaceInterval: const Duration(hours: 3),
+      createdAt: DateTime(2026, 6, 1),
+      updatedAt: DateTime(2026, 6, 1),
+    );
+    final cleared = state().copyWith(
+      clearAltitude: true,
+      clearSiteId: true,
+      clearSurfaceInterval: true,
+    );
+    final merged = divePlanFromState(cleared, existing: existing);
+    expect(merged.altitude, isNull);
+    expect(merged.siteId, isNull);
+    expect(merged.surfaceInterval, isNull);
+  });
+
+  test('segments come back in order, whatever order the list was in', () {
+    // A .subplan file carries each segment's `order` alongside the array, so
+    // the two can disagree. The state's list order is the planner's working
+    // order - the segment list renders it, the reorder handler indexes into
+    // it, SegmentChain chains it - while the engine sorts by `order`. Left
+    // unsorted the two would show and compute different profiles.
+    final plan = domain.DivePlan(
+      id: 'p1',
+      name: 'Out of order',
+      gfLow: 30,
+      gfHigh: 70,
+      tanks: const [tank],
+      segments: [
+        PlanSegment.hold(
+          id: 'bottom',
+          depth: 30.0,
+          durationMinutes: 20,
+          tankId: 't1',
+          gasMix: gas,
+          order: 1,
+        ),
+        PlanSegment.travel(
+          id: 'descent',
+          fromDepth: 0,
+          targetDepth: 30.0,
+          ratePerMinute: 18,
+          tankId: 't1',
+          gasMix: gas,
+          order: 0,
+        ),
+      ],
+      createdAt: DateTime(2026, 9, 2),
+      updatedAt: DateTime(2026, 9, 2),
+    );
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.segments.map((s) => s.id), ['descent', 'bottom']);
+  });
+
+  test('a stored suit inflation bottle never reaches the state', () {
+    // Every reader of a stored plan (a series, the plan vs actual overlay)
+    // hands the state to the engine, so the mapper strips it (issue #4243).
+    const suit = DiveTank(
+      id: 'suit',
+      volume: 0.85,
+      gasMix: GasMix(o2: 0),
+      role: TankRole.suitInflation,
+      order: 1,
+    );
+    final plan = divePlanFromState(
+      state().copyWith(
+        tanks: [tank, suit],
+        segments: [
+          ...segments,
+          PlanSegment.hold(
+            id: 's2',
+            depth: 20.0,
+            durationMinutes: 5,
+            tankId: 'suit',
+            gasMix: const GasMix(o2: 0),
+            order: 1,
+          ),
+        ],
+      ),
+    );
+    final restored = stateFromDivePlan(plan);
+    expect(restored.tanks.map((t) => t.id), ['t1']);
+    expect(restored.segments.map((s) => (s.tankId, s.gasMix)), [
+      ('t1', gas),
+      ('t1', gas),
+    ]);
+  });
+
+  test('contingency config round-trips through the state', () {
+    final configured = state().copyWith(
+      deviationDepthDelta: 6.0,
+      deviationTimeMinutes: 10,
+      turnPressureRule: domain.TurnPressureRule.halves,
+      turnPressureFraction: 0.4,
+    );
+    final plan = divePlanFromState(configured);
+    expect(plan.deviationDepthDelta, 6.0);
+    expect(plan.deviationTimeMinutes, 10);
+    expect(plan.turnPressureRule, domain.TurnPressureRule.halves);
+    expect(plan.turnPressureFraction, 0.4);
+
+    final restored = stateFromDivePlan(plan);
+    expect(restored.deviationDepthDelta, 6.0);
+    expect(restored.turnPressureRule, domain.TurnPressureRule.halves);
+  });
+}

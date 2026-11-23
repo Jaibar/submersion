@@ -74,42 +74,6 @@ class WeatherMapper {
     return hpa / 1000;
   }
 
-  /// Build a human-readable weather description from data.
-  ///
-  /// Returns null if no data is available.
-  static String? buildDescription({
-    CloudCover? cloudCover,
-    double? airTempCelsius,
-    double? windSpeedMs,
-    CurrentDirection? windDirection,
-    Precipitation? precipitation,
-  }) {
-    final parts = <String>[];
-
-    if (cloudCover != null) {
-      parts.add(cloudCover.displayName);
-    }
-
-    if (airTempCelsius != null) {
-      parts.add('${airTempCelsius.round()}C');
-    }
-
-    if (windSpeedMs != null && windSpeedMs > 0) {
-      final beaufort = _windDescription(windSpeedMs);
-      final dirStr =
-          windDirection != null && windDirection != CurrentDirection.none
-          ? ' from ${windDirection.displayName}'
-          : '';
-      parts.add('$beaufort$dirStr');
-    }
-
-    if (precipitation != null && precipitation != Precipitation.none) {
-      parts.add(precipitation.displayName);
-    }
-
-    return parts.isEmpty ? null : parts.join(', ');
-  }
-
   /// Map a full Open-Meteo hourly API response to WeatherData.
   ///
   /// Selects the hour closest to [targetHour] from the hourly arrays.
@@ -143,23 +107,31 @@ class WeatherMapper {
       humidity: humidity,
       airTemp: temp,
       surfacePressure: pressureBar,
-      description: buildDescription(
-        cloudCover: cloudCoverEnum,
-        airTempCelsius: temp,
-        windSpeedMs: windSpeedMs,
-        windDirection: windDirection,
-        precipitation: precipEnum,
-      ),
+      weatherCode: weatherCode,
+      // Deliberately null. The provider returns no prose and has no language
+      // parameter, so any description here would be ours -- and persisting it
+      // froze one locale and one unit system into the database. It is built
+      // at display time instead, from the fields above plus weatherCode.
+      description: null,
     );
   }
 
+  /// Index of the hourly sample nearest [target], compared on wall-clock
+  /// fields only.
+  ///
+  /// The archive's timestamps carry no zone (they are the site's wall clock
+  /// when the request asks for `timezone=auto`), and dive times are a wall
+  /// clock that may be flagged UTC or local. Comparing instants would shift
+  /// the pick by the device's UTC offset, so both sides are rebuilt as UTC
+  /// from their components first.
   static int _findClosestHourIndex(List<String> times, DateTime target) {
+    final wallTarget = _wallClock(target);
     int closestIndex = 0;
     Duration closestDiff = const Duration(days: 365);
 
     for (int i = 0; i < times.length; i++) {
-      final parsed = DateTime.parse(times[i]);
-      final diff = (parsed.difference(target)).abs();
+      final parsed = _wallClock(DateTime.parse(times[i]));
+      final diff = (parsed.difference(wallTarget)).abs();
       if (diff < closestDiff) {
         closestDiff = diff;
         closestIndex = i;
@@ -168,6 +140,17 @@ class WeatherMapper {
 
     return closestIndex;
   }
+
+  static DateTime _wallClock(DateTime t) => DateTime.utc(
+    t.year,
+    t.month,
+    t.day,
+    t.hour,
+    t.minute,
+    t.second,
+    t.millisecond,
+    t.microsecond,
+  );
 
   static double? _getDouble(dynamic list, int index) {
     if (list is! List || index >= list.length) return null;
@@ -181,13 +164,5 @@ class WeatherMapper {
     final val = list[index];
     if (val == null) return null;
     return (val as num).toInt();
-  }
-
-  static String _windDescription(double ms) {
-    if (ms < 0.5) return 'calm';
-    if (ms < 3.4) return 'light breeze';
-    if (ms < 8.0) return 'moderate breeze';
-    if (ms < 13.9) return 'strong breeze';
-    return 'high wind';
   }
 }

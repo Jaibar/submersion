@@ -1,0 +1,186 @@
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_grid.dart';
+import 'package:submersion/features/bathymetry/domain/bathymetry_source.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+
+const _log = LoggerService('BathymetryResolver');
+
+/// The outcome of walking the source tiers for one coordinate.
+///
+/// - `grid != null && definitive`: usable terrain from the best source that
+///   answered, cacheable as final.
+/// - `grid != null && !definitive`: usable terrain, but only because a
+///   higher-priority source failed transiently on the way to it. Show it,
+///   but do NOT cache it, or the preferred source is never retried.
+/// - `grid == null && definitive`: fetched fine, genuinely no water here —
+///   cacheable as a negative answer.
+/// - `grid == null && !definitive`: transient failure — must NOT be cached.
+class BathymetryResolution {
+  final BathymetryGrid? grid;
+  final bool definitive;
+
+  const BathymetryResolution.ok(BathymetryGrid this.grid) : definitive = true;
+  const BathymetryResolution.provisional(BathymetryGrid this.grid)
+    : definitive = false;
+  const BathymetryResolution.empty() : grid = null, definitive = true;
+  const BathymetryResolution.transientFailure()
+    : grid = null,
+      definitive = false;
+}
+
+/// Best-source-wins. Probes every source, orders them by MATERIALLY better
+/// resolution, then fetches in that order and takes the first grid passing
+/// both quality floors.
+///
+/// No mosaicking: sources use different vertical datums (EMODnet is LAT,
+/// GMRT and ETOPO are MSL), so stitching two of them together would leave
+/// a visible step wherever they meet.
+class BathymetryResolver {
+  static const double minWetFraction = 0.10;
+
+  /// How much finer a source must be to jump ahead of the declared list
+  /// order. Declared resolution is a claim, so only a MATERIAL difference
+  /// may override the curated tier order: NOAA CUDEM at 3.4 m preempts
+  /// GMRT's 60 m, while GMRT's nominal 60 m does not preempt EMODnet's
+  /// surveyed 115 m, which in Europe would trade real data for a grid that
+  /// may be upsampled GEBCO.
+  static const double preemptionFactor = 2.0;
+
+  /// Request-box width. 8 km shows the surrounding seascape, not just the
+  /// site itself; the repository's downsample cap bounds the render cost.
+  /// This value is part of the cache key, see [BathymetryRepository.keyFor],
+  /// so changing it refetches.
+  static const double defaultSpanMeters = 8000;
+
+  final List<BathymetrySource> sources;
+
+  const BathymetryResolver({required this.sources});
+
+  /// [spanMeters] defaults to [defaultSpanMeters] (the always-loaded 8 km
+  /// base square). Callers building a smaller, additional LOD patch pass a
+  /// narrower span explicitly; every source-quality gate below (known-
+  /// fraction floor, wet-fraction floor) applies identically regardless of
+  /// span, so a patch source that cannot actually deliver finer detail is
+  /// rejected the same way the base fetch would reject it.
+  Future<BathymetryResolution> resolve(
+    GeoPoint center, {
+    double? spanMeters,
+  }) async {
+    final span = spanMeters ?? defaultSpanMeters;
+    final (:ordered, :anyProbeFailed) = await _order(center);
+    var globalSourceSaidDry = false;
+    // Whether any source threw instead of answering, in its probe or its
+    // fetch (issue #1770). Such a source might have had better terrain, or
+    // water where a global model says dry, so whatever the walk settles on
+    // is not final: a single network hiccup must not permanently downgrade
+    // the cell.
+    var anySourceFailed = anyProbeFailed;
+    for (final source in ordered) {
+      try {
+        final grid = await source.fetch(center, spanMeters: span);
+        if (grid.knownFraction < source.minKnownFraction) {
+          // Nominally fine, actually absent. Deliberately NOT treated as a
+          // dry answer: a grid this empty proves nothing about the water,
+          // and caching it as 'empty' would pin the cell forever. The
+          // floor itself is per-source -- see [BathymetrySource.
+          // minKnownFraction]'s doc for why the same number is wrong for a
+          // regional, already-confirmed-covered source like swissBATHY3D.
+          _log.debug(
+            '${source.id} rejected at ${center.latitude},${center.longitude}: '
+            'knownFraction ${grid.knownFraction} < ${source.minKnownFraction}',
+          );
+          continue;
+        }
+        if (grid.wetFraction >= minWetFraction) {
+          return anySourceFailed
+              ? BathymetryResolution.provisional(grid)
+              : BathymetryResolution.ok(grid);
+        }
+        _log.debug(
+          '${source.id} rejected at ${center.latitude},${center.longitude}: '
+          'wetFraction ${grid.wetFraction} < $minWetFraction',
+        );
+        // A dry answer only proves "no water here" if the source actually
+        // covers everywhere; a regional edge cell proves nothing.
+        if (source.global) globalSourceSaidDry = true;
+      } on BathymetryNoDataException catch (e) {
+        // A stable "nothing here", not a hiccup: fall through without
+        // marking the walk as failed.
+        _log.debug(
+          '${source.id} has no data at '
+          '${center.latitude},${center.longitude}',
+          error: e,
+        );
+      } on BathymetryFetchException catch (e) {
+        // Transient: fall through to the next source.
+        anySourceFailed = true;
+        _log.warning(
+          '${source.id} fetch failed at ${center.latitude},${center.longitude}',
+          error: e,
+        );
+      } catch (e, stackTrace) {
+        // A source blowing up with anything else (a TypeError from an
+        // unexpected response shape, an ArgumentError) must not kill the
+        // whole scene: treat it exactly like a transient failure.
+        anySourceFailed = true;
+        _log.warning(
+          '${source.id} fetch threw unexpectedly at '
+          '${center.latitude},${center.longitude}',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return globalSourceSaidDry && !anySourceFailed
+        ? const BathymetryResolution.empty()
+        : const BathymetryResolution.transientFailure();
+  }
+
+  /// Covering sources in fetch order. Probes run concurrently because a
+  /// probe may be a network call and they are independent; a probe that
+  /// fails for any reason drops that source rather than failing the scene,
+  /// and is reported in `anyProbeFailed` so the resolve that follows is
+  /// not taken as definitive (see [BathymetrySource.probe]).
+  Future<({List<BathymetrySource> ordered, bool anyProbeFailed})> _order(
+    GeoPoint center,
+  ) async {
+    var anyProbeFailed = false;
+    final caps = await Future.wait(
+      sources.map((s) async {
+        try {
+          return await s.probe(center);
+        } catch (e) {
+          anyProbeFailed = true;
+          _log.warning(
+            '${s.id} probe failed at ${center.latitude},${center.longitude}',
+            error: e,
+          );
+          return null;
+        }
+      }),
+    );
+    final covering = <({BathymetrySource source, int rank, double cell})>[];
+    for (var i = 0; i < sources.length; i++) {
+      final cap = caps[i];
+      if (cap == null) continue;
+      covering.add((source: sources[i], rank: i, cell: cap.cellSizeMeters));
+    }
+    // A source leads only when it is more than preemptionFactor finer than
+    // the one it overtakes; within that band the declared order stands.
+    //
+    // The relation is not transitive, so this is not a total order and
+    // List.sort may resolve a pathological three-source chain either way.
+    // With the shipped sources (3.4 m, 60 m, 115 m, 450 m) it is
+    // well-behaved, and the two cases that matter are pinned by tests. Do
+    // not extend the source list without revisiting this.
+    covering.sort((a, b) {
+      if (a.cell * preemptionFactor < b.cell) return -1;
+      if (b.cell * preemptionFactor < a.cell) return 1;
+      return a.rank.compareTo(b.rank);
+    });
+    return (
+      ordered: [for (final c in covering) c.source],
+      anyProbeFailed: anyProbeFailed,
+    );
+  }
+}

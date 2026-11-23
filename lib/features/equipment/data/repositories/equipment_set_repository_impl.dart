@@ -4,21 +4,127 @@ import 'package:uuid/uuid.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/utils/stream_debounce.dart';
+import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_set.dart'
     as domain;
+import 'package:submersion/features/equipment/domain/entities/equipment_set_geofence.dart'
+    as domain;
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+
+part 'equipment_set_repository_bundle_lists.dart';
+
+/// [EquipmentSetRepository.getSetNamesById], or an empty map when the read
+/// fails, so a printed logbook still exports with its sets unnamed rather
+/// than not at all (#2031).
+Future<Map<String, String>> equipmentSetNamesOrEmpty(
+  EquipmentSetRepository repository,
+) async {
+  try {
+    return await repository.getSetNamesById();
+  } catch (e, stackTrace) {
+    LoggerService.forClass(EquipmentSetRepository).warning(
+      'Exporting without equipment set names',
+      error: e,
+      stackTrace: stackTrace,
+    );
+    return const {};
+  }
+}
 
 class EquipmentSetRepository {
   AppDatabase get _db => DatabaseService.instance.database;
   final SyncRepository _syncRepository = SyncRepository();
   final _uuid = const Uuid();
   final _equipmentRepo = EquipmentRepository();
+  final _log = LoggerService.forClass(EquipmentSetRepository);
+
+  /// Debounce for [watchSetChanges] so a multi-changeset sync refreshes the
+  /// set surfaces once on the settled DB state instead of once per commit
+  /// (mirrors DiveRepository.changeTickDebounce).
+  static const changeTickDebounce = Duration(milliseconds: 300);
+
+  /// Emits whenever anything an equipment set renders changes, so the
+  /// set providers can self-invalidate after ANY write -- including a sync or
+  /// an import applying changes straight to the DB, which bypasses the
+  /// notifier paths that invalidate caches on local edits.
+  ///
+  /// Watches the hydration sources, not just `equipment_sets`:
+  /// - `equipment_set_items` -- membership. This is also the target of drift's
+  ///   generated `WritePropagation` for the `equipment` ON DELETE CASCADE, so
+  ///   deleting a gear item ticks here even though the DELETE statement only
+  ///   named `equipment` (see `streamUpdateRules` in database.g.dart).
+  /// - `equipment` -- [getSetById] with `includeItems` hydrates full items, and
+  ///   the cascade propagation above is delete-only, so a RENAME of a member
+  ///   only surfaces if this table is watched directly.
+  /// - `equipment_set_geofences` -- hydrated by the set detail/edit providers.
+  /// - `equipment_attributes` -- hydrated with each item; a member's colour
+  ///   tints the set page's diver figure, and a synced colour edit writes
+  ///   only this table (issue #2326).
+  ///
+  /// Without this, deleting a gear item left every cached set carrying the dead
+  /// id; the edit form then re-inserted it and the save died on the FK
+  /// (issue #819).
+  Stream<void> watchSetChanges() => _db
+      .tableUpdates(
+        TableUpdateQuery.allOf([
+          TableUpdateQuery.onTable(_db.equipmentSets),
+          TableUpdateQuery.onTable(_db.equipmentSetItems),
+          TableUpdateQuery.onTable(_db.equipment),
+          TableUpdateQuery.onTable(_db.equipmentAttributes),
+          TableUpdateQuery.onTable(_db.equipmentSetGeofences),
+          // What a set carries besides gear (issue #4525).
+          TableUpdateQuery.onTable(_db.equipmentSetIncludes),
+          TableUpdateQuery.onTable(_db.equipmentSetWeightPresets),
+          TableUpdateQuery.onTable(_db.equipmentSetCylinderConfigs),
+        ]),
+      )
+      .debounce(changeTickDebounce);
+
+  /// The subset of [ids] that still has an `equipment` row, preserving order.
+  ///
+  /// A caller can legitimately hold ids that no longer exist: SQLite cascades
+  /// the junction rows away the instant a gear item is deleted, but an
+  /// in-memory equipment set -- or a sitting already open -- keeps its
+  /// snapshot of the membership. Inserting such an id fails the
+  /// foreign key and aborts the entire save (issue #819), so drop it instead.
+  ///
+  /// Deliberately NOT `InsertMode.insertOrIgnore`: this is a foreign-key
+  /// violation rather than a uniqueness conflict, and ignoring it would hide
+  /// the drop entirely. The set is the diver's data and must still save, but a
+  /// silent prune would also mask a genuine provider-staleness regression --
+  /// hence the warning.
+  Future<List<String>> _liveEquipmentIds(String setId, List<String> ids) async {
+    if (ids.isEmpty) return const [];
+    final rows = await (_db.select(
+      _db.equipment,
+    )..where((t) => t.id.isIn(ids))).get();
+    final live = rows.map((r) => r.id).toSet();
+    final kept = ids.where(live.contains).toList();
+    if (kept.length != ids.length) {
+      final missing = ids.where((id) => !live.contains(id));
+      _log.warning(
+        'Equipment set $setId: dropping ${ids.length - kept.length} member(s) '
+        'whose equipment no longer exists (${missing.join(', ')})',
+      );
+    }
+    return kept;
+  }
 
   /// Get all equipment sets
-  Future<List<domain.EquipmentSet>> getAllSets({String? diverId}) async {
+  ///
+  /// [ids] narrows the read to those records (Global Search's few rows,
+  /// issue #4247), on the same terms.
+  Future<List<domain.EquipmentSet>> getAllSets({
+    String? diverId,
+    List<String>? ids,
+  }) async {
+    if (ids != null && ids.isEmpty) return const [];
     final query = _db.select(_db.equipmentSets)
-      ..orderBy([(t) => OrderingTerm.asc(t.name)]);
+      ..orderBy([(t) => OrderingTerm.asc(t.name.collate(Collate.noCase))]);
+    if (ids != null) query.where((t) => t.id.isIn(ids));
 
     if (diverId != null) {
       query.where((t) => t.diverId.equals(diverId));
@@ -26,29 +132,54 @@ class EquipmentSetRepository {
 
     final rows = await query.get();
 
+    final lists = await _bundleListsFor([for (final row in rows) row.id]);
     final sets = <domain.EquipmentSet>[];
-    for (final row in rows) {
+    for (final row in sortedByText(rows, (r) => r.name)) {
       final equipmentIds = await getEquipmentIdsInSet(row.id);
-      sets.add(_mapRowToSet(row, equipmentIds));
+      sets.add(_mapRowToSet(row, equipmentIds, lists[row.id]));
     }
     return sets;
+  }
+
+  /// Every set's name keyed by its id, in one query.
+  ///
+  /// For documents that name the sets a dive's gear came from (#2031). Not
+  /// diver-scoped: a dive refers to its set by id, and an id is unique.
+  Future<Map<String, String>> getSetNamesById() async {
+    final sets = _db.equipmentSets;
+    final rows = await (_db.selectOnly(
+      sets,
+    )..addColumns([sets.id, sets.name])).get();
+    return {for (final row in rows) row.read(sets.id)!: row.read(sets.name)!};
   }
 
   /// Get set by ID
   Future<domain.EquipmentSet?> getSetById(
     String id, {
     bool includeItems = false,
+    bool includeGeofences = false,
   }) async {
     final query = _db.select(_db.equipmentSets)..where((t) => t.id.equals(id));
     final row = await query.getSingleOrNull();
     if (row == null) return null;
 
     final equipmentIds = await getEquipmentIdsInSet(id);
-    var set = _mapRowToSet(row, equipmentIds);
+    final lists = (await _bundleListsFor([id]))[id];
+    var set = _mapRowToSet(row, equipmentIds, lists);
 
     if (includeItems) {
-      final items = await _equipmentRepo.getEquipmentByIds(equipmentIds);
+      // The gear the set applies: its own plus that of the sets it includes
+      // (issue #4525). equipmentIds stays the set's own.
+      final effective = await _effectiveIds(
+        id,
+        equipmentIds,
+        set.includedSetIds,
+      );
+      final items = await _equipmentRepo.getEquipmentByIds(effective);
       set = set.copyWith(items: items);
+    }
+    if (includeGeofences) {
+      set = set.copyWith(geofences: await getGeofencesForSet(id));
     }
     return set;
   }
@@ -61,111 +192,246 @@ class EquipmentSetRepository {
     return rows.map((r) => r.equipmentId).toList();
   }
 
-  /// Create a new equipment set
+  /// The gear set [setId] applies: that of the sets it includes, then its
+  /// own, without duplicates (issue #4525). One level deep.
+  Future<List<String>> getEffectiveEquipmentIds(String setId) async {
+    final lists = (await _bundleListsFor([setId]))[setId] ?? _noBundleLists;
+    return _effectiveIds(
+      setId,
+      await getEquipmentIdsInSet(setId),
+      lists.includes,
+    );
+  }
+
+  Future<List<String>> _effectiveIds(
+    String setId,
+    List<String> ownIds,
+    List<String> includedSetIds,
+  ) async {
+    final seen = <String>{};
+    return [
+      for (final included in includedSetIds)
+        if (included != setId)
+          for (final id in await getEquipmentIdsInSet(included))
+            if (seen.add(id)) id,
+      for (final id in ownIds)
+        if (seen.add(id)) id,
+    ];
+  }
+
+  /// The sets holding [equipmentId], only [diverId]'s own when given (a
+  /// clone joins the cloner's sets, never the owner's: issue #3184).
+  Future<List<String>> getSetIdsContaining(
+    String equipmentId, {
+    String? diverId,
+  }) async {
+    final items = _db.equipmentSetItems;
+    final sets = _db.equipmentSets;
+    final query = _db.select(items).join([
+      innerJoin(sets, sets.id.equalsExp(items.setId)),
+    ])..where(items.equipmentId.equals(equipmentId));
+    if (diverId != null) query.where(sets.diverId.equals(diverId));
+    final rows = await query.get();
+    return [for (final row in rows) row.readTable(items).setId];
+  }
+
+  /// Create a new equipment set.
+  ///
+  /// The set row and its membership are one logical write, so they share a
+  /// transaction: a failing member insert must not leave a named set behind
+  /// with a partial roster. Sync bookkeeping runs after the commit so a
+  /// rollback leaves no stray pending markers (mirrors DivePlanRepository).
   Future<domain.EquipmentSet> createSet(domain.EquipmentSet set) async {
     final id = set.id.isEmpty ? _uuid.v4() : set.id;
     final now = DateTime.now().millisecondsSinceEpoch;
+    late final List<String> members;
+    late final List<_BundleListWrite> listWrites;
 
-    await _db
-        .into(_db.equipmentSets)
-        .insert(
-          EquipmentSetsCompanion(
-            id: Value(id),
-            diverId: Value(set.diverId),
-            name: Value(set.name),
-            description: Value(set.description),
-            createdAt: Value(now),
-            updatedAt: Value(now),
-          ),
-        );
+    await _db.transaction(() async {
+      await _db
+          .into(_db.equipmentSets)
+          .insert(
+            EquipmentSetsCompanion(
+              id: Value(id),
+              diverId: Value(set.diverId),
+              name: Value(set.name),
+              description: Value(set.description),
+              autoApplyOnComputerImport: Value(set.autoApplyOnComputerImport),
+              showFigure: Value(set.showFigure),
+              createdAt: Value(now),
+              updatedAt: Value(now),
+            ),
+          );
+
+      members = await _liveEquipmentIds(id, set.equipmentIds);
+      for (final equipmentId in members) {
+        await _db
+            .into(_db.equipmentSetItems)
+            .insert(
+              EquipmentSetItemsCompanion(
+                setId: Value(id),
+                equipmentId: Value(equipmentId),
+              ),
+            );
+      }
+      listWrites = await _writeBundleLists(id, set, now);
+    });
+
     await _syncRepository.markRecordPending(
       entityType: 'equipmentSets',
       recordId: id,
       localUpdatedAt: now,
     );
-
-    // Add equipment items to set
-    for (final equipmentId in set.equipmentIds) {
-      await _db
-          .into(_db.equipmentSetItems)
-          .insert(
-            EquipmentSetItemsCompanion(
-              setId: Value(id),
-              equipmentId: Value(equipmentId),
-            ),
-          );
+    for (final equipmentId in members) {
       await _syncRepository.markRecordPending(
         entityType: 'equipmentSetItems',
         recordId: '$id|$equipmentId',
         localUpdatedAt: now,
       );
     }
+    await _recordBundleListWrites(listWrites, now);
     SyncEventBus.notifyLocalChange();
 
+    final lists = (await _bundleListsFor([id]))[id] ?? _noBundleLists;
     return set.copyWith(
       id: id,
+      equipmentIds: members,
+      includedSetIds: lists.includes,
+      weightPresetIds: lists.presets,
+      cylinderConfigIds: lists.configs,
       createdAt: DateTime.fromMillisecondsSinceEpoch(now),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(now),
     );
   }
 
-  /// Update an equipment set
-  Future<void> updateSet(domain.EquipmentSet set) async {
+  /// Update an equipment set.
+  ///
+  /// Membership is reconciled as a DIFF rather than delete-all-then-reinsert.
+  /// The old shape had two defects this flow hits hard: it was untransacted, so
+  /// a failing re-insert left the set empty with every member already
+  /// tombstoned (issue #819); and it tombstoned + re-marked every member on
+  /// every save even when nothing changed, which is the churn the
+  /// contradicted-key handling in SyncService exists to absorb. Diffing removes
+  /// both. Mirrors the composite-PK junction handling in
+  /// DivePlanRepository.updatePlan, including running sync bookkeeping only
+  /// after the transaction commits.
+  ///
+  /// Returns the members it actually added and removed, after dropping dead
+  /// ids, so a caller can replay the change on the dives that carry the set
+  /// (issue #4283).
+  Future<({List<String> added, List<String> removed})> updateSet(
+    domain.EquipmentSet set,
+  ) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final added = <String>[];
+    final removed = <String>[];
+    late final List<_BundleListWrite> listWrites;
 
-    await (_db.update(
-      _db.equipmentSets,
-    )..where((t) => t.id.equals(set.id))).write(
-      EquipmentSetsCompanion(
-        name: Value(set.name),
-        description: Value(set.description),
-        updatedAt: Value(now),
-      ),
-    );
+    await _db.transaction(() async {
+      await (_db.update(
+        _db.equipmentSets,
+      )..where((t) => t.id.equals(set.id))).write(
+        EquipmentSetsCompanion(
+          name: Value(set.name),
+          description: Value(set.description),
+          autoApplyOnComputerImport: Value(set.autoApplyOnComputerImport),
+          showFigure: Value(set.showFigure),
+          updatedAt: Value(now),
+        ),
+      );
+
+      final desired = (await _liveEquipmentIds(
+        set.id,
+        set.equipmentIds,
+      )).toSet();
+      final existing =
+          (await (_db.select(
+                _db.equipmentSetItems,
+              )..where((t) => t.setId.equals(set.id))).get())
+              .map((r) => r.equipmentId)
+              .toSet();
+
+      added.addAll(desired.difference(existing));
+      removed.addAll(existing.difference(desired));
+
+      for (final equipmentId in added) {
+        await _db
+            .into(_db.equipmentSetItems)
+            .insert(
+              EquipmentSetItemsCompanion(
+                setId: Value(set.id),
+                equipmentId: Value(equipmentId),
+              ),
+              mode: InsertMode.insertOrIgnore,
+            );
+      }
+      for (final equipmentId in removed) {
+        await (_db.delete(_db.equipmentSetItems)..where(
+              (t) => t.setId.equals(set.id) & t.equipmentId.equals(equipmentId),
+            ))
+            .go();
+      }
+      listWrites = await _writeBundleLists(set.id, set, now);
+    });
+
     await _syncRepository.markRecordPending(
       entityType: 'equipmentSets',
       recordId: set.id,
       localUpdatedAt: now,
     );
-
-    // Update equipment items: delete and re-insert
-    final existingItems = await (_db.select(
-      _db.equipmentSetItems,
-    )..where((t) => t.setId.equals(set.id))).get();
-    await (_db.delete(
-      _db.equipmentSetItems,
-    )..where((t) => t.setId.equals(set.id))).go();
-    for (final item in existingItems) {
-      await _syncRepository.logDeletion(
-        entityType: 'equipmentSetItems',
-        recordId: '${item.setId}|${item.equipmentId}',
-      );
-    }
-    for (final equipmentId in set.equipmentIds) {
-      await _db
-          .into(_db.equipmentSetItems)
-          .insert(
-            EquipmentSetItemsCompanion(
-              setId: Value(set.id),
-              equipmentId: Value(equipmentId),
-            ),
-          );
+    await _recordBundleListWrites(listWrites, now);
+    for (final equipmentId in added) {
       await _syncRepository.markRecordPending(
         entityType: 'equipmentSetItems',
         recordId: '${set.id}|$equipmentId',
         localUpdatedAt: now,
       );
     }
+    for (final equipmentId in removed) {
+      await _syncRepository.logDeletion(
+        entityType: 'equipmentSetItems',
+        recordId: '${set.id}|$equipmentId',
+      );
+    }
     SyncEventBus.notifyLocalChange();
+    return (
+      added: List<String>.unmodifiable(added),
+      removed: List<String>.unmodifiable(removed),
+    );
   }
 
-  /// Delete an equipment set
+  /// Delete an equipment set.
+  ///
+  /// Geofences are a first-class synced child cascade-deleted by SQLite, but
+  /// cascades emit no deletion-log entries, so each geofence must be tombstoned
+  /// explicitly or a peer will resurrect it. Done in one transaction with the
+  /// set deletion (mirrors the buddy/certification deletion path).
   Future<void> deleteSet(String id) async {
-    await (_db.delete(_db.equipmentSets)..where((t) => t.id.equals(id))).go();
-    await _syncRepository.logDeletion(
-      entityType: 'equipmentSets',
-      recordId: id,
-    );
+    await _db.transaction(() async {
+      final geofences = await getGeofencesForSet(id);
+      // What the set carried besides gear, and the rows of the sets that
+      // included it (issue #4525). They cascade with the set, and a cascade
+      // writes no tombstone: a peer that has not seen the delete would push
+      // the row straight back.
+      final listRows = await _bundleListRowsOfSet(id);
+      await (_db.delete(_db.equipmentSets)..where((t) => t.id.equals(id))).go();
+      for (final g in geofences) {
+        await _syncRepository.logDeletion(
+          entityType: 'equipmentSetGeofences',
+          recordId: g.id,
+        );
+      }
+      for (final row in listRows) {
+        await _syncRepository.logDeletion(
+          entityType: row.entity,
+          recordId: row.id,
+        );
+      }
+      await _syncRepository.logDeletion(
+        entityType: 'equipmentSets',
+        recordId: id,
+      );
+    });
     SyncEventBus.notifyLocalChange();
   }
 
@@ -225,16 +491,215 @@ class EquipmentSetRepository {
     SyncEventBus.notifyLocalChange();
   }
 
+  /// Set [id] as the diver's default equipment set, clearing the flag from the
+  /// diver's other sets. The scope is derived from the target set's own owner
+  /// so the clear/promote/mark-pending steps always cover the same diver, even
+  /// if a caller passes a mismatched [diverId] (the parameter is retained for
+  /// API compatibility but the target row is authoritative). Runs in a single
+  /// transaction so a partial write cannot leave two defaults.
+  Future<void> setAsDefault(String id, {String? diverId}) async {
+    await _db.transaction(() async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      final target = await (_db.select(
+        _db.equipmentSets,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      if (target == null) return;
+      final ownerId = target.diverId;
+
+      await (_db.update(_db.equipmentSets)..where(
+            (t) => ownerId == null
+                ? t.diverId.isNull()
+                : t.diverId.equals(ownerId),
+          ))
+          .write(
+            EquipmentSetsCompanion(
+              isDefault: const Value(false),
+              updatedAt: Value(now),
+            ),
+          );
+
+      await (_db.update(
+        _db.equipmentSets,
+      )..where((t) => t.id.equals(id))).write(
+        EquipmentSetsCompanion(
+          isDefault: const Value(true),
+          updatedAt: Value(now),
+        ),
+      );
+
+      // The promoted row is in scope by construction (its owner defines the
+      // scope), so this sweep marks it and every demoted sibling pending.
+      final affected =
+          await (_db.select(_db.equipmentSets)..where(
+                (t) => ownerId == null
+                    ? t.diverId.isNull()
+                    : t.diverId.equals(ownerId),
+              ))
+              .get();
+      for (final row in affected) {
+        await _syncRepository.markRecordPending(
+          entityType: 'equipmentSets',
+          recordId: row.id,
+          localUpdatedAt: now,
+        );
+      }
+    });
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// Clear the default flag from a single set, leaving the diver with no
+  /// default (nothing auto-applies until a default is set again).
+  /// Turns the diver figure on or off for set [id], writing only that
+  /// column. The page's menu uses this rather than [updateSet], which
+  /// rewrites the name and the member list from the caller's copy and would
+  /// revert anything sync changed since that copy was loaded.
+  Future<void> setShowFigure(String id, bool showFigure) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(_db.equipmentSets)..where((t) => t.id.equals(id))).write(
+      EquipmentSetsCompanion(
+        showFigure: Value(showFigure),
+        updatedAt: Value(now),
+      ),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'equipmentSets',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  Future<void> clearDefault(String id) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(_db.equipmentSets)..where((t) => t.id.equals(id))).write(
+      EquipmentSetsCompanion(
+        isDefault: const Value(false),
+        updatedAt: Value(now),
+      ),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'equipmentSets',
+      recordId: id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// All geofences for a set.
+  Future<List<domain.EquipmentSetGeofence>> getGeofencesForSet(
+    String setId,
+  ) async {
+    final rows = await (_db.select(
+      _db.equipmentSetGeofences,
+    )..where((t) => t.setId.equals(setId))).get();
+    return rows.map(_mapRowToGeofence).toList();
+  }
+
+  /// All geofences belonging to the given diver's sets (or all sets when
+  /// [diverId] is null).
+  Future<List<domain.EquipmentSetGeofence>> getAllGeofences({
+    String? diverId,
+  }) async {
+    final setQuery = _db.select(_db.equipmentSets);
+    if (diverId != null) {
+      setQuery.where((t) => t.diverId.equals(diverId));
+    }
+    final setIds = (await setQuery.get()).map((s) => s.id).toSet();
+    if (setIds.isEmpty) return [];
+    final rows = await (_db.select(
+      _db.equipmentSetGeofences,
+    )..where((t) => t.setId.isIn(setIds))).get();
+    return rows.map(_mapRowToGeofence).toList();
+  }
+
+  Future<void> addGeofence(domain.EquipmentSetGeofence fence) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db
+        .into(_db.equipmentSetGeofences)
+        .insert(
+          EquipmentSetGeofencesCompanion(
+            id: Value(fence.id),
+            setId: Value(fence.setId),
+            label: Value(fence.label),
+            latitude: Value(fence.latitude),
+            longitude: Value(fence.longitude),
+            radiusMeters: Value(fence.radiusMeters),
+            createdAt: Value(now),
+            updatedAt: Value(now),
+          ),
+        );
+    await _syncRepository.markRecordPending(
+      entityType: 'equipmentSetGeofences',
+      recordId: fence.id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  Future<void> updateGeofence(domain.EquipmentSetGeofence fence) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(
+      _db.equipmentSetGeofences,
+    )..where((t) => t.id.equals(fence.id))).write(
+      EquipmentSetGeofencesCompanion(
+        label: Value(fence.label),
+        latitude: Value(fence.latitude),
+        longitude: Value(fence.longitude),
+        radiusMeters: Value(fence.radiusMeters),
+        updatedAt: Value(now),
+      ),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'equipmentSetGeofences',
+      recordId: fence.id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  Future<void> removeGeofence(String geofenceId) async {
+    await (_db.delete(
+      _db.equipmentSetGeofences,
+    )..where((t) => t.id.equals(geofenceId))).go();
+    await _syncRepository.logDeletion(
+      entityType: 'equipmentSetGeofences',
+      recordId: geofenceId,
+    );
+    SyncEventBus.notifyLocalChange();
+  }
+
+  domain.EquipmentSetGeofence _mapRowToGeofence(EquipmentSetGeofence row) {
+    return domain.EquipmentSetGeofence(
+      id: row.id,
+      setId: row.setId,
+      label: row.label,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      radiusMeters: row.radiusMeters,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
+    );
+  }
+
   domain.EquipmentSet _mapRowToSet(
     EquipmentSet row,
-    List<String> equipmentIds,
-  ) {
+    List<String> equipmentIds, [
+    _BundleLists? lists,
+  ]) {
+    final bundle = lists ?? _noBundleLists;
     return domain.EquipmentSet(
       id: row.id,
       diverId: row.diverId,
       name: row.name,
       description: row.description,
       equipmentIds: equipmentIds,
+      includedSetIds: bundle.includes,
+      weightPresetIds: bundle.presets,
+      cylinderConfigIds: bundle.configs,
+      isDefault: row.isDefault,
+      autoApplyOnComputerImport: row.autoApplyOnComputerImport,
+      showFigure: row.showFigure,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
     );

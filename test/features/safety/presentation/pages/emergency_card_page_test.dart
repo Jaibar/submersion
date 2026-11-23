@@ -1,0 +1,660 @@
+import 'package:flutter/material.dart'
+    show
+        FilledButton,
+        IconButton,
+        Icons,
+        Locale,
+        MaterialApp,
+        PopupMenuButton,
+        Size,
+        TextField;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/safety/data/repositories/emergency_chamber_repository.dart';
+import 'package:submersion/features/safety/domain/entities/chamber_listing.dart';
+import 'package:submersion/features/safety/domain/entities/emergency_info.dart';
+import 'package:submersion/features/safety/presentation/pages/emergency_card_page.dart';
+import 'package:submersion/features/safety/presentation/providers/emergency_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+
+class _FakeChamberRepo extends Fake implements EmergencyChamberRepository {
+  String? deletedId;
+
+  @override
+  Future<void> deleteChamber(String id) async => deletedId = id;
+}
+
+void main() {
+  const hotline = EmergencyRegion(
+    id: 'des-australia',
+    name: 'DES Australia (Divers Emergency Service)',
+    phone: '1800-088-200',
+    countries: ['AU'],
+  );
+
+  final chamber = EmergencyChamber(
+    id: 'au-townsville',
+    name: 'Townsville University Hospital Hyperbaric Unit',
+    country: 'AU',
+    city: 'Townsville, QLD',
+    phone: '+61-7-4433-1111',
+    lastVerified: DateTime.utc(2026, 7, 1),
+    isBuiltIn: true,
+  );
+
+  final diver = Diver(
+    id: 'diver-1',
+    name: 'Test Diver',
+    createdAt: DateTime.utc(2026, 1, 1),
+    updatedAt: DateTime.utc(2026, 1, 1),
+    bloodType: 'O+',
+    allergies: 'Penicillin',
+    medications: 'Aspirin',
+    medicalNotes: 'Chronic asthma',
+    emergencyContact: const EmergencyContact(
+      name: 'Pat Example',
+      phone: '+61-400-000-000',
+      relation: 'Partner',
+    ),
+    emergencyContact2: const EmergencyContact(
+      name: 'Sam Second',
+      phone: '+61-400-111-222',
+      relation: 'Sibling',
+    ),
+    insurance: const DiverInsurance(
+      provider: 'DAN World',
+      policyNumber: 'P-12345',
+    ),
+  );
+
+  Future<void> pump(
+    WidgetTester tester, {
+    bool includeDiver = true,
+    Diver? diverOverride,
+    List<EmergencyChamber>? chambers,
+    List<ChamberListing>? listings,
+    int? totalChamberCount,
+    EmergencyChamberRepository? chamberRepo,
+    MockSettingsNotifier? settings,
+    String? countryCode = 'AU',
+    bool regionIsManual = false,
+    List<String> regionChoices = const ['AU', 'DE', 'JP'],
+  }) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          settingsProvider.overrideWith(
+            (ref) => settings ?? MockSettingsNotifier(),
+          ),
+          if (chamberRepo != null)
+            emergencyChamberRepositoryProvider.overrideWithValue(chamberRepo),
+          emergencyCardDataProvider.overrideWith(
+            (ref) async => EmergencyCardData(
+              countryCode: countryCode,
+              regionIsManual: regionIsManual,
+              regionChoices: regionChoices,
+              hotline: hotline,
+              emsNumber: '000',
+              diver: includeDiver ? (diverOverride ?? diver) : null,
+              nearbyChambers:
+                  listings ??
+                  [
+                    for (final c in chambers ?? [chamber])
+                      ChamberListing(chamber: c),
+                  ],
+              totalChamberCount:
+                  totalChamberCount ??
+                  (listings ?? chambers ?? [chamber]).length,
+            ),
+          ),
+        ],
+        child: const MaterialApp(
+          // Pinned: the assertions match English strings.
+          locale: Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EmergencyCardPage(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+  }
+
+  testWidgets('renders hotline, EMS, diver data, and chambers', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(tester);
+
+    expect(find.textContaining('DES Australia'), findsOneWidget);
+    expect(find.textContaining('1800-088-200'), findsOneWidget);
+    expect(find.textContaining('000'), findsWidgets);
+    expect(find.text('Test Diver'), findsOneWidget);
+    expect(find.textContaining('Blood type: O+'), findsOneWidget);
+    expect(find.textContaining('Penicillin'), findsOneWidget);
+    expect(find.textContaining('Pat Example'), findsOneWidget);
+    expect(find.textContaining('DAN World'), findsOneWidget);
+    expect(find.textContaining('Townsville'), findsWidgets);
+    expect(find.textContaining('verified'), findsOneWidget);
+    expect(find.textContaining('Medications: Aspirin'), findsOneWidget);
+    expect(find.textContaining('Chronic asthma'), findsOneWidget);
+    expect(find.textContaining('Sam Second'), findsOneWidget);
+    expect(find.textContaining('Policy P-12345'), findsOneWidget);
+  });
+
+  testWidgets('add-chamber action is enabled when a diver is loaded', (
+    tester,
+  ) async {
+    await pump(tester);
+    final button = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.add_location_alt_outlined),
+    );
+    expect(button.onPressed, isNotNull);
+  });
+
+  testWidgets('add-chamber action is disabled with no diver profile', (
+    tester,
+  ) async {
+    await pump(tester, includeDiver: false);
+    final button = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.add_location_alt_outlined),
+    );
+    expect(button.onPressed, isNull);
+  });
+
+  testWidgets('shows a localized message when the data fails to load', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          emergencyCardDataProvider.overrideWith(
+            (ref) async => throw Exception('boom'),
+          ),
+        ],
+        child: const MaterialApp(
+          locale: Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EmergencyCardPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('went wrong'), findsOneWidget);
+  });
+
+  testWidgets('hiding a built-in chamber shows an undo snackbar', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(500, 2000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(tester);
+    await tester.ensureVisible(find.byType(PopupMenuButton<String>));
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Hide'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Chamber hidden'), findsOneWidget);
+    expect(find.text('Undo'), findsOneWidget);
+    await tester.tap(find.text('Undo'));
+    await tester.pump();
+  });
+
+  testWidgets('deleting a user chamber calls the repository', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(500, 2000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final repo = _FakeChamberRepo();
+    const userChamber = EmergencyChamber(
+      id: 'user-1',
+      name: 'My Chamber',
+      country: 'AU',
+      phone: '+61',
+      isBuiltIn: false,
+    );
+    await pump(tester, chambers: [userChamber], chamberRepo: repo);
+
+    await tester.ensureVisible(find.byType(PopupMenuButton<String>));
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+
+    expect(repo.deletedId, 'user-1');
+  });
+
+  testWidgets('shows the distance to each chamber', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(
+      tester,
+      listings: [ChamberListing(chamber: chamber, distanceMeters: 42000)],
+    );
+
+    // Metric is the default unit setting, so 42 km rather than 26 mi.
+    expect(find.textContaining('42 km'), findsOneWidget);
+  });
+
+  testWidgets(
+    'labels an elective clinic so it cannot be mistaken for a chamber',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final elective = EmergencyChamber(
+        id: 'us-wound-care',
+        name: 'Downtown Wound Care Center',
+        country: 'US',
+        phone: '+1-555-0100',
+        capability: ChamberCapability.elective,
+        lastVerified: DateTime.utc(2026, 7, 1),
+        isBuiltIn: true,
+      );
+      await pump(tester, chambers: [elective]);
+
+      expect(find.text('Elective therapy only'), findsOneWidget);
+    },
+  );
+
+  testWidgets('surfaces the capability of a dive-capable chamber', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final dive = chamber.copyWith(
+      capability: ChamberCapability.divingEmergency,
+      availability: ChamberAvailability.h24,
+    );
+    await pump(tester, chambers: [dive]);
+
+    expect(find.text('Treats diving injuries'), findsOneWidget);
+    expect(find.text('24h'), findsOneWidget);
+  });
+
+  testWidgets('offers the full directory when chambers are omitted', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(tester, chambers: [chamber], totalChamberCount: 214);
+
+    expect(find.textContaining('View all 214 chambers'), findsOneWidget);
+  });
+
+  testWidgets('points at the hotline when nothing is in range', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(tester, listings: const [], totalChamberCount: 214);
+
+    expect(
+      find.textContaining('No chamber listed within range'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('marks a row that was never confirmed with the facility', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(500, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await pump(
+      tester,
+      chambers: [chamber.copyWith(verifiedVia: ChamberVerification.registry)],
+    );
+
+    expect(
+      find.textContaining('Not confirmed with the facility'),
+      findsOneWidget,
+    );
+  });
+
+  group('issue #1522: the insurer leads when the diver recorded a number', () {
+    final insured = diver.copyWith(
+      insurance: const DiverInsurance(
+        provider: 'ARENA',
+        policyNumber: 'A-777',
+        emergencyPhone: '+49-30-555-0100',
+        phone: '+49-30-555-0199',
+      ),
+    );
+
+    testWidgets('the primary button calls the insurer, not the hotline', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester, diverOverride: insured);
+
+      final primary = tester.widget<FilledButton>(
+        find.byType(FilledButton).first,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('Call ARENA'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('+49-30-555-0100'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Your dive insurance emergency line'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the regional hotline stays on the card as the fallback', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester, diverOverride: insured);
+
+      expect(find.textContaining('DES Australia'), findsOneWidget);
+      expect(find.textContaining('1800-088-200'), findsOneWidget);
+      expect(
+        find.textContaining('Call this if your insurer'),
+        findsOneWidget,
+        reason: 'the hotline must say why it is now the second call',
+      );
+    });
+
+    testWidgets('an office line alone never displaces the 24h hotline', (
+      tester,
+    ) async {
+      // An insurer's office line typically answers in business hours only.
+      // Promoting it would promise a first call that rings an empty desk at
+      // 2am, which is worse than the regional hotline that does answer.
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(
+        tester,
+        diverOverride: diver.copyWith(
+          insurance: const DiverInsurance(
+            provider: 'ARENA',
+            phone: '+49-30-555-0199',
+          ),
+        ),
+      );
+
+      final primary = tester.widget<FilledButton>(
+        find.byType(FilledButton).first,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('DES Australia'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Your dive insurance emergency line'),
+        findsNothing,
+        reason: 'an office line must not be described as an emergency line',
+      );
+    });
+
+    testWidgets('an unnamed insurer still leads, under a generic label', (
+      tester,
+    ) async {
+      // A diver can save the number off their card without typing the
+      // insurer's name. "Call" on its own is not a button, so the section
+      // heading stands in for the name.
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(
+        tester,
+        diverOverride: diver.copyWith(
+          insurance: const DiverInsurance(emergencyPhone: '+49-30-555-0100'),
+        ),
+      );
+
+      final primary = tester.widget<FilledButton>(
+        find.byType(FilledButton).first,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('Call Dive insurance'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('+49-30-555-0100'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a whitespace-only policy number prints no policy line', (
+      tester,
+    ) async {
+      // A blank "Policy" line is noise on a screen read under stress.
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(
+        tester,
+        diverOverride: diver.copyWith(
+          insurance: const DiverInsurance(
+            provider: 'ARENA',
+            policyNumber: '   ',
+            emergencyPhone: '+49-30-555-0100',
+          ),
+        ),
+      );
+
+      expect(find.textContaining('Policy'), findsNothing);
+    });
+
+    testWidgets('the office line stays reachable in the insurance block', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(
+        tester,
+        diverOverride: diver.copyWith(
+          insurance: const DiverInsurance(
+            provider: 'ARENA',
+            phone: '+49-30-555-0199',
+          ),
+        ),
+      );
+
+      expect(find.text('Office line'), findsOneWidget);
+      expect(find.text('+49-30-555-0199'), findsOneWidget);
+      expect(
+        find.textContaining('No insurer emergency number saved'),
+        findsOneWidget,
+        reason: 'an office line alone still needs the 24h number nudge',
+      );
+    });
+
+    testWidgets('both insurer numbers are listed and tappable', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester, diverOverride: insured);
+
+      expect(find.text('24h emergency line'), findsOneWidget);
+      expect(find.text('Office line'), findsOneWidget);
+      expect(find.text('+49-30-555-0199'), findsOneWidget);
+    });
+
+    testWidgets('the hotline still leads when no insurer number is stored', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester);
+
+      final primary = tester.widget<FilledButton>(
+        find.byType(FilledButton).first,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(primary),
+          matching: find.textContaining('DES Australia'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Diver emergency hotline. Call first'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a provider with no number explains why it cannot lead', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester);
+
+      expect(
+        find.textContaining('No insurer emergency number saved'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('emergency region', () {
+    Future<void> openPicker(WidgetTester tester) async {
+      await tester.ensureVisible(find.text('Change region'));
+      await tester.tap(find.text('Change region'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('names the region and says it follows the last dive', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester);
+
+      expect(find.text('Region: Australia (AU)'), findsOneWidget);
+      expect(find.text('Change region'), findsOneWidget);
+    });
+
+    testWidgets('says when the region is unknown', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester, countryCode: null);
+
+      expect(
+        find.text('Region unknown - using worldwide hotline'),
+        findsOneWidget,
+      );
+      expect(find.text('Change region'), findsOneWidget);
+    });
+
+    testWidgets('says when the region was set by hand', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester, regionIsManual: true);
+
+      expect(find.text('Region: Australia (AU), set manually'), findsOneWidget);
+    });
+
+    testWidgets('choosing a country stores it as the override', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final settings = MockSettingsNotifier();
+
+      await pump(tester, settings: settings);
+      await openPicker(tester);
+
+      expect(find.text('Automatic (most recent dive)'), findsOneWidget);
+      expect(find.text('Germany (DE)'), findsOneWidget);
+      await tester.tap(find.text('Japan (JP)'));
+      await tester.pumpAndSettle();
+
+      expect(settings.state.emergencyRegion, 'JP');
+    });
+
+    testWidgets('automatic clears the override', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final settings = MockSettingsNotifier();
+      await settings.setEmergencyRegion('JP');
+
+      await pump(tester, settings: settings, regionIsManual: true);
+      await openPicker(tester);
+      await tester.tap(find.text('Automatic (most recent dive)'));
+      await tester.pumpAndSettle();
+
+      expect(settings.state.emergencyRegion, isNull);
+    });
+
+    testWidgets('cancelling leaves the override alone', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final settings = MockSettingsNotifier();
+      await settings.setEmergencyRegion('JP');
+
+      await pump(tester, settings: settings, regionIsManual: true);
+      await openPicker(tester);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(settings.state.emergencyRegion, 'JP');
+    });
+
+    testWidgets('search narrows the list by name or code', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(500, 1800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await pump(tester);
+      await openPicker(tester);
+      await tester.enterText(find.byType(TextField), 'jap');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Japan (JP)'), findsOneWidget);
+      expect(find.text('Germany (DE)'), findsNothing);
+
+      await tester.enterText(find.byType(TextField), 'de');
+      await tester.pumpAndSettle();
+      expect(find.text('Germany (DE)'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'zzz');
+      await tester.pumpAndSettle();
+      expect(find.text('No matching countries'), findsOneWidget);
+      // Automatic stays offered whatever the search.
+      expect(find.text('Automatic (most recent dive)'), findsOneWidget);
+    });
+  });
+}

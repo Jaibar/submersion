@@ -7,6 +7,7 @@ import 'package:submersion/features/universal_import/data/models/import_options.
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 import 'package:submersion/features/universal_import/data/parsers/import_parser.dart';
+import 'package:submersion/features/universal_import/data/services/import_site_location.dart';
 
 /// Parser adapter for UDDF files.
 ///
@@ -67,12 +68,39 @@ class UddfImportParser implements ImportParser {
       if (result.customDiveTypes.isNotEmpty) {
         entities[ImportEntityType.diveTypes] = result.customDiveTypes;
       }
+      // Service records and cylinder fills (issue #2651): the wizard keeps
+      // only these entity lists, so a list left out here never reaches the
+      // importer, which silently dropped every UDDF service record.
+      if (result.serviceRecords.isNotEmpty) {
+        entities[ImportEntityType.serviceRecords] = result.serviceRecords;
+      }
+      if (result.fills.isNotEmpty) {
+        entities[ImportEntityType.fills] = result.fills;
+      }
 
       return ImportPayload(
         entities: entities,
+        warnings: [
+          if (result.divesMissingSite > 0)
+            ImportSiteLocation.sitesUnresolved(result.divesMissingSite),
+        ],
         metadata: {
           'sourceApp': options?.sourceApp.displayName ?? 'UDDF',
           'summary': result.summary,
+          if (result.customDiveRoles.isNotEmpty)
+            ImportPayload.customDiveRolesKey: result.customDiveRoles,
+          if (result.customSiteTypes.isNotEmpty)
+            ImportPayload.customSiteTypesKey: result.customSiteTypes,
+          if (result.serviceKinds.isNotEmpty)
+            ImportPayload.serviceKindsKey: result.serviceKinds,
+          if (result.currencyRules.isNotEmpty)
+            ImportPayload.currencyRulesKey: result.currencyRules,
+          if (result.currencyPrefs.isNotEmpty)
+            ImportPayload.currencyPrefsKey: result.currencyPrefs,
+          if (result.currencyEvents.isNotEmpty)
+            ImportPayload.currencyEventsKey: result.currencyEvents,
+          if (result.species.isNotEmpty)
+            ImportPayload.speciesKey: result.species,
         },
       );
     } on FormatException catch (e) {

@@ -1,12 +1,33 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/theme/status_colors.dart';
+import 'package:submersion/core/utils/currency.dart';
+import 'package:submersion/features/equipment/domain/entities/condition_trend.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_exposure_totals.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_finding.dart';
+import 'package:submersion/features/equipment/presentation/providers/condition_trend_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_condition_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_exposure_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/exposure_unit.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
 import 'package:submersion/features/equipment/domain/entities/service_record.dart';
+import 'package:submersion/features/equipment/domain/entities/service_schedule.dart';
+import 'package:submersion/features/equipment/presentation/helpers/equipment_web_link_launcher.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_detail_page.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_observation_providers.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/providers/equipment_media_providers.dart';
+import 'package:submersion/features/equipment/presentation/widgets/service_record_dialog.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -14,6 +35,16 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 import '../../../../helpers/mock_providers.dart';
 
 void main() {
+  // Dates format through the process-global Intl.defaultLocale, which
+  // MaterialApp.locale does not set; pin it so the English month names
+  // in these expectations hold on any host.
+  late String? savedIntlLocale;
+  setUp(() {
+    savedIntlLocale = Intl.defaultLocale;
+    Intl.defaultLocale = 'en_US';
+  });
+  tearDown(() => Intl.defaultLocale = savedIntlLocale);
+
   group('EquipmentDetailPage desktop redirect', () {
     const equipment = EquipmentItem(
       id: 'equip-1',
@@ -21,69 +52,96 @@ void main() {
       type: EquipmentType.bcd,
     );
 
-    testWidgets(
-      'redirects to master-detail on desktop when not in table mode',
-      (tester) async {
-        tester.view.devicePixelRatio = 1.0;
-        tester.view.physicalSize = const Size(1200, 800);
-        addTearDown(() {
-          tester.view.resetPhysicalSize();
-          tester.view.resetDevicePixelRatio();
-        });
+    testWidgets('redirects to master-detail on desktop when not in table mode', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
 
-        final overrides = await getBaseOverrides();
+      final overrides = await getBaseOverrides();
 
-        final router = GoRouter(
-          initialLocation: '/equipment/equip-1',
-          routes: [
-            GoRoute(
-              path: '/equipment',
-              builder: (context, state) =>
-                  const Scaffold(body: Text('EQUIPMENT_LIST_PAGE')),
-            ),
-            GoRoute(
-              path: '/equipment/:id',
-              builder: (context, state) =>
-                  EquipmentDetailPage(equipmentId: state.pathParameters['id']!),
-            ),
-          ],
-        );
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              ...overrides,
-              equipmentListViewModeProvider.overrideWith(
-                (ref) => ListViewMode.detailed,
-              ),
-              equipmentItemProvider(
-                equipment.id,
-              ).overrideWith((ref) async => equipment),
-              equipmentDiveCountProvider(
-                equipment.id,
-              ).overrideWith((ref) async => 0),
-              equipmentTripCountProvider(
-                equipment.id,
-              ).overrideWith((ref) async => 0),
-              serviceRecordNotifierProvider(
-                equipment.id,
-              ).overrideWith((ref) => _MockServiceRecordNotifier()),
-              serviceRecordTotalCostProvider(
-                equipment.id,
-              ).overrideWith((ref) async => 0.0),
-            ].cast(),
-            child: MaterialApp.router(
-              routerConfig: router,
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-            ),
+      final router = GoRouter(
+        initialLocation: '/equipment/equip-1',
+        routes: [
+          GoRoute(
+            path: '/equipment',
+            builder: (context, state) =>
+                const Scaffold(body: Text('EQUIPMENT_LIST_PAGE')),
           ),
-        );
+          GoRoute(
+            path: '/equipment/:id',
+            builder: (context, state) =>
+                EquipmentDetailPage(equipmentId: state.pathParameters['id']!),
+          ),
+        ],
+      );
 
-        await tester.pumpAndSettle();
-        expect(find.text('EQUIPMENT_LIST_PAGE'), findsOneWidget);
-      },
-    );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.detailed,
+            ),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('EQUIPMENT_LIST_PAGE'), findsOneWidget);
+    });
 
     testWidgets('does not redirect on desktop in table mode', (tester) async {
       tester.view.devicePixelRatio = 1.0;
@@ -115,6 +173,9 @@ void main() {
         ProviderScope(
           overrides: [
             ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
             equipmentListViewModeProvider.overrideWith(
               (ref) => ListViewMode.table,
             ),
@@ -127,15 +188,40 @@ void main() {
             equipmentTripCountProvider(
               equipment.id,
             ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
             serviceRecordNotifierProvider(
               equipment.id,
             ).overrideWith((ref) => _MockServiceRecordNotifier()),
-            serviceRecordTotalCostProvider(
-              equipment.id,
-            ).overrideWith((ref) async => 0.0),
           ].cast(),
           child: MaterialApp.router(
             routerConfig: router,
+            locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
           ),
@@ -144,6 +230,1101 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('EQUIPMENT_LIST_PAGE'), findsNothing);
+    });
+
+    testWidgets('Open in Connections centres the map on the item', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      final router = GoRouter(
+        initialLocation: '/equipment/equip-1',
+        routes: [
+          GoRoute(
+            path: '/equipment',
+            builder: (context, state) =>
+                const Scaffold(body: Text('EQUIPMENT_LIST_PAGE')),
+          ),
+          GoRoute(
+            path: '/equipment/:id',
+            builder: (context, state) =>
+                EquipmentDetailPage(equipmentId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/insights/connections',
+            builder: (context, state) =>
+                Scaffold(body: Text('CONNECTIONS ${state.uri.query}')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // A resolved active diver: the page menu is owner-only (#2046),
+            // and with no diver every profile counts as the owner.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.table,
+            ),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(PopupMenuButton<String>).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open in Connections'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('CONNECTIONS mode=around&focus=equipment:equip-1'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Clone opens a new item pre-filled from this one', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1200, 800);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+
+      final router = GoRouter(
+        initialLocation: '/equipment/equip-1',
+        routes: [
+          GoRoute(
+            path: '/equipment',
+            builder: (context, state) =>
+                const Scaffold(body: Text('EQUIPMENT_LIST_PAGE')),
+          ),
+          // Before the :id route, as in the app router, or "new" would
+          // match as an id.
+          GoRoute(
+            path: '/equipment/new',
+            builder: (context, state) =>
+                Scaffold(body: Text('NEW ${state.uri.query}')),
+          ),
+          GoRoute(
+            path: '/equipment/:id',
+            builder: (context, state) =>
+                EquipmentDetailPage(equipmentId: state.pathParameters['id']!),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // A resolved active diver: the page menu is owner-only (#2046),
+            // and with no diver every profile counts as the owner.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentListViewModeProvider.overrideWith(
+              (ref) => ListViewMode.table,
+            ),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+          ].cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(PopupMenuButton<String>).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Clone'));
+      await tester.pumpAndSettle();
+      expect(find.text('NEW cloneFrom=equip-1'), findsOneWidget);
+    });
+  });
+
+  group('EquipmentDetailPage attributes card', () {
+    testWidgets('shows curated and custom attributes', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(600, 1600);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final equipment = EquipmentItem(
+        id: 'equip-2',
+        name: 'Winter suit',
+        type: EquipmentType.wetsuit,
+        attributes: [
+          EquipmentAttribute.curated(
+            equipmentId: 'equip-2',
+            key: 'thickness_mm',
+            valueText: '7/5',
+            valueNum: 7.0,
+          ),
+          EquipmentAttribute.curated(
+            equipmentId: 'equip-2',
+            key: 'suit_style',
+            valueText: 'semi_dry',
+          ),
+          const EquipmentAttribute(
+            id: 'c1',
+            equipmentId: 'equip-2',
+            key: 'Repair note',
+            isCustom: true,
+            valueText: 'patched left knee',
+          ),
+        ],
+      );
+
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: EquipmentDetailPage(equipmentId: equipment.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('7/5 mm'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('7/5 mm'), findsOneWidget);
+      expect(find.text('Semi-dry'), findsOneWidget);
+      expect(find.text('Repair note'), findsOneWidget);
+      expect(find.text('patched left knee'), findsOneWidget);
+    });
+  });
+
+  group('EquipmentDetailPage purchase price', () {
+    Future<void> pumpWithEquipment(
+      WidgetTester tester,
+      EquipmentItem equipment, {
+      List<ServiceClockStatus>? clocks,
+      bool embedded = false,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(600, 1600);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+            if (clocks != null)
+              serviceClockStatusesProvider(
+                equipment.id,
+              ).overrideWith((ref) async => clocks),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: embedded
+                ? Scaffold(
+                    body: EquipmentDetailPage(
+                      equipmentId: equipment.id,
+                      embedded: true,
+                    ),
+                  )
+                : EquipmentDetailPage(equipmentId: equipment.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    ServiceClockStatus overdueClock(EquipmentItem equipment) {
+      final t0 = DateTime(2025, 1, 1);
+      return ServiceClockStatus(
+        schedule: ServiceSchedule(
+          id: 's1',
+          equipmentId: equipment.id,
+          serviceKindId: 'annual',
+          createdAt: t0,
+          updatedAt: t0,
+        ),
+        kind: ServiceKind(
+          id: 'annual',
+          name: 'Annual service',
+          createdAt: t0,
+          updatedAt: t0,
+        ),
+        anchor: t0,
+        dueDate: DateTime(2026, 1, 1),
+        severity: ServiceClockSeverity.overdue,
+        now: DateTime(2026, 6, 1),
+      );
+    }
+
+    testWidgets('an overdue clock lights the embedded header avatar too', (
+      tester,
+    ) async {
+      const equipment = EquipmentItem(
+        id: 'equip-overdue-embedded',
+        name: 'Old reg',
+        type: EquipmentType.regulator,
+      );
+
+      await pumpWithEquipment(
+        tester,
+        equipment,
+        clocks: [overdueClock(equipment)],
+        embedded: true,
+      );
+
+      final alert = StatusColors.light.alert;
+      final avatar = tester
+          .widgetList<CircleAvatar>(find.byType(CircleAvatar))
+          .firstWhere((a) => a.radius == 20);
+      expect(avatar.backgroundColor, alert.container);
+      final glyph = tester.widget<Icon>(
+        find.descendant(of: find.byWidget(avatar), matching: find.byType(Icon)),
+      );
+      expect(glyph.color, alert.onContainer);
+    });
+
+    testWidgets('an overdue clock lights the header in the alert palette', (
+      tester,
+    ) async {
+      const equipment = EquipmentItem(
+        id: 'equip-overdue',
+        name: 'Old reg',
+        type: EquipmentType.regulator,
+      );
+      final t0 = DateTime(2025, 1, 1);
+      final overdue = ServiceClockStatus(
+        schedule: ServiceSchedule(
+          id: 's1',
+          equipmentId: equipment.id,
+          serviceKindId: 'annual',
+          createdAt: t0,
+          updatedAt: t0,
+        ),
+        kind: ServiceKind(
+          id: 'annual',
+          name: 'Annual service',
+          createdAt: t0,
+          updatedAt: t0,
+        ),
+        anchor: t0,
+        dueDate: DateTime(2026, 1, 1),
+        severity: ServiceClockSeverity.overdue,
+        now: DateTime(2026, 6, 1),
+      );
+
+      await pumpWithEquipment(tester, equipment, clocks: [overdue]);
+
+      final alert = StatusColors.light.alert;
+      final avatar = tester
+          .widgetList<CircleAvatar>(find.byType(CircleAvatar))
+          .firstWhere((a) => a.radius == 32);
+      expect(avatar.backgroundColor, alert.container);
+
+      // The banner names the service now (#2260); the palette is unchanged.
+      const headline = 'Annual service overdue';
+      final banner = find
+          .ancestor(of: find.text(headline), matching: find.byType(Container))
+          .first;
+      final box = tester.widget<Container>(banner);
+      final decoration = box.decoration! as BoxDecoration;
+      expect(decoration.color, alert.container);
+      expect((decoration.border! as Border).top.color, alert.outline);
+      expect(
+        tester.widget<Text>(find.text(headline)).style?.color,
+        alert.onContainer,
+      );
+      // The second line too: on this solid fill the indicator's default grey
+      // would not read, which is why the banner passes onContainer through.
+      // Scoped to the banner: the Service Clocks card below renders the same
+      // trigger line for the same clock.
+      expect(
+        tester
+            .widget<Text>(
+              find.descendant(
+                of: banner,
+                matching: find.textContaining('Overdue since'),
+              ),
+            )
+            .style
+            ?.color,
+        alert.onContainer,
+      );
+    });
+
+    testWidgets('renders the item currency symbol, not a hardcoded dollar', (
+      tester,
+    ) async {
+      const equipment = EquipmentItem(
+        id: 'equip-price-eur',
+        name: 'Drysuit',
+        type: EquipmentType.drysuit,
+        purchasePrice: 1234.5,
+        purchaseCurrency: 'EUR',
+      );
+
+      await pumpWithEquipment(tester, equipment);
+
+      final expected = formatMoney(1234.5, 'EUR');
+      await tester.scrollUntilVisible(
+        find.text(expected),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text(expected), findsOneWidget);
+      expect(expected, contains('€'));
+    });
+
+    testWidgets('an unrecognised code falls back to showing the code', (
+      tester,
+    ) async {
+      const equipment = EquipmentItem(
+        id: 'equip-price-zzz',
+        name: 'Prototype rebreather',
+        type: EquipmentType.other,
+        purchasePrice: 99.0,
+        purchaseCurrency: 'ZZZ',
+      );
+
+      await pumpWithEquipment(tester, equipment);
+
+      final expected = formatMoney(99.0, 'ZZZ');
+      await tester.scrollUntilVisible(
+        find.text(expected),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text(expected), findsOneWidget);
+      expect(expected, contains('ZZZ'));
+    });
+
+    // Retiring and reactivating go through the Edit page's Status field;
+    // the overflow menu offers only History, Open in Connections, Clone and Delete,
+    // whatever the item's state.
+    for (final embedded in [false, true]) {
+      for (final isActive in [true, false]) {
+        final state = isActive ? 'an active' : 'a retired';
+        final layout = embedded ? 'embedded' : 'standalone';
+        testWidgets(
+          'the $layout overflow menu of $state item offers only History, Connections, Clone and Delete, Delete under the lock',
+          (tester) async {
+            final equipment = EquipmentItem(
+              id: 'equip-menu-$layout-$isActive',
+              name: 'Backup light',
+              type: EquipmentType.light,
+              isActive: isActive,
+              status: isActive
+                  ? EquipmentStatus.active
+                  : EquipmentStatus.retired,
+            );
+
+            await pumpWithEquipment(tester, equipment, embedded: embedded);
+
+            final menuButton = find.byType(PopupMenuButton<String>);
+            await tester.tap(
+              embedded
+                  ? menuButton.first
+                  : find.descendant(
+                      of: find.byType(AppBar),
+                      matching: menuButton,
+                    ),
+            );
+            await tester.pumpAndSettle();
+
+            expect(find.text('Open in Connections'), findsOneWidget);
+            expect(find.text('Clone'), findsOneWidget);
+            expect(find.text('Delete'), findsOneWidget);
+            expect(find.text('Retire Equipment'), findsNothing);
+            expect(find.text('Reactivate'), findsNothing);
+            expect(find.text('History'), findsOneWidget);
+            // Locked, a caption over Delete says it needs the unlock (issue
+            // #4527): it is the fifth entry, and Delete is off.
+            expect(find.byType(PopupMenuItem<String>), findsNWidgets(5));
+            final delete = tester.widget<PopupMenuItem<String>>(
+              find.widgetWithText(PopupMenuItem<String>, 'Delete'),
+            );
+            expect(delete.enabled, isFalse);
+          },
+        );
+      }
+    }
+  });
+
+  group('ServiceRecordDialog date pickers (#765)', () {
+    Future<void> pumpDialog(WidgetTester tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 1600);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            serviceKindsProvider.overrideWith((ref) async => const []),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: ServiceRecordDialog(
+                equipmentId: 'equip-3',
+                onSave: (_) async {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the service-date field opens the date picker', (tester) async {
+      await pumpDialog(tester);
+
+      await tester.tap(find.byIcon(Icons.calendar_today));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DatePickerDialog), findsOneWidget);
+
+      // The service dialog has its own Cancel action, so scope to the picker.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(DatePickerDialog),
+          matching: find.text('Cancel'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(DatePickerDialog), findsNothing);
+    });
+
+    testWidgets('the next-service-due field opens the date picker', (
+      tester,
+    ) async {
+      await pumpDialog(tester);
+
+      await tester.tap(find.byIcon(Icons.event));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DatePickerDialog), findsOneWidget);
+
+      // The service dialog has its own Cancel action, so scope to the picker.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(DatePickerDialog),
+          matching: find.text('Cancel'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(DatePickerDialog), findsNothing);
+    });
+  });
+
+  /// The purchase record (issue #1517): SKU, retailer and the product link,
+  /// rendered with the purchase date and price rather than among the specs.
+  group('EquipmentDetailPage purchase record', () {
+    EquipmentItem itemWith(Map<String, String> purchaseAttrs) => EquipmentItem(
+      id: 'equip-9',
+      name: 'MK25 EVO',
+      type: EquipmentType.regulator,
+      attributes: [
+        for (final entry in purchaseAttrs.entries)
+          EquipmentAttribute.curated(
+            equipmentId: 'equip-9',
+            key: entry.key,
+            valueText: entry.value,
+          ),
+      ],
+    );
+
+    Future<List<Uri>> pump(WidgetTester tester, EquipmentItem equipment) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(600, 2000);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final launched = <Uri>[];
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentItemProvider(
+              equipment.id,
+            ).overrideWith((ref) async => equipment),
+            equipmentDiveCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentTripCountProvider(
+              equipment.id,
+            ).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentExposureTotalsProvider(
+              equipment.id,
+            ).overrideWith((ref) async => EquipmentExposureTotals.empty),
+            equipmentConditionProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: equipment.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              equipment.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+            // The documents card sits on this page now; without the override
+            // it reaches the real repository and the database behind it.
+            mediaForEquipmentProvider(
+              equipment.id,
+            ).overrideWith((ref) async => const <MediaItem>[]),
+            equipmentWebLinkLaunchProvider.overrideWithValue((uri) async {
+              launched.add(uri);
+              return true;
+            }),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: EquipmentDetailPage(equipmentId: equipment.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return launched;
+    }
+
+    testWidgets('renders SKU, retailer and the web link', (tester) async {
+      await pump(
+        tester,
+        itemWith({
+          'sku': 'SP-MK25-EVO',
+          'retailer': 'Dive Shop Ltd',
+          'product_url': 'https://shop.example.com/mk25',
+        }),
+      );
+
+      await tester.scrollUntilVisible(
+        find.text('SP-MK25-EVO'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('Product number (SKU)'), findsOneWidget);
+      expect(find.text('SP-MK25-EVO'), findsOneWidget);
+      expect(find.text('Retailer'), findsOneWidget);
+      expect(find.text('Dive Shop Ltd'), findsOneWidget);
+      expect(find.text('Web link'), findsOneWidget);
+      expect(find.text('https://shop.example.com/mk25'), findsOneWidget);
+    });
+
+    testWidgets('unrecorded purchase fields render no rows at all', (
+      tester,
+    ) async {
+      await pump(tester, itemWith(const {}));
+
+      expect(find.text('Product number (SKU)'), findsNothing);
+      expect(find.text('Retailer'), findsNothing);
+      expect(find.text('Web link'), findsNothing);
+    });
+
+    testWidgets('tapping the web link launches it', (tester) async {
+      final launched = await pump(
+        tester,
+        itemWith({'product_url': 'https://shop.example.com/mk25'}),
+      );
+
+      final link = find.byKey(const ValueKey('equipment-detail-web-link'));
+      await tester.scrollUntilVisible(
+        link,
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(link);
+      await tester.pumpAndSettle();
+
+      expect(launched, [Uri.parse('https://shop.example.com/mk25')]);
+    });
+
+    testWidgets('a bare host is shown as typed and launched as https', (
+      tester,
+    ) async {
+      // parseWebLink only assumes the scheme at launch time, so the row keeps
+      // showing exactly what the diver entered.
+      final launched = await pump(
+        tester,
+        itemWith({'product_url': 'shop.example.com/mk25'}),
+      );
+
+      final link = find.byKey(const ValueKey('equipment-detail-web-link'));
+      await tester.scrollUntilVisible(
+        link,
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('shop.example.com/mk25'), findsOneWidget);
+
+      await tester.tap(link);
+      await tester.pumpAndSettle();
+      expect(launched, [Uri.parse('https://shop.example.com/mk25')]);
+    });
+
+    testWidgets('a value that is not a link stays plain text', (tester) async {
+      // A garbled or non-web value must still be visible and editable rather
+      // than silently dropped, and must never become a tappable launch.
+      await pump(tester, itemWith({'product_url': 'receipt in the drawer'}));
+
+      await tester.scrollUntilVisible(
+        find.text('receipt in the drawer'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('receipt in the drawer'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('equipment-detail-web-link')),
+        findsNothing,
+      );
+    });
+  });
+
+  group('condition section (phase 4a)', () {
+    const ccr = EquipmentItem(
+      id: 'ccr-1',
+      name: 'My CCR',
+      type: EquipmentType.rebreather,
+    );
+    const mask = EquipmentItem(
+      id: 'mask-1',
+      name: 'Mask',
+      type: EquipmentType.mask,
+    );
+    final evidence = FindingEvidence(
+      n: 3,
+      windowStart: DateTime(2026, 3, 3),
+      windowEnd: DateTime(2026, 6, 9),
+      values: const {'count': 2},
+    );
+
+    Future<void> pumpItem(
+      WidgetTester tester,
+      EquipmentItem item, {
+      List<EquipmentFinding> findings = const [],
+      List<EquipmentItem> children = const [],
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 4000);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final overrides = await getBaseOverrides();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...overrides,
+            // No diver profile: the page treats every item as the viewer's own
+            // (issue #2046), and the menu waits for this to resolve.
+            validatedCurrentDiverIdProvider.overrideWith((ref) async => null),
+            equipmentItemProvider(item.id).overrideWith((ref) async => item),
+            equipmentDiveCountProvider(item.id).overrideWith((ref) async => 3),
+            equipmentTripCountProvider(item.id).overrideWith((ref) async => 0),
+            equipmentComponentsProvider(
+              item.id,
+            ).overrideWith((ref) async => const []),
+            equipmentPartOfProvider(
+              item.id,
+            ).overrideWith((ref) async => const []),
+            observationsForEquipmentProvider(
+              item.id,
+            ).overrideWith((ref) async => const []),
+            equipmentWorstClockProvider.overrideWith((ref) async => {}),
+            serviceRecordNotifierProvider(
+              item.id,
+            ).overrideWith((ref) => _MockServiceRecordNotifier()),
+            equipmentExposureTotalsProvider(item.id).overrideWith(
+              (ref) async => EquipmentExposureTotals(
+                byUnit: const {ExposureUnit.dives: 3},
+                diveCount: 3,
+                firstDive: DateTime(2026, 1, 1),
+                lastDive: DateTime(2026, 6, 9),
+              ),
+            ),
+            equipmentConditionProvider(
+              item.id,
+            ).overrideWith((ref) async => findings),
+            conditionTrendProvider((
+              equipmentId: item.id,
+              kind: null,
+            )).overrideWith((ref) async => null),
+            conditionTrendProvider((
+              equipmentId: item.id,
+              kind: ConditionTrendKind.scrubberMinutes,
+            )).overrideWith((ref) async => null),
+            childEquipmentProvider(
+              item.id,
+            ).overrideWith((ref) async => children),
+          ].cast(),
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: EquipmentDetailPage(equipmentId: item.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a rebreather shows exposure, findings and installed parts', (
+      tester,
+    ) async {
+      await pumpItem(
+        tester,
+        ccr,
+        findings: [
+          EquipmentFinding(
+            id: 'cf_ccr-1_incidentLinked',
+            equipmentId: ccr.id,
+            ruleId: ConditionRuleId.incidentLinked,
+            severity: ConditionSeverity.info,
+            evidence: evidence,
+            evidenceFingerprint: evidenceFingerprint(evidence),
+            engineVersion: 1,
+            createdAt: DateTime(2026),
+          ),
+        ],
+        children: const [
+          EquipmentItem(
+            id: 'cell-1',
+            name: 'Cell 1',
+            type: EquipmentType.o2Cell,
+            parentEquipmentId: 'ccr-1',
+          ),
+        ],
+      );
+      expect(find.text('Exposure'), findsOneWidget);
+      expect(find.text('3 dives, Jan 1 - Jun 9, 2026'), findsOneWidget);
+      expect(find.text('Condition findings'), findsOneWidget);
+      expect(find.text('2 incidents name this item'), findsOneWidget);
+      expect(find.text('Installed parts'), findsOneWidget);
+      expect(find.text('Cell 1'), findsOneWidget);
+    });
+
+    testWidgets('a mask shows exposure but no installed parts', (tester) async {
+      await pumpItem(tester, mask);
+      expect(find.text('Exposure'), findsOneWidget);
+      expect(find.text('Installed parts'), findsNothing);
+      expect(find.text('Condition findings'), findsNothing);
+    });
+
+    EquipmentItem fins({required String color}) => EquipmentItem(
+      id: 'fins-color',
+      name: 'Jet Fins',
+      type: EquipmentType.fins,
+      attributes: [
+        EquipmentAttribute.curated(
+          equipmentId: 'fins-color',
+          key: 'color',
+        ).copyWith(valueText: color),
+      ],
+    );
+
+    testWidgets('shows a set colour by name with a swatch', (tester) async {
+      await pumpItem(tester, fins(color: '#EF4444'));
+      expect(find.text('Color'), findsOneWidget);
+      expect(find.text('Red'), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-color-swatch')), findsOneWidget);
+    });
+
+    testWidgets('shows the spot the diver moved the item to on the figure', (
+      tester,
+    ) async {
+      // Issue #4493: a cylinder moved to the diver's left side.
+      await pumpItem(
+        tester,
+        EquipmentItem(
+          id: 'tank-position',
+          name: '12L left',
+          type: EquipmentType.tank,
+          attributes: [
+            EquipmentAttribute.curated(
+              equipmentId: 'tank-position',
+              key: 'figure_position',
+              valueText: 'sidemount_left',
+            ),
+            EquipmentAttribute.curated(
+              equipmentId: 'tank-position',
+              key: 'worn_as',
+              valueText: 'stage',
+            ),
+          ],
+        ),
+      );
+      expect(find.text('Position on figure'), findsOneWidget);
+      expect(find.text('Sidemount, left'), findsOneWidget);
+      expect(find.text('Worn as'), findsOneWidget);
+      expect(find.text('Stage'), findsOneWidget);
+    });
+
+    testWidgets('shows no colour row for a value that is not a colour', (
+      tester,
+    ) async {
+      await pumpItem(tester, fins(color: 'Red'));
+      expect(find.byKey(const ValueKey('detail-color-swatch')), findsNothing);
+      expect(find.text('Red'), findsNothing);
+    });
+
+    // Issue #2520: a battery has no colour, so one that reached it shows
+    // as the diver's own field, the way the Details editor keeps it.
+    testWidgets('a colour on a battery shows as a custom field', (
+      tester,
+    ) async {
+      await pumpItem(
+        tester,
+        EquipmentItem(
+          id: 'battery-color',
+          name: 'Cell pack',
+          type: EquipmentType.battery,
+          attributes: [
+            EquipmentAttribute.curated(
+              equipmentId: 'battery-color',
+              key: 'color',
+              valueText: '#EF4444',
+            ),
+          ],
+        ),
+      );
+      expect(find.byKey(const ValueKey('detail-color-swatch')), findsNothing);
+      expect(find.text('Color'), findsNothing);
+      expect(find.text('color'), findsOneWidget);
+      expect(find.text('#EF4444'), findsOneWidget);
+    });
+
+    testWidgets('the Components card renders with no error line', (
+      tester,
+    ) async {
+      await pumpItem(tester, mask);
+      expect(find.text('Components'), findsOneWidget);
+      expect(find.textContaining('Something went wrong'), findsNothing);
     });
   });
 }

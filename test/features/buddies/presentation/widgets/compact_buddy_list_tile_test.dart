@@ -1,0 +1,151 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/buddies/domain/constants/buddy_field.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy.dart';
+import 'package:submersion/features/buddies/domain/entities/buddy_with_dive_count.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/buddies/presentation/widgets/compact_buddy_list_tile.dart';
+import 'package:submersion/shared/models/entity_card_view_config.dart';
+import 'package:submersion/shared/providers/entity_card_config_providers.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
+import '../../helpers/fake_buddy_list_notifier.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
+
+const _config = EntityCardViewConfig<BuddyField>(
+  slots: [
+    EntityCardSlotConfig(slotId: 'title', field: BuddyField.buddyName),
+    EntityCardSlotConfig(
+      slotId: 'subtitle',
+      field: BuddyField.certificationLevel,
+    ),
+    EntityCardSlotConfig(slotId: 'stat1', field: BuddyField.diveCount),
+    EntityCardSlotConfig(slotId: 'stat2', field: BuddyField.lastDive),
+  ],
+);
+
+Future<List<dynamic>> _overrides() async => [
+  ...await getBaseOverrides(),
+  buddyCompactCardConfigProvider.overrideWith(
+    (ref) => EntityCardConfigNotifier<BuddyField>(
+      defaultConfig: _config,
+      fieldFromName: BuddyFieldAdapter.instance.fieldFromName,
+    ),
+  ),
+];
+
+final _entry = BuddyWithDiveCount(
+  buddy: Buddy(
+    id: 'b1',
+    name: 'Ken Sato',
+    certificationLevel: CertificationLevel.advancedOpenWater.name,
+    createdAt: DateTime(2026, 1, 1),
+    updatedAt: DateTime(2026, 1, 1),
+  ),
+  diveCount: 7,
+  lastDiveAt: DateTime(2024, 3, 5),
+);
+
+void main() {
+  testWidgets('renders two lines from the compact config', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: CompactBuddyListTile(entry: _entry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Ken Sato'), findsOneWidget);
+    expect(find.text('Advanced Open Water'), findsOneWidget);
+    expect(find.text('7 dives'), findsOneWidget);
+    expect(find.byIcon(Icons.history), findsOneWidget);
+    expect(find.byType(CircleAvatar), findsNothing);
+  });
+
+  testWidgets('shows a checkbox in selection mode', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: CompactBuddyListTile(
+          entry: _entry,
+          isSelectionMode: true,
+          isSelected: true,
+          onTap: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(Checkbox), findsOneWidget);
+  });
+
+  group('favorite star (issue #1336)', () {
+    testWidgets('shows a filled star for a favorite buddy', (tester) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          child: CompactBuddyListTile(
+            entry: BuddyWithDiveCount(
+              buddy: _entry.buddy.copyWith(isFavorite: true),
+              diveCount: _entry.diveCount,
+            ),
+            onTap: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byIcon(Icons.star), findsOneWidget);
+      expect(find.byIcon(Icons.star_border), findsNothing);
+    });
+
+    testWidgets('tapping the star writes nothing and opens the buddy', (
+      tester,
+    ) async {
+      final notifier = FakeBuddyListNotifier();
+      var rowTaps = 0;
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...await _overrides(),
+            buddyListNotifierProvider.overrideWith((ref) => notifier),
+          ],
+          child: CompactBuddyListTile(entry: _entry, onTap: () => rowTaps++),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byIcon(Icons.star_border));
+      await tester.pump();
+
+      // The star only shows the favourite (issue #4527, plan 12): a tap
+      // on it is the row's.
+      expect(notifier.calls, isEmpty);
+      expect(rowTaps, 1);
+    });
+  });
+
+  testWidgets('chevron ends one card padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        locale: const Locale('en'),
+        child: CompactBuddyListTile(entry: _entry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: recordCardBounds(tester),
+      padding: kRecordCardCompactPadding,
+    );
+  });
+}

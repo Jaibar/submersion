@@ -1,0 +1,362 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/reef/data/services/nearby_species_service.dart';
+import 'package:submersion/features/reef/domain/entities/reef_data_status.dart';
+import 'package:submersion/features/reef/domain/services/species_catalog_matcher.dart';
+
+SpeciesCatalogMatcher _matcher() => SpeciesCatalogMatcher.fromJsonString(
+  jsonEncode({
+    'speciesKeys': {'2384460': 'sp_sixbar_wrasse', '5231676': 'sp_star_coral'},
+    'taxonKeys': [587, 1362],
+  }),
+);
+
+String _facetBody(List<List<Object>> counts) => jsonEncode({
+  'count': 1000,
+  'facets': [
+    {
+      'field': 'SPECIES_KEY',
+      'counts': counts.map((c) => {'name': c[0], 'count': c[1]}).toList(),
+    },
+  ],
+});
+
+void main() {
+  group('NearbySpeciesService.fetch', () {
+    test('sends licence, quality and order filters', () async {
+      late Uri captured;
+      final client = MockClient((request) async {
+        captured = request.url;
+        return http.Response(_facetBody([]), 200);
+      });
+
+      await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(12.160, -68.280));
+
+      // GBIF takes latitude first, unlike ArcGIS.
+      expect(captured.queryParameters['geoDistance'], '12.160,-68.280,5km');
+      expect(
+        captured.queryParametersAll['license'],
+        containsAll(<String>['CC0_1_0', 'CC_BY_4_0']),
+      );
+      expect(captured.queryParameters['occurrenceStatus'], 'PRESENT');
+      expect(captured.queryParameters['hasGeospatialIssue'], 'false');
+      expect(
+        captured.queryParametersAll['taxonKey'],
+        containsAll(<String>['587', '1362']),
+      );
+      expect(captured.queryParameters['facet'], 'speciesKey');
+      expect(captured.queryParameters['limit'], '0');
+    });
+
+    test('sets a User-Agent, which GBIF asks integrators to do', () async {
+      late Map<String, String> headers;
+      final client = MockClient((request) async {
+        headers = request.headers;
+        return http.Response(_facetBody([]), 200);
+      });
+
+      await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(headers['user-agent'], contains('Submersion'));
+    });
+
+    test('splits results into catalog matches and unmatched names', () async {
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response(
+            jsonEncode({'scientificName': 'Aplysina archeri'}),
+            200,
+          );
+        }
+        return http.Response(
+          _facetBody([
+            ['5231676', 300],
+            ['9999999', 278],
+            ['2384460', 120],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(12.160, -68.280));
+
+      expect(result.status, ReefDataStatus.ok);
+      expect(result.value!.matched.map((m) => m.speciesId), [
+        'sp_star_coral',
+        'sp_sixbar_wrasse',
+      ]);
+      expect(result.value!.matched.first.occurrenceCount, 300);
+      expect(result.value!.unmatchedNames, ['Aplysina archeri']);
+    });
+
+    test('caps the unmatched tail at 25 entries', () async {
+      final counts = List.generate(
+        60,
+        (i) => <Object>['${900000 + i}', 60 - i],
+      );
+      var nameLookups = 0;
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          nameLookups++;
+          return http.Response(
+            jsonEncode({'scientificName': 'Species $nameLookups'}),
+            200,
+          );
+        }
+        return http.Response(_facetBody(counts), 200);
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(result.value!.unmatchedNames, hasLength(25));
+      expect(nameLookups, 25);
+    });
+
+    test('keeps every species key the search returned', () async {
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response(
+            jsonEncode({'scientificName': 'Aplysina archeri'}),
+            200,
+          );
+        }
+        return http.Response(
+          _facetBody([
+            ['2384460', 120],
+            ['9999999', 40],
+          ]),
+          200,
+        );
+      });
+
+      final part = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(12.160, -68.280));
+
+      // One catalogue match and one name-only species: both keys kept.
+      expect(part.value!.speciesKeys, {2384460, 9999999});
+    });
+
+    test('keeps keys beyond the 25 names it looks up', () async {
+      final counts = List.generate(
+        40,
+        (i) => <Object>['${900000 + i}', 40 - i],
+      );
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response(jsonEncode({'scientificName': 'A b'}), 200);
+        }
+        return http.Response(_facetBody(counts), 200);
+      });
+
+      final part = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(part.value!.unmatchedNames.length, 25);
+      expect(part.value!.speciesKeys.length, 40);
+    });
+
+    // Sequentially these would be 25 round trips before the tier can render.
+    test('resolves unmatched names concurrently', () async {
+      var inFlight = 0;
+      var peakInFlight = 0;
+      final counts = List.generate(
+        10,
+        (i) => <Object>['${900000 + i}', 10 - i],
+      );
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          inFlight++;
+          peakInFlight = inFlight > peakInFlight ? inFlight : peakInFlight;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          inFlight--;
+          return http.Response(
+            jsonEncode({
+              'scientificName': 'Species ${request.url.pathSegments.last}',
+            }),
+            200,
+          );
+        }
+        return http.Response(_facetBody(counts), 200);
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(result.value!.unmatchedNames, hasLength(10));
+      expect(peakInFlight, greaterThan(1), reason: 'lookups ran sequentially');
+    });
+
+    test('drops unmatched entries whose name lookup fails', () async {
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response('nope', 500);
+        }
+        return http.Response(
+          _facetBody([
+            ['9999999', 10],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      // The site has records this lookup could not name, so "nothing nearby"
+      // would state something untrue.
+      expect(result.status, ReefDataStatus.unavailable);
+      // The server answered: saved, so the next try is spaced out.
+      expect(result.unanswered, isFalse);
+    });
+
+    test('names lost to no answer are not saved as a failure', () async {
+      // The connection dropped between the search and its name lookups.
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          throw http.ClientException('Connection reset', request.url);
+        }
+        return http.Response(
+          _facetBody([
+            ['9999999', 10],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(result.status, ReefDataStatus.unavailable);
+      expect(result.unanswered, isTrue);
+    });
+
+    test('keeps the keys of a list it could name nothing of', () async {
+      // Every lookup is GBIF's final word (no such record), so this list is
+      // saved for 30 days: without its keys, no suggestion here could be
+      // marked for that long. The site page shows nothing either way.
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response('not found', 404);
+        }
+        return http.Response(
+          _facetBody([
+            ['9999999', 10],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(result.status, ReefDataStatus.ok);
+      expect(result.value!.isEmpty, isTrue);
+      expect(result.value!.speciesKeys, {9999999});
+    });
+
+    test('returns empty when no species are recorded nearby', () async {
+      final client = MockClient(
+        (_) async => http.Response(_facetBody([]), 200),
+      );
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+      expect(result.status, ReefDataStatus.empty);
+    });
+
+    test('returns unavailable on HTTP 429 rate limiting', () async {
+      final client = MockClient((_) async => http.Response('slow down', 429));
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+      expect(result.status, ReefDataStatus.unavailable);
+    });
+
+    // Issue #1036: a land plant led the list at a German quarry. Araceae sits
+    // under Alismatales beside the seagrasses, so the taxon whitelist cannot
+    // exclude it and the resolved family has to.
+    test('drops terrestrial families that share an aquatic order', () async {
+      const families = {'901': 'Araceae', '902': 'Potamogetonaceae'};
+      const names = {'901': 'Arum maculatum', '902': 'Zannichellia palustris'};
+
+      final client = MockClient((request) async {
+        final key = request.url.pathSegments.last;
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response(
+            jsonEncode({'scientificName': names[key], 'family': families[key]}),
+            200,
+          );
+        }
+        return http.Response(
+          _facetBody([
+            ['901', 15],
+            ['902', 4],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(51.640, 6.430));
+
+      expect(result.status, ReefDataStatus.ok);
+      expect(result.value!.unmatchedNames, ['Zannichellia palustris']);
+    });
+
+    test('keeps records whose family GBIF does not report', () async {
+      final client = MockClient((request) async {
+        if (request.url.path.startsWith('/v1/species/')) {
+          return http.Response(
+            jsonEncode({'scientificName': 'Aplysina archeri'}),
+            200,
+          );
+        }
+        return http.Response(
+          _facetBody([
+            ['901', 15],
+          ]),
+          200,
+        );
+      });
+
+      final result = await NearbySpeciesService(
+        client: client,
+        matcher: _matcher(),
+      ).fetch(const GeoPoint(1, 2));
+
+      expect(result.value!.unmatchedNames, ['Aplysina archeri']);
+    });
+  });
+}

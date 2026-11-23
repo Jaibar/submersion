@@ -1,0 +1,114 @@
+part of 'app_database_migrations.dart';
+
+/// Column-only backstops for child rows that every read selects whole, split
+/// out of before_open.dart to keep it under the migration file size limit.
+extension BeforeOpenChildColumns on AppDatabase {
+  /// Re-asserts columns a database that arrived by restore or sync-adopt, or
+  /// one a renumbered rung skipped, may lack. Each is column only, with no
+  /// backfill, so none can touch diver data.
+  Future<void> _assertChildRowColumns() async {
+    // v194: dive_tanks.transmitter_serial. Every tank read selects the whole
+    // row, so a database without the rung would throw on the first read.
+    await _assertTankTransmitterSerialColumn();
+
+    // v254: dive_tanks.role_source, for the same reason.
+    await _assertTankRoleSourceColumn();
+
+    // v259: dive_tanks.usage_duration (issue #1496).
+    await _assertTankUsageDurationColumn();
+
+    // v348: dive_tanks.surface_breathing_duration (issue #2930).
+    await _assertTankSurfaceBreathingColumn();
+
+    // v287: dive_tanks.passport_id (issue #2650).
+    await _assertTankPassportIdColumn();
+
+    // v270: the weight name columns (issue #956), defaulted to ''.
+    await _assertWeightLabelColumns();
+
+    // v313: dive_centers.is_permanently_closed (issue #3379). Every center
+    // read selects the whole row, for the same reason as the tank columns.
+    await _assertDiveCenterClosedColumn();
+
+    // v316: transmitters.is_configured (issue #3676). Every registry read
+    // selects the whole row, for the same reason as the tank columns.
+    await _assertTransmitterConfiguredColumn();
+
+    // v324: buddy card swap columns (issue #3728).
+    await _assertBuddyCardColumns();
+
+    // v325: trips.parent_trip_id (issue #3658). Every trip read selects the
+    // whole row, for the same reason as the tank columns.
+    await _assertTripParentColumn();
+
+    // v330: buddies.excluded_from_rankings (issue #3624). Every buddy read
+    // selects the whole row, for the same reason as the tank columns.
+    await _assertBuddyExcludedFromRankingsColumn();
+
+    // v331: equipment_locations.dive_center_id (issue #3623). Every place
+    // read selects the whole row, for the same reason as the tank columns.
+    await _assertEquipmentLocationCenterColumn();
+
+    // v333: dives.gas_switches_edited (issue #32). Every dive read selects
+    // the whole row, for the same reason as the tank columns.
+    await _assertDiveGasSwitchesEditedColumn();
+
+    // v334: equipment_locations.buddy_id (issue #3790), for the same reason.
+    await _assertEquipmentLocationBuddyColumn();
+
+    // v338: incidents.observation_id (issue #3062), for the same reason.
+    await _assertIncidentObservationColumn();
+
+    // v339: dive_computers.auto_download_disabled (issue #3361). Every
+    // computer read selects the whole row, for the same reason as the tank
+    // columns.
+    await _assertDiveComputerAutoDownloadDisabledColumn();
+
+    // v354: dives.is_draft (issue #637). Every dive read selects the whole
+    // row, for the same reason as the tank columns.
+    await _assertDiveIsDraftColumn();
+
+    // v368: dives.media_time_offset_seconds (issue #4539), for the same
+    // reason.
+    await _assertDiveMediaTimeOffsetColumn();
+
+    // v382: dives.hand_set_fields (issue #4909), for the same reason.
+    await _assertDiveHandSetFieldsColumn();
+
+    // v350: sightings.abundance (issue #4337). Every sighting read selects
+    // the whole row, for the same reason as the tank columns.
+    await _assertSightingAbundanceColumn();
+
+    // v357: dive_profile_series.is_edit (issue #4386). Every series read
+    // selects the whole row, for the same reason as the tank columns.
+    await _assertProfileSeriesIsEditColumn();
+
+    // v361: dive_sites.country_code (issue #4426). Every site read selects
+    // the whole row. Column only: the backfill runs in the rung.
+    await _assertSiteCountryCodeColumn();
+    // v363: dive_sites.catalogue_id. Every site read selects the whole row.
+    await _assertSiteCatalogueIdColumn();
+
+    // v364: divers.sex, divers.birth_year and
+    // diver_weight_entries.body_fat_percent (issue #4525). Every diver and
+    // weight-entry read selects the whole row.
+    await _assertBodyCompositionColumns();
+
+    // v368: equipment_attributes.value_unit (issue #4534). Every attribute
+    // read selects the whole row. A database that skipped the rung also
+    // skipped its cylinder volume repair, so healing the column runs it.
+    await _healAttributeValueUnitColumn();
+
+    // v369: dive_sites.catalogue_answers and the catalogue columns of
+    // library_site_notes. Every read of either table selects the whole row.
+    await _assertSiteCatalogueAnswersColumns();
+
+    // v372: buddies.country and buddies.country_code (issue #4457). Every
+    // buddy read selects the whole row.
+    await _assertBuddyCountryColumns();
+
+    // v373: dive_centers.logo (issue #4460). Every center read selects the
+    // whole row.
+    await _assertDiveCenterLogoColumn();
+  }
+}

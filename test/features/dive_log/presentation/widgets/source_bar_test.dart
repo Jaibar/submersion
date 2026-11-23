@@ -1,0 +1,292 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:submersion/features/dive_log/presentation/widgets/source_bar.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+
+Widget _harness(Widget child) {
+  return MaterialApp(
+    // flutter_test forwards the host machine's locale list, so an unpinned
+    // MaterialApp renders a translated UI on a non-English machine and every
+    // English literal below stops matching.
+    locale: const Locale('en'),
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    home: Scaffold(body: child),
+  );
+}
+
+SourceBarItem _item({
+  required String sourceId,
+  required String label,
+  bool isActive = false,
+  bool isPrimary = false,
+  bool isOverlaid = false,
+  bool hasProfile = true,
+}) {
+  return SourceBarItem(
+    sourceId: sourceId,
+    label: label,
+    color: Colors.cyan,
+    isActive: isActive,
+    isPrimary: isPrimary,
+    isOverlaid: isOverlaid,
+    hasProfile: hasProfile,
+  );
+}
+
+void main() {
+  testWidgets('renders nothing for a single source', (tester) async {
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(sourceId: 'src-a', label: 'Kiyans Teric', isActive: true),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    expect(find.text('Kiyans Teric'), findsNothing);
+  });
+
+  testWidgets('shows both chips; only non-active chips get an overlay eye', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    expect(find.text('Kiyans Teric'), findsOneWidget);
+    expect(find.text('Erics Teric'), findsOneWidget);
+    // One eye icon only (the non-active chip's), currently not overlaid.
+    expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.visibility), findsNothing);
+  });
+
+  testWidgets('tapping a non-active chip body activates it', (tester) async {
+    final activated = <String>[];
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: activated.add,
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Erics Teric'));
+    await tester.pump();
+
+    expect(activated, ['src-b']);
+  });
+
+  testWidgets('tapping the eye toggles overlay on', (tester) async {
+    final toggles = <(String, bool)>[];
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (id, overlaid) => toggles.add((id, overlaid)),
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    await tester.tap(find.byIcon(Icons.visibility_off_outlined));
+    await tester.pump();
+
+    expect(toggles, [('src-b', true)]);
+  });
+
+  testWidgets('primary chip shows the star icon', (tester) async {
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.star), findsOneWidget);
+  });
+
+  testWidgets('menu offers set primary only; split is not offered', (
+    tester,
+  ) async {
+    final promoted = <String>[];
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: promoted.add,
+        ),
+      ),
+    );
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Set as primary'), findsOneWidget);
+    expect(find.text('Split into separate dive'), findsNothing);
+
+    await tester.tap(find.text('Set as primary'));
+    await tester.pumpAndSettle();
+
+    expect(promoted, ['src-b']);
+  });
+
+  testWidgets('the primary chip has no overflow menu at all', (tester) async {
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    // Only the non-primary chip carries a menu button.
+    expect(find.byIcon(Icons.more_vert), findsOneWidget);
+  });
+
+  testWidgets('profile-less source has a disabled eye', (tester) async {
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          operationReason: null,
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric', hasProfile: false),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: (_) {},
+        ),
+      ),
+    );
+
+    final eye = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.visibility_off_outlined),
+    );
+    expect(eye.onPressed, isNull);
+  });
+
+  testWidgets('with a reason the chip menu lists Set as primary disabled '
+      'under it', (tester) async {
+    final promoted = <String>[];
+    await tester.pumpWidget(
+      _harness(
+        SourceBar(
+          sources: [
+            _item(
+              sourceId: 'src-a',
+              label: 'Kiyans Teric',
+              isActive: true,
+              isPrimary: true,
+            ),
+            _item(sourceId: 'src-b', label: 'Erics Teric'),
+          ],
+          onActivate: (_) {},
+          onToggleOverlay: (_, _) {},
+          onSetPrimary: promoted.add,
+          operationReason: 'Unlock to use this',
+        ),
+      ),
+    );
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Unlock to use this'), findsOneWidget);
+    final item = tester.widget<PopupMenuItem<void>>(
+      find.ancestor(
+        of: find.text('Set as primary'),
+        matching: find.byWidgetPredicate((w) => w is PopupMenuItem<void>),
+      ),
+    );
+    expect(item.enabled, isFalse);
+    await tester.tap(find.text('Set as primary'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(promoted, isEmpty);
+  });
+}

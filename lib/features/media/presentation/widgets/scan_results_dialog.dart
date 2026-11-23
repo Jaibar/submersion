@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
 import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
@@ -31,16 +32,16 @@ class ScanDialogResult {
 ///
 /// Displays photos matched to dives with checkboxes to select which
 /// dives' photos should be linked. All dives are checked by default.
-class ScanResultsDialog extends StatefulWidget {
+class ScanResultsDialog extends ConsumerStatefulWidget {
   final ScanResult scanResult;
 
   const ScanResultsDialog({super.key, required this.scanResult});
 
   @override
-  State<ScanResultsDialog> createState() => _ScanResultsDialogState();
+  ConsumerState<ScanResultsDialog> createState() => _ScanResultsDialogState();
 }
 
-class _ScanResultsDialogState extends State<ScanResultsDialog> {
+class _ScanResultsDialogState extends ConsumerState<ScanResultsDialog> {
   /// Track which dives are selected for linking.
   late Map<Dive, bool> _selectedDives;
 
@@ -178,8 +179,7 @@ class _ScanResultsDialogState extends State<ScanResultsDialog> {
   }
 
   List<Widget> _buildDiveItems(ColorScheme colorScheme, TextTheme textTheme) {
-    final dateFormat = DateFormat.yMMMd();
-    final timeFormat = DateFormat.jm();
+    final units = ref.watch(unitFormatterProvider);
     final sortedDives = widget.scanResult.matchedByDive.keys.toList()
       ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
 
@@ -190,8 +190,8 @@ class _ScanResultsDialogState extends State<ScanResultsDialog> {
       // Build dive subtitle
       final siteName =
           dive.site?.name ?? context.l10n.media_scanResults_unknownSite;
-      final dateStr = dateFormat.format(dive.dateTime);
-      final timeStr = timeFormat.format(dive.effectiveEntryTime);
+      final dateStr = units.formatDate(dive.dateTime);
+      final timeStr = units.formatTime(dive.effectiveEntryTime);
 
       return CheckboxListTile(
         value: isSelected,

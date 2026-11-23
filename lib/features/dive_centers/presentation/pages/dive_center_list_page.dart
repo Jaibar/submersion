@@ -2,15 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/features/dive_centers/domain/constants/dive_center_field.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/selection/table_selection_owner.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/master_detail_scaffold.dart';
+import 'package:submersion/shared/widgets/master_detail/remembered_selection.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.dart';
@@ -18,8 +22,14 @@ import 'package:submersion/features/dive_centers/presentation/widgets/dive_cente
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_map_content.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_summary_widget.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
-import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_page.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/core/query/domain/query_subject.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_query_providers.dart';
+import 'package:submersion/features/dive_centers/query/dive_center_query_entity.dart';
+import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_list_count_provider.dart';
+import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
 
 class DiveCenterListPage extends ConsumerStatefulWidget {
   const DiveCenterListPage({super.key});
@@ -28,7 +38,8 @@ class DiveCenterListPage extends ConsumerStatefulWidget {
   ConsumerState<DiveCenterListPage> createState() => _DiveCenterListPageState();
 }
 
-class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
+class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage>
+    with TableSelectionOwner {
   bool get _isMapView {
     final state = GoRouterState.of(context);
     return state.uri.queryParameters['view'] == 'map';
@@ -68,7 +79,7 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/dive-centers/new');
+          openNewDiveCenter(context);
         }
       },
       tooltip: context.l10n.diveCenters_tooltip_addNew,
@@ -76,14 +87,22 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
       label: Text(context.l10n.diveCenters_title_add),
     );
 
+    resetTableSelectionOffTable(diveCenterListViewModeProvider);
+
     // Table mode: use shared TableModeLayout for full-width table with
     // optional detail pane and map.
     final viewMode = ref.watch(diveCenterListViewModeProvider);
     if (viewMode == ListViewMode.table) {
       return TableModeLayout(
         sectionKey: 'diveCenters',
+        paneSectionId: RecordListSection.diveCenters,
+        rememberedSelectedId: ref.watch(rememberedDiveCenterIdProvider),
         appBarTitle: context.l10n.nav_diveCenters,
-        tableContent: const DiveCenterListContent(showAppBar: false),
+        appBarSubtitle: diveCenterListCountLabel(context, ref),
+        tableContent: DiveCenterListContent(
+          showAppBar: false,
+          selectionController: tableSelection,
+        ),
         detailBuilder: (context, centerId) => DiveCenterDetailPage(
           centerId: centerId,
           embedded: true,
@@ -93,18 +112,18 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
           },
         ),
         summaryBuilder: (context) => const DiveCenterSummaryWidget(),
+        // The page opened unlocked (issue #4527).
         editBuilder: (context, centerId, onSaved, onCancel) =>
-            DiveCenterEditPage(
-              centerId: centerId,
-              embedded: true,
-              onSaved: onSaved,
-              onCancel: onCancel,
+            diveCenterEditPane(
+              context,
+              centerId,
+              onSaved,
+              onCancel,
+              onDeleted: () => context.go(GoRouterState.of(context).uri.path),
             ),
-        createBuilder: (context, onSaved, onCancel) => DiveCenterEditPage(
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
+        // The page on a new centre (plan 11).
+        createBuilder: (context, onSaved, onCancel) =>
+            newDiveCenterPane(context, onSaved, onCancel),
         mapContent: DiveCenterMapContent(
           selectedId: ref.watch(highlightedDiveCenterIdProvider),
           onItemSelected: (centerId) {
@@ -120,30 +139,25 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
         onMapViewToggle: _toggleMapView,
         columnSettingsAction: IconButton(
           icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
-          onPressed: () {
-            final config = ref.read(diveCenterTableConfigProvider);
-            final notifier = ref.read(diveCenterTableConfigProvider.notifier);
-            showEntityTableColumnPicker<DiveCenterField>(
-              context,
-              config: config,
-              adapter: DiveCenterFieldAdapter.instance,
-              onToggleColumn: notifier.toggleColumn,
-              onReorderColumn: notifier.reorderColumn,
-              onTogglePin: notifier.togglePin,
-            );
-          },
+          tooltip: context.l10n.columnConfig_tooltip_columnSettings,
+          onPressed: () => showEntityTableColumnPicker<DiveCenterField>(
+            context,
+            configProvider: diveCenterTableConfigProvider,
+            adapter: DiveCenterFieldAdapter.instance,
+          ),
         ),
         appBarActions: [
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
+          EntitySearchAction(
+            subject: QuerySubject.centers,
+            active: ref.watch(diveCenterQueryProvider) != null,
             tooltip: context.l10n.diveCenters_tooltip_search,
-            onPressed: () {
-              showSearch(
-                context: context,
-                delegate: DiveCenterSearchDelegate(ref),
-              );
-            },
+            compact: true,
+          ),
+          QueryFilterAction(
+            provider: diveCenterQueryProvider,
+            subject: QuerySubject.centers,
+            root: diveCenterQueryEntity,
+            compact: true,
           ),
           IconButton(
             icon: const Icon(Icons.sort, size: 20),
@@ -156,13 +170,15 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
                 currentField: sort.field,
                 currentDirection: sort.direction,
                 fields: DiveCenterSortField.values,
-                getFieldDisplayName: (field) => field.displayName,
+                getFieldDisplayName: (field) =>
+                    field.localizedName(context.l10n),
                 getFieldIcon: (field) => field.icon,
                 onSortChanged: (field, direction) {
-                  ref.read(diveCenterSortProvider.notifier).state = SortState(
-                    field: field,
-                    direction: direction,
-                  );
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setDiveCenterSort(
+                        SortState(field: field, direction: direction),
+                      );
                 },
               );
             },
@@ -174,12 +190,15 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
                 final mode = ListViewMode.fromName(
                   value.replaceFirst('view_', ''),
                 );
-                ref.read(diveCenterListViewModeProvider.notifier).state = mode;
+                ref
+                    .read(settingsProvider.notifier)
+                    .setDiveCenterListViewMode(mode);
               }
             },
             itemBuilder: (context) {
               final currentMode = ref.read(diveCenterListViewModeProvider);
               return [
+                ...tableSelectItemsEntries(context),
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
@@ -201,7 +220,8 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
       return FocusTraversalGroup(
         child: MasterDetailScaffold(
-          sectionId: 'dive-centers',
+          sectionId: RecordListSection.diveCenters,
+          rememberedSelectedId: ref.watch(rememberedDiveCenterIdProvider),
           masterBuilder: (context, onItemSelected, selectedId) =>
               DiveCenterListContent(
                 onItemSelected: onItemSelected,
@@ -226,18 +246,18 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage> {
                 onDetailsTap: (centerId) =>
                     context.push('/dive-centers/$centerId'),
               ),
+          // The page opened unlocked (issue #4527).
           editBuilder: (context, centerId, onSaved, onCancel) =>
-              DiveCenterEditPage(
-                centerId: centerId,
-                embedded: true,
-                onSaved: onSaved,
-                onCancel: onCancel,
+              diveCenterEditPane(
+                context,
+                centerId,
+                onSaved,
+                onCancel,
+                onDeleted: () => context.go(GoRouterState.of(context).uri.path),
               ),
-          createBuilder: (context, onSaved, onCancel) => DiveCenterEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new centre (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newDiveCenterPane(context, onSaved, onCancel),
           floatingActionButton: fab,
         ),
       );

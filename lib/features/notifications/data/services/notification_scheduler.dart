@@ -1,24 +1,82 @@
+import 'dart:async';
+
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/notification_service.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/equipment/data/repositories/service_kind_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
+import 'package:submersion/features/equipment/data/services/loaded_service_clocks.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/features/equipment/domain/entities/service_clock_status.dart';
+import 'package:submersion/features/equipment/domain/entities/service_kind.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_draft_repository.dart';
 import 'package:submersion/features/notifications/data/repositories/scheduled_notification_repository.dart';
+import 'package:submersion/features/notifications/domain/draft_reminder_plan.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/data/services/clearance_delete_events.dart';
+import 'package:submersion/features/documents/domain/clearance_supersession.dart';
+import 'package:submersion/features/documents/domain/document_reminder_plan.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/documents/presentation/document_l10n.dart';
+import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
 
-/// Service for scheduling equipment service reminder notifications
+/// Schedules service-clock reminder notifications plus one pre-trip nag per
+/// upcoming trip with gear due before the trip ends.
 class NotificationScheduler {
   final NotificationService _notificationService;
   final EquipmentRepository _equipmentRepository;
+  final ServiceScheduleRepository _serviceScheduleRepository;
+  final ServiceKindRepository _serviceKindRepository;
+  final ServiceRecordRepository _serviceRecordRepository;
+  final TripRepository _tripRepository;
   final ScheduledNotificationRepository _scheduledNotificationRepository;
+  final DocumentRepository _documentRepository;
+  final DiveDraftRepository _drafts;
+  final Future<bool> Function() _draftRemindersOn;
+
+  /// The medical clearance deletes (ClearanceDeleteEvents), by diver.
+  final Stream<Map<String, Set<String>>> _clearanceDeletes;
+
+  /// What each draft reminder this scheduler set was set with: its time
+  /// and locale. A reminder still pending with the same pair is left alone,
+  /// so a dive change does not reschedule every reminder.
+  final _draftReminderSet = <String, (DateTime, String)>{};
+  final DateTime Function() _clock;
   final _log = LoggerService.forClass(NotificationScheduler);
 
   NotificationScheduler({
     NotificationService? notificationService,
     EquipmentRepository? equipmentRepository,
+    ServiceScheduleRepository? serviceScheduleRepository,
+    ServiceKindRepository? serviceKindRepository,
+    ServiceRecordRepository? serviceRecordRepository,
+    TripRepository? tripRepository,
     ScheduledNotificationRepository? scheduledNotificationRepository,
-  }) : _notificationService =
+    DocumentRepository? documentRepository,
+    DiveDraftRepository? draftRepository,
+    Future<bool> Function()? draftRemindersOn,
+    DateTime Function()? clock,
+    Stream<Map<String, Set<String>>>? clearanceDeletes,
+  }) : _clearanceDeletes = clearanceDeletes ?? ClearanceDeleteEvents.stream,
+       _documentRepository = documentRepository ?? DocumentRepository(),
+       _drafts = draftRepository ?? DiveDraftRepository(),
+       _draftRemindersOn = draftRemindersOn ?? _draftRemindersSwitch,
+       _clock = clock ?? DateTime.now,
+       _notificationService =
            notificationService ?? NotificationService.instance,
        _equipmentRepository = equipmentRepository ?? EquipmentRepository(),
+       _serviceScheduleRepository =
+           serviceScheduleRepository ?? ServiceScheduleRepository(),
+       _serviceKindRepository =
+           serviceKindRepository ?? ServiceKindRepository(),
+       _serviceRecordRepository =
+           serviceRecordRepository ?? ServiceRecordRepository(),
+       _tripRepository = tripRepository ?? TripRepository(),
        _scheduledNotificationRepository =
            scheduledNotificationRepository ?? ScheduledNotificationRepository();
 
@@ -27,39 +85,95 @@ class NotificationScheduler {
     required AppSettings settings,
     String? diverId,
   }) async {
+    if (DemoModeGate.instance.isActive) return;
     if (!settings.notificationsEnabled) {
       _log.info('Notifications disabled, skipping scheduling');
       return;
     }
 
-    _log.info('Scheduling notifications for equipment service reminders');
+    _log.info('Scheduling notifications for service clocks');
 
-    // Get equipment with service dates
-    final equipment = await _equipmentRepository.getEquipmentWithServiceDates(
+    final items = await _equipmentRepository.getActiveEquipment(
       diverId: diverId,
     );
-
-    _log.info('Found ${equipment.length} equipment items with service dates');
+    // Every kind, not only [diverId]'s: a shared item's schedule can use its
+    // owner's custom kind, and ServiceDueEngine drops a schedule whose kind
+    // is missing (issue #2046).
+    final kinds = await _serviceKindRepository.getAllKinds();
+    final kindsById = {for (final k in kinds) k.id: k};
 
     // Clean up expired records first
     await _scheduledNotificationRepository.deleteExpired();
 
-    for (final item in equipment) {
-      await _scheduleForEquipment(item: item, globalSettings: settings);
+    final evaluated = await _evaluateClocks(
+      items: items,
+      kindsById: kindsById,
+      settings: settings,
+    );
+    for (final item in items) {
+      final statuses = evaluated[item.id] ?? const <ServiceClockStatus>[];
+      await _reconcileUsageReminders(item: item, statuses: statuses);
+      for (final status in statuses) {
+        await _scheduleForClock(
+          item: item,
+          status: status,
+          globalSettings: settings,
+        );
+      }
     }
+
+    await _scheduleTripReminders(
+      items: items,
+      statusesByItem: evaluated,
+      settings: settings,
+      diverId: diverId,
+    );
+
+    await _scheduleDocumentReminders(settings: settings, diverId: diverId);
+
+    await updateDraftReminders(settings: settings, diverId: diverId);
 
     _log.info('Notification scheduling complete');
   }
 
-  /// Schedule notifications for a single equipment item
-  Future<void> _scheduleForEquipment({
+  /// [items]' clocks keyed by equipment id, an item without one absent.
+  Future<Map<String, List<ServiceClockStatus>>> _evaluateClocks({
+    required List<EquipmentItem> items,
+    required Map<String, ServiceKind> kindsById,
+    required AppSettings settings,
+  }) => evaluateServiceClocksForItems(
+    items,
+    kindsById: kindsById,
+    settings: settings,
+    schedules: _serviceScheduleRepository,
+    records: _serviceRecordRepository,
+    equipment: _equipmentRepository,
+    now: DateTime.now(),
+  );
+
+  /// Schedule per-reminder-day notifications for one clock's date trigger.
+  /// Usage-only clocks get no push (there is no future date to anchor to);
+  /// they surface via the in-app badges instead.
+  Future<void> _scheduleForClock({
     required EquipmentItem item,
+    required ServiceClockStatus status,
     required AppSettings globalSettings,
   }) async {
-    final nextServiceDue = item.nextServiceDue;
-    if (nextServiceDue == null) return;
+    // Usage triggers first: a clock that is due because of dives, hours or
+    // an exposure unit gets its one-off reminder whether or not it also
+    // carries a calendar trigger.
+    if (_usageDue(status)) {
+      await _scheduleUsageReminder(
+        item: item,
+        status: status,
+        globalSettings: globalSettings,
+      );
+    }
+    final dueDate = status.dueDate;
+    if (dueDate == null) return;
 
-    // Determine which reminder days to use
+    // Determine which reminder days to use (per ITEM, matching the legacy
+    // custom-reminder override semantics).
     List<int> reminderDays;
     if (item.customReminderEnabled == false) {
       // Notifications disabled for this item
@@ -67,10 +181,8 @@ class NotificationScheduler {
       return;
     } else if (item.customReminderEnabled == true &&
         item.customReminderDays != null) {
-      // Use custom reminder days
       reminderDays = item.customReminderDays!;
     } else {
-      // Use global settings
       reminderDays = globalSettings.serviceReminderDays;
     }
 
@@ -79,7 +191,7 @@ class NotificationScheduler {
         : null;
 
     for (final daysBefore in reminderDays) {
-      final scheduledDate = nextServiceDue.subtract(Duration(days: daysBefore));
+      final scheduledDate = dueDate.subtract(Duration(days: daysBefore));
 
       // Add the reminder time
       final scheduledDateTime = DateTime(
@@ -95,42 +207,193 @@ class NotificationScheduler {
         continue;
       }
 
-      // Check if already scheduled
+      // Check if already scheduled (per clock)
       final alreadyScheduled = await _scheduledNotificationRepository
           .isScheduled(
             equipmentId: item.id,
             reminderDaysBefore: daysBefore,
             scheduledDate: scheduledDateTime,
+            scheduleId: status.schedule.id,
           );
 
       if (alreadyScheduled) {
         continue;
       }
 
-      // Schedule the notification
       final notificationId = await _notificationService.scheduleServiceReminder(
+        scheduleId: status.schedule.id,
         equipmentId: item.id,
         equipmentName: item.name,
+        kindName: status.kind.name,
         brandModel: brandModel,
         scheduledDate: scheduledDateTime,
         daysBefore: daysBefore,
       );
 
-      // Record the scheduled notification
       await _scheduledNotificationRepository.recordScheduled(
         equipmentId: item.id,
         scheduledDate: scheduledDateTime,
         reminderDaysBefore: daysBefore,
         notificationId: notificationId,
+        scheduleId: status.schedule.id,
       );
     }
   }
 
-  /// Cancel notifications for an equipment item
+  /// Cancel usage reminders that no longer belong to their clock's current
+  /// anchor: the clock is no longer due (a service record moved the anchor,
+  /// or the schedule was removed or paused), or the reminder was armed
+  /// against a different anchor (the clock is still due, but a record moved
+  /// the anchor in either direction). The platform notification is
+  /// cancelled by its recorded id and the ledger row dropped, so
+  /// [_scheduleUsageReminder] can arm exactly one against the current
+  /// anchor.
+  Future<void> _reconcileUsageReminders({
+    required EquipmentItem item,
+    required List<ServiceClockStatus> statuses,
+  }) async {
+    final recorded = await _scheduledNotificationRepository.getForEquipment(
+      item.id,
+    );
+    final bySchedule = {for (final s in statuses) s.schedule.id: s};
+    for (final row in recorded) {
+      if (row.reminderDaysBefore != kUsageReminderDaysBefore) continue;
+      final status = bySchedule[row.scheduleId];
+      final current =
+          status != null &&
+          _usageDue(status) &&
+          row.createdAt == status.anchor.millisecondsSinceEpoch;
+      if (current) continue;
+      await _notificationService.cancelNotification(row.notificationId);
+      await _scheduledNotificationRepository.deleteById(row.id);
+    }
+  }
+
+  /// Whether any usage unit is within its due-soon band or past it. Mirrors
+  /// the engine's band: counts round the 10 percent band up, fractional
+  /// units compare directly.
+  bool _usageDue(ServiceClockStatus status) {
+    for (final entry in status.usageByUnit.entries) {
+      final u = entry.value;
+      final band = entry.key.isFractional
+          ? u.interval * 0.1
+          : (u.interval * 0.1).ceilToDouble();
+      if (u.remaining <= band) return true;
+    }
+    return false;
+  }
+
+  /// One local notification when a usage clock reaches due-soon or
+  /// overdue, deduplicated per (schedule, anchor). Fires at the next
+  /// reminder time. Rescheduling everything (settings change) re-arms it
+  /// once, which is acceptable for a clock that is still due.
+  Future<void> _scheduleUsageReminder({
+    required EquipmentItem item,
+    required ServiceClockStatus status,
+    required AppSettings globalSettings,
+  }) async {
+    if (item.customReminderEnabled == false) return;
+    final already = await _scheduledNotificationRepository.hasUsageReminder(
+      scheduleId: status.schedule.id,
+      anchor: status.anchor,
+    );
+    if (already) return;
+
+    final now = DateTime.now();
+    var fireAt = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      globalSettings.reminderTime.hour,
+      globalSettings.reminderTime.minute,
+    );
+    if (!fireAt.isAfter(now)) fireAt = fireAt.add(const Duration(days: 1));
+
+    final brandModel = item.brand != null || item.model != null
+        ? '${item.brand ?? ''} ${item.model ?? ''}'.trim()
+        : null;
+    final notificationId = await _notificationService.scheduleServiceReminder(
+      scheduleId: status.schedule.id,
+      equipmentId: item.id,
+      equipmentName: item.name,
+      kindName: status.kind.name,
+      brandModel: brandModel,
+      scheduledDate: fireAt,
+      daysBefore: kUsageReminderDaysBefore,
+    );
+    await _scheduledNotificationRepository.recordScheduled(
+      equipmentId: item.id,
+      scheduledDate: fireAt,
+      reminderDaysBefore: kUsageReminderDaysBefore,
+      notificationId: notificationId,
+      scheduleId: status.schedule.id,
+      // The anchor this reminder was armed against, not the wall clock, so
+      // a backdated record still reads as a different anchor.
+      createdAt: status.anchor.millisecondsSinceEpoch,
+    );
+  }
+
+  /// One notification per upcoming trip with service alerts, at trip start
+  /// minus the configured lead time. Same alert rule as the trip banner:
+  /// date trigger before trip end, or already overdue.
+  Future<void> _scheduleTripReminders({
+    required List<EquipmentItem> items,
+    required Map<String, List<ServiceClockStatus>> statusesByItem,
+    required AppSettings settings,
+    String? diverId,
+  }) async {
+    final trips = await _tripRepository.getAllTrips(diverId: diverId);
+    final now = DateTime.now();
+    for (final trip in trips) {
+      if (!trip.startDate.isAfter(now)) continue;
+
+      // Count distinct ITEMS with any blocking clock -- the notification
+      // says "N items", and one item with hydro + VIP both due is still one
+      // thing to bring to the shop.
+      final blockedItemIds = <String>{};
+      for (final item in items) {
+        for (final status in statusesByItem[item.id] ?? const []) {
+          final blocks =
+              status.severity == ServiceClockSeverity.overdue ||
+              (status.dueDate != null &&
+                  status.dueDate!.isBefore(trip.endDate));
+          if (blocks) blockedItemIds.add(item.id);
+        }
+      }
+      if (blockedItemIds.isEmpty) continue;
+
+      final fireAt = DateTime(
+        trip.startDate.year,
+        trip.startDate.month,
+        trip.startDate.day,
+        settings.reminderTime.hour,
+        settings.reminderTime.minute,
+      ).subtract(Duration(days: settings.tripServiceLeadDays));
+      if (fireAt.isBefore(now)) continue;
+
+      await _notificationService.scheduleTripServiceReminder(
+        tripId: trip.id,
+        tripName: trip.name,
+        itemCount: blockedItemIds.length,
+        scheduledDate: fireAt,
+      );
+    }
+  }
+
+  /// Cancel notifications for an equipment item. Cancels by the RECORDED
+  /// platform ids (v122 ids derive from schedule ids, so recomputing from
+  /// the equipment id would miss them); the legacy equipment-hash ids are
+  /// also cancelled for pre-ledger rows.
   Future<void> _cancelForEquipment(
     String equipmentId,
     List<int> daysBefore,
   ) async {
+    final recorded = await _scheduledNotificationRepository.getForEquipment(
+      equipmentId,
+    );
+    for (final row in recorded) {
+      await _notificationService.cancelNotification(row.notificationId);
+    }
     await _notificationService.cancelNotificationsForEquipment(
       equipmentId,
       daysBefore,
@@ -143,6 +406,7 @@ class NotificationScheduler {
     required AppSettings settings,
     String? diverId,
   }) async {
+    if (DemoModeGate.instance.isActive) return;
     _log.info('Rescheduling all notifications');
 
     // Cancel all existing notifications
@@ -158,10 +422,260 @@ class NotificationScheduler {
     required EquipmentItem item,
     required AppSettings globalSettings,
   }) async {
+    if (DemoModeGate.instance.isActive) return;
     // Cancel existing notifications for this item
     await _cancelForEquipment(item.id, [7, 14, 30]); // Cancel all possible days
 
     // Reschedule based on current settings
-    await _scheduleForEquipment(item: item, globalSettings: globalSettings);
+    final kinds = await _serviceKindRepository.getAllKinds();
+    final evaluated = await _evaluateClocks(
+      items: [item],
+      kindsById: {for (final k in kinds) k.id: k},
+      settings: globalSettings,
+    );
+    for (final status in evaluated[item.id] ?? const <ServiceClockStatus>[]) {
+      await _scheduleForClock(
+        item: item,
+        status: status,
+        globalSettings: globalSettings,
+      );
+    }
+  }
+
+  /// Expiry reminders for every reminding document of [diverId] (#2613).
+  ///
+  /// The run arms from what it read at its start, so a medical clearance
+  /// deleted meanwhile, after its own re-arm, would be armed again and the
+  /// one it superseded left silent. Each diver a delete named during the
+  /// run is settled again once it is done, from the database as it is then
+  /// (#4609). A delete heard only after the run is re-armed after it by
+  /// the delete listener.
+  Future<void> _scheduleDocumentReminders({
+    required AppSettings settings,
+    String? diverId,
+  }) async {
+    final deletedMeanwhile = <String, Set<String>>{};
+    final heard = _clearanceDeletes.listen((deletedByDiver) {
+      for (final MapEntry(key: diver, value: ids) in deletedByDiver.entries) {
+        (deletedMeanwhile[diver] ??= {}).addAll(ids);
+      }
+    });
+    try {
+      await _armDocumentReminders(settings: settings, diverId: diverId);
+    } finally {
+      await heard.cancel();
+    }
+    for (final MapEntry(key: diver, value: ids) in deletedMeanwhile.entries) {
+      await updateClearancesForDiver(diver, settings, deletedIds: ids);
+    }
+  }
+
+  Future<void> _armDocumentReminders({
+    required AppSettings settings,
+    String? diverId,
+  }) async {
+    // Pending reminders, known only from their payloads. One whose document
+    // is gone (deleted on another device, or with its owner) or no longer
+    // reminds is cancelled. One of another profile, which the loop below
+    // never reaches, is rebuilt from the document as it is now: a renewal
+    // synced in must not leave the old expiry announcing itself. A medical
+    // clearance rebuilds its diver's whole set (#4541), so once per diver.
+    // One of [diverId]'s that a later clearance supersedes is cancelled.
+    // A gone document of another profile may have been its current
+    // clearance, and the one it superseded has no reminder to be found
+    // by: the payload's diver settles that profile's set (#4609).
+    final reminding = diverId == null
+        ? const <Document>[]
+        : await _documentRepository.getRemindingForDiver(diverId);
+    final remindingIds = {for (final d in reminding) d.id};
+    final clearanceDiversRebuilt = <String>{};
+    final pending = await _notificationService.pendingDocumentReminders();
+    for (final MapEntry(key: id, value: payloadDiver) in pending.entries) {
+      final document = await _documentRepository.getById(id);
+      if (document == null) {
+        await _notificationService.cancelDocumentReminders(id);
+        if (payloadDiver != null &&
+            payloadDiver != diverId &&
+            clearanceDiversRebuilt.add(payloadDiver)) {
+          await _settleClearances(payloadDiver, settings);
+        }
+      } else if (!document.remindsOnExpiry) {
+        await _notificationService.cancelDocumentReminders(id);
+      } else if (document.diverId != diverId) {
+        // Only a clearance settles its diver's others: a type change is an
+        // edit's concern, not a full schedule's.
+        if (document.type != DocumentType.medicalClearance) {
+          await _armDocument(document, settings);
+        } else if (clearanceDiversRebuilt.add(document.diverId)) {
+          await updateForDocument(document, settings);
+        }
+      } else if (!remindingIds.contains(id)) {
+        await _notificationService.cancelDocumentReminders(id);
+      }
+    }
+    for (final document in reminding) {
+      await _armDocument(document, settings);
+    }
+  }
+
+  /// Replaces [document]'s reminders with the ones its expiry calls for
+  /// now; after an edit that cleared the expiry, that is none.
+  ///
+  /// A medical clearance re-arms its diver's every clearance from the
+  /// database instead, so only the current one reminds (#4541): saving a
+  /// renewal silences the one it supersedes, and passing a deleted
+  /// renewal brings the superseded one back.
+  ///
+  /// Any other type settles its diver's clearances too, since the document
+  /// may have been the current clearance before an edit changed its type,
+  /// and the one it superseded should remind again.
+  Future<void> updateForDocument(
+    Document document,
+    AppSettings settings,
+  ) async {
+    if (DemoModeGate.instance.isActive) return;
+    if (document.type == DocumentType.medicalClearance) {
+      return _updateClearances(document, settings);
+    }
+    await _armDocument(document, settings);
+    await _settleClearances(document.diverId, settings);
+  }
+
+  /// Re-arms [diverId]'s medical clearances from the database, so only
+  /// the current one reminds: after a delete took [deletedIds] (#4609),
+  /// the one they superseded reminds again. Those of [deletedIds] still
+  /// gone are cancelled once more afterwards: an earlier re-arm that read
+  /// them before they went may have armed them since their delete
+  /// cancelled them. One still present is a delete that rolled back, and
+  /// the settle has just armed it as it should.
+  Future<void> updateClearancesForDiver(
+    String diverId,
+    AppSettings settings, {
+    Iterable<String> deletedIds = const [],
+  }) async {
+    if (DemoModeGate.instance.isActive) return;
+    final present = {
+      for (final c in await _settleClearances(diverId, settings)) c.id,
+    };
+    for (final id in deletedIds) {
+      if (present.contains(id)) continue;
+      await _notificationService.cancelDocumentReminders(id);
+    }
+  }
+
+  Future<void> _updateClearances(Document changed, AppSettings settings) async {
+    final clearances = await _settleClearances(changed.diverId, settings);
+    if (!clearances.any((c) => c.id == changed.id)) {
+      await _notificationService.cancelDocumentReminders(changed.id);
+    }
+  }
+
+  /// Arms [diverId]'s current clearance and cancels the ones it supersedes;
+  /// returns the clearances it read.
+  Future<List<Document>> _settleClearances(
+    String diverId,
+    AppSettings settings,
+  ) async {
+    final clearances = await _documentRepository.getMedicalClearancesForDiver(
+      diverId,
+    );
+    final superseded = supersededClearanceIds(clearances);
+    for (final clearance in clearances) {
+      if (superseded.contains(clearance.id)) {
+        await _notificationService.cancelDocumentReminders(clearance.id);
+      } else {
+        await _armDocument(clearance, settings);
+      }
+    }
+    return clearances;
+  }
+
+  Future<void> _armDocument(Document document, AppSettings settings) async {
+    if (DemoModeGate.instance.isActive) return;
+    await _notificationService.cancelDocumentReminders(document.id);
+    if (!settings.notificationsEnabled) return;
+    final l10n = l10nForLocaleTag(settings.locale);
+    final title = documentDisplayTitle(l10n, document);
+    for (final r in documentReminderPlan(
+      document,
+      DateTime.now(),
+      settings.reminderTime,
+    )) {
+      final expiryDay = r.stage == DocumentReminderStage.expiryDay;
+      await _notificationService.scheduleDocumentReminder(
+        documentId: document.id,
+        diverId: document.diverId,
+        title: expiryDay
+            ? l10n.notifications_document_expiresToday_title(title)
+            : l10n.notifications_document_expiresSoon_title(title),
+        body: expiryDay
+            ? l10n.notifications_document_expiresToday_body
+            : l10n.notifications_document_expiresSoon_body(r.daysLeft),
+        stage: r.stage,
+        scheduledDate: r.fireAt,
+      );
+    }
+  }
+
+  /// Reminders for [diverId]'s drafts out of the water and waiting for a
+  /// download (issue #637): one per draft, three days after its exit at the
+  /// reminder time, while that is still ahead. A pending reminder whose
+  /// draft was filled, completed or deleted is cancelled. With no diver (a
+  /// background refresh) the reminders are left as they are.
+  Future<void> updateDraftReminders({
+    required AppSettings settings,
+    String? diverId,
+  }) async {
+    if (DemoModeGate.instance.isActive || diverId == null) return;
+    final now = _clock();
+    final due = <String, DateTime>{};
+    if (settings.notificationsEnabled && await _draftRemindersOn()) {
+      for (final draft in await _drafts.getDrafts(diverId: diverId)) {
+        final exit = draft.exitTime;
+        if (exit == null) continue;
+        final at = draftReminderAt(
+          exitWallClock: exit,
+          reminderTime: settings.reminderTime,
+        );
+        if (at.isAfter(now)) due[draft.id] = at;
+      }
+    }
+    final pending = await _notificationService.pendingDraftReminderIds();
+    for (final id in pending) {
+      if (!due.containsKey(id)) {
+        await _notificationService.cancelDraftReminder(id);
+        _draftReminderSet.remove(id);
+      }
+    }
+    if (due.isEmpty) return;
+    final l10n = l10nForLocaleTag(settings.locale);
+    for (final MapEntry(key: diveId, value: at) in due.entries) {
+      final setWith = (at, settings.locale);
+      if (pending.contains(diveId) && _draftReminderSet[diveId] == setWith) {
+        continue;
+      }
+      _draftReminderSet[diveId] = setWith;
+      await _notificationService.scheduleDraftReminder(
+        diveId: diveId,
+        at: at,
+        title: l10n.notifications_draftReminder_title,
+        body: l10n.notifications_draftReminder_body,
+      );
+    }
+  }
+
+  /// The device-local "remind me about drafts" switch, off unless set. A
+  /// store that cannot be read (no preferences plugin, as in a background
+  /// isolate that never registered one) reads as off, so the other reminders
+  /// still schedule.
+  static Future<bool> _draftRemindersSwitch() async {
+    try {
+      return (await SharedPreferences.getInstance()).getBool(
+            SettingsKeys.draftDownloadReminder,
+          ) ??
+          false;
+    } catch (_) {
+      return false;
+    }
   }
 }

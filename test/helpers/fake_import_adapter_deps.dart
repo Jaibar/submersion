@@ -6,6 +6,7 @@ import 'package:libdivecomputer_plugin/src/dive_computer_service.dart'
 import 'package:submersion/features/dive_computer/data/services/dive_import_service.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
 
 class _FakeDiveComputerService implements pigeon.DiveComputerService {
@@ -27,6 +28,7 @@ class _FakeDiveComputerService implements pigeon.DiveComputerService {
   Future<void> startDownload(
     pigeon.DiscoveredDevice device, {
     String? fingerprint,
+    bool syncClock = false,
   }) async {}
   @override
   Future<void> cancelDownload() async {}
@@ -45,6 +47,9 @@ class _FakeDiveComputerService implements pigeon.DiveComputerService {
     int totalDives,
     String? serialNumber,
     String? firmwareVersion,
+    String? clockSyncStatus,
+    String? reportedProduct,
+    int? reportedModel,
   ) {}
   @override
   void onError(pigeon.DiveComputerError error) {}
@@ -81,4 +86,7 @@ class FakeImportAdapterDeps {
 
   DiveImportService get importService =>
       DiveImportService(repository: computerRepo, diveRepository: diveRepo);
+
+  DiveConsolidationService get consolidationService =>
+      DiveConsolidationService(diveRepo);
 }

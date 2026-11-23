@@ -1,0 +1,97 @@
+import 'package:equatable/equatable.dart';
+
+/// Checklist item (copied from a template or added ad hoc), belonging to one
+/// of a trip's checklists (issue #3356).
+class TripChecklistItem extends Equatable {
+  final String id;
+  final String checklistId;
+  final String title;
+
+  /// The section this item is grouped under, if any (issue #3360). Replaces
+  /// the free-text `category` field.
+  final String? sectionId;
+  final String notes;
+
+  /// Absolute due date, resolved from the template offset at apply time.
+  final DateTime? dueDate;
+  final bool isDone;
+  final DateTime? completedAt;
+  final int sortOrder;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  const TripChecklistItem({
+    required this.id,
+    required this.checklistId,
+    required this.title,
+    this.sectionId,
+    this.notes = '',
+    this.dueDate,
+    this.isDone = false,
+    this.completedAt,
+    this.sortOrder = 0,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  /// Overdue when the due date has passed (date-only) and the item is
+  /// not done. Callers must additionally gate on Trip.isUpcoming so past
+  /// trips never nag.
+  bool isOverdue(DateTime now) {
+    final due = dueDate;
+    if (due == null || isDone) return false;
+    final today = DateTime(now.year, now.month, now.day);
+    final dueDay = DateTime(due.year, due.month, due.day);
+    return dueDay.isBefore(today);
+  }
+
+  TripChecklistItem copyWith({
+    String? id,
+    String? checklistId,
+    String? title,
+    Object? sectionId = _undefined,
+    String? notes,
+    Object? dueDate = _undefined,
+    bool? isDone,
+    Object? completedAt = _undefined,
+    int? sortOrder,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return TripChecklistItem(
+      id: id ?? this.id,
+      checklistId: checklistId ?? this.checklistId,
+      title: title ?? this.title,
+      sectionId: sectionId == _undefined
+          ? this.sectionId
+          : sectionId as String?,
+      notes: notes ?? this.notes,
+      dueDate: dueDate == _undefined ? this.dueDate : dueDate as DateTime?,
+      isDone: isDone ?? this.isDone,
+      completedAt: completedAt == _undefined
+          ? this.completedAt
+          : completedAt as DateTime?,
+      sortOrder: sortOrder ?? this.sortOrder,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  @override
+  List<Object?> get props => [
+    id,
+    checklistId,
+    title,
+    sectionId,
+    notes,
+    dueDate,
+    isDone,
+    completedAt,
+    sortOrder,
+    createdAt,
+    updatedAt,
+  ];
+}
+
+// Sentinel value for distinguishing null from undefined in copyWith
+const _undefined = Object();

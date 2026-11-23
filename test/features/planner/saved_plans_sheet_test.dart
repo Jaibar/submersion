@@ -1,0 +1,488 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:share_plus_platform_interface/share_plus_platform_interface.dart';
+import 'package:submersion/core/constants/map_style.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/planner/data/repositories/dive_plan_repository.dart';
+import 'package:submersion/features/planner/data/services/plan_file_codec.dart';
+import 'package:submersion/features/planner/data/services/plan_file_names.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_repository_providers.dart';
+import 'package:submersion/features/planner/presentation/widgets/saved_plans_sheet.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
+import '../../helpers/fake_path_provider.dart';
+import '../../helpers/mock_file_picker_platform.dart';
+import '../../helpers/test_app.dart';
+import '../../helpers/test_database.dart';
+
+/// Sharing a plan writes it to getApplicationDocumentsDirectory() first, a
+/// platform channel with no implementation under flutter_test.
+class _FakePathProvider extends PathProviderPlatform
+    with MockPlatformInterfaceMixin {
+  _FakePathProvider(this.documentsPath);
+  final String documentsPath;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => documentsPath;
+}
+
+/// Records what reached the platform so the iPad popover anchor can be
+/// asserted without a real share sheet.
+class _FakeSharePlatform extends SharePlatform {
+  final List<ShareParams> calls = [];
+
+  @override
+  Future<ShareResult> share(ShareParams params) async {
+    calls.add(params);
+    return const ShareResult('ok', ShareResultStatus.success);
+  }
+}
+
+class _TestSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _TestSettingsNotifier() : super(const AppSettings());
+
+  @override
+  Future<void> setMapStyle(MapStyle style) async =>
+      state = state.copyWith(mapStyle: style);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+DivePlan _plan(String id, String name) => DivePlan(
+  id: id,
+  name: name,
+  gfLow: 50,
+  gfHigh: 80,
+  createdAt: DateTime(2026, 7, 5),
+  updatedAt: DateTime(2026, 7, 5),
+);
+
+void main() {
+  late DivePlanRepository repository;
+  late Directory documents;
+  final sharePlatform = _FakeSharePlatform();
+
+  // The harness pins a forwarder that looks the platform up on every share
+  // (test/helpers/late_bound_share_platform.dart), so the fake comes out
+  // again when this file is done.
+  late SharePlatform originalSharePlatform;
+
+  setUpAll(() {
+    originalSharePlatform = SharePlatform.instance;
+    SharePlatform.instance = sharePlatform;
+  });
+  tearDownAll(() => SharePlatform.instance = originalSharePlatform);
+
+  setUp(() async {
+    await setUpTestDatabase();
+    repository = DivePlanRepository();
+    documents = Directory.systemTemp.createTempSync('saved_plans_sheet_test');
+    useFakePathProvider(_FakePathProvider(documents.path));
+    sharePlatform.calls.clear();
+  });
+
+  tearDown(() {
+    DatabaseService.instance.resetForTesting();
+    documents.deleteSync(recursive: true);
+  });
+
+  Widget harness() => testApp(
+    overrides: [
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+    ],
+    locale: const Locale('en'),
+    child: const SavedPlansSheet(),
+  );
+
+  // A router harness so the sheet's `context.go(...)` calls resolve to stub
+  // destinations we can assert on.
+  Widget routerHarness() => testAppRouter(
+    overrides: [
+      settingsProvider.overrideWith((ref) => _TestSettingsNotifier()),
+    ],
+    router: GoRouter(
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (_, _) => Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => showSavedPlansSheet(context),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: '/planning/dive-planner/compare',
+          builder: (_, _) => const Scaffold(body: Text('compare-page')),
+        ),
+        GoRoute(
+          path: '/planning/dive-planner/:id',
+          builder: (_, state) =>
+              Scaffold(body: Text('plan:${state.pathParameters['id']}')),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> openSheet(WidgetTester tester) async {
+    await tester.pumpWidget(routerHarness());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('lists saved plans', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    await repository.savePlan(_plan('b', 'Wreck dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Reef dive'), findsOneWidget);
+    expect(find.text('Wreck dive'), findsOneWidget);
+  });
+
+  testWidgets('shows empty state with no plans', (tester) async {
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+    expect(find.text('No saved plans yet'), findsOneWidget);
+  });
+
+  testWidgets('delete flow removes a plan after confirmation', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+
+    // Confirmation dialog.
+    expect(find.text('Delete plan?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(await repository.getAllPlanSummaries(), isEmpty);
+  });
+
+  testWidgets('duplicate action copies the plan', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Duplicate').last);
+    await tester.pumpAndSettle();
+
+    expect(await repository.getAllPlanSummaries(), hasLength(2));
+  });
+
+  testWidgets('share anchors the iPad popover to the row overflow button', (
+    tester,
+  ) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    // The overflow button stays mounted while the menu is up and after it
+    // pops, so it is a valid anchor at the moment the share sheet opens --
+    // unlike the menu item, which is gone by then.
+    final button = find.byType(PopupMenuButton<String>);
+    final buttonRect = tester.getRect(button);
+
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export plan file').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    // Sharing writes the plan with real dart:io, which parks under the
+    // FakeAsync zone testWidgets runs in: runAsync turns the real event loop
+    // so the write lands, and the following pump drains the continuation that
+    // FakeAsync then has queued. Neither alone gets to the share sheet.
+    for (var i = 0; i < 50 && sharePlatform.calls.isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+
+    expect(sharePlatform.calls.single.sharePositionOrigin, buttonRect);
+  });
+
+  testWidgets('export can save the plan file through the save dialog', (
+    tester,
+  ) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    final original = FilePickerPlatform.instance;
+    addTearDown(() => FilePickerPlatform.instance = original);
+    final picker = MockFilePickerPlatform()
+      ..saveFileResult = Uri.file(p.join(documents.path, 'saved'));
+    FilePickerPlatform.instance = picker;
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export plan file').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save to File'));
+    await tester.pumpAndSettle();
+
+    // The plan is read from the database only once a destination is chosen,
+    // and the fake dialog writes with real dart:io: both need the real event
+    // loop, so wait for the confirmation that follows them.
+    for (var i = 0; i < 50 && find.byType(SnackBar).evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    expect(picker.lastSavedFileName, subplanFileName('Reef dive'));
+    expect(String.fromCharCodes(picker.lastSavedBytes!), contains('Reef dive'));
+    expect(sharePlatform.calls, isEmpty);
+    expect(find.text('Plan file saved'), findsOneWidget);
+  });
+
+  testWidgets('snackbars show inside the sheet, not behind it', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    final original = FilePickerPlatform.instance;
+    addTearDown(() => FilePickerPlatform.instance = original);
+    FilePickerPlatform.instance = MockFilePickerPlatform()
+      ..saveFileResult = Uri.file(p.join(documents.path, 'saved'));
+
+    // Opened as the real modal sheet: a snackbar sent to the page's
+    // messenger would render underneath it.
+    await openSheet(tester);
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export plan file').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save to File'));
+    await tester.pumpAndSettle();
+    for (var i = 0; i < 50 && find.byType(SnackBar).evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('Plan file saved'),
+      ),
+      findsOneWidget,
+    );
+    // The sheet keeps its content height rather than filling the screen.
+    final screen = tester.getSize(find.byType(MaterialApp));
+    expect(
+      tester.getSize(find.byType(BottomSheet)).height,
+      lessThan(screen.height / 2),
+    );
+  });
+
+  testWidgets('tapping a plan opens it', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+
+    await openSheet(tester);
+
+    await tester.tap(find.text('Reef dive'));
+    await tester.pumpAndSettle();
+    expect(find.text('plan:a'), findsOneWidget);
+  });
+
+  testWidgets('compare mode selects plans and opens the compare page', (
+    tester,
+  ) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    await repository.savePlan(_plan('b', 'Wreck dive'));
+
+    await openSheet(tester);
+
+    // Enter compare mode -> checkboxes appear.
+    await tester.tap(find.text('Compare'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CheckboxListTile), findsNWidgets(2));
+
+    // Select both, then launch the compare page.
+    await tester.tap(find.text('Reef dive'));
+    await tester.tap(find.text('Wreck dive'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Compare (2)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('compare-page'), findsOneWidget);
+  });
+
+  testWidgets('delete is not offered per-row inside compare mode', (
+    tester,
+  ) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    await repository.savePlan(_plan('b', 'Wreck dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    // Normal mode: each row carries its own trash button.
+    expect(find.byIcon(Icons.delete_outline), findsNWidgets(2));
+
+    await tester.tap(find.text('Compare'));
+    await tester.pumpAndSettle();
+
+    // Compare mode: the rows are checkboxes gathering plans for a comparison,
+    // so a one-tap destructive action has no business sitting beside them.
+    expect(find.byType(CheckboxListTile), findsNWidgets(2));
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
+
+    // Cancelling restores the per-row delete.
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.delete_outline), findsNWidgets(2));
+  });
+
+  testWidgets('compare mode is not silently re-entered after the count '
+      'recovers', (tester) async {
+    await repository.savePlan(_plan('a', 'Reef dive'));
+    await repository.savePlan(_plan('b', 'Wreck dive'));
+
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    // Enter compare mode, then drop to one plan behind the sheet's back. The
+    // count can fall while the sheet is open without the sheet doing it --
+    // deleting from the canvas, or a sync -- so the listener must still reset
+    // the mode rather than relying on the sheet's own controls.
+    await tester.tap(find.text('Compare'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CheckboxListTile), findsNWidgets(2));
+
+    await repository.deletePlan('b');
+    ProviderScope.containerOf(
+      tester.element(find.byType(SavedPlansSheet)),
+    ).invalidate(divePlanSummariesProvider);
+    await tester.pumpAndSettle();
+    expect(find.byType(CheckboxListTile), findsNothing);
+
+    // Adding a plan back climbs the count to >=2 again. The sheet must stay in
+    // normal mode; a stale `_selecting` flag would resurrect the checkboxes.
+    await repository.savePlan(_plan('c', 'Drift dive'));
+    ProviderScope.containerOf(
+      tester.element(find.byType(SavedPlansSheet)),
+    ).invalidate(divePlanSummariesProvider);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CheckboxListTile), findsNothing);
+    expect(find.text('Compare'), findsOneWidget);
+  });
+
+  /// Taps Import and waits for the handler to actually finish.
+  ///
+  /// The import does real file and database I/O, which only progresses inside
+  /// runAsync. Its duration is wall-clock and scales with machine load, so a
+  /// single fixed delay is a race rather than a wait: poll until [done] holds,
+  /// with a ceiling so a genuine hang still fails.
+  Future<void> tapImportAndSettle(WidgetTester tester) async {
+    await tester.runAsync(() async {
+      await tester.tap(find.text('Import'));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    });
+    await tester.pumpAndSettle();
+
+    for (var i = 0; i < 100; i++) {
+      final done =
+          find.textContaining('plan:').evaluate().isNotEmpty ||
+          find.byType(SnackBar).evaluate().isNotEmpty;
+      if (done) return;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+    }
+  }
+
+  testWidgets('import reads a .subplan file and opens the imported plan', (
+    tester,
+  ) async {
+    final dir = Directory.systemTemp.createTempSync('subplan-import');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/plan.subplan')
+      ..writeAsStringSync(planToSubplanJson(_plan('src', 'Imported reef')));
+    final original = FilePickerPlatform.instance;
+    addTearDown(() => FilePickerPlatform.instance = original);
+    FilePickerPlatform.instance = MockFilePickerPlatform()
+      ..pickFilesResult = [FakePlatformFile(file.path, name: 'plan.subplan')];
+
+    await openSheet(tester);
+    // The import does real file + DB I/O; runAsync lets it complete.
+    await tapImportAndSettle(tester);
+
+    // Imported with a fresh id, so the route lands on the new plan page.
+    expect(find.textContaining('plan:'), findsOneWidget);
+    expect(await repository.getAllPlanSummaries(), hasLength(1));
+  });
+
+  testWidgets('import surfaces a friendly error for a malformed file', (
+    tester,
+  ) async {
+    final dir = Directory.systemTemp.createTempSync('subplan-bad');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/bad.subplan')
+      ..writeAsStringSync('this is not a plan');
+    final original = FilePickerPlatform.instance;
+    addTearDown(() => FilePickerPlatform.instance = original);
+    FilePickerPlatform.instance = MockFilePickerPlatform()
+      ..pickFilesResult = [FakePlatformFile(file.path, name: 'bad.subplan')];
+
+    await openSheet(tester);
+    await tapImportAndSettle(tester);
+
+    // The FormatException is caught and surfaced, not thrown out of the sheet.
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(await repository.getAllPlanSummaries(), isEmpty);
+  });
+
+  testWidgets('rename from the overflow menu updates the plan name', (
+    tester,
+  ) async {
+    await repository.savePlan(_plan('p1', 'New Dive Plan'));
+    await tester.pumpWidget(harness());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename Plan'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'Zenobia');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    final summaries = await repository.getAllPlanSummaries();
+    expect(summaries.single.name, 'Zenobia');
+    expect(find.text('Zenobia'), findsOneWidget);
+  });
+}

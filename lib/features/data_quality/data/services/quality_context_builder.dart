@@ -1,0 +1,554 @@
+import 'package:drift/drift.dart';
+
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart'
+    as domain;
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_series.dart'
+    as series;
+import 'package:submersion/features/dive_log/domain/services/ccr_bailout_timeline.dart';
+import 'package:submersion/features/dive_log/domain/services/profile_series_merge.dart';
+import 'package:submersion/features/data_quality/data/services/diver_data_sql.dart';
+import 'package:submersion/features/data_quality/data/services/quality_source_samples.dart';
+import 'package:submersion/features/data_quality/domain/entities/dive_quality_context.dart';
+import 'package:submersion/features/data_quality/domain/quality_thresholds.dart';
+import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
+import 'package:submersion/features/transmitters/data/repositories/transmitter_repository.dart';
+import 'package:submersion/features/transmitters/domain/entities/transmitter.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/equipment/data/repositories/dive_gear_usage_sql.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_repository_impl.dart';
+import 'package:submersion/features/data_quality/domain/services/shared_gear_overlap_rules.dart';
+import 'package:submersion/features/dive_log/domain/services/transmitter_serial.dart';
+
+class QualityContextBuilder {
+  QualityContextBuilder({
+    DiveRepository? diveRepository,
+    DiverSettingsRepository? settingsRepository,
+    TransmitterRepository? transmitterRepository,
+    EquipmentRepository? equipmentRepository,
+  }) : _diveRepo = diveRepository ?? DiveRepository(),
+       _settingsRepo = settingsRepository ?? DiverSettingsRepository(),
+       _transmitterRepo = transmitterRepository ?? TransmitterRepository(),
+       _equipmentRepo = equipmentRepository ?? EquipmentRepository();
+
+  final DiveRepository _diveRepo;
+  final DiverSettingsRepository _settingsRepo;
+  final TransmitterRepository _transmitterRepo;
+  final EquipmentRepository _equipmentRepo;
+
+  /// Registered transmitter serials per diver id, resolved once per
+  /// [buildAll] batch. '' stands for the null diver, like the ppO2 cache.
+  final Map<String, Set<String>> _knownSerialsByDiver = {};
+
+  /// Normalized serials of registry entries whose linked transmitter gear
+  /// item carries a different, non-empty serial of its own (issue #3367),
+  /// resolved once per [buildAll] batch like [_knownSerialsByDiver].
+  final Map<String, Set<String>> _mismatchedSerialsByDiver = {};
+
+  /// The diver's registry entries, resolved once per [buildAll] batch and
+  /// shared by [_knownSerials] and [_mismatchedSerials] so the batch issues
+  /// one `getForDiver` query per diver, not one per caller.
+  final Map<String, List<Transmitter>> _transmittersByDiver = {};
+
+  Future<List<Transmitter>> _transmitters(String? diverId) async {
+    final key = diverId ?? '';
+    final cached = _transmittersByDiver[key];
+    if (cached != null) return cached;
+    final value = await _transmitterRepo.getForDiver(diverId);
+    _transmittersByDiver[key] = value;
+    return value;
+  }
+
+  final _profileSeries = ProfileSeriesRepository();
+  final _tankSeries = TankPressureSeriesRepository();
+  AppDatabase get _db => DatabaseService.instance.database;
+
+  /// ppO2 ceiling per diver id, resolved once per [buildAll] batch. The key
+  /// '' stands for the implicit default diver (a null diver_id).
+  final Map<String, double> _ppO2MaxByDiver = {};
+
+  /// How many profiles the library holds, read once per [buildAll] batch:
+  /// with fewer than two, no dive can share gear with another profile's.
+  int? _profileCount;
+
+  /// Profile names by id, read once per [buildAll] batch for the shared
+  /// gear overlaps.
+  Map<String, String>? _diverNames;
+
+  Future<List<DiveQualityContext>> buildAll(
+    List<String> diveIds, {
+    DateTime? now,
+  }) async {
+    final effectiveNow = now ?? DateTime.now();
+    _ppO2MaxByDiver.clear();
+    _knownSerialsByDiver.clear();
+    _mismatchedSerialsByDiver.clear();
+    _transmittersByDiver.clear();
+    _profileCount = null;
+    _diverNames = null;
+    // Sample-free, because _build reads the series the detectors want itself.
+    // A dive whose row leaves a value to its samples still gets the full read,
+    // so what a detector takes off the dive matches getDivesByIds (#3864).
+    final dives = await _diveRepo.getDivesByIdsWithoutSamples(diveIds);
+    final out = <DiveQualityContext>[];
+    for (final dive in dives) {
+      out.add(await _build(dive, effectiveNow));
+    }
+    return out;
+  }
+
+  /// The diver's configured maximum ppO2, or the default ceiling when the
+  /// dive has no diver or no stored settings. Cached for the batch.
+  Future<double> _ppO2Max(String? diverId) async {
+    final key = diverId ?? '';
+    final cached = _ppO2MaxByDiver[key];
+    if (cached != null) return cached;
+    var value = QualityThresholds.ppO2WarnBar;
+    if (diverId != null) {
+      final settings = await _settingsRepo.getSettingsForDiver(diverId);
+      if (settings != null) value = settings.ppO2MaxDeco;
+    }
+    _ppO2MaxByDiver[key] = value;
+    return value;
+  }
+
+  Future<Set<String>> _knownSerials(String? diverId) async {
+    final key = diverId ?? '';
+    final cached = _knownSerialsByDiver[key];
+    if (cached != null) return cached;
+    Set<String> value;
+    try {
+      // Set up, not merely registered (issue #3676): a download now
+      // registers every serial it sees, so "known" would never nudge.
+      value = Transmitter.setUpSerials(await _transmitters(diverId));
+    } catch (_) {
+      value = const {};
+    }
+    _knownSerialsByDiver[key] = value;
+    return value;
+  }
+
+  Future<Set<String>> _mismatchedSerials(String? diverId) async {
+    final key = diverId ?? '';
+    final cached = _mismatchedSerialsByDiver[key];
+    if (cached != null) return cached;
+    Set<String> value;
+    try {
+      final entries = [
+        for (final t in await _transmitters(diverId))
+          if (t.transmitterEquipmentId != null && t.hasSerial) t,
+      ];
+      final gearById = {
+        for (final g in await _equipmentRepo.getEquipmentByIds([
+          for (final t in entries) t.transmitterEquipmentId!,
+        ]))
+          g.id: g,
+      };
+      value = {
+        for (final t in entries)
+          if (normalizeTransmitterSerial(t.transmitterSerial)
+              case final serial?)
+            if (normalizeTransmitterSerial(
+                  gearById[t.transmitterEquipmentId]?.serialNumber,
+                )
+                case final gearSerial? when gearSerial != serial)
+              serial,
+      };
+    } catch (_) {
+      value = const {};
+    }
+    _mismatchedSerialsByDiver[key] = value;
+    return value;
+  }
+
+  Future<DiveQualityContext> _build(domain.Dive dive, DateTime now) async {
+    final sources = await _diveRepo.getDataSources(dive.id);
+    // A dive with more than one source reads every series once, so each
+    // source's placement can be checked against the primary's trace; one
+    // source has nothing to be checked against and reads the primary alone.
+    final multiSource = sources.length >= 2;
+    final everySeries = multiSource
+        ? await _profileSeries.getSeriesForDive(dive.id)
+        : const <series.ProfileSeries>[];
+    final primarySeries = multiSource
+        ? [
+            for (final s in everySeries)
+              if (s.isPrimary) s,
+          ]
+        : await _profileSeries.getSeriesForDive(dive.id, primaryOnly: true);
+    // Summed from the stored summaries, not counted off the merged list
+    // below, so it agrees with the neighbor query's SUM over the same column.
+    final primarySampleCount = primarySeries.isEmpty
+        ? null
+        : primarySeries.fold<int>(0, (n, s) => n + s.summary.sampleCount);
+    final samples = <QualitySample>[
+      for (final p in mergeSeriesPointsCollapsingDuplicates(primarySeries))
+        if (p.depth.isFinite &&
+            (p.temperature == null || p.temperature!.isFinite))
+          QualitySample(t: p.timestamp, depth: p.depth, temp: p.temperature),
+    ];
+
+    final sourceSamples = qualitySourceSamples(sources, everySeries);
+    final pressures = <String, List<QualityPressureSample>>{};
+    // The detectors read what the rest of the app reads: one source per
+    // stretch of a tank, never two recordings interleaved (#2440).
+    final allSeries = await _tankSeries.getSeriesForDive(dive.id);
+    final primarySourceId = sources.where((s) => s.isPrimary).firstOrNull?.id;
+    final tankSeries = selectTankSeriesPerSource(
+      allSeries,
+      preferredSourceId: primarySourceId,
+    );
+    final byTank = <String, List<series.TankPressureSeries>>{};
+    for (final s in tankSeries) {
+      byTank.putIfAbsent(s.tankId, () => []).add(s);
+    }
+    for (final entry in byTank.entries) {
+      for (final p in mergeTankSeriesPoints(entry.value)) {
+        if (!p.pressure.isFinite) continue;
+        pressures
+            .putIfAbsent(entry.key, () => [])
+            .add(QualityPressureSample(t: p.timestamp, bar: p.pressure));
+      }
+    }
+
+    // A name-derived tank (#3307) and a loop cylinder (#3652) are judged
+    // against their own computer's switches, so on their own computer's
+    // reading too. A loop cylinder no computer owns is judged on the merged
+    // series, so it needs no copy of its own.
+    final ownComputerPressures = <String, List<QualityPressureSample>>{};
+    for (final tank in dive.tanks) {
+      final ownedLoopTank =
+          tank.computerId != null && isLoopTankRole(tank.role.name);
+      if (tank.roleSource != TankRoleSource.transmitterName && !ownedLoopTank) {
+        continue;
+      }
+      // Same pick getTankPressuresForComputer makes: this computer's series,
+      // then one source per stretch, so two recordings never interleave.
+      final own = [
+        for (final s in selectTankSeriesPerSource(
+          selectTankSeriesForComputer(allSeries, tank.computerId),
+          preferredSourceId: primarySourceId,
+          preferredComputerId: tank.computerId,
+        ))
+          if (s.tankId == tank.id) s,
+      ];
+      if (own.isEmpty) continue;
+      ownComputerPressures[tank.id] = [
+        for (final p in mergeTankSeriesPoints(own))
+          if (p.pressure.isFinite)
+            QualityPressureSample(t: p.timestamp, bar: p.pressure),
+      ];
+    }
+
+    final switchRows =
+        await (_db.select(_db.gasSwitches)
+              ..where((t) => t.diveId.equals(dive.id))
+              ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+            .get();
+    final switches = [
+      for (final r in switchRows)
+        GasSwitch(
+          id: r.id,
+          diveId: r.diveId,
+          timestamp: r.timestamp,
+          tankId: r.tankId,
+          depth: r.depth,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(r.createdAt),
+          computerId: r.computerId,
+        ),
+    ];
+
+    final neighbors = await _neighbors(dive);
+    final carriesDiverData = await _carriesDiverData(dive.id);
+
+    return DiveQualityContext(
+      dive: dive,
+      now: now,
+      sources: sources,
+      primarySamples: samples,
+      sourceSamples: sourceSamples,
+      primarySampleCount: primarySampleCount,
+      carriesDiverData: carriesDiverData,
+      tanks: dive.tanks,
+      pressuresByTankId: pressures,
+      ownComputerPressuresByTankId: ownComputerPressures,
+      gasSwitches: switches,
+      neighbors: neighbors,
+      ppO2MaxBar: await _ppO2Max(dive.diverId),
+      knownTransmitterSerials: await _knownSerials(dive.diverId),
+      // Only the mismatch detector reads this, and only for a tank carrying
+      // a serial, so a dive without one skips the equipment lookup.
+      mismatchedTransmitterSerials:
+          dive.tanks.any(
+            (t) => normalizeTransmitterSerial(t.transmitterSerial) != null,
+          )
+          ? await _mismatchedSerials(dive.diverId)
+          : const {},
+      sharedGearOverlaps: await _sharedGearOverlaps(dive),
+    );
+  }
+
+  /// Other profiles' dives in the neighbour window that share an item with
+  /// [dive], through any of the links in `diveGearUsageSql` (issue #2853).
+  /// Times are rebuilt as UTC wall-clock instants, as [_neighbors] does.
+  Future<List<SharedGearOverlap>> _sharedGearOverlaps(domain.Dive dive) async {
+    final diverId = dive.diverId;
+    if (diverId == null) return const [];
+    _profileCount ??=
+        (await _db.customSelect('SELECT COUNT(*) AS n FROM divers').getSingle())
+            .read<int>('n');
+    if (_profileCount! < 2) return const [];
+
+    final mine = <String, Set<String>>{};
+    for (final r in await gearUsageForDives(_db, [dive.id])) {
+      mine.putIfAbsent(r.equipmentId, () => {}).add(r.linkKind);
+    }
+    if (mine.isEmpty) return const [];
+
+    final entry = dive.effectiveEntryTime;
+    // The end the detector uses, so the window reaches every dive it could
+    // pair with; a dive without one still looks around its entry.
+    final exit =
+        sharedGearExit(
+          entry: entry,
+          exit: dive.exitTime,
+          runtime: dive.runtime,
+          bottomTime: dive.bottomTime,
+        ) ??
+        entry;
+    final windowMs = QualityThresholds.neighborWindow.inMilliseconds;
+    final others = await _db
+        .customSelect(
+          'SELECT id, diver_id, entry_time, dive_date_time, exit_time, '
+          'runtime, bottom_time FROM dives '
+          'WHERE id != ?1 AND diver_id IS NOT NULL AND diver_id != ?2 '
+          'AND COALESCE(entry_time, dive_date_time) BETWEEN ?3 AND ?4',
+          variables: [
+            Variable.withString(dive.id),
+            Variable.withString(diverId),
+            Variable.withInt(entry.millisecondsSinceEpoch - windowMs),
+            Variable.withInt(exit.millisecondsSinceEpoch + windowMs),
+          ],
+        )
+        .get();
+    if (others.isEmpty) return const [];
+
+    // Other dive -> shared item -> link kinds on that dive.
+    final theirs = <String, Map<String, Set<String>>>{};
+    for (final r in await gearUsageForDives(_db, [
+      for (final o in others) o.read<String>('id'),
+    ])) {
+      if (!mine.containsKey(r.equipmentId)) continue;
+      theirs
+          .putIfAbsent(r.diveId, () => {})
+          .putIfAbsent(r.equipmentId, () => {})
+          .add(r.linkKind);
+    }
+    if (theirs.isEmpty) return const [];
+
+    final sharedIds = {for (final m in theirs.values) ...m.keys}.toList()
+      ..sort();
+    final names = <String, String>{};
+    // Assembly links of a gear row belong to its dive: a pair folds by the
+    // rows of its own two dives only, or a third dive nearby could make the
+    // two sides of the pair fold differently.
+    final viaByDive = <String, Map<String, Set<String>>>{};
+    final hosts = <String, Set<String>>{
+      for (final id in sharedIds) id: <String>{},
+    };
+    for (final chunk in seriesIdChunks(sharedIds)) {
+      for (final r in await (_db.select(
+        _db.equipment,
+      )..where((t) => t.id.isIn(chunk))).get()) {
+        names[r.id] = r.name;
+        if (r.parentEquipmentId case final host?) hosts[r.id]!.add(host);
+      }
+      for (final e in await (_db.select(
+        _db.equipmentComponents,
+      )..where((t) => t.componentEquipmentId.isIn(chunk))).get()) {
+        hosts[e.componentEquipmentId]!.add(e.parentEquipmentId);
+      }
+      for (final g
+          in await (_db.select(_db.diveEquipment)..where(
+                (t) =>
+                    t.equipmentId.isIn(chunk) &
+                    t.diveId.isIn([dive.id, ...theirs.keys]),
+              ))
+              .get()) {
+        if (g.viaEquipmentId case final via?) {
+          viaByDive
+              .putIfAbsent(g.diveId, () => {})
+              .putIfAbsent(g.equipmentId, () => {})
+              .add(via);
+        }
+      }
+    }
+    final installed = <String, List<String>>{};
+    for (final chunk in seriesIdChunks(sharedIds)) {
+      for (final r
+          in await (_db.select(_db.equipment)..where(
+                (t) =>
+                    t.parentEquipmentId.isIn(chunk) & t.isActive.equals(true),
+              ))
+              .get()) {
+        installed.putIfAbsent(r.parentEquipmentId!, () => []).add(r.id);
+      }
+    }
+    final diverNames = _diverNames ??= {
+      for (final r in await _db.select(_db.divers).get()) r.id: r.name,
+    };
+
+    final out = <SharedGearOverlap>[];
+    for (final o in others) {
+      final otherId = o.read<String>('id');
+      final items = theirs[otherId];
+      if (items == null) continue;
+      final entryMs =
+          o.read<int?>('entry_time') ?? o.read<int>('dive_date_time');
+      final durationSeconds =
+          o.read<int?>('runtime') ?? o.read<int?>('bottom_time');
+      final exitMs =
+          o.read<int?>('exit_time') ??
+          (durationSeconds != null ? entryMs + durationSeconds * 1000 : null);
+      final otherDiverId = o.read<String>('diver_id');
+      out.add(
+        SharedGearOverlap(
+          otherDiveId: otherId,
+          otherDiverId: otherDiverId,
+          otherDiverName: diverNames[otherDiverId] ?? '',
+          thisDiverName: diverNames[diverId] ?? '',
+          otherEntry: DateTime.fromMillisecondsSinceEpoch(entryMs, isUtc: true),
+          otherExit: exitMs == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(exitMs, isUtc: true),
+          items: [
+            for (final id in items.keys.toList()..sort())
+              SharedGearItem(
+                equipmentId: id,
+                name: names[id] ?? '',
+                thisLinkKinds: mine[id]!,
+                otherLinkKinds: items[id]!,
+                hostIds: {
+                  ...?hosts[id],
+                  ...?viaByDive[dive.id]?[id],
+                  ...?viaByDive[otherId]?[id],
+                },
+                installedPartIds: (installed[id] ?? const <String>[]).toList()
+                  ..sort(),
+              ),
+          ],
+        ),
+      );
+    }
+    out.sort((a, b) => a.otherDiveId.compareTo(b.otherDiveId));
+    return out;
+  }
+
+  /// [DiveQualityContext.carriesDiverData] for one dive. Read through the same
+  /// fragment the neighbor query uses so a duplicate pair's two sides are
+  /// measured identically; null when the row is gone, which leaves the
+  /// delete-duplicate repair withheld rather than offered on a guess (#1720).
+  Future<bool?> _carriesDiverData(String diveId) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT ($kDiverDataExistsSql) AS carries_diver_data '
+          'FROM dives WHERE id = ?1',
+          variables: [Variable.withString(diveId)],
+          readsFrom: diverDataTables(_db),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    return (rows.single.read<int?>('carries_diver_data') ?? 0) != 0;
+  }
+
+  Future<List<QualityNeighbor>> _neighbors(domain.Dive dive) async {
+    final entry = dive.effectiveEntryTime;
+    final exit = entry.add(dive.effectiveRuntime ?? Duration.zero);
+    final windowMs = QualityThresholds.neighborWindow.inMilliseconds;
+    // `IS` (not `=`) is intentional: an unassigned dive (diver_id NULL) belongs
+    // to the implicit default diver, and `getAllDives(null)`/`DiveMatcher` treat
+    // all such dives as one scope. `IS` matches same-id and both-NULL, but never
+    // NULL-vs-non-NULL, so a null-diver dive is never paired across into a
+    // specific diver's dives. Do not "fix" this to `=`: that drops neighbor
+    // detection for the common single-diver (all-NULL) library.
+    // Project each neighbor's first/last primary-sample depth via correlated
+    // subqueries so the whole window resolves in one query instead of two
+    // extra point lookups per neighbor (an N+1 during full-library scans).
+    final rows = await _db
+        .customSelect(
+          'SELECT id, entry_time, dive_date_time, exit_time, max_depth, '
+          'runtime, bottom_time, dive_computer_serial, '
+          '(SELECT s.first_depth FROM dive_profile_series s '
+          'WHERE s.dive_id = dives.id AND s.is_primary = 1 '
+          'ORDER BY s.start_timestamp ASC, s.id ASC LIMIT 1) AS first_depth, '
+          '(SELECT s.last_depth FROM dive_profile_series s '
+          'WHERE s.dive_id = dives.id AND s.is_primary = 1 '
+          // start_timestamp before id: series order is (start_timestamp,
+          // id), so on an end-timestamp tie (the sync union of one profile
+          // from two devices) the merged read's last sample comes from the
+          // LATER-starting series, whatever its id sorts as. Ordering by id
+          // alone picked the other one and reported a last depth no other
+          // reader agrees with.
+          'ORDER BY s.end_timestamp DESC, s.start_timestamp DESC, '
+          's.id DESC LIMIT 1) AS last_depth, '
+          // NULL (not 0) when the neighbor has no primary series, so an
+          // unknown recording never reads as an empty one.
+          '(SELECT SUM(s.sample_count) FROM dive_profile_series s '
+          'WHERE s.dive_id = dives.id AND s.is_primary = 1) AS sample_count, '
+          // Projected here rather than looked up per neighbor: the scan
+          // resolves this window for every dive in the library, and a second
+          // round trip per neighbor would be an N+1 (#1720).
+          '($kDiverDataExistsSql) AS carries_diver_data '
+          'FROM dives WHERE id != ?1 AND diver_id IS ?2 '
+          'AND COALESCE(entry_time, dive_date_time) BETWEEN ?3 AND ?4 '
+          'ORDER BY COALESCE(entry_time, dive_date_time) ASC',
+          variables: [
+            Variable.withString(dive.id),
+            Variable(dive.diverId),
+            Variable.withInt(entry.millisecondsSinceEpoch - windowMs),
+            Variable.withInt(exit.millisecondsSinceEpoch + windowMs),
+          ],
+          readsFrom: {...diverDataTables(_db), _db.diveProfileSeries},
+        )
+        .get();
+    final out = <QualityNeighbor>[];
+    for (final row in rows) {
+      final entryMs =
+          row.read<int?>('entry_time') ?? row.read<int?>('dive_date_time');
+      if (entryMs == null) continue;
+      final durationSeconds =
+          row.read<int?>('runtime') ?? row.read<int?>('bottom_time');
+      final exitMs =
+          row.read<int?>('exit_time') ??
+          (durationSeconds != null ? entryMs + durationSeconds * 1000 : null);
+      final id = row.read<String>('id');
+      out.add(
+        QualityNeighbor(
+          id: id,
+          // Dive times are stored/read as UTC epoch millis; reconstruct with
+          // isUtc so calendar fields and wall-clock dates match the dive repo.
+          entryTime: DateTime.fromMillisecondsSinceEpoch(entryMs, isUtc: true),
+          exitTime: exitMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(exitMs, isUtc: true)
+              : null,
+          maxDepth: row.read<double?>('max_depth'),
+          durationSeconds: durationSeconds,
+          computerSerial: row.read<String?>('dive_computer_serial'),
+          firstSampleDepth: _finiteDepth(row.read<double?>('first_depth')),
+          lastSampleDepth: _finiteDepth(row.read<double?>('last_depth')),
+          sampleCount: row.read<int?>('sample_count'),
+          carriesDiverData: (row.read<int?>('carries_diver_data') ?? 0) != 0,
+        ),
+      );
+    }
+    return out;
+  }
+
+  double? _finiteDepth(double? d) => (d != null && d.isFinite) ? d : null;
+}

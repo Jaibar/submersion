@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_warning.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_db_reader.dart';
@@ -68,6 +69,140 @@ void main() {
         expect(warnings.first.message, contains('Could not determine'));
         expect(warnings.first.severity, ImportWarningSeverity.warning);
         expect(warnings.first.entityType, ImportEntityType.dives);
+      });
+
+      // The import summary shows coded warnings only. Each of these leaves a
+      // dive without its profile, so each must say so under one code.
+      group('summary codes', () {
+        const channel =
+            'dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.'
+            'parseRawDiveData';
+
+        ShearwaterRawDive teric() => ShearwaterRawDive(
+          diveId: 'teric-1',
+          fileName: 'Teric[AABB1234]#10 2025-06-15 10-30-00.swlogzp',
+          decompressedLogData: Uint8List.fromList(List.filled(100, 0)),
+        );
+
+        /// Answers the decode call with [reply], a pigeon reply list.
+        void answerDecode(List<Object?> reply) {
+          final messenger =
+              TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+          messenger.setMockMessageHandler(
+            channel,
+            (_) async => const StandardMessageCodec().encodeMessage(reply),
+          );
+          addTearDown(() => messenger.setMockMessageHandler(channel, null));
+        }
+
+        setUp(TestWidgetsFlutterBinding.ensureInitialized);
+
+        test('an unknown model is coded as an unreadable profile', () async {
+          final warnings = <ImportWarning>[];
+          await ShearwaterDiveMapper.mapDive(
+            ShearwaterRawDive(
+              diveId: 'test-unknown',
+              fileName: 'UnknownModel[ABCD]#1 2025-1-1 0-0-0.swlogzp',
+              decompressedLogData: Uint8List.fromList([1, 2, 3]),
+            ),
+            warnings: warnings,
+          );
+
+          expect(warnings.single.code, ImportWarningCode.profileUnreadable);
+        });
+
+        test(
+          'a decoder that rejects the data is coded as unreadable',
+          () async {
+            answerDecode(['PARSE_ERROR', 'corrupt dive data', null]);
+            final warnings = <ImportWarning>[];
+
+            final result = await ShearwaterDiveMapper.mapDive(
+              teric(),
+              warnings: warnings,
+            );
+
+            expect(result['profile'], isEmpty);
+            expect(warnings.single.code, ImportWarningCode.profileUnreadable);
+            expect(warnings.single.message, contains('PARSE_ERROR'));
+          },
+        );
+
+        test('any other decode failure is coded as unreadable', () async {
+          // A reply that is not a ParsedDive fails the cast, which is neither
+          // a platform nor a plugin error.
+          answerDecode(['not a parsed dive']);
+          final warnings = <ImportWarning>[];
+
+          await ShearwaterDiveMapper.mapDive(teric(), warnings: warnings);
+
+          expect(warnings.single.code, ImportWarningCode.profileUnreadable);
+        });
+
+        test(
+          'a successful decode aligns gf99 onto the parsed samples',
+          () async {
+            final parsed = pigeon.ParsedDive(
+              fingerprint: 'fp',
+              dateTimeYear: 2025,
+              dateTimeMonth: 6,
+              dateTimeDay: 15,
+              dateTimeHour: 10,
+              dateTimeMinute: 30,
+              dateTimeSecond: 0,
+              maxDepthMeters: 30,
+              avgDepthMeters: 18,
+              durationSeconds: 20,
+              samples: [
+                pigeon.ProfileSample(timeSeconds: 0, depthMeters: 1.0),
+                pigeon.ProfileSample(
+                  timeSeconds: 10,
+                  depthMeters: 20.0,
+                  aveloBuoyancy: -0.393,
+                  aveloGasRemaining: 64,
+                  computerRmv: 10.68,
+                ),
+                pigeon.ProfileSample(timeSeconds: 20, depthMeters: 5.0),
+              ],
+              tanks: [],
+              gasMixes: [],
+              events: [],
+            );
+            final messenger = TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger;
+            messenger.setMockMessageHandler(channel, (_) async {
+              return pigeon.DiveComputerHostApi.pigeonChannelCodec
+                  .encodeMessage(<Object?>[parsed]);
+            });
+            addTearDown(() => messenger.setMockMessageHandler(channel, null));
+
+            final rawDive = ShearwaterRawDive(
+              diveId: 'teric-1',
+              fileName: 'Teric[AABB1234]#10 2025-06-15 10-30-00.swlogzp',
+              decompressedLogData: Uint8List.fromList(List.filled(100, 0)),
+              gf99Samples: const [
+                ShearwaterGf99Sample(timeSeconds: 0, gf99: 4),
+                ShearwaterGf99Sample(timeSeconds: 10, gf99: 31),
+                ShearwaterGf99Sample(timeSeconds: 20, gf99: 62),
+              ],
+            );
+            final warnings = <ImportWarning>[];
+            final result = await ShearwaterDiveMapper.mapDive(
+              rawDive,
+              warnings: warnings,
+            );
+
+            expect(warnings, isEmpty);
+            final profile = result['profile'] as List<Map<String, dynamic>>;
+            expect(profile.map((p) => p['gf99']), [4, 31, 62]);
+            expect(profile.map((p) => p['depth']), [1.0, 20.0, 5.0]);
+            // The Avelo samples survive the alignment (#4664).
+            expect(profile[1]['aveloBuoyancy'], -0.393);
+            expect(profile[1]['aveloGasRemaining'], 64);
+            expect(profile[1]['computerRmv'], 10.68);
+          },
+        );
       });
     });
 
@@ -159,6 +294,148 @@ void main() {
         expect(result.containsKey('decoAlgorithm'), isFalse);
         expect(result.containsKey('gradientFactorLow'), isFalse);
         expect(result.containsKey('gradientFactorHigh'), isFalse);
+      });
+
+      pigeon.ParsedDive parsedWithSurfacePressure(double? bar) =>
+          pigeon.ParsedDive(
+            fingerprint: '',
+            dateTimeYear: 2025,
+            dateTimeMonth: 1,
+            dateTimeDay: 1,
+            dateTimeHour: 0,
+            dateTimeMinute: 0,
+            dateTimeSecond: 0,
+            maxDepthMeters: 0,
+            avgDepthMeters: 0,
+            durationSeconds: 0,
+            samples: [],
+            tanks: [],
+            gasMixes: [],
+            events: [],
+            surfacePressureBar: bar,
+          );
+
+      test('fills a missing surface pressure from the raw log (#4208)', () {
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          <String, dynamic>{
+            'surfacePressure': null,
+            'profile': <Map<String, dynamic>>[],
+          },
+          parsedWithSurfacePressure(0.961),
+        );
+        expect(result['surfacePressure'], 0.961);
+      });
+
+      test('an implausible raw reading fills nothing', () {
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          <String, dynamic>{
+            'surfacePressure': null,
+            'profile': <Map<String, dynamic>>[],
+          },
+          parsedWithSurfacePressure(0.0),
+        );
+        expect(result['surfacePressure'], isNull);
+      });
+
+      test('keeps the surface pressure the export reported', () {
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          <String, dynamic>{
+            'surfacePressure': 0.958,
+            'profile': <Map<String, dynamic>>[],
+          },
+          parsedWithSurfacePressure(0.961),
+        );
+        expect(result['surfacePressure'], 0.958);
+      });
+
+      test('gives each tank the transmitter serial from the raw log '
+          '(#4388)', () {
+        final parsed = pigeon.ParsedDive(
+          fingerprint: '',
+          dateTimeYear: 2025,
+          dateTimeMonth: 1,
+          dateTimeDay: 1,
+          dateTimeHour: 0,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 0,
+          avgDepthMeters: 0,
+          durationSeconds: 0,
+          samples: [],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: 0,
+              startPressureBar: 190.1,
+              transmitterSerial: 76287,
+            ),
+            pigeon.TankInfo(
+              index: 1,
+              gasMixIndex: 0,
+              startPressureBar: 185.0,
+              transmitterSerial: 76290,
+            ),
+          ],
+          gasMixes: [],
+          events: [],
+        );
+
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          <String, dynamic>{
+            'tanks': [
+              {'name': 'T2', 'startPressure': 190.0},
+              {'name': 'T3', 'startPressure': 185.2},
+            ],
+            'profile': <Map<String, dynamic>>[],
+          },
+          parsed,
+        );
+
+        final tanks = result['tanks'] as List<Map<String, dynamic>>;
+        expect(tanks.map((t) => t['transmitterSerial']), ['76287', '76290']);
+        expect(tanks.map((t) => t['name']), ['T2', 'T3']);
+      });
+
+      test('an Avelo dive\'s Hydrotank keeps its role through the merge '
+          '(#4657)', () {
+        final parsed = pigeon.ParsedDive(
+          fingerprint: '',
+          dateTimeYear: 2025,
+          dateTimeMonth: 1,
+          dateTimeDay: 1,
+          dateTimeHour: 0,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 0,
+          avgDepthMeters: 0,
+          durationSeconds: 0,
+          diveMode: 'open_circuit',
+          samples: [],
+          tanks: [
+            pigeon.TankInfo(
+              index: 0,
+              gasMixIndex: 0,
+              startPressureBar: 200.1,
+              transmitterSerial: 12345,
+              usage: 4,
+            ),
+          ],
+          gasMixes: [],
+          events: [],
+        );
+
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          <String, dynamic>{
+            'tanks': [
+              {'name': 'Avelo', 'startPressure': 200.0},
+            ],
+            'profile': <Map<String, dynamic>>[],
+          },
+          parsed,
+        );
+
+        final tanks = result['tanks'] as List<Map<String, dynamic>>;
+        expect(tanks.single['role'], 'hydrotank');
       });
 
       test('maps dive mode from parsed data', () {
@@ -294,7 +571,8 @@ void main() {
         expect(s1['ppO2'], 1.1);
         expect(s1['heartRate'], 80);
         expect(s1['cns'], 5.0);
-        expect(s1['rbt'], 60);
+        // libdc reports RBT in minutes; profile points store seconds.
+        expect(s1['rbt'], 60 * 60);
         expect(s1['tts'], 120);
         expect(s1['decoType'], 0);
         expect(s1.containsKey('ceiling'), isFalse);
@@ -318,6 +596,94 @@ void main() {
         expect(s2.containsKey('ndl'), isFalse);
       });
 
+      test('maps per-cell O2 sensor ppO2 (absent cells stay absent)', () {
+        final baseMap = <String, dynamic>{'profile': <Map<String, dynamic>>[]};
+        final parsed = pigeon.ParsedDive(
+          fingerprint: '',
+          dateTimeYear: 2025,
+          dateTimeMonth: 1,
+          dateTimeDay: 1,
+          dateTimeHour: 0,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 40,
+          avgDepthMeters: 30,
+          durationSeconds: 3600,
+          samples: [
+            pigeon.ProfileSample(
+              timeSeconds: 10,
+              depthMeters: 30.0,
+              ppo2: 1.2,
+              o2Sensor1: 1.18,
+              o2Sensor2: 1.21,
+              o2Sensor3: 1.19,
+            ),
+            pigeon.ProfileSample(timeSeconds: 20, depthMeters: 30.0),
+          ],
+          tanks: [],
+          gasMixes: [],
+          events: [],
+        );
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          baseMap,
+          parsed,
+        );
+        final profile = result['profile'] as List;
+
+        final s1 = profile[0] as Map<String, dynamic>;
+        expect(s1['ppO2'], 1.2);
+        expect(s1['o2Sensor1'], 1.18);
+        expect(s1['o2Sensor2'], 1.21);
+        expect(s1['o2Sensor3'], 1.19);
+        expect(s1.containsKey('o2Sensor4'), isFalse);
+        expect(s1.containsKey('o2Sensor5'), isFalse);
+        expect(s1.containsKey('o2Sensor6'), isFalse);
+
+        final s2 = profile[1] as Map<String, dynamic>;
+        expect(s2.containsKey('o2Sensor1'), isFalse);
+      });
+
+      test('keeps cell readings when the computer logs no aggregate ppO2', () {
+        final baseMap = <String, dynamic>{'profile': <Map<String, dynamic>>[]};
+        final parsed = pigeon.ParsedDive(
+          fingerprint: '',
+          dateTimeYear: 2025,
+          dateTimeMonth: 1,
+          dateTimeDay: 1,
+          dateTimeHour: 0,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 40,
+          avgDepthMeters: 30,
+          durationSeconds: 3600,
+          samples: [
+            pigeon.ProfileSample(
+              timeSeconds: 10,
+              depthMeters: 30.0,
+              o2Sensor1: 1.18,
+              o2Sensor2: 1.21,
+              o2Sensor3: 1.19,
+            ),
+          ],
+          tanks: [],
+          gasMixes: [],
+          events: [],
+        );
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          baseMap,
+          parsed,
+        );
+        final sample =
+            (result['profile'] as List).single as Map<String, dynamic>;
+
+        // The loop value is averaged from the cells downstream
+        // (resolveRebreatherPpO2), so the cells must survive on their own.
+        expect(sample.containsKey('ppO2'), isFalse);
+        expect(sample['o2Sensor1'], 1.18);
+        expect(sample['o2Sensor2'], 1.21);
+        expect(sample['o2Sensor3'], 1.19);
+      });
+
       test('maps deco stop samples with ceiling and no ndl', () {
         final baseMap = <String, dynamic>{'profile': <Map<String, dynamic>>[]};
         final parsed = pigeon.ParsedDive(
@@ -339,6 +705,20 @@ void main() {
               decoTime: 180,
               decoDepth: 6.0,
             ),
+            pigeon.ProfileSample(
+              timeSeconds: 20,
+              depthMeters: 21.0,
+              decoType: 3,
+              decoTime: 60,
+              decoDepth: 15.0,
+            ),
+            pigeon.ProfileSample(
+              timeSeconds: 30,
+              depthMeters: 5.0,
+              decoType: 1,
+              decoTime: 180,
+              decoDepth: 5.0,
+            ),
           ],
           tanks: [],
           gasMixes: [],
@@ -353,6 +733,15 @@ void main() {
         expect(s1['decoType'], 2);
         expect(s1['ceiling'], 6.0);
         expect(s1.containsKey('ndl'), isFalse);
+        // A deep stop is a stop the computer asks for, so it is a ceiling.
+        final deep = profile[1] as Map<String, dynamic>;
+        expect(deep['decoType'], 3);
+        expect(deep['ceiling'], 15.0);
+        // A safety stop is not an obligation, so it is no ceiling (#2550).
+        final safety = profile[2] as Map<String, dynamic>;
+        expect(safety['decoType'], 1);
+        expect(safety.containsKey('ceiling'), isFalse);
+        expect(safety.containsKey('ndl'), isFalse);
       });
 
       test('extracts water temp from samples when not in metadata', () {
@@ -520,6 +909,63 @@ void main() {
         final s5 = profile[4] as Map<String, dynamic>;
         expect(s5.containsKey('allTankPressures'), isFalse);
         expect(s5.containsKey('pressure'), isFalse);
+      });
+
+      test('emits the gas switches of a deco dive', () {
+        // No transmitter was on, so the metadata lists no tanks at all.
+        final baseMap = <String, dynamic>{
+          'tanks': const <Map<String, dynamic>>[],
+          'profile': <Map<String, dynamic>>[],
+        };
+        final parsed = pigeon.ParsedDive(
+          fingerprint: '',
+          dateTimeYear: 2025,
+          dateTimeMonth: 1,
+          dateTimeDay: 1,
+          dateTimeHour: 0,
+          dateTimeMinute: 0,
+          dateTimeSecond: 0,
+          maxDepthMeters: 45,
+          avgDepthMeters: 25,
+          durationSeconds: 3000,
+          samples: [
+            pigeon.ProfileSample(
+              timeSeconds: 0,
+              depthMeters: 0.0,
+              gasMixIndex: 0,
+            ),
+            pigeon.ProfileSample(
+              timeSeconds: 1500,
+              depthMeters: 21.0,
+              gasMixIndex: 1,
+            ),
+            pigeon.ProfileSample(
+              timeSeconds: 3000,
+              depthMeters: 0.0,
+              gasMixIndex: 1,
+            ),
+          ],
+          tanks: [],
+          gasMixes: [
+            pigeon.GasMix(index: 0, o2Percent: 18.0, hePercent: 45.0),
+            pigeon.GasMix(index: 1, o2Percent: 50.0, hePercent: 0.0),
+          ],
+          events: [],
+        );
+
+        final result = ShearwaterDiveMapper.mergeWithParsedDive(
+          baseMap,
+          parsed,
+        );
+
+        final tanks = result['tanks'] as List<Map<String, dynamic>>;
+        expect(tanks.map((t) => t['gasMix']), const [
+          GasMix(o2: 18.0, he: 45.0),
+          GasMix(o2: 50.0),
+        ]);
+        expect(result['gasSwitches'], [
+          {'timestamp': 1500, 'depth': 21.0, 'tankIndex': 1},
+        ]);
       });
 
       test('defaults tankIndex to 0 when FFI sample has null tankIndex', () {

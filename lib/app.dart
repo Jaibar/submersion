@@ -1,21 +1,83 @@
-import 'dart:typed_data';
+import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:submersion/core/services/storage/gc/storage_gc_coordinator.dart';
+import 'package:submersion/core/utils/system_sheet_lifecycle.dart';
+import 'package:submersion/features/data_quality/presentation/providers/launch_gas_mix_repair_provider.dart';
+import 'package:submersion/features/dive_import/presentation/health_auto_import_feedback.dart';
+import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/stale_open_draft_prompt.dart';
+import 'package:submersion/features/documents/presentation/providers/equipment_file_conversion_provider.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_catalogue_providers.dart';
+import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/core/app/app_exit.dart';
+import 'package:submersion/core/app/app_exit_guard.dart';
+import 'package:submersion/core/presentation/localizations/week_start_material_localizations.dart';
+import 'package:submersion/core/presentation/providers/app_lock_provider.dart';
+import 'package:submersion/core/presentation/widgets/lock_barrier.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/theme/app_theme_registry.dart';
+import 'package:submersion/core/theme/display_zoom.dart';
+import 'package:submersion/core/theme/display_zoom_shortcuts.dart';
 import 'package:submersion/core/router/app_router.dart';
+import 'package:submersion/core/ui/app_actions.dart';
+import 'package:submersion/features/gps_log/presentation/dive_mark_action_bridge.dart';
+import 'package:submersion/features/notifications/presentation/providers/notification_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/storage_gc_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/display_zoom_menu_channel.dart';
+import 'package:submersion/features/settings/presentation/providers/display_zoom_provider.dart';
 import 'package:submersion/features/auto_update/presentation/providers/update_menu_channel.dart';
+import 'package:submersion/features/backup/presentation/pages/restore_complete_page.dart';
+import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/backup/presentation/widgets/restore_barrier.dart';
+import 'package:submersion/features/buddies/domain/services/buddy_card_codec.dart';
+import 'package:submersion/features/buddies/presentation/services/buddy_card_link_dispatcher.dart';
+import 'package:submersion/features/buddies/presentation/services/recent_buddy_card_links.dart';
+import 'package:submersion/features/buddies/presentation/utils/open_buddy_card.dart';
+import 'package:submersion/features/change_log/data/services/change_log_settle_scheduler.dart';
+import 'package:submersion/features/change_log/presentation/providers/change_log_providers.dart';
+import 'package:submersion/features/cylinder_passports/presentation/providers/cylinder_passport_providers.dart';
+import 'package:submersion/features/cylinder_passports/presentation/services/passport_link_dispatcher.dart';
+import 'package:submersion/features/cylinder_passports/presentation/services/recent_passport_tags.dart';
+import 'package:submersion/features/cylinder_passports/presentation/utils/scan_cylinder_tag.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_caches_keeper.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_origin_republish_provider.dart';
+import 'package:submersion/features/nav_track/presentation/pages/nav_track_import_review_page.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
+import 'package:submersion/features/import_wizard/presentation/suunto_file_import_navigation.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/species_id/presentation/providers/species_id_providers.dart';
+import 'package:submersion/features/agent_access/presentation/providers/agent_access_providers.dart';
+import 'package:submersion/features/settings/presentation/providers/nearby_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/features/settings/presentation/widgets/adopt_replaced_library_dialog.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
 import 'package:submersion/shared/services/file_share_handler.dart';
 import 'package:submersion/shared/services/incoming_file_handler.dart';
+import 'package:submersion/shared/services/incoming_share.dart';
+import 'package:submersion/shared/services/navigation_ready_gate.dart';
+import 'package:submersion/shared/widgets/app_scaffold_messenger.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/window_fullscreen.dart';
 import 'package:submersion/core/services/local_cache_database_service.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/services/sync/library_epoch.dart';
+import 'package:submersion/features/shared_library/presentation/providers/shared_library_sync_notifier.dart';
+import 'package:submersion/features/import_wizard/presentation/providers/import_job_provider.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/background_import_notice.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_mode_ribbon.dart';
 
 const Locale _defaultFallbackLocale = Locale('en');
 const Set<String> _invalidSystemLocaleLanguageCodes = {'c', 'posix'};
@@ -66,38 +128,136 @@ class SubmersionApp extends ConsumerStatefulWidget {
 class _SubmersionAppState extends ConsumerState<SubmersionApp>
     with WidgetsBindingObserver {
   final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+  bool _adoptDialogShownThisSession = false;
+  final _lifecycle = SystemSheetLifecycle();
   late final FileShareHandler _fileShareHandler;
+  late final PassportLinkDispatcher _passportLinks;
+  late final SharedIncomingLinks _incomingLinks;
+  late final BuddyCardLinkDispatcher _buddyCardLinks;
+  late final GoRouter _linkRouter;
+  bool _hasDivers = false;
+  bool _navigationReadyRetryScheduled = false;
+
+  /// This root's hold on the share gate, which outlives it (see
+  /// [incomingShareGateProvider]).
+  late final NavigationReadyGateOwner<IncomingShare> _shares;
   late final AppLifecycleListener _lifecycleListener;
+
+  /// Lock screen Entered water and Surfaced taps (issue #637).
+  late final StreamSubscription<void> _diveMarks;
+  final _staleDrafts = StaleOpenDraftPrompter();
+  final _healthImports = HealthAutoImportThrottle();
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _lifecycleListener = AppLifecycleListener(onExitRequested: _closeDatabases);
-    registerUpdateMenuChannel(ref);
-    _fileShareHandler = FileShareHandler(
-      onFileReceived: _handleIncomingFile,
-      onError: (_) {
-        final l10n = _scaffoldMessengerKey.currentContext != null
-            ? AppLocalizations.of(_scaffoldMessengerKey.currentContext!)
-            : null;
-        _scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text(
-              l10n?.dropTarget_error_readFailed ?? 'Could not read file',
-            ),
-          ),
-        );
-      },
+    final exitGuard = ref.read(appExitGuardProvider);
+    _lifecycleListener = AppLifecycleListener(
+      onExitRequested: () => exitGuard.answer(_closeDatabases),
     );
+    registerUpdateMenuChannel(ref);
+    registerDisplayZoomMenuChannel(ref);
+    // Each share waits until the app can open the page it leads to (see
+    // _updateNavigationReady): one that cold-started the app arrives ahead
+    // of the navigator (#2690), and one on a fresh install ahead of the end
+    // of setup. Attached first: the readiness updates below report to it.
+    final shareGate = ref.read(incomingShareGateProvider);
+    _shares = shareGate.attach(_openShare);
+    _fileShareHandler = FileShareHandler(
+      onFileReceived: (bytes, fileName) =>
+          shareGate.run(SharedFile(bytes, fileName)),
+      onFilesReceived: (paths) => shareGate.run(SharedFileBatch(paths)),
+      onError: _reportShareError,
+    );
+    // Passport and buddy card links share one platform subscription, made
+    // once both dispatchers listen, so neither misses the launch link.
+    _incomingLinks = SharedIncomingLinks(ref.read(incomingLinkSourceProvider));
+    _buddyCardLinks = BuddyCardLinkDispatcher(
+      source: _incomingLinks,
+      open: _openBuddyCardLink,
+      alreadyHandled: (text) =>
+          ref.read(recentBuddyCardLinksProvider).takeJustHandled(text),
+    );
+    _passportLinks = PassportLinkDispatcher(
+      source: _incomingLinks,
+      open: _openPassportLink,
+      alreadyHandled: (text) =>
+          ref.read(recentPassportTagsProvider).takeJustHandled(text),
+    );
+    // A tag tapped or a file shared on a fresh install waits until setup is
+    // over, and one arriving with the app closed waits for the navigator.
+    _linkRouter = ref.read(appRouterProvider);
+    _linkRouter.routeInformationProvider.addListener(_updateNavigationReady);
+    // The SQL count, not the profile list: this listener lives all session,
+    // and keeping the list alive would re-hydrate every profile on each
+    // divers-table write.
+    ref.listenManual<AsyncValue<int>>(diverCountProvider, (_, next) {
+      _hasDivers = (next.value ?? 0) > 0;
+      _updateNavigationReady();
+    }, fireImmediately: true);
+    // The serviceDue and deco query fields read caches of engine verdicts
+    // (the service clocks, the dive analysis), and any list can reach them
+    // through a relation. The keeper runs each cache writer while a filter
+    // names its field, and leaves the engines idle otherwise (#2365, #4461).
+    ref.listenManual(queryCachesKeeperProvider, (_, _) {});
+    // A delete that takes a diver's current medical clearance, on any path,
+    // hands its reminders back to the one it superseded (#4609).
+    ref.listenManual(clearanceDeleteRearmProvider, (_, _) {});
+    // Nearby Bluetooth sync (issue #3731): the switch re-decides whether the
+    // radio is on.
+    ref.listenManual<bool>(
+      syncBehaviorProvider.select((s) => s.nearbyAutoEnabled),
+      (_, _) => unawaited(ref.read(nearbyLinkManagerProvider).refresh()),
+    );
+    // Agent access (MCP): the controller keeps the loopback listener in step
+    // with its settings for as long as this scope lives. Desktop only.
+    if (hasDesktopWindow()) {
+      ref.listenManual(agentAccessControllerProvider, (_, _) {});
+    }
+    _diveMarks = startDiveMarkActionBridge(ref);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _maybeSyncOnLaunch();
+      final launchSync = _maybeSyncOnLaunch();
+      _runStorageCleanupAfter(launchSync, StorageGcTrigger.launch);
+      _repairGasMixesAfter(launchSync);
+      _setNearbyForeground(true);
+      _resumeMediaTransfers();
+      _republishOwnedMedia();
+      _convertGearFiles();
+      _importSiteCatalogue();
+      unawaited(runIdentificationLaunchSteps(ref.container));
       _fileShareHandler.initialize();
+      _passportLinks.start();
+      _buddyCardLinks.start();
+      _incomingLinks.connect();
+      // Fill the per-dive sensor summary cache for dives that predate it or
+      // changed since. Single-flight, oldest first, no-op when current.
+      SensorSummaryScheduler.instance.scheduleStaleSweep();
+      DerivedMetricsScheduler.instance.scheduleStaleSweep();
+      ChangeLogSettleScheduler.instance.start();
+      _pruneChangeLog();
+      unawaited(_staleDrafts.check(ref, rootNavigatorKey.currentContext));
+      unawaited(_runHealthImport());
     });
   }
 
+  /// Apple Watch dives imported without the wizard (issue #637).
+  Future<void> _runHealthImport() => runHealthAutoImport(
+    ref,
+    throttle: _healthImports,
+    messenger: _scaffoldMessengerKey,
+    open: _linkRouter.go,
+  );
+
   @override
   void dispose() {
+    unawaited(_diveMarks.cancel());
+    ChangeLogSettleScheduler.instance.stop();
+    _linkRouter.routeInformationProvider.removeListener(_updateNavigationReady);
+    _shares.release();
+    unawaited(_passportLinks.dispose());
+    unawaited(_buddyCardLinks.dispose());
+    unawaited(_incomingLinks.dispose());
     _fileShareHandler.dispose();
     _lifecycleListener.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -108,35 +268,371 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   /// NSApplicationDelegate.applicationShouldTerminate: on macOS) which is
   /// async and fires before the Dart VM begins isolate/FFI teardown. Without
   /// this, the Drift background isolate can outlive the FFI subsystem and
-  /// crash in sqlite3_close_v2 → functionDestroy.
-  Future<AppExitResponse> _closeDatabases() async {
-    await Future.wait([
-      DatabaseService.instance.close(),
-      LocalCacheDatabaseService.instance.close(),
-    ]);
-    return AppExitResponse.exit;
+  /// crash in sqlite3_close_v2 -> functionDestroy ("GetFfiCallbackMetadata
+  /// called after shutdown"), which stalls the quit.
+  ///
+  /// The guarantees that make this safe to be the platform's only reply path
+  /// (always answers, never throws, never exceeds its budget) live in
+  /// [closeDatabasesForExit]; see its doc for why totality matters here and
+  /// what happens natively when the reply never arrives. [AppExitGuard]
+  /// answers first, and holds the same guarantees: a page with unsaved work
+  /// cancels the exit and asks, and nothing closes until the diver lets it go.
+  Future<AppExitResponse> _closeDatabases() => closeDatabasesForExit(
+    closeMain: () => DatabaseService.instance.close(),
+    closeCache: () => LocalCacheDatabaseService.instance.close(),
+    onError: (error, stack) => LoggerService.forClass(SubmersionApp).warning(
+      'Database close during app exit did not finish cleanly',
+      error: error,
+      stackTrace: stack,
+    ),
+  );
+
+  /// A first day of week left on Automatic follows the region the device
+  /// now names (issue #4232).
+  @override
+  void didChangeLocales(List<Locale>? locales) {
+    ref.invalidate(deviceRegionProvider);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _maybeSyncOnResume();
+    // The iOS NFC sheet over the app is not the diver leaving it.
+    final meaning = _lifecycle.interpret(
+      state,
+      systemSheetUp: ref.read(nfcTagServiceProvider).sessionActive,
+    );
+    switch (meaning) {
+      case LifecycleMeaning.backgrounded:
+        ref.read(appLockNotifierProvider.notifier).noteBackgrounded();
+      case LifecycleMeaning.resumed:
+        ref.read(appLockNotifierProvider.notifier).noteResumed();
+        _runStorageCleanupAfter(_maybeSyncOnResume(), StorageGcTrigger.resume);
+        _resumeMediaTransfers();
+        unawaited(_staleDrafts.check(ref, rootNavigatorKey.currentContext));
+        unawaited(_runHealthImport());
+        // NFC may have been turned on in the system settings meanwhile, as
+        // the passport screens tell the diver to do.
+        ref.invalidate(nfcSupportProvider);
+      case LifecycleMeaning.none:
+        break;
+    }
+    // Nearby follows whether the app is on screen, not whether it has the
+    // focus: an inactive window (another app in front on a desktop, Control
+    // Center or an alert over it on iOS) must not end a transfer, though
+    // App Lock counts it as leaving.
+    switch (state) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        _setNearbyForeground(false);
+      case AppLifecycleState.resumed:
+        _setNearbyForeground(true);
+      case AppLifecycleState.inactive || AppLifecycleState.detached:
+        break;
     }
   }
 
-  void _maybeSyncOnLaunch() {
+  /// Restarts an outstanding media transfer queue (issue #1270).
+  ///
+  /// On launch and on every resume, because the queue's own triggers all live
+  /// downstream of a runtime this process may never have built: a desktop app
+  /// sits in one process for days, and a queue that stopped mid-import stayed
+  /// stopped through every restart. The provider does the deciding - it
+  /// short-circuits on an unattached device or an empty queue before anything
+  /// expensive - and contains its own failures, which is what makes this call
+  /// safe to leave unawaited.
+  ///
+  /// Safe to reach the local cache database from here: StartupWrapper mounts
+  /// SubmersionRestart (and so this widget) only once `_state` is ready, which
+  /// it sets after `_initializeServices()` returns - and that awaits
+  /// `LocalCacheDatabaseService.instance.initialize`. This runs a post-frame
+  /// callback later still.
+  void _resumeMediaTransfers() {
+    unawaited(ref.read(mediaTransferResumeProvider)());
+  }
+
+  /// Loads the bundled site catalogue into the local cache when its version
+  /// changed (once per app update). Not awaited: built-in sites appear in
+  /// the picker and on the map when it finishes. Same database timing
+  /// argument as [_resumeMediaTransfers].
+  void _importSiteCatalogue() {
+    unawaited(ref.read(siteCatalogueImportProvider)());
+  }
+
+  /// Runs the storage cleanup coordinator (issue #3396) once [syncs] end:
+  /// device sweeps at most daily, the cloud cleanup on its own cadence, and
+  /// a post-restore pass when a restore left its marker. After the syncs,
+  /// because an automatic pass that finds one running skips its cloud part,
+  /// and one started beside the launch or resume sync never deleted. Same
+  /// database timing argument as [_resumeMediaTransfers]; the syncs and the
+  /// coordinator contain their own failures, so it is safe to leave
+  /// unawaited.
+  void _runStorageCleanupAfter(Future<void> syncs, StorageGcTrigger trigger) {
+    unawaited(
+      syncs.whenComplete(() {
+        if (!mounted) return;
+        unawaited(ref.read(storageGcCoordinatorProvider).run(trigger));
+      }),
+    );
+  }
+
+  /// Divides cylinder mixes older imports stored 100 times too high (issue
+  /// #4714) once [syncs] end, so a mix the launch sync brings in from a
+  /// device on an older version is put right this launch too. Same database
+  /// timing argument as [_resumeMediaTransfers]; the syncs and the provider
+  /// contain their own failures, so it is safe to leave unawaited.
+  ///
+  /// It also waits for the launch reconcile, as [_maybeSyncOnLaunch] does:
+  /// with sync on launch off, [syncs] ends at once, and the repair's row
+  /// clocks and pending marks must not land in a restore's rebaseline.
+  void _repairGasMixesAfter(Future<void> syncs) {
+    unawaited(
+      syncs.whenComplete(() async {
+        if (!mounted) return;
+        try {
+          await ref.read(reconcileDeviceIdentityProvider.future);
+        } catch (_) {
+          // Logged inside reconcileDeviceIdentity; repair anyway.
+        }
+        if (!mounted) return;
+        unawaited(ref.read(launchGasMixRepairProvider)());
+      }),
+    );
+  }
+
+  /// One-time repair of media rows whose cloud stamps a peer dropped before
+  /// the origin-device fix. Launch only: it is flagged after its first
+  /// success, and the provider checks the flag before building anything.
+  /// Same database timing argument as [_resumeMediaTransfers], and the
+  /// provider contains its own failures, so it is safe to leave unawaited.
+  void _republishOwnedMedia() {
+    unawaited(ref.read(mediaOriginRepublishProvider)());
+  }
+
+  /// Removes change log entries past their retention, at most daily. Same
+  /// database timing argument as [_resumeMediaTransfers], and it contains its
+  /// own failures, so it is safe to leave unawaited.
+  void _pruneChangeLog() {
+    unawaited(ref.read(changeLogMaintenanceProvider).pruneIfDue());
+  }
+
+  /// Moves files linked to gear by the older attachment card into Documents
+  /// (issue #3333). Same database timing argument as [_resumeMediaTransfers],
+  /// and the provider contains its own failures, so it is safe to leave
+  /// unawaited.
+  void _convertGearFiles() {
+    // The provider then checks whether a compaction is worth scheduling.
+    unawaited(ref.read(equipmentFileConversionProvider)());
+  }
+
+  /// The nearby link scans and advertises only while the app is on screen
+  /// (issue #3731); a failure there never reaches the app.
+  void _setNearbyForeground(bool inForeground) {
+    unawaited(
+      ref
+          .read(nearbyLinkManagerProvider)
+          .setForeground(inForeground)
+          .catchError((Object e) {
+            LoggerService.forClass(
+              SubmersionApp,
+            ).warning('Nearby link did not follow the app: $e');
+          }),
+    );
+  }
+
+  Future<void> _maybeSyncOnLaunch() async {
     final settings = ref.read(syncBehaviorProvider);
     if (!settings.autoSyncEnabled || !settings.syncOnLaunch) return;
-    ref.read(syncStateProvider.notifier).performSync();
+    // Wait for the launch reconcile (watched in build) to finish before the
+    // first sync reads sync state. A restore-triggered rebaseline may still be
+    // in flight; syncing mid-rebaseline would read a rewound lastSync/tombstone
+    // set and defeat the "rebaseline before anything reads sync state"
+    // guarantee. Reconcile is launch-safe (resolves with a status, never
+    // throws), but guard anyway so a failure can't block launch sync forever.
+    try {
+      await ref.read(reconcileDeviceIdentityProvider.future);
+    } catch (_) {
+      // Already logged inside reconcileDeviceIdentity; proceed with the sync.
+    }
+    if (!mounted) return;
+    await _syncAll();
   }
 
-  void _maybeSyncOnResume() {
+  Future<void> _maybeSyncOnResume() async {
     final settings = ref.read(syncBehaviorProvider);
     if (!settings.autoSyncEnabled || !settings.syncOnResume) return;
-    ref.read(syncStateProvider.notifier).performSync();
+    await _syncAll();
   }
 
-  Future<void> _handleIncomingFile(Uint8List bytes, String fileName) async {
+  /// The library sync and every shared library's, at once; completes when
+  /// both have ended, however they ended.
+  Future<void> _syncAll() async {
+    await Future.wait(
+      [
+        ref.read(syncStateProvider.notifier).performSync(auto: true),
+        ref.read(sharedLibrarySyncProvider.notifier).syncAll(auto: true),
+      ].map((sync) => sync.catchError((Object _) {})),
+    );
+  }
+
+  void _onBackgroundImportEnded(
+    ImportJobOutcome? previous,
+    ImportJobOutcome? outcome,
+  ) {
+    if (outcome == null || identical(outcome, previous)) return;
+    final ctx = _scaffoldMessengerKey.currentContext;
+    if (ctx == null) return;
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        content: Text(
+          backgroundImportNotice(AppLocalizations.of(ctx), outcome),
+        ),
+      ),
+    );
+  }
+
+  void _onSyncStateChanged(SyncState? prev, SyncState next) {
+    final ctx = _scaffoldMessengerKey.currentContext;
+    final l10n = ctx != null ? AppLocalizations.of(ctx) : null;
+    final messenger = _scaffoldMessengerKey.currentState;
+
+    // Post-restore merge notice (start).
+    if (next.postRestoreSyncing && !(prev?.postRestoreSyncing ?? false)) {
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(
+            l10n?.settings_cloudSync_postRestore_syncing ??
+                'Syncing your restored library with the cloud…',
+          ),
+        ),
+      );
+    }
+    // Post-restore merge notice (done).
+    if ((prev?.postRestoreSyncing ?? false) &&
+        !next.postRestoreSyncing &&
+        (next.status == SyncStatus.success ||
+            next.status == SyncStatus.hasConflicts)) {
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(
+            l10n?.settings_cloudSync_postRestore_synced ??
+                'Restored library synced.',
+          ),
+        ),
+      );
+    }
+    // Replaced-library adopt: persistent banner + once-per-session modal.
+    if (next.replaceAwaitingAdoption &&
+        !(prev?.replaceAwaitingAdoption ?? false)) {
+      _surfaceReplaceAdoption(next.replaceMarker);
+    }
+    if (!next.replaceAwaitingAdoption &&
+        (prev?.replaceAwaitingAdoption ?? false)) {
+      messenger?.clearMaterialBanners();
+    }
+  }
+
+  void _surfaceReplaceAdoption(LibraryEpochMarker? marker) {
+    if (marker == null) return;
+    final ctx = _scaffoldMessengerKey.currentContext;
+    final l10n = ctx != null ? AppLocalizations.of(ctx) : null;
+    final messenger = _scaffoldMessengerKey.currentState;
+
+    // Persistent banner: rides across every screen until adopted.
+    messenger?.clearMaterialBanners();
+    messenger?.showMaterialBanner(
+      MaterialBanner(
+        content: Text(
+          l10n?.settings_cloudSync_replace_globalBanner(marker.displayName) ??
+              'Sync is paused — the library was replaced from a backup.',
+        ),
+        leading: const Icon(Icons.restore_page_outlined),
+        actions: [
+          TextButton(
+            onPressed: () => _openAdoptDialog(marker),
+            child: Text(
+              l10n?.settings_cloudSync_replace_reviewAction ?? 'Review',
+            ),
+          ),
+        ],
+      ),
+    );
+
+    // Modal once per session; the banner persists if it is dismissed.
+    if (!_adoptDialogShownThisSession) {
+      _adoptDialogShownThisSession = true;
+      _openAdoptDialog(marker);
+    }
+  }
+
+  void _openAdoptDialog(LibraryEpochMarker marker) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final navContext = rootNavigatorKey.currentContext;
+      if (navContext == null) return;
+      showAdoptReplacedLibraryDialog(navContext, ref, marker);
+    });
+  }
+
+  void _onBackupOperationChanged(
+    BackupOperationState? prev,
+    BackupOperationState next,
+  ) {
+    // Fire once, on the transition into restoreComplete.
+    if (next.status != BackupOperationStatus.restoreComplete) return;
+    if (prev?.status == BackupOperationStatus.restoreComplete) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final navContext = rootNavigatorKey.currentContext;
+      if (navContext == null) return;
+      RestoreCompletePage.show(navContext);
+    });
+  }
+
+  /// Opens a share the gate has let through, returning whether it finished
+  /// with it. A root that a soft restart disposed while it was opening the
+  /// share hands it back for the root that replaced it. Failures are
+  /// reported here, by the root that opened it: the share handler that
+  /// received it may belong to a root since replaced.
+  Future<bool> _openShare(IncomingShare share) async {
+    // Demo mode (issue #3708): nothing comes in. The share is consumed with
+    // a note, so it is not imported into the sample logbook or held for later.
+    final messengerContext = _scaffoldMessengerKey.currentContext;
+    if (messengerContext != null &&
+        !demoSealGuard(messengerContext, DemoSealedFeature.fileImport)) {
+      return true;
+    }
+    if (DemoModeGate.instance.isActive) return true;
+    try {
+      return switch (share) {
+        SharedFile(:final bytes, :final fileName) => await _handleIncomingFile(
+          bytes,
+          fileName,
+        ),
+        SharedFileBatch(:final paths) => await _handleIncomingFiles(paths),
+      };
+    } catch (error) {
+      // Torn down mid-way, the old scope's providers throw; that is the
+      // restart, not the file, so the new root gets to try it.
+      if (!mounted) return false;
+      _reportShareError(error);
+      return true;
+    }
+  }
+
+  /// Logs a share failure and tells the diver, through this root's
+  /// messenger: what could not be read, or how many files were skipped.
+  void _reportShareError(Object error) {
+    final l10n = _scaffoldMessengerKey.currentContext != null
+        ? AppLocalizations.of(_scaffoldMessengerKey.currentContext!)
+        : null;
+    reportIncomingFileError(
+      error,
+      messenger: _scaffoldMessengerKey.currentState,
+      readFailedMessage: l10n?.dropTarget_error_readFailed,
+      someUnreadableMessage: l10n?.dropTarget_error_someUnreadable,
+    );
+  }
+
+  /// Opens one shared file. False when this root can no longer open it.
+  Future<bool> _handleIncomingFile(Uint8List bytes, String fileName) async {
     final router = ref.read(appRouterProvider);
     final location = router.routeInformationProvider.value.uri.path;
 
@@ -144,19 +640,135 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
         ? AppLocalizations.of(_scaffoldMessengerKey.currentContext!)
         : null;
 
-    final shouldNavigate = await handleIncomingFile(
+    final outcome = await handleIncomingFile(
       bytes: bytes,
       fileName: fileName,
       currentPath: location,
       notifier: ref.read(universalImportNotifierProvider.notifier),
       messenger: _scaffoldMessengerKey.currentState,
+      isImportRunning: () => ref.read(importJobProvider).isRunning,
       wizardActiveMessage: l10n?.dropTarget_error_wizardActive,
       unsupportedFileMessage: l10n?.dropTarget_error_unsupportedFile,
     );
 
-    if (shouldNavigate) {
-      router.go('/transfer/import-wizard');
+    if (!mounted) return false;
+
+    switch (outcome) {
+      case IncomingFileOutcome.navigateToWizard:
+        // PUSH (not go): the wizard is a sub-page, so system back returns
+        // to wherever the drop happened instead of closing the app (#647).
+        router.push('/transfer/import-wizard');
+      case IncomingFileOutcome.navigateToNavTrackReview:
+        // The share gate held this until the navigator was built, so a
+        // missing one means the app root is being replaced: hand the route
+        // back for the next one.
+        final navContext = rootNavigatorKey.currentContext;
+        if (navContext == null || !navContext.mounted) return false;
+        // Not awaited: the review stays open until the diver leaves it, and
+        // the share gate must not hold the next shared file until then.
+        unawaited(
+          navigateToNavTrackReview(navContext, bytes, fileName: fileName),
+        );
+      case IncomingFileOutcome.navigateToSuuntoFileImport:
+        // PUSH, like the wizard: back returns to wherever the share landed.
+        router.push(
+          suuntoFileImportPath,
+          extra: [SuuntoJsonFile(name: fileName, bytes: bytes)],
+        );
+      case IncomingFileOutcome.buddyCard:
+        final navContext = rootNavigatorKey.currentContext;
+        if (navContext == null || !navContext.mounted) return false;
+        // Awaited, so the share gate holds the next shared card until this
+        // preview closes, as several cards shared together do.
+        await openBuddyCard(navContext, BuddyCardCodec.decodeFull(bytes));
+      case IncomingFileOutcome.none:
+        break;
     }
+    return true;
+  }
+
+  /// Whether a passport link or a shared file can open its page now: a
+  /// diver exists, setup is no longer on screen (the wizard writes the diver
+  /// before it finishes, and finishing replaces the whole stack), and the
+  /// root navigator is built (go_router builds none until its async redirect
+  /// resolves).
+  void _updateNavigationReady() {
+    if (!mounted) return;
+    final settled =
+        _hasDivers &&
+        _linkRouter.routeInformationProvider.value.uri.path != '/welcome';
+    final navigatorBuilt = rootNavigatorKey.currentContext != null;
+    final ready = settled && navigatorBuilt;
+    _passportLinks.setReady(ready);
+    _buddyCardLinks.setReady(ready);
+    _shares.setReady(ready);
+    // One pending retry at most, however many updates arrive meanwhile.
+    if (settled && !navigatorBuilt && !_navigationReadyRetryScheduled) {
+      _navigationReadyRetryScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _navigationReadyRetryScheduled = false;
+        _updateNavigationReady();
+      });
+    }
+  }
+
+  /// Opens a buddy card that arrived as a link (issue #3728).
+  Future<void> _openBuddyCardLink(String text) async {
+    final context = rootNavigatorKey.currentContext;
+    if (context == null || !context.mounted) return;
+    await openBuddyCard(context, BuddyCardCodec.decodeLink(text));
+  }
+
+  /// Opens a passport tag that arrived as a link. The root navigator's
+  /// context sits under the router and the scaffold messenger, which is all
+  /// [openScannedTag] needs.
+  Future<void> _openPassportLink(String text) async {
+    final context = rootNavigatorKey.currentContext;
+    if (context == null || !context.mounted) return;
+    await openScannedTag(context, ref, text);
+  }
+
+  /// Opens a batch of shared files. False when this root can no longer
+  /// open them.
+  Future<bool> _handleIncomingFiles(List<String> shared) async {
+    // Buddy cards shared with other files open on their own (issue #3728).
+    final (:cards, others: paths) = splitBuddyCardPaths(shared);
+    for (final path in cards) {
+      final navContext = rootNavigatorKey.currentContext;
+      if (navContext == null || !navContext.mounted) return false;
+      try {
+        final bytes = await File(path).readAsBytes();
+        final current = rootNavigatorKey.currentContext;
+        if (current == null || !current.mounted) return false;
+        // Awaited: the next card opens once this one's preview closes.
+        await openBuddyCard(current, BuddyCardCodec.decodeFull(bytes));
+      } on FileSystemException catch (e) {
+        _reportShareError(e);
+      }
+    }
+    if (paths.isEmpty) return true;
+    final router = ref.read(appRouterProvider);
+    final location = router.routeInformationProvider.value.uri.path;
+
+    final l10n = _scaffoldMessengerKey.currentContext != null
+        ? AppLocalizations.of(_scaffoldMessengerKey.currentContext!)
+        : null;
+
+    final shouldNavigate = await handleIncomingFiles(
+      paths: paths,
+      currentPath: location,
+      notifier: ref.read(universalImportNotifierProvider.notifier),
+      messenger: _scaffoldMessengerKey.currentState,
+      isImportRunning: () => ref.read(importJobProvider).isRunning,
+      wizardActiveMessage: l10n?.dropTarget_error_wizardActive,
+    );
+
+    if (!mounted) return false;
+    if (shouldNavigate) {
+      // PUSH (not go), for the same reason as _handleIncomingFile (#647).
+      router.push('/transfer/import-wizard');
+    }
+    return true;
   }
 
   Locale? _resolveLocale(String localeSetting) {
@@ -170,12 +782,40 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
     final themeMode = ref.watch(themeModeProvider);
     final themePreset = ref.watch(themePresetProvider);
     final localeSetting = ref.watch(localeProvider);
+    final firstWeekday = ref.watch(firstWeekdayProvider);
 
-    // Restore the last used cloud sync provider on app startup
+    // Detect a database restore and re-baseline sync before anything reads
+    // sync state, so a rewound baseline can't stall sync or resurrect deletes.
+    ref.watch(reconcileDeviceIdentityProvider);
+
+    // Restore the last used cloud sync provider BEFORE listening to sync state:
+    // listening instantiates SyncNotifier, whose _initialize needs the restored
+    // provider to run the post-restore intent / replaced-library surfacing.
     ref.watch(restoreLastProviderProvider);
 
+    // Turn transient sync state into unmissable, screen-independent UI: the
+    // post-restore "syncing" notice, and the replaced-library adopt prompt.
+    ref.listen<SyncState>(syncStateProvider, _onSyncStateChanged);
+
+    // App-level restore completion: hand off to RestoreCompletePage from here
+    // rather than from whichever page triggered the restore. That page may be
+    // disposed (the user navigated away) by the time the restore finishes, in
+    // which case its own listener would never fire and the app would be
+    // stranded on a stale screen. Listening at the app root guarantees the
+    // hand-off -- and its restartApp() -- always happens.
+    ref.listen<BackupOperationState>(
+      backupOperationProvider,
+      _onBackupOperationChanged,
+    );
+
+    // An import that ran on after its wizard closed (#3554) has no summary
+    // page to end on, so its outcome is told here, whatever screen is up.
+    ref.listen<ImportJobOutcome?>(
+      importJobProvider.select((job) => job.backgroundOutcome),
+      _onBackgroundImportEnded,
+    );
+
     return MaterialApp.router(
-      scaffoldMessengerKey: _scaffoldMessengerKey,
       title: 'Submersion',
       debugShowCheckedModeBanner: false,
       theme: AppThemeRegistry.resolveTheme(themePreset, Brightness.light),
@@ -185,12 +825,65 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
       localeListResolutionCallback: (preferredLocales, supportedLocales) {
         return resolveAppLocale(preferredLocales, supportedLocales);
       },
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      // Ahead of the generated delegates, so its MaterialLocalizations win:
+      // they start every week in the app on the diver's first day of the
+      // week (issue #4232).
+      localizationsDelegates: [
+        WeekStartMaterialLocalizationsDelegate(firstWeekday),
+        ...AppLocalizations.localizationsDelegates,
+      ],
       supportedLocales: AppLocalizations.supportedLocales,
+      actions: appActions(),
       routerConfig: router,
       builder: (context, child) {
         Intl.defaultLocale = Localizations.localeOf(context).toLanguageTag();
-        return child!;
+        // Block all interaction while a database restore runs, so no data page
+        // can rebuild against the transient null database mid-restore. Kept
+        // outside the zoom scope so the barrier stays a full-screen, unscaled
+        // overlay. LockBarrier sits OUTSIDE RestoreBarrier so the App Lock
+        // re-lock overlay covers restore UI too.
+        // The demo ribbon goes over every screen, dialogs included, and
+        // outside the zoom scope so it keeps its size in the corner. The lock
+        // overlay still covers it.
+        final app = LockBarrier(
+          child: DemoModeRibbon(
+            child: RestoreBarrier(
+              child: Consumer(
+                builder: (context, ref, _) {
+                  // Watched here rather than in build() so dragging the zoom
+                  // slider rebuilds only this subtree, not all of MaterialApp.
+                  final zoom = ref.watch(displayZoomNotifierProvider);
+                  final notifier = ref.read(
+                    displayZoomNotifierProvider.notifier,
+                  );
+                  final useMeta =
+                      defaultTargetPlatform == TargetPlatform.macOS ||
+                      defaultTargetPlatform == TargetPlatform.iOS;
+
+                  return CallbackShortcuts(
+                    bindings: displayZoomShortcuts(
+                      onZoomIn: () => notifier.stepBy(1),
+                      onZoomOut: () => notifier.stepBy(-1),
+                      onReset: notifier.reset,
+                      useMetaModifier: useMeta,
+                    ),
+                    // CallbackShortcuts only fires for keystrokes inside its
+                    // focused subtree, and nothing has focus on desktop
+                    // cold-start, so the shortcuts would otherwise be dead until
+                    // the user clicks something.
+                    child: Focus(
+                      autofocus: true,
+                      child: DisplayZoomScope(zoom: zoom, child: child!),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+        // Here rather than through MaterialApp.scaffoldMessengerKey, which
+        // would give the key MaterialApp's plain messenger instead of this one.
+        return AppScaffoldMessenger(key: _scaffoldMessengerKey, child: app);
       },
     );
   }

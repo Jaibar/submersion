@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/sort_option_tile.dart';
 
 /// A reusable bottom sheet for selecting sort field and direction.
 ///
@@ -29,6 +31,9 @@ class SortBottomSheet<T extends Enum> extends StatefulWidget {
   /// Callback when sort selection changes
   final void Function(T field, SortDirection direction) onSortChanged;
 
+  /// Extra controls under the field list, such as a list's group-by choice.
+  final Widget? footer;
+
   const SortBottomSheet({
     super.key,
     required this.title,
@@ -38,6 +43,7 @@ class SortBottomSheet<T extends Enum> extends StatefulWidget {
     required this.getFieldDisplayName,
     required this.getFieldIcon,
     required this.onSortChanged,
+    this.footer,
   });
 
   @override
@@ -57,11 +63,11 @@ class _SortBottomSheetState<T extends Enum> extends State<SortBottomSheet<T>> {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
+    // Scrolls when a footer makes the sheet taller than a short screen.
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(vertical: 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -83,12 +89,16 @@ class _SortBottomSheetState<T extends Enum> extends State<SortBottomSheet<T>> {
                       ButtonSegment(
                         value: SortDirection.ascending,
                         icon: Icon(SortDirection.ascending.icon, size: 18),
-                        tooltip: SortDirection.ascending.displayName,
+                        tooltip: SortDirection.ascending.localizedName(
+                          context.l10n,
+                        ),
                       ),
                       ButtonSegment(
                         value: SortDirection.descending,
                         icon: Icon(SortDirection.descending.icon, size: 18),
-                        tooltip: SortDirection.descending.displayName,
+                        tooltip: SortDirection.descending.localizedName(
+                          context.l10n,
+                        ),
                       ),
                     ],
                     selected: {_selectedDirection},
@@ -106,41 +116,23 @@ class _SortBottomSheetState<T extends Enum> extends State<SortBottomSheet<T>> {
             const SizedBox(height: 8),
             const Divider(height: 1),
             // Sort field options
-            ...widget.fields.map((field) {
-              final isSelected = field == _selectedField;
-              final displayName = widget.getFieldDisplayName(field);
-              return Semantics(
-                button: true,
-                selected: isSelected,
-                label: isSelected
-                    ? context.l10n.accessibility_sort_selectedLabel(displayName)
-                    : context.l10n.accessibility_sort_unselectedLabel(
-                        displayName,
-                      ),
-                child: ListTile(
-                  leading: Icon(
-                    widget.getFieldIcon(field),
-                    color: isSelected ? colorScheme.primary : null,
-                  ),
-                  title: Text(
-                    displayName,
-                    style: TextStyle(
-                      color: isSelected ? colorScheme.primary : null,
-                      fontWeight: isSelected ? FontWeight.w600 : null,
-                    ),
-                  ),
-                  trailing: isSelected
-                      ? Icon(Icons.check, color: colorScheme.primary)
-                      : null,
-                  onTap: () {
-                    setState(() {
-                      _selectedField = field;
-                    });
-                    widget.onSortChanged(_selectedField, _selectedDirection);
-                  },
-                ),
-              );
-            }),
+            ...widget.fields.map(
+              (field) => SortOptionTile(
+                icon: widget.getFieldIcon(field),
+                label: widget.getFieldDisplayName(field),
+                isSelected: field == _selectedField,
+                onTap: () {
+                  setState(() {
+                    _selectedField = field;
+                  });
+                  widget.onSortChanged(_selectedField, _selectedDirection);
+                },
+              ),
+            ),
+            if (widget.footer != null) ...[
+              const Divider(height: 1),
+              widget.footer!,
+            ],
             const SizedBox(height: 8),
           ],
         ),
@@ -161,9 +153,14 @@ Future<void> showSortBottomSheet<T extends Enum>({
   required String Function(T) getFieldDisplayName,
   required IconData Function(T) getFieldIcon,
   required void Function(T field, SortDirection direction) onSortChanged,
+  Widget? footer,
 }) {
   return showModalBottomSheet(
     context: context,
+    // Lets the sheet grow past the default 9/16-height cap, so a footer is
+    // not pushed off a phone screen; short sheets still hug their content.
+    isScrollControlled: true,
+    useSafeArea: true,
     builder: (context) => SortBottomSheet<T>(
       title: title,
       currentField: currentField,
@@ -171,6 +168,7 @@ Future<void> showSortBottomSheet<T extends Enum>({
       fields: fields,
       getFieldDisplayName: getFieldDisplayName,
       getFieldIcon: getFieldIcon,
+      footer: footer,
       onSortChanged: (field, direction) {
         onSortChanged(field, direction);
         Navigator.pop(context);

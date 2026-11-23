@@ -1,0 +1,1476 @@
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/data/repositories/connected_accounts_repository.dart';
+import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/features/cylinder_configs/data/repositories/cylinder_config_repository.dart';
+import 'package:submersion/features/cylinder_passports/data/repositories/cylinder_fill_repository.dart';
+import 'package:submersion/features/connections/data/repositories/connection_map_repository.dart';
+import 'package:submersion/features/query/data/repositories/saved_query_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_custom_field_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/view_config_repository.dart';
+import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
+import 'package:submersion/features/dive_log/query/dive_filter_query.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_share_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_kind_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_record_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
+import 'package:submersion/features/equipment/query/equipment_query_entity.dart';
+import 'package:submersion/features/maps/data/repositories/offline_map_repository.dart';
+import 'package:submersion/features/media/data/repositories/manifest_subscription_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_library_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_repository.dart';
+import 'package:submersion/features/media/data/repositories/media_smart_album_repository.dart';
+import 'package:submersion/features/media/domain/entities/media_library_filter.dart';
+import 'package:submersion/features/media_store/data/media_stores_repository.dart';
+import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
+import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
+import 'package:submersion/features/trips/data/repositories/trip_cylinder_repository.dart';
+import 'package:submersion/features/trips/data/repositories/liveaboard_details_repository.dart';
+import 'package:submersion/features/universal_import/data/repositories/csv_preset_repository.dart';
+import 'package:submersion/features/weight_planner/data/repositories/weight_history_repository.dart';
+import 'package:submersion/features/divers/data/repositories/profile_hides_repository.dart';
+import 'package:submersion/features/trips/data/repositories/trip_equipment_repository.dart';
+
+import '../helpers/test_database.dart';
+
+/// Guards the change-tick streams provider reactivity depends on (issue #974).
+///
+/// A tick is only useful if it fires for every table its callers actually read.
+/// A stream that names the wrong table is silently inert: the provider
+/// subscribes, nothing ever emits, and the staleness the tick was added to fix
+/// returns with no test failing. These write to a watched table and assert the
+/// stream emits, so a mis-targeted tick cannot pass.
+///
+/// Note a delete on an empty table does NOT notify -- Drift's update
+/// notification is driven by rows actually written -- so every case here
+/// inserts.
+///
+/// The cases that earn their place are the non-obvious ones, where the tick
+/// deliberately watches a table other than the repository's headline one:
+/// statistics over `dive_tanks`, schedules over `diver_settings`, custom
+/// fields over `dives`, subscriptions over the per-device state table. Those
+/// are exactly the couplings a future edit is most likely to drop.
+void main() {
+  late AppDatabase db;
+
+  /// Epoch millis, matching how this schema stores every timestamp.
+  final now = DateTime.utc(2026, 3, 28).millisecondsSinceEpoch;
+
+  setUp(() async {
+    db = await setUpTestDatabase();
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  /// Inserts the parent rows the child-table cases below reference.
+  ///
+  /// Foreign keys are enforced in these tests, so a child insert without its
+  /// parent fails on the constraint rather than on the tick under test.
+  Future<void> seedParents() async {
+    await db
+        .into(db.divers)
+        .insert(
+          DiversCompanion.insert(
+            id: 'diver-1',
+            name: 'Test Diver',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+    await db
+        .into(db.equipment)
+        .insert(
+          EquipmentCompanion.insert(
+            id: 'e1',
+            name: 'Reg',
+            type: 'regulator',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+    await db
+        .into(db.cylinderConfigs)
+        .insert(
+          CylinderConfigsCompanion.insert(
+            id: 'c1',
+            name: 'Sidemount',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+    await db
+        .into(db.trips)
+        .insert(
+          TripsCompanion.insert(
+            id: 't1',
+            name: 'Red Sea 2026',
+            startDate: now,
+            endDate: now,
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+    await db
+        .into(db.mediaSubscriptions)
+        .insert(
+          MediaSubscriptionsCompanion.insert(
+            id: 's1',
+            manifestUrl: 'https://example.test/manifest.json',
+            format: 'json',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+  }
+
+  /// Subscribes to [tick], runs [write], and reports whether the stream fired.
+  ///
+  /// Polls rather than sleeping a fixed span so the debounced ticks (300 ms)
+  /// and the un-debounced majority share one helper without every case paying
+  /// the worst-case wait.
+  Future<bool> fires(Stream<void> tick, Future<void> Function() write) async {
+    var fired = false;
+    final sub = tick.listen((_) => fired = true);
+    addTearDown(sub.cancel);
+
+    await write();
+    for (var i = 0; i < 150 && !fired; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    return fired;
+  }
+
+  /// Subscribes to [tick] and reports whether it emitted with NO write at all.
+  ///
+  /// The other half of the contract, and the half nothing checked before
+  /// #1175. Every consumer of these streams feeds them to
+  /// `Ref.invalidateSelfWhen`, which rebuilds the provider on each tick. A
+  /// stream that emits on subscribe therefore invalidates the provider that
+  /// just subscribed; the rebuild subscribes again and emits again, and the
+  /// provider spins for as long as anything watches it -- running its query
+  /// once per event-loop turn on the main-isolate database.
+  ///
+  /// This is exactly what a Drift QUERY stream does: `watchSingle()` and
+  /// friends deliver the current row set on listen. A tick must be built on
+  /// `tableUpdates`, which fires only on a real write.
+  Future<bool> firesWithoutAWrite(Stream<void> tick) async {
+    var fired = false;
+    final sub = tick.listen((_) => fired = true);
+    addTearDown(sub.cancel);
+
+    // Generous relative to the 300 ms debounce the slowest tick applies, so a
+    // late emission is not mistaken for silence.
+    for (var i = 0; i < 60 && !fired; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    return fired;
+  }
+
+  group('silence before a write', () {
+    // Regression guard for #1175: MediaLibraryRepository.watchMediaChanges was
+    // a watched COUNT query, so subscribing to it emitted immediately. Fed to
+    // invalidateSelfWhen by missingCountProvider and
+    // sourceCountsProvider, that turned opening the Media section into an
+    // unbounded rebuild loop, one COUNT(*) over `media` per event-loop turn.
+    //
+    // Covers every tick this file already exercises for firing, so the two
+    // halves of the contract are checked over the same set.
+    // Each entry builds its repository when the test runs, not while the
+    // file is declared: a repository may create an HTTP client, and by then
+    // another file in the isolate may have set up the test binding, whose
+    // HTTP layer only works inside a test.
+    final ticks = <String, Stream<void> Function()>{
+      'MediaLibraryRepository.watchMediaChanges': () =>
+          MediaLibraryRepository().watchMediaChanges(),
+      'MediaRepository.watchMediaChanges': () =>
+          MediaRepository().watchMediaChanges(),
+      'MediaLibraryRepository.watchMapChanges': () =>
+          MediaLibraryRepository().watchMapChanges(),
+      // #2835: a watched COUNT query again, this time behind the Filter media
+      // sheet, which looped mediaSmartAlbumsProvider for as long as it was
+      // open and froze the library when it closed.
+      'MediaSmartAlbumRepository.watchChanges': () =>
+          MediaSmartAlbumRepository().watchChanges(),
+      'InsightsRepository.watchInsightsChanges': () =>
+          InsightsRepository().watchInsightsChanges(),
+      'InsightsRepository.watchInsightsChanges with a filter': () =>
+          InsightsRepository().watchInsightsChanges(
+            filter: DiveFilterState(query: TextNode(const ['reef'])),
+          ),
+      'InsightsRepository.watchOutingChanges': () =>
+          InsightsRepository().watchOutingChanges(),
+      'ServiceRecordRepository.watchServiceRecordsChanges': () =>
+          ServiceRecordRepository().watchServiceRecordsChanges(),
+      'ServiceKindRepository.watchServiceKindsChanges': () =>
+          ServiceKindRepository().watchServiceKindsChanges(),
+      'EquipmentShareRepository.watchChanges': () =>
+          EquipmentShareRepository().watchChanges(),
+      'TripEquipmentRepository.watchChanges': () =>
+          TripEquipmentRepository().watchChanges(),
+      'ProfileHidesRepository.watchChanges': () =>
+          ProfileHidesRepository().watchChanges(),
+      'ServiceScheduleRepository.watchSchedulesChanges': () =>
+          ServiceScheduleRepository().watchSchedulesChanges(),
+      'CylinderConfigRepository.watchConfigsChanges': () =>
+          CylinderConfigRepository().watchConfigsChanges(),
+      'CylinderFillRepository.watchFillsChanges': () =>
+          CylinderFillRepository().watchFillsChanges(),
+      'ConnectionMapRepository.watchConnectionMapsChanges': () =>
+          ConnectionMapRepository().watchConnectionMapsChanges(),
+      'SavedQueryRepository.watchSavedQueriesChanges': () =>
+          SavedQueryRepository().watchSavedQueriesChanges(),
+      'DiveComputerRepository.watchComputersChanges': () =>
+          DiveComputerRepository().watchComputersChanges(),
+      'OfflineMapRepository.watchRegionsChanges': () =>
+          OfflineMapRepository().watchRegionsChanges(),
+      'AppSettingsRepository.watchSettingsChanges': () =>
+          AppSettingsRepository().watchSettingsChanges(),
+      'ManifestSubscriptionRepository.watchSubscriptionsChanges': () =>
+          ManifestSubscriptionRepository().watchSubscriptionsChanges(),
+      'WeightHistoryRepository.watchGearLeadChanges': () =>
+          WeightHistoryRepository().watchGearLeadChanges(),
+      'CsvPresetRepository.watchPresetsChanges': () =>
+          CsvPresetRepository().watchPresetsChanges(),
+      'DiveRepository.watchAnalysisInputChanges': () =>
+          DiveRepository().watchAnalysisInputChanges(),
+      'DiveRepository.watchTables': () =>
+          DiveRepository().watchTables({'equipment_attributes'}),
+      'DiveRepository.watchDiveListChangesWithBuddyLinks': () =>
+          DiveRepository().watchDiveListChangesWithBuddyLinks(),
+      'DiveRepository.watchDivesChangesWithBuddyLinks': () =>
+          DiveRepository().watchDivesChangesWithBuddyLinks(),
+    };
+
+    for (final entry in ticks.entries) {
+      test('${entry.key} stays silent until something is written', () async {
+        expect(
+          await firesWithoutAWrite(entry.value()),
+          isFalse,
+          reason:
+              '${entry.key} emitted on subscribe. Every caller feeds this to '
+              'Ref.invalidateSelfWhen, so an emit-on-listen tick makes the '
+              'provider rebuild, resubscribe and tick again forever. Build the '
+              'tick on tableUpdates(), not on a watched query.',
+        );
+      });
+    }
+  });
+
+  group('insights', () {
+    test('watchInsightsChanges fires on a dives write', () async {
+      expect(
+        await fires(
+          InsightsRepository().watchInsightsChanges(),
+          () => db
+              .into(db.dives)
+              .insert(
+                DivesCompanion.insert(
+                  id: 'd1',
+                  diveDateTime: now,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchInsightsChanges fires on a dive_tanks write', () async {
+      // The case watchDivesChanges would have missed. dive_tanks carries all
+      // of the SAC math, and a tank-only sync changeset never touches the
+      // dives row -- so subscribing to the dives tick alone would have left
+      // every SAC chart stale.
+      await db
+          .into(db.dives)
+          .insert(
+            DivesCompanion.insert(
+              id: 'd1',
+              diveDateTime: now,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+      expect(
+        await fires(
+          InsightsRepository().watchInsightsChanges(),
+          () => db
+              .into(db.diveTanks)
+              .insert(DiveTanksCompanion.insert(id: 't1', diveId: 'd1')),
+        ),
+        isTrue,
+      );
+    });
+
+    test(
+      'watchInsightsChanges fires on an equipment_attributes write',
+      () async {
+        // The equipment-attribute filter (#1805) and the suit-thickness chart
+        // read attribute rows, and saveAttributes or a sync pull writes only
+        // that table.
+        await seedParents();
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(),
+            () => db
+                .into(db.equipmentAttributes)
+                .insert(
+                  EquipmentAttributesCompanion.insert(
+                    id: 'attr_e1_connection',
+                    equipmentId: 'e1',
+                    attrKey: 'connection',
+                    createdAt: now,
+                    updatedAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    group('tables beyond the dive row (#3894)', () {
+      final textSearch = DiveFilterState(query: TextNode(const ['reef']));
+
+      Future<void> insertDive() => db
+          .into(db.dives)
+          .insert(
+            DivesCompanion.insert(
+              id: 'd1',
+              diveDateTime: now,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+
+      Future<void> insertTag() => db
+          .into(db.tags)
+          .insert(
+            TagsCompanion.insert(
+              id: 'tag1',
+              name: 'reef',
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+
+      test('fires on a tags write the filter reads', () async {
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(filter: textSearch),
+            insertTag,
+          ),
+          isTrue,
+        );
+      });
+
+      test('fires on a dive_types write the filter reads', () async {
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(filter: textSearch),
+            () => db
+                .into(db.diveTypes)
+                .insert(
+                  DiveTypesCompanion.insert(
+                    id: 'reef_type',
+                    name: 'Reef',
+                    createdAt: now,
+                    updatedAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+
+      test('fires on a dive_custom_fields write the filter reads', () async {
+        await insertDive();
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(filter: textSearch),
+            () => db
+                .into(db.diveCustomFields)
+                .insert(
+                  DiveCustomFieldsCompanion.insert(
+                    id: 'field1',
+                    diveId: 'd1',
+                    fieldKey: 'site',
+                    createdAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+
+      test('fires on a dive_profile_events write with no filter', () async {
+        // The deco card classifies a dive from its stop events whatever the
+        // filter, and a sync pull can write only those.
+        await insertDive();
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(),
+            () => db
+                .into(db.diveProfileEvents)
+                .insert(
+                  DiveProfileEventsCompanion.insert(
+                    id: 'event1',
+                    diveId: 'd1',
+                    timestamp: 60,
+                    eventType: 'decoStopStart',
+                    createdAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+
+      test('stays narrow when the filter does not read the table', () async {
+        // Otherwise every chart reloads on writes no statistic reads.
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(
+              filter: const DiveFilterState(minDepth: 10),
+            ),
+            insertTag,
+          ),
+          isFalse,
+        );
+      });
+
+      test('fires on a service status write the filter reads', () async {
+        // A chart does not await this cache, so the tick is what brings it up
+        // to date once the cache is written.
+        final serviceDue = DiveFilterState(
+          query: ConditionNode(
+            FieldPath(const ['gear', 'serviceDue']),
+            QueryOp.eq,
+            const EnumValue('overdue'),
+          ),
+        );
+        expect(
+          diveFilterTablesTouched(serviceDue),
+          contains(serviceStatusTable),
+        );
+        await seedParents();
+        expect(
+          await fires(
+            InsightsRepository().watchInsightsChanges(filter: serviceDue),
+            () => db
+                .into(db.equipmentServiceStatus)
+                .insert(
+                  EquipmentServiceStatusCompanion.insert(
+                    equipmentId: 'e1',
+                    severity: 'overdue',
+                    computedAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+
+      test('a write to a filter table and a dive is one tick', () async {
+        var ticks = 0;
+        final sub = InsightsRepository()
+            .watchInsightsChanges(filter: textSearch)
+            .listen((_) => ticks++);
+        addTearDown(sub.cancel);
+
+        await db.transaction(() async {
+          await insertTag();
+          await insertDive();
+        });
+        for (var i = 0; i < 150 && ticks == 0; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        // Room for a second tick to arrive, had there been a second stream.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+
+        expect(ticks, 1);
+      });
+    });
+
+    test(
+      'DiveRepository.watchTables fires on a write to a named table',
+      () async {
+        expect(
+          await fires(
+            DiveRepository().watchTables({'equipment_attributes'}),
+            () async {
+              await db
+                  .into(db.equipment)
+                  .insert(
+                    EquipmentCompanion.insert(
+                      id: 'eq_query_tick',
+                      name: 'tick',
+                      type: 'hose',
+                      createdAt: now,
+                      updatedAt: now,
+                    ),
+                  );
+              await db
+                  .into(db.equipmentAttributes)
+                  .insert(
+                    EquipmentAttributesCompanion.insert(
+                      id: 'attr_eq_query_tick',
+                      equipmentId: 'eq_query_tick',
+                      attrKey: 'query_tick',
+                      createdAt: now,
+                      updatedAt: now,
+                    ),
+                  );
+            },
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test('watchInsightsChanges fires on a dive_sites write', () async {
+      expect(
+        await fires(
+          InsightsRepository().watchInsightsChanges(),
+          () => db
+              .into(db.diveSites)
+              .insert(
+                DiveSitesCompanion.insert(
+                  id: 's1',
+                  name: 'Blue Hole',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    // Site type links are clockless children: typing a site writes only the
+    // junction, never dive_sites, so the chart must listen to it (#1765).
+    test('watchInsightsChanges fires on a site_site_types write', () async {
+      await db
+          .into(db.diveSites)
+          .insert(
+            DiveSitesCompanion.insert(
+              id: 's2',
+              name: 'Quarry',
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+      expect(
+        await fires(
+          InsightsRepository().watchInsightsChanges(),
+          () => db
+              .into(db.siteSiteTypes)
+              .insert(
+                SiteSiteTypesCompanion.insert(
+                  id: 'j1',
+                  siteId: 's2',
+                  siteTypeId: 'quarry',
+                  createdAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('equipment', () {
+    test('watchServiceRecordsChanges fires', () async {
+      await seedParents();
+      expect(
+        await fires(
+          ServiceRecordRepository().watchServiceRecordsChanges(),
+          () => db
+              .into(db.serviceRecords)
+              .insert(
+                ServiceRecordsCompanion.insert(
+                  id: 'r1',
+                  equipmentId: 'e1',
+                  serviceCategory: 'annual',
+                  serviceDate: now,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('EquipmentShareRepository.watchChanges fires on an event', () async {
+      // The ownership log is the table a share-only write would miss.
+      await seedParents();
+      expect(
+        await fires(
+          EquipmentShareRepository().watchChanges(),
+          () => db
+              .into(db.equipmentOwnershipEvents)
+              .insert(
+                EquipmentOwnershipEventsCompanion.insert(
+                  id: 'ev1',
+                  equipmentId: 'e1',
+                  kind: 'shared',
+                  occurredAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchServiceKindsChanges fires', () async {
+      expect(
+        await fires(
+          ServiceKindRepository().watchServiceKindsChanges(),
+          () => db
+              .into(db.serviceKinds)
+              .insert(
+                ServiceKindsCompanion.insert(
+                  id: 'k1',
+                  name: 'O2 clean',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test(
+      'watchGearLeadChanges fires on an equipment_attributes write',
+      () async {
+        await seedParents();
+        // Not the headline table: since #1103 a weight observation's carriedKg
+        // also comes from weights-type gear, whose mass lives in
+        // equipment_attributes. saveAttributes writes that table ALONE, so a
+        // tick watching only `equipment` would be inert for an attribute-only
+        // write and leave the calibration refitting against stale ballast.
+        expect(
+          await fires(
+            WeightHistoryRepository().watchGearLeadChanges(),
+            () => db
+                .into(db.equipmentAttributes)
+                .insert(
+                  EquipmentAttributesCompanion.insert(
+                    id: 'attr_e1_dry_weight_kg',
+                    equipmentId: 'e1',
+                    attrKey: 'dry_weight_kg',
+                    valueNum: const Value(3.63),
+                    createdAt: now,
+                    updatedAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test('watchSchedulesChanges fires on a diver_settings write', () async {
+      await seedParents();
+      // Not the headline table: getDueSoonWindowDays reads serviceReminderDays
+      // out of diver_settings, so changing the reminder window moves the
+      // due-soon threshold without any service_schedules row being written.
+      expect(
+        await fires(
+          ServiceScheduleRepository().watchSchedulesChanges(),
+          () => db
+              .into(db.diverSettings)
+              .insert(
+                DiverSettingsCompanion.insert(
+                  id: 'ds1',
+                  diverId: 'diver-1',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('cylinder configs', () {
+    test('watchConfigsChanges fires on an items write', () async {
+      await seedParents();
+      // Watches the item table too: a config is meaningless without its items
+      // and a sync can apply either side independently.
+      expect(
+        await fires(
+          CylinderConfigRepository().watchConfigsChanges(),
+          () => db
+              .into(db.cylinderConfigItems)
+              .insert(
+                CylinderConfigItemsCompanion.insert(
+                  id: 'i1',
+                  configId: 'c1',
+                  tankRole: 'backGas',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('saved queries', () {
+    test('watchSavedQueriesChanges fires on a saved query write', () async {
+      expect(
+        await fires(
+          SavedQueryRepository().watchSavedQueriesChanges(),
+          () => db
+              .into(db.savedQueries)
+              .insert(
+                SavedQueriesCompanion.insert(
+                  id: 'sq-tick',
+                  subject: 'dives',
+                  name: 'x',
+                  queryJson: '{}',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('cylinder fills', () {
+    test('watchFillsChanges fires on a fill write', () async {
+      expect(
+        await fires(
+          CylinderFillRepository().watchFillsChanges(),
+          () => db
+              .into(db.cylinderFills)
+              .insert(
+                CylinderFillsCompanion.insert(
+                  id: 'fill-tick',
+                  passportId: 'pp-tick',
+                  filledAt: now,
+                  o2Percent: 21,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('connection maps', () {
+    test('watchConnectionMapsChanges fires on a saved map write', () async {
+      await db
+          .into(db.divers)
+          .insert(
+            DiversCompanion.insert(
+              id: 'diver-tick',
+              name: 'Tick',
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+      expect(
+        await fires(
+          ConnectionMapRepository().watchConnectionMapsChanges(),
+          () => db
+              .into(db.connectionMaps)
+              .insert(
+                ConnectionMapsCompanion.insert(
+                  id: 'map-tick',
+                  diverId: 'diver-tick',
+                  name: 'Tick',
+                  spec: '{"kinds":["buddy"],"links":[],"min":1}',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('dive log', () {
+    test('watchComputersChanges fires', () async {
+      expect(
+        await fires(
+          DiveComputerRepository().watchComputersChanges(),
+          () => db
+              .into(db.diveComputers)
+              .insert(
+                DiveComputersCompanion.insert(
+                  id: 'c1',
+                  name: 'Perdix 2',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchCustomFieldsChanges fires on a dives write', () async {
+      // Watches dives as well as dive_custom_fields: getDistinctKeysForDiver
+      // joins the two, so a cascade delete changes the suggestion set without
+      // the custom-field table being written directly.
+      expect(
+        await fires(
+          DiveCustomFieldRepository(db).watchCustomFieldsChanges(),
+          () => db
+              .into(db.dives)
+              .insert(
+                DivesCompanion.insert(
+                  id: 'd1',
+                  diveDateTime: now,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    // The buddy filters read dive_buddies (and buddies.name for the name
+    // filter), which the plain list and dives ticks do not watch. A sync pull
+    // of a buddy link writes only dive_buddies, never the parent dive, and a
+    // rename writes only buddies (#1769, #1915).
+    final buddyAwareTicks = <String, Stream<void> Function()>{
+      'watchDiveListChangesWithBuddyLinks': () =>
+          DiveRepository().watchDiveListChangesWithBuddyLinks(),
+      'watchDivesChangesWithBuddyLinks': () =>
+          DiveRepository().watchDivesChangesWithBuddyLinks(),
+    };
+    for (final entry in buddyAwareTicks.entries) {
+      test('${entry.key} fires on a dive_buddies write', () async {
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion.insert(
+                id: 'd1',
+                diveDateTime: now,
+                createdAt: now,
+                updatedAt: now,
+              ),
+            );
+        await db
+            .into(db.buddies)
+            .insert(
+              BuddiesCompanion.insert(
+                id: 'b1',
+                name: 'Ann',
+                createdAt: now,
+                updatedAt: now,
+              ),
+            );
+        expect(
+          await fires(
+            entry.value(),
+            () => db
+                .into(db.diveBuddies)
+                .insert(
+                  DiveBuddiesCompanion.insert(
+                    id: 'l1',
+                    diveId: 'd1',
+                    buddyId: 'b1',
+                    createdAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+
+      test('${entry.key} fires on a buddies write', () async {
+        expect(
+          await fires(
+            entry.value(),
+            () => db
+                .into(db.buddies)
+                .insert(
+                  BuddiesCompanion.insert(
+                    id: 'b1',
+                    name: 'Ann',
+                    createdAt: now,
+                    updatedAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      });
+    }
+
+    test('watchPresetsChanges fires for field presets', () async {
+      await seedParents();
+      expect(
+        await fires(
+          ViewConfigRepository(db).watchPresetsChanges(),
+          () => db
+              .into(db.fieldPresets)
+              .insert(
+                FieldPresetsCompanion.insert(
+                  id: 'p1',
+                  diverId: 'diver-1',
+                  viewMode: 'table',
+                  name: 'Wide',
+                  configJson: '[]',
+                  createdAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('trips', () {
+    test('watchLiveaboardChanges fires', () async {
+      await seedParents();
+      expect(
+        await fires(
+          LiveaboardDetailsRepository().watchLiveaboardChanges(),
+          () => db
+              .into(db.liveaboardDetailRecords)
+              .insert(
+                LiveaboardDetailRecordsCompanion.insert(
+                  id: 'l1',
+                  tripId: 't1',
+                  vesselName: 'MY Blue Horizon',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchItineraryChanges fires', () async {
+      await seedParents();
+      expect(
+        await fires(
+          ItineraryDayRepository().watchItineraryChanges(),
+          () => db
+              .into(db.tripItineraryDays)
+              .insert(
+                TripItineraryDaysCompanion.insert(
+                  id: 'i1',
+                  tripId: 't1',
+                  dayNumber: 1,
+                  date: now,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchTripCylinderChanges fires on a slot write', () async {
+      await seedParents();
+      expect(
+        await fires(
+          TripCylinderRepository().watchTripCylinderChanges(),
+          () => db
+              .into(db.tripCylinders)
+              .insert(
+                TripCylindersCompanion.insert(
+                  id: 'slot-1',
+                  tripId: 't1',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchTripCylinderChanges fires on a dive tank write', () async {
+      // The board's consumption side lives on dive_tanks; a sync pull that
+      // rewrites a tank never touches the dives row.
+      await seedParents();
+      await db
+          .into(db.dives)
+          .insert(
+            DivesCompanion.insert(
+              id: 'dive-tick',
+              diveDateTime: now,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+      expect(
+        await fires(
+          TripCylinderRepository().watchTripCylinderChanges(),
+          () => db
+              .into(db.diveTanks)
+              .insert(
+                DiveTanksCompanion.insert(id: 'tank-tick', diveId: 'dive-tick'),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchGasRecordChanges fires on a slot write', () async {
+      await seedParents();
+      expect(
+        await fires(
+          TripCylinderRepository().watchGasRecordChanges(),
+          () => db
+              .into(db.tripCylinders)
+              .insert(
+                TripCylindersCompanion.insert(
+                  id: 'slot-1',
+                  tripId: 't1',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchGasRecordChanges fires on a diver rename', () async {
+      // The record names each tank's diver, and a rename writes only the
+      // divers row (issue #2666).
+      await seedParents();
+      expect(
+        await fires(
+          TripCylinderRepository().watchGasRecordChanges(),
+          () => (db.update(db.divers)..where((d) => d.id.equals('diver-1')))
+              .write(const DiversCompanion(name: Value('Renamed'))),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('maps', () {
+    test('watchRegionsChanges fires', () async {
+      expect(
+        await fires(
+          OfflineMapRepository().watchRegionsChanges(),
+          () => db
+              .into(db.cachedRegions)
+              .insert(
+                CachedRegionsCompanion.insert(
+                  id: 'r1',
+                  name: 'Red Sea',
+                  minLat: 27,
+                  maxLat: 28,
+                  minLng: 33,
+                  maxLng: 34,
+                  minZoom: 8,
+                  maxZoom: 12,
+                  tileCount: 0,
+                  sizeBytes: 0,
+                  createdAt: now,
+                  lastAccessedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('settings', () {
+    test('watchSettingsChanges fires', () async {
+      expect(
+        await fires(
+          AppSettingsRepository().watchSettingsChanges(),
+          () => db
+              .into(db.settings)
+              .insert(SettingsCompanion.insert(key: 'k', updatedAt: now)),
+        ),
+        isTrue,
+      );
+    });
+
+    test(
+      'watchSettingsChanges is inert rather than throwing with no db',
+      () async {
+        // Regression guard. Every read in AppSettingsRepository catches its own
+        // errors and falls back to a default, so shareByDefaultProvider resolved
+        // fine before the database was up. A tick that threw took that
+        // robustness away, which is the null-database window of a restore and
+        // not merely a test condition.
+        await tearDownTestDatabase();
+        addTearDown(() async {
+          db = await setUpTestDatabase();
+        });
+
+        expect(AppSettingsRepository().watchSettingsChanges, returnsNormally);
+        expect(
+          await AppSettingsRepository().watchSettingsChanges().isEmpty,
+          isTrue,
+        );
+      },
+    );
+  });
+
+  group('media', () {
+    test('MediaSmartAlbumRepository.watchChanges fires on create', () async {
+      final repo = MediaSmartAlbumRepository();
+      expect(
+        await fires(
+          repo.watchChanges(),
+          () => repo.create(name: 'x', filter: MediaLibraryFilter.none),
+        ),
+        isTrue,
+      );
+    });
+
+    test('MediaSmartAlbumRepository.watchChanges fires on delete', () async {
+      final repo = MediaSmartAlbumRepository();
+      final album = await repo.create(
+        name: 'x',
+        filter: MediaLibraryFilter.none,
+      );
+      expect(
+        await fires(repo.watchChanges(), () => repo.delete(album.id)),
+        isTrue,
+      );
+    });
+
+    test('watchSubscriptionsChanges fires on a state-table write', () async {
+      await seedParents();
+      // Watches the per-device state table as well as the subscription table:
+      // every read left-outer-joins it, and a poll cycle writes only that side
+      // while changing the last-polled and error fields the UI shows.
+      expect(
+        await fires(
+          ManifestSubscriptionRepository().watchSubscriptionsChanges(),
+          () => db
+              .into(db.mediaSubscriptionState)
+              .insert(
+                MediaSubscriptionStateCompanion.insert(subscriptionId: 's1'),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    // Every read behind this tick (getMediaById, getMediaForDive, the library
+    // page) LEFT JOINs media_enrichment, so the enrichment table is part of
+    // the answer, not a detail of some other feature. Watching only `media`
+    // made the depth/elapsed chips, the mini profile and the dive computer
+    // stay absent after a backfill computed them: the row was written, the
+    // provider never re-read it, and the overlays only appeared if the viewer
+    // was closed and reopened. Newly linked media hit this every time, since
+    // linking is exactly when the enrichment does not exist yet.
+    test('watchMediaChanges fires on an enrichment-only write', () async {
+      await seedParents();
+      await db
+          .into(db.dives)
+          .insert(
+            DivesCompanion.insert(
+              id: 'd1',
+              diveDateTime: now,
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+      await db
+          .into(db.media)
+          .insert(
+            MediaCompanion.insert(
+              id: 'm1',
+              diveId: const Value('d1'),
+              filePath: '/photos/m1.jpg',
+              fileType: const Value('photo'),
+              sourceType: const Value('localFile'),
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+
+      expect(
+        await fires(
+          MediaRepository().watchMediaChanges(),
+          () => db
+              .into(db.mediaEnrichment)
+              .insert(
+                MediaEnrichmentCompanion.insert(
+                  id: 'e1',
+                  mediaId: 'm1',
+                  diveId: 'd1',
+                  createdAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+        reason:
+            'a media read joins media_enrichment, so an enrichment write '
+            'changes what the consumers of this tick would return',
+      );
+    });
+
+    // The media map places items through dives (entry fix) and dive_sites
+    // (coordinates), so a tick over media alone would leave a moved site's
+    // photos where they were until something else happened to write media.
+    test(
+      'MediaLibraryRepository.watchMapChanges fires on a dive_sites write',
+      () async {
+        expect(
+          await fires(
+            MediaLibraryRepository().watchMapChanges(),
+            () => db
+                .into(db.diveSites)
+                .insert(
+                  DiveSitesCompanion(
+                    id: const Value('site-tick'),
+                    name: const Value('Tick'),
+                    createdAt: Value(now),
+                    updatedAt: Value(now),
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'MediaLibraryRepository.watchMapChanges fires on a dives write',
+      () async {
+        expect(
+          await fires(
+            MediaLibraryRepository().watchMapChanges(),
+            () => db
+                .into(db.dives)
+                .insert(
+                  DivesCompanion(
+                    id: const Value('dive-tick'),
+                    diveDateTime: Value(now),
+                    createdAt: Value(now),
+                    updatedAt: Value(now),
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    // The species filter is an EXISTS over media_species, so tagging or
+    // untagging a photo changes which points the map shows.
+    test(
+      'MediaLibraryRepository.watchMapChanges fires on a media_species write',
+      () async {
+        await seedParents();
+        await db
+            .into(db.media)
+            .insert(
+              MediaCompanion.insert(
+                id: 'm-tag',
+                filePath: 'm-tag.jpg',
+                fileType: const Value('photo'),
+                sourceType: const Value('localFile'),
+                createdAt: now,
+                updatedAt: now,
+              ),
+            );
+        await db
+            .into(db.species)
+            .insert(
+              SpeciesCompanion.insert(
+                id: 'sp-1',
+                commonName: 'Manta',
+                category: 'fish',
+              ),
+            );
+
+        expect(
+          await fires(
+            MediaLibraryRepository().watchMapChanges(),
+            () => db
+                .into(db.mediaSpecies)
+                .insert(
+                  MediaSpeciesCompanion.insert(
+                    id: 'ms-1',
+                    mediaId: 'm-tag',
+                    speciesId: 'sp-1',
+                    createdAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test('watchStoresChanges fires', () async {
+      expect(
+        await fires(
+          MediaStoresRepository(database: db).watchStoresChanges(),
+          () => db
+              .into(db.mediaStores)
+              .insert(
+                MediaStoresCompanion.insert(
+                  id: 'store-1',
+                  providerType: 's3',
+                  displayHint: 'bucket @ host',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('accounts and presets', () {
+    test('watchAccountsChanges fires', () async {
+      expect(
+        await fires(
+          ConnectedAccountsRepository(database: db).watchAccountsChanges(),
+          () => db
+              .into(db.connectedAccounts)
+              .insert(
+                ConnectedAccountsCompanion.insert(
+                  id: 'a1',
+                  kind: 'adobeLightroom',
+                  label: 'Lightroom',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('watchPresetsChanges fires for CSV presets', () async {
+      expect(
+        await fires(
+          CsvPresetRepository().watchPresetsChanges(),
+          () => db
+              .into(db.csvPresets)
+              .insert(
+                CsvPresetsCompanion.insert(
+                  id: 'p1',
+                  name: 'Subsurface',
+                  presetJson: '{}',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('analysis inputs', () {
+    Future<void> seedDive(String id) => db
+        .into(db.dives)
+        .insert(
+          DivesCompanion.insert(
+            id: id,
+            diveDateTime: now,
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+
+    test(
+      'watchAnalysisInputChanges fires on a dive_profile_events write',
+      () async {
+        // The coupling watchDiveDetailChanges never had: dive_profile_events is
+        // read by diveComputerEventsProvider and merged into every analysis,
+        // but the broad detail tick does not include the table at all.
+        await seedDive('d1');
+        expect(
+          await fires(
+            DiveRepository().watchAnalysisInputChanges(),
+            () => db
+                .into(db.diveProfileEvents)
+                .insert(
+                  DiveProfileEventsCompanion.insert(
+                    id: 'ev1',
+                    diveId: 'd1',
+                    timestamp: 120,
+                    eventType: 'gasSwitch',
+                    createdAt: now,
+                  ),
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test('watchAnalysisInputChanges stays silent on a media write', () async {
+      // The other half of the contract, and the reason this tick exists.
+      // media IS in watchDiveDetailChanges, so the analysis chain used to be
+      // discarded by every media write (orphan reconcile, enrichment
+      // backfill) -- re-running the Buhlmann cascade after merely viewing a
+      // photo. The analysis reads nothing from media; its tick must not
+      // fire for it.
+      await seedDive('d1');
+      expect(
+        await fires(
+          DiveRepository().watchAnalysisInputChanges(),
+          () => db
+              .into(db.media)
+              .insert(
+                MediaCompanion.insert(
+                  id: 'm1',
+                  filePath: '/tmp/m1.jpg',
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              ),
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  test(
+    'ChangeLogRepository.watchChanges fires on change_log_operations',
+    () async {
+      expect(
+        await fires(
+          ChangeLogRepository().watchChanges(),
+          () => db
+              .into(db.changeLogOperations)
+              .insert(
+                ChangeLogOperationsCompanion.insert(
+                  id: 'op',
+                  source: 'manual',
+                  startedAt: now,
+                  endedAt: now,
+                ),
+              ),
+        ),
+        isTrue,
+      );
+    },
+  );
+}

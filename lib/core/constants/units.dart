@@ -29,6 +29,16 @@ enum TemperatureUnit {
     if (this == fahrenheit && to == celsius) return (value - 32) * 5 / 9;
     return value;
   }
+
+  /// Converts a temperature difference between units.
+  ///
+  /// Deltas scale but never take the Fahrenheit offset: a +0.5 C anomaly is
+  /// +0.9 F, not +32.9 F.
+  double convertDelta(double value, TemperatureUnit to) {
+    if (this == to) return value;
+    if (this == celsius && to == fahrenheit) return value * 9 / 5;
+    return value * 5 / 9;
+  }
 }
 
 enum PressureUnit {
@@ -94,16 +104,26 @@ enum AltitudeUnit {
   }
 }
 
-/// SAC (Surface Air Consumption) calculation method
-enum SacUnit {
-  /// L/min - requires tank volume, calculates actual gas consumption
-  litersPerMin('L/min'),
-
-  /// pressure/min - uses pressure drop only (bar or psi depending on pressure unit)
-  pressurePerMin('pressure/min');
+/// Horizontal geographic distance: how far a site, a chamber or a tide
+/// station is, and how long a surface track runs (issue #2030). Independent
+/// of the depth unit, so a diver can log depth in feet and read distances in
+/// kilometres.
+enum DistanceUnit {
+  kilometers('km'),
+  miles('mi');
 
   final String symbol;
-  const SacUnit(this.symbol);
+  const DistanceUnit(this.symbol);
+
+  /// International mile, exact.
+  static const double _kilometersPerMile = 1.609344;
+
+  double convert(double value, DistanceUnit to) {
+    if (this == to) return value;
+    if (this == kilometers && to == miles) return value / _kilometersPerMile;
+    if (this == miles && to == kilometers) return value * _kilometersPerMile;
+    return value;
+  }
 }
 
 /// Time format preference (12-hour vs 24-hour)
@@ -128,7 +148,8 @@ enum DateFormatPreference {
   ddmmyyyy('DD/MM/YYYY', 'dd/MM/yyyy'),
   yyyymmdd('YYYY-MM-DD', 'yyyy-MM-dd'),
   mmmDYYYY('MMM D, YYYY', 'MMM d, yyyy'),
-  dMMMYYYY('D MMM YYYY', 'd MMM yyyy');
+  dMMMYYYY('D MMM YYYY', 'd MMM yyyy'),
+  ddmmyyyyDots('DD.MM.YYYY', 'dd.MM.yyyy');
 
   final String displayName;
   final String pattern;
@@ -142,5 +163,8 @@ enum DateFormatPreference {
 
   /// Whether this format puts day before month
   bool get isDayFirst =>
-      this == ddmmyyyy || this == dMMMYYYY || this == yyyymmdd;
+      this == ddmmyyyy ||
+      this == dMMMYYYY ||
+      this == yyyymmdd ||
+      this == ddmmyyyyDots;
 }

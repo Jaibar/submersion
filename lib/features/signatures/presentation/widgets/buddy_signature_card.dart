@@ -1,16 +1,22 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/dive_roles/presentation/dive_role_list_display.dart';
 
 /// Card displaying a buddy's signature status
-class BuddySignatureCard extends StatelessWidget {
+class BuddySignatureCard extends ConsumerWidget {
   final BuddyWithRole buddyWithRole;
   final Signature? signature;
   final VoidCallback? onRequestSignature;
   final VoidCallback? onViewSignature;
+
+  /// Whether Request is offered. Hidden, it keeps its room, so the card
+  /// does not change height when its dive is unlocked (issue #4527).
+  final bool requestShown;
 
   const BuddySignatureCard({
     super.key,
@@ -18,14 +24,16 @@ class BuddySignatureCard extends StatelessWidget {
     this.signature,
     this.onRequestSignature,
     this.onViewSignature,
+    this.requestShown = true,
   });
 
   bool get hasSigned => signature != null;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
     final buddy = buddyWithRole.buddy;
+    final units = ref.watch(unitFormatterProvider);
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -71,7 +79,7 @@ class BuddySignatureCard extends StatelessWidget {
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                       Text(
-                        buddyWithRole.role.displayName,
+                        buddyWithRole.roles.joinedLocalizedNames(context.l10n),
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: colorScheme.onSurfaceVariant,
                         ),
@@ -80,7 +88,7 @@ class BuddySignatureCard extends StatelessWidget {
                         const SizedBox(height: 4),
                         Text(
                           context.l10n.signatures_signedDate(
-                            DateFormat.yMMMd().format(signature!.signedAt),
+                            units.formatDate(signature!.signedAt),
                           ),
                           style: Theme.of(context).textTheme.bodySmall
                               ?.copyWith(color: colorScheme.primary),
@@ -94,9 +102,15 @@ class BuddySignatureCard extends StatelessWidget {
                 if (hasSigned && signature != null)
                   _buildSignaturePreview(context, signature!)
                 else
-                  FilledButton.tonal(
-                    onPressed: onRequestSignature,
-                    child: Text(context.l10n.signatures_action_request),
+                  Visibility(
+                    visible: requestShown,
+                    maintainSize: true,
+                    maintainAnimation: true,
+                    maintainState: true,
+                    child: FilledButton.tonal(
+                      onPressed: requestShown ? onRequestSignature : null,
+                      child: Text(context.l10n.signatures_action_request),
+                    ),
                   ),
               ],
             ),

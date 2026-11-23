@@ -1,31 +1,69 @@
+import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:googleapis/drive/v3.dart' as drive;
-import 'package:googleapis_auth/googleapis_auth.dart' as gapis_auth;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
-import 'package:submersion/core/services/logger_service.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
+import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
+import 'package:http/http.dart' as http;
+
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_access.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_authenticator.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_authenticator_choice.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_client_config.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/google_drive_errors.dart';
+import 'package:submersion/core/services/cloud_storage/google_drive/keychain_gated_authenticator.dart';
+import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 
 /// Google Drive implementation of CloudStorageProvider
 ///
 /// Uses the Drive API's appDataFolder for app-specific storage.
 /// This folder is hidden from the user and only accessible by this app.
+///
+/// Authentication is delegated to a [GoogleDriveAuthenticator]:
+/// google_sign_in on iOS/Android, loopback OAuth on Windows/Linux, and on
+/// macOS whichever of the two the build's keychain entitlements allow (see
+/// [KeychainGatedAuthenticator]).
+/// The seam's boundary is an [http.Client], so neither auth world leaks
+/// into the Drive REST code below.
 class GoogleDriveStorageProvider
     with CloudStorageProviderMixin
     implements CloudStorageProvider {
+  GoogleDriveStorageProvider({GoogleDriveAuthenticator? authenticator})
+    : _authenticator = authenticator ?? _defaultAuthenticator();
+
   static final _log = LoggerService.forClass(GoogleDriveStorageProvider);
 
-  static const _scopes = [drive.DriveApi.driveAppdataScope];
+  static GoogleDriveAuthenticator _defaultAuthenticator() =>
+      googleDriveAuthenticatorFor(
+        isWeb: HostPlatform.isWeb,
+        isLoopbackPlatform: HostPlatform.isWindows || HostPlatform.isLinux,
+        isMacOS: HostPlatform.isMacOS,
+      );
 
-  // Use the shared instance; configuration is provided per-call via scope hints.
-  final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
-  bool _initialized = false;
-  bool _allowSilentAuth = false;
-  gapis_auth.AuthClient? _authClient;
+  /// [googleDriveAuthenticatorFor], reachable for the tests that call it.
+  @visibleForTesting
+  static GoogleDriveAuthenticator authenticatorFor({
+    bool isWeb = false,
+    required bool isLoopbackPlatform,
+    required bool isMacOS,
+  }) => googleDriveAuthenticatorFor(
+    isWeb: isWeb,
+    isLoopbackPlatform: isLoopbackPlatform,
+    isMacOS: isMacOS,
+  );
+
+  final GoogleDriveAuthenticator _authenticator;
   drive.DriveApi? _driveApi;
-  GoogleSignInAccount? _currentUser;
+
+  /// The client [_driveApi] was built over, compared by identity so a client
+  /// swapped underneath us is never kept in use.
+  http.Client? _driveApiClient;
+  drive.DriveApi? _injectedApi;
   String? _syncFolderId;
 
   @override
@@ -36,118 +74,245 @@ class GoogleDriveStorageProvider
 
   @override
   Future<bool> isAvailable() async {
-    // Google Drive is available on all platforms Flutter supports
-    return true;
-  }
-
-  Future<void> _ensureInitialized() async {
-    if (_initialized) return;
-    await _googleSignIn.initialize();
-    _initialized = true;
+    // Mobile and macOS OAuth config is compile-time (Info.plist / Android
+    // client registration). Desktop needs the committed Desktop-app client;
+    // a build without it degrades to a hidden tile instead of crashing.
+    return GoogleDriveClientConfig.isSupportedOnThisPlatform;
   }
 
   @override
   Future<bool> isAuthenticated() async {
-    try {
-      // If we already have an authenticated session in memory, reuse it.
-      if (_currentUser != null && _authClient != null) {
-        return true;
-      }
-
-      // Defer any silent sign-in (which triggers Keychain access) until the user
-      // has explicitly opted in by signing in once.
-      if (!_allowSilentAuth) {
-        return false;
-      }
-
-      await _ensureInitialized();
-      final futureAccount = _googleSignIn.attemptLightweightAuthentication();
-      if (futureAccount == null) return false;
-
-      final account = await futureAccount;
-      if (account == null) return false;
-
-      final authorization = await account.authorizationClient
-          .authorizationForScopes(_scopes);
-      if (authorization == null) return false;
-
-      await _initDriveApi(account, authorization);
-      // The user has already opted in, keep allowing silent auth.
-      _allowSilentAuth = true;
-      return true;
-    } catch (e) {
-      _log.warning('Silent sign-in failed: $e');
-      return false;
+    if (_api != null) return true;
+    if (await _authenticator.attemptSilentAuth()) {
+      return _api != null;
     }
+    return false;
   }
 
   @override
-  Future<void> authenticate() async {
-    try {
-      await _ensureInitialized();
-      final account = await _googleSignIn.authenticate(scopeHint: _scopes);
-      final authorization = await account.authorizationClient.authorizeScopes(
-        _scopes,
-      );
+  Future<void> authenticate() => authenticateAs(null);
 
-      await _initDriveApi(account, authorization);
-      _allowSilentAuth = true;
-      _log.info('Authenticated with Google Drive as ${account.email}');
-    } on GoogleSignInException catch (e, stackTrace) {
-      if (e.code == GoogleSignInExceptionCode.canceled) {
-        _log.info('Google Sign-In was cancelled by the user');
-        throw CloudStorageException(
-          'Google Sign-In was cancelled',
-          e,
-          stackTrace,
-        );
-      }
-      _log.error('Google Sign-In failed', error: e, stackTrace: stackTrace);
-      throw CloudStorageException(
-        'Google Sign-In failed: ${e.description ?? e.code.name}',
-        e,
-        stackTrace,
+  /// [authenticate], refusing an account other than [expectedAccount] with
+  /// [CloudAccountMismatchException]. Not on [CloudStorageProvider]: only
+  /// Google and Dropbox let a diver pick another account at sign-in.
+  Future<void> authenticateAs(String? expectedAccount) async {
+    await _authenticator.authenticate(expectedAccount: expectedAccount);
+    _driveApi = null; // rebuilt lazily from the fresh auth client
+    _syncFolderId = null; // this sign-in may be another account's
+    if (_api == null) {
+      throw const CloudStorageException(
+        'Google Sign-In did not produce an authorized client',
       );
-    } catch (e, stackTrace) {
-      _log.error('Google Sign-In failed', error: e, stackTrace: stackTrace);
-      throw CloudStorageException('Google Sign-In failed: $e', e, stackTrace);
     }
   }
 
   @override
   Future<void> signOut() async {
-    await _googleSignIn.signOut();
-    // Close the auth client if it exists; close is synchronous.
-    _authClient?.close();
-    _authClient = null;
-    _currentUser = null;
+    await _authenticator.signOut();
     _driveApi = null;
     _syncFolderId = null;
-    _allowSilentAuth = false;
-    _log.info('Signed out from Google Drive');
   }
 
   @override
-  Future<String?> getUserEmail() async {
-    return _currentUser?.email;
+  Future<String?> getUserEmail() => _authenticator.userEmail;
+
+  /// Authenticated HTTP client for the media store's raw REST calls.
+  /// Returns null when no Google session can be established.
+  Future<http.Client?> mediaHttpClient() async {
+    if (await isAuthenticated()) return _authenticator.authClient;
+    return null;
   }
 
-  Future<void> _initDriveApi(
-    GoogleSignInAccount account,
-    GoogleSignInClientAuthorization authorization,
-  ) async {
-    _authClient?.close();
-    _authClient = authorization.authClient(scopes: _scopes);
-    _driveApi = drive.DriveApi(_authClient!);
-    _currentUser = account;
+  /// The media store's rejection hook: Drive refused [rejected], so drop it
+  /// and refresh through the shared re-auth the sync calls use. True when a
+  /// fresh client is available for one retry.
+  Future<bool> mediaAuthRejected(http.Client rejected) =>
+      _reauthorize(rejected);
+
+  /// The Drive API bound to the authenticator's current client, or null
+  /// when not authenticated. Rebuilt lazily so a re-auth (new client)
+  /// transparently produces a new API instance.
+  ///
+  /// The cache is keyed on the client's IDENTITY, not merely on its
+  /// nullness. A re-auth closes the client it replaces, and an api cached
+  /// over that closed client kept sending through it -- "HTTP request
+  /// failed. Client is already closed." on every Drive call for the rest of
+  /// the process, while isAuthenticated() went on answering true because
+  /// authClient was non-null the whole time.
+  ///
+  /// An api injected by [debugSetDriveApi] wins outright: tests exercise the
+  /// transfer paths with no authenticator at all, so deriving from
+  /// [GoogleDriveAuthenticator.authClient] would resolve to null and every
+  /// call would throw "Not authenticated".
+  drive.DriveApi? get _api {
+    final injected = _injectedApi;
+    if (injected != null) return injected;
+
+    final client = _authenticator.authClient;
+    if (client == null) {
+      _driveApi = null;
+      _driveApiClient = null;
+      return null;
+    }
+    if (_driveApi == null || !identical(client, _driveApiClient)) {
+      _driveApi = drive.DriveApi(client);
+      _driveApiClient = client;
+    }
+    return _driveApi;
   }
 
-  drive.DriveApi get _api {
-    final api = _driveApi;
+  drive.DriveApi get _requireApi {
+    final api = _api;
     if (api == null) {
       throw const CloudStorageException('Not authenticated with Google Drive');
     }
     return api;
+  }
+
+  /// Test seam: injects a [drive.DriveApi] (backed by a mock HTTP client) so
+  /// the transfer paths are exercisable without a Google sign-in — the real
+  /// api is only ever minted from an authenticated session.
+  @visibleForTesting
+  void debugSetDriveApi(drive.DriveApi api) => _injectedApi = api;
+
+  /// Runs a Drive operation with a single 401 retry: access tokens expire
+  /// hourly mid-session, so one silent re-auth disambiguates a stale token
+  /// from a revoked grant. On a revoked grant the authenticator clears its
+  /// stored state and the user is asked to sign in again.
+  ///
+  /// The stale-vs-revoked disambiguation is the mobile authenticator's:
+  /// google_sign_in can mint a fresh token silently from the known
+  /// account's authorization.
+  /// The desktop authenticator's auto-refreshing client already handles
+  /// hourly expiry itself. A revoked or expired refresh token reaches here
+  /// not as a 401 but as the refresh's own failure, an OAuth `invalid_grant`
+  /// ([isRevokedDriveGrant]); its handleAuthFailure() clears the token store,
+  /// so the retry's attemptSilentAuth() fails and the user is asked to sign in
+  /// again. Missing that case left the dead token in place, failing every
+  /// sync with a generic listing error (issue #2332).
+  ///
+  /// A token Drive refuses for lacking the Drive scope is the one rejection
+  /// not retried, since a refresh cannot add a scope; see [_noDriveAccess].
+  ///
+  /// A retry rejected the same way means the fresh authorization is no good
+  /// either. It is reported as the same sign-in-again error rather than the
+  /// raw Drive error, which told the diver only "invalid credentials", and
+  /// the client is dropped again so the next sync re-authorizes from scratch
+  /// (issue #3602).
+  Future<T> _run<T>(Future<T> Function() operation) async {
+    final client = _authenticator.authClient;
+    try {
+      return await operation();
+    } catch (e) {
+      if (isMissingDriveScope(e)) throw await _noDriveAccess(e, client);
+      if (!_isAuthRejection(e)) rethrow;
+      _log.info('Drive rejected the sign-in ($e); attempting silent re-auth');
+      if (!await _reauthorize(client)) {
+        throw _authenticator.lastSilentAuthThrew
+            ? driveRefreshFailed(e)
+            : driveSignInExpired(e);
+      }
+      final retryClient = _authenticator.authClient;
+      try {
+        return await operation();
+      } catch (retryError) {
+        if (isMissingDriveScope(retryError)) {
+          throw await _noDriveAccess(retryError, retryClient);
+        }
+        if (!_isAuthRejection(retryError)) rethrow;
+        _log.warning('Drive rejected the re-authorized sign-in: $retryError');
+        await _dropRejectedAuth(retryClient);
+        throw driveSignInExpired(retryError);
+      }
+    }
+  }
+
+  /// Drops a grant Drive refused for lacking the Drive scope and returns the
+  /// error that asks for it.
+  ///
+  /// Dropping it turns a sign-in that can never sync into "not signed in",
+  /// which offers the sign-in again. Left in place, the account read as
+  /// signed in while sync, repair and wipe all failed on the raw 403, with
+  /// nothing on screen pointing at the Drive box (#3835). No cause on the
+  /// error: displayMessage appends it, and it is that raw header.
+  Future<CloudStorageException> _noDriveAccess(
+    Object refusal,
+    http.Client? client,
+  ) async {
+    _log.warning('Drive refused a sign-in without Drive access: $refusal');
+    await _dropRejectedAuth(client);
+    return const CloudAccessRefusedException(googleDriveAccessNotAllowed);
+  }
+
+  /// Replaces [rejected] with a freshly authorized client, sharing one
+  /// re-auth among every caller rejected at the same time.
+  ///
+  /// The access token expires for all in-flight requests at once, so
+  /// concurrent rejections are the ordinary case, not a corner. Each running
+  /// its own drop-and-re-auth made the later one close the client the earlier
+  /// had just installed, failing its retry with "Client is already closed",
+  /// and evict that client's fresh token from the SDK cache.
+  Future<bool>? _reauthInFlight;
+
+  Future<bool> _reauthorize(http.Client? rejected) {
+    if (_replacedSince(rejected)) return Future.value(true);
+    return _reauthInFlight ??= () async {
+      await _dropRejectedAuth(rejected);
+      return _authenticator.attemptSilentAuth();
+    }().whenComplete(() => _reauthInFlight = null);
+  }
+
+  /// Drops the authenticator's client after Drive rejected [rejected],
+  /// unless another caller has already replaced it with a fresh one.
+  Future<void> _dropRejectedAuth(http.Client? rejected) async {
+    if (_replacedSince(rejected)) return;
+    await _authenticator.handleAuthFailure();
+    _driveApi = null;
+  }
+
+  /// Whether the client has changed since [rejected] was refused. A null
+  /// [rejected] means the caller never saw which client it used (one was
+  /// installed after it looked), so it counts as not replaced: assuming
+  /// otherwise skipped the refresh and retried on the same dead token.
+  bool _replacedSince(http.Client? rejected) {
+    final current = _authenticator.authClient;
+    return rejected != null && current != null && !identical(current, rejected);
+  }
+
+  /// The auth client raises [gauth.AccessDeniedException] for a real 401
+  /// before the Drive API sees it (see [isMissingDriveScope]), so that is the
+  /// form an expired token takes in production.
+  static bool _isAuthRejection(Object e) =>
+      e is gauth.AccessDeniedException ||
+      (e is drive.DetailedApiRequestError && e.status == 401) ||
+      isRevokedDriveGrant(e);
+
+  /// Maps a Drive error to a CloudStorageException with an actionable
+  /// message where one exists (quota); otherwise a generic wrapper.
+  CloudStorageException _mapDriveError(
+    String operation,
+    Object e,
+    StackTrace stackTrace,
+  ) {
+    if (e is drive.DetailedApiRequestError &&
+        e.status == 403 &&
+        e.errors.any((d) => d.reason == 'storageQuotaExceeded')) {
+      return CloudStorageException(
+        'Google Drive storage is full',
+        e,
+        stackTrace,
+      );
+    }
+    if (e is drive.DetailedApiRequestError &&
+        e.status == 403 &&
+        e.errors.any((d) => driveRefusedReasons.contains(d.reason))) {
+      return CloudAccessRefusedException(
+        '$operation failed: $e',
+        e,
+        stackTrace,
+      );
+    }
+    return CloudStorageException('$operation failed: $e', e, stackTrace);
   }
 
   @override
@@ -156,87 +321,199 @@ class GoogleDriveStorageProvider
     String filename, {
     String? folderId,
   }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+
     try {
-      final targetFolder = folderId ?? await getOrCreateSyncFolder();
+      return await _run(() async {
+        final targetFolder = folderId ?? await getOrCreateSyncFolder();
 
-      // Check if file already exists
-      final existingFile = await _findFile(filename, targetFolder);
+        // Check if file already exists
+        final existingFile = await _findFile(filename, targetFolder);
 
-      drive.File result;
-      final media = drive.Media(Stream.fromIterable([data]), data.length);
+        drive.File result;
+        final media = drive.Media(Stream.fromIterable([data]), data.length);
 
-      if (existingFile != null) {
-        // Update existing file
-        result = await _api.files.update(
-          drive.File(),
-          existingFile.id!,
-          uploadMedia: media,
-        );
-        _log.info('Updated file: $filename (${result.id})');
-      } else {
-        // Create new file
-        final fileMetadata = drive.File()
-          ..name = filename
-          ..parents = [targetFolder];
+        if (existingFile != null) {
+          // Update existing file
+          result = await _requireApi.files.update(
+            drive.File(),
+            existingFile.id!,
+            uploadMedia: media,
+          );
+          _log.info('Updated file: $filename (${result.id})');
+        } else {
+          // Create new file
+          final fileMetadata = drive.File()
+            ..name = filename
+            ..parents = [targetFolder];
 
-        result = await _api.files.create(fileMetadata, uploadMedia: media);
-        _log.info('Created file: $filename (${result.id})');
-      }
+          result = await _requireApi.files.create(
+            fileMetadata,
+            uploadMedia: media,
+          );
+          _log.info('Created file: $filename (${result.id})');
+        }
 
-      return UploadResult(fileId: result.id!, uploadTime: DateTime.now());
+        return UploadResult(fileId: result.id!, uploadTime: DateTime.now());
+      });
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to upload file: $filename',
         error: e,
         stackTrace: stackTrace,
       );
-      throw CloudStorageException('Upload failed: $e', e, stackTrace);
+      throw _mapDriveError('Upload', e, stackTrace);
     }
   }
 
   @override
   Future<Uint8List> downloadFile(String fileId) async {
     try {
-      final response = await _api.files.get(
-        fileId,
-        downloadOptions: drive.DownloadOptions.fullMedia,
-      );
+      return await _run(() async {
+        final response = await _requireApi.files.get(
+          fileId,
+          downloadOptions: drive.DownloadOptions.fullMedia,
+        );
 
-      if (response is! drive.Media) {
-        throw const CloudStorageException('Invalid download response');
-      }
+        if (response is! drive.Media) {
+          throw const CloudStorageException('Invalid download response');
+        }
 
-      final chunks = <List<int>>[];
-      await for (final chunk in response.stream) {
-        chunks.add(chunk);
-      }
+        final chunks = <List<int>>[];
+        await for (final chunk in response.stream) {
+          chunks.add(chunk);
+        }
 
-      final allBytes = chunks.expand((x) => x).toList();
-      _log.info('Downloaded file: $fileId (${allBytes.length} bytes)');
-      return Uint8List.fromList(allBytes);
+        final allBytes = chunks.expand((x) => x).toList();
+        _log.info('Downloaded file: $fileId (${allBytes.length} bytes)');
+        return Uint8List.fromList(allBytes);
+      });
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to download file: $fileId',
         error: e,
         stackTrace: stackTrace,
       );
-      throw CloudStorageException('Download failed: $e', e, stackTrace);
+      throw _mapDriveError('Download', e, stackTrace);
+    }
+  }
+
+  /// Streams the local file into the Drive SDK ([drive.Media] takes a byte
+  /// stream), so the artifact is never resident in memory.
+  ///
+  /// The stream is opened inside [_run] so a 401 retry gets a fresh one: a
+  /// consumed [File.openRead] stream cannot be replayed.
+  @override
+  Future<UploadResult> uploadFileFromPath(
+    String sourcePath,
+    String filename, {
+    String? folderId,
+  }) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+
+    try {
+      return await _run(() async {
+        final targetFolder = folderId ?? await getOrCreateSyncFolder();
+        final existingFile = await _findFile(filename, targetFolder);
+
+        final source = File(sourcePath);
+        final media = drive.Media(source.openRead(), await source.length());
+
+        drive.File result;
+        if (existingFile != null) {
+          result = await _requireApi.files.update(
+            drive.File(),
+            existingFile.id!,
+            uploadMedia: media,
+          );
+          _log.info('Updated file: $filename (${result.id})');
+        } else {
+          final fileMetadata = drive.File()
+            ..name = filename
+            ..parents = [targetFolder];
+          result = await _requireApi.files.create(
+            fileMetadata,
+            uploadMedia: media,
+          );
+          _log.info('Created file: $filename (${result.id})');
+        }
+
+        return UploadResult(fileId: result.id!, uploadTime: DateTime.now());
+      });
+    } on CloudStorageException {
+      rethrow;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to upload file: $filename',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      throw _mapDriveError('Upload', e, stackTrace);
+    }
+  }
+
+  /// Pipes the download stream straight to disk. The buffering downloadFile
+  /// holds three concurrent copies of the payload at peak (chunk list,
+  /// expanded list, Uint8List); this holds one chunk.
+  @override
+  Future<void> downloadToFile(String fileId, String destinationPath) async {
+    try {
+      await _run(() async {
+        final response = await _requireApi.files.get(
+          fileId,
+          downloadOptions: drive.DownloadOptions.fullMedia,
+        );
+        if (response is! drive.Media) {
+          throw const CloudStorageException('Invalid download response');
+        }
+        final sink = File(destinationPath).openWrite();
+        try {
+          await response.stream.pipe(sink);
+        } finally {
+          await sink.close();
+        }
+      });
+    } catch (e, stackTrace) {
+      final partial = File(destinationPath);
+      if (await partial.exists()) {
+        try {
+          await partial.delete();
+        } catch (_) {
+          // Best-effort cleanup of a partial download.
+        }
+      }
+      if (e is CloudStorageException) rethrow;
+      _log.error(
+        'Failed to download file: $fileId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      throw _mapDriveError('Download', e, stackTrace);
     }
   }
 
   @override
   Future<CloudFileInfo?> getFileInfo(String fileId) async {
     try {
-      final file =
-          await _api.files.get(fileId, $fields: 'id,name,modifiedTime,size')
-              as drive.File;
+      return await _run(() async {
+        final file =
+            await _requireApi.files.get(
+                  fileId,
+                  $fields: 'id,name,modifiedTime,size',
+                )
+                as drive.File;
 
-      return CloudFileInfo(
-        id: file.id!,
-        name: file.name!,
-        modifiedTime: file.modifiedTime ?? DateTime.now(),
-        sizeBytes: file.size != null ? int.tryParse(file.size!) : null,
-      );
+        return CloudFileInfo(
+          id: file.id!,
+          name: file.name!,
+          modifiedTime: file.modifiedTime ?? DateTime.now(),
+          sizeBytes: file.size != null ? int.tryParse(file.size!) : null,
+        );
+      });
     } catch (e) {
       _log.warning('Failed to get file info: $fileId - $e');
       return null;
@@ -249,83 +526,150 @@ class GoogleDriveStorageProvider
     String? namePattern,
   }) async {
     try {
-      final targetFolder = folderId ?? await getOrCreateSyncFolder();
+      return await _run(() async {
+        final targetFolder = folderId ?? await getOrCreateSyncFolder();
+        final folders = _folderDuplicates[targetFolder] ?? [targetFolder];
 
-      var query = "'$targetFolder' in parents and trashed = false";
-      if (namePattern != null) {
-        query += " and name contains '$namePattern'";
-      }
-
-      final fileList = await _api.files.list(
-        spaces: 'appDataFolder',
-        q: query,
-        $fields: 'files(id,name,modifiedTime,size)',
-      );
-
-      return (fileList.files ?? [])
-          .where((f) => f.id != null && f.name != null)
-          .map(
-            (f) => CloudFileInfo(
-              id: f.id!,
-              name: f.name!,
-              modifiedTime: f.modifiedTime ?? DateTime.now(),
-              sizeBytes: f.size != null ? int.tryParse(f.size!) : null,
+        final files = <drive.File>[];
+        for (var i = 0; i < folders.length; i += _parentsPerQuery) {
+          final batch = folders.skip(i).take(_parentsPerQuery);
+          final parents = batch.map((id) => "'$id' in parents").join(' or ');
+          var query = '($parents) and trashed = false';
+          if (namePattern != null) {
+            query += " and name contains '$namePattern'";
+          }
+          files.addAll(
+            await _listAllFiles(
+              query: query,
+              fileFields: 'files(id,name,modifiedTime,size)',
             ),
-          )
-          .toList();
+          );
+        }
+
+        return files
+            .where((f) => f.id != null && f.name != null)
+            .map(
+              (f) => CloudFileInfo(
+                id: f.id!,
+                name: f.name!,
+                modifiedTime: f.modifiedTime ?? DateTime.now(),
+                sizeBytes: f.size != null ? int.tryParse(f.size!) : null,
+              ),
+            )
+            .toList();
+      });
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error('Failed to list files', error: e, stackTrace: stackTrace);
-      throw CloudStorageException('List files failed: $e', e, stackTrace);
+      throw _mapDriveError('List files', e, stackTrace);
     }
   }
 
   @override
   Future<void> deleteFile(String fileId) async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+
     try {
-      await _api.files.delete(fileId);
+      await _run(() => _requireApi.files.delete(fileId));
       _log.info('Deleted file: $fileId');
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to delete file: $fileId',
         error: e,
         stackTrace: stackTrace,
       );
-      throw CloudStorageException('Delete failed: $e', e, stackTrace);
+      throw _mapDriveError('Delete', e, stackTrace);
     }
   }
 
   @override
   Future<bool> fileExists(String fileId) async {
     try {
-      await _api.files.get(fileId, $fields: 'id');
+      await _run(() => _requireApi.files.get(fileId, $fields: 'id'));
       return true;
     } catch (e) {
       return false;
     }
   }
 
+  /// Returns the existing folder of that name when there is one, as every
+  /// other provider does; only a missing folder is created.
+  ///
+  /// Drive allows any number of same-named folders, and this used to create
+  /// one on every call, so each cloud backup went into a folder of its own.
+  /// The oldest is reused from now on, and [listFiles] on it also reads its
+  /// duplicates, so backups filed by earlier builds stay visible (issue
+  /// #3214).
   @override
   Future<String> createFolder(
     String folderName, {
     String? parentFolderId,
   }) async {
-    try {
-      final folderMetadata = drive.File()
-        ..name = folderName
-        ..mimeType = 'application/vnd.google-apps.folder'
-        ..parents = [parentFolderId ?? 'appDataFolder'];
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
 
-      final folder = await _api.files.create(folderMetadata);
-      _log.info('Created folder: $folderName (${folder.id})');
-      return folder.id!;
+    final parent = parentFolderId ?? 'appDataFolder';
+    try {
+      return await _run(() async {
+        final existing = await _listAllFiles(
+          query:
+              "name = '$folderName' "
+              "and mimeType = '$_folderMimeType' "
+              "and '$parent' in parents "
+              "and trashed = false",
+          fileFields: 'files(id,createdTime)',
+        );
+        final ids = _oldestFirst(existing);
+        if (ids.isEmpty) return _createFolderNow(folderName, parent);
+        _folderDuplicates[ids.first] = ids;
+        return ids.first;
+      });
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to create folder: $folderName',
         error: e,
         stackTrace: stackTrace,
       );
-      throw CloudStorageException('Create folder failed: $e', e, stackTrace);
+      throw _mapDriveError('Create folder', e, stackTrace);
     }
+  }
+
+  static const _folderMimeType = 'application/vnd.google-apps.folder';
+
+  /// Every same-named sibling of a folder [createFolder] resolved, keyed by
+  /// the id it returned (oldest first, that id included).
+  final Map<String, List<String>> _folderDuplicates = {};
+
+  /// Parent clauses per listing query. Drive caps the query length, and a
+  /// daily schedule leaves one duplicate folder per backup ever made.
+  static const _parentsPerQuery = 50;
+
+  static List<String> _oldestFirst(List<drive.File> folders) {
+    final sorted = [
+      for (final f in folders)
+        if (f.id != null) f,
+    ];
+    final epoch = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    sorted.sort((a, b) {
+      final byAge = (a.createdTime ?? epoch).compareTo(b.createdTime ?? epoch);
+      return byAge != 0 ? byAge : a.id!.compareTo(b.id!);
+    });
+    return [for (final f in sorted) f.id!];
+  }
+
+  Future<String> _createFolderNow(String folderName, String parent) async {
+    final folderMetadata = drive.File()
+      ..name = folderName
+      ..mimeType = _folderMimeType
+      ..parents = [parent];
+
+    final folder = await _requireApi.files.create(folderMetadata);
+    _log.info('Created folder: $folderName (${folder.id})');
+    return folder.id!;
   }
 
   @override
@@ -336,43 +680,91 @@ class GoogleDriveStorageProvider
     }
 
     try {
-      // Look for existing sync folder
-      const query =
-          "name = '${CloudStorageProviderMixin.syncFolderName}' "
-          "and mimeType = 'application/vnd.google-apps.folder' "
-          "and 'appDataFolder' in parents "
-          "and trashed = false";
+      return await _run(() async {
+        // Look for existing sync folder
+        const query =
+            "name = '${CloudStorageProviderMixin.syncFolderName}' "
+            "and mimeType = 'application/vnd.google-apps.folder' "
+            "and 'appDataFolder' in parents "
+            "and trashed = false";
 
-      final fileList = await _api.files.list(
-        spaces: 'appDataFolder',
-        q: query,
-        $fields: 'files(id,name)',
-      );
+        final folders = await _listAllFiles(
+          query: query,
+          fileFields: 'files(id,name)',
+        );
 
-      if (fileList.files != null && fileList.files!.isNotEmpty) {
-        _syncFolderId = fileList.files!.first.id!;
-        _log.info('Found existing sync folder: $_syncFolderId');
+        if (folders.isNotEmpty) {
+          _syncFolderId = folders.first.id!;
+          _log.info('Found existing sync folder: $_syncFolderId');
+          return _syncFolderId!;
+        }
+
+        // Create new sync folder (the lookup above already found none)
+        _syncFolderId = await _createFolderNow(
+          CloudStorageProviderMixin.syncFolderName,
+          'appDataFolder',
+        );
         return _syncFolderId!;
-      }
-
-      // Create new sync folder
-      _syncFolderId = await createFolder(
-        CloudStorageProviderMixin.syncFolderName,
-        parentFolderId: 'appDataFolder',
-      );
-      return _syncFolderId!;
+      });
+    } on CloudStorageException {
+      rethrow;
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get/create sync folder',
         error: e,
         stackTrace: stackTrace,
       );
-      throw CloudStorageException(
-        'Get/create sync folder failed: $e',
-        e,
-        stackTrace,
-      );
+      throw _mapDriveError('Get/create sync folder', e, stackTrace);
     }
+  }
+
+  /// Drive's per-page cap, requested explicitly. `files.list` defaults to
+  /// 100 results per page; 1000 is the documented maximum, so a typical
+  /// sync folder is covered by a single round trip.
+  static const _listPageSize = 1000;
+
+  /// Every appDataFolder file matching [query], following `nextPageToken`
+  /// to exhaustion.
+  ///
+  /// A single `files.list` call returns at most one page and reports the
+  /// rest only through `nextPageToken`, so it silently truncated any sync
+  /// folder holding more than 100 artifacts. A base publish splits into
+  /// many `.pNNNN` parts and every device adds its own changeset log, so
+  /// real backends cross that line: peer discovery, manifest reads,
+  /// compaction pruning and wipe deletion all ran against a partial view,
+  /// with no error to say so.
+  ///
+  /// [fileFields] is the `files(...)` projection. `nextPageToken` is added
+  /// alongside it because Drive's `fields` filter applies to the whole
+  /// response, not just the file records: a projection that names only
+  /// `files(...)` strips the token, and the loop would stop after one page
+  /// exactly as before.
+  ///
+  /// Callers wrap this in [_run], so a 401 mid-listing restarts from the
+  /// first page rather than resuming with a token minted under the old
+  /// credentials -- which is what Drive asks for anyway ("if the token is
+  /// rejected, pagination should be restarted from the first page").
+  Future<List<drive.File>> _listAllFiles({
+    required String query,
+    required String fileFields,
+  }) async {
+    final files = <drive.File>[];
+    String? pageToken;
+    do {
+      final page = await _requireApi.files.list(
+        spaces: 'appDataFolder',
+        q: query,
+        pageSize: _listPageSize,
+        pageToken: pageToken,
+        $fields: 'nextPageToken,$fileFields',
+      );
+      files.addAll(page.files ?? const []);
+      // An empty token means the same thing as an absent one; treating it
+      // as a real token would re-issue the first page forever.
+      final next = page.nextPageToken;
+      pageToken = (next == null || next.isEmpty) ? null : next;
+    } while (pageToken != null);
+    return files;
   }
 
   /// Find a file by name in a specific folder
@@ -383,17 +775,18 @@ class GoogleDriveStorageProvider
           "and '$folderId' in parents "
           "and trashed = false";
 
-      final fileList = await _api.files.list(
-        spaces: 'appDataFolder',
-        q: query,
-        $fields: 'files(id,name)',
+      final matches = await _listAllFiles(
+        query: query,
+        fileFields: 'files(id,name)',
       );
 
-      if (fileList.files != null && fileList.files!.isNotEmpty) {
-        return fileList.files!.first;
-      }
-      return null;
+      return matches.isNotEmpty ? matches.first : null;
+    } on drive.DetailedApiRequestError {
+      // Let auth errors reach _run's 401 handling instead of masking them
+      // as "file not found" (which would create a duplicate).
+      rethrow;
     } catch (e) {
+      if (_isAuthRejection(e)) rethrow;
       _log.warning('Failed to find file: $filename - $e');
       return null;
     }

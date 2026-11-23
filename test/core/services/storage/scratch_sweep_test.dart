@@ -1,0 +1,327 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:submersion/core/services/storage/cache_location.dart';
+import 'package:submersion/core/services/storage/scratch_sweep.dart';
+
+void main() {
+  group('StorageScratchSweep', () {
+    late Directory root;
+    late Directory temp;
+    late Directory support;
+    late Directory osCache;
+    final now = DateTime.utc(2026, 8, 31, 12);
+
+    setUp(() async {
+      root = await Directory.systemTemp.createTemp('scratch_sweep_test');
+      temp = Directory(p.join(root.path, 'temp'));
+      support = Directory(p.join(root.path, 'support'));
+      osCache = Directory(p.join(root.path, 'os_cache'));
+      await temp.create(recursive: true);
+      await support.create(recursive: true);
+    });
+
+    tearDown(() async {
+      if (root.existsSync()) await root.delete(recursive: true);
+    });
+
+    CacheLocation location({bool phone = false}) => CacheLocation(
+      regenerableBase: Directory(
+        p.join(phone ? osCache.path : support.path, 'Submersion'),
+      ),
+      supportBase: Directory(p.join(support.path, 'Submersion')),
+      osManagesCaches: phone,
+    );
+
+    // Ages come from the modification time alone here, so a test can
+    // backdate a file with setLastModified; the default also weighs the time
+    // the file was created (see the last test).
+    StorageScratchSweep build({bool phone = false}) => StorageScratchSweep(
+      temporaryDirectory: () async => temp,
+      cacheLocation: () async => location(phone: phone),
+      touchedAt: (stat) => stat.modified,
+    );
+
+    Future<File> write(String absolute, int bytes, Duration age) async {
+      final file = File(absolute);
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(List<int>.filled(bytes, 0));
+      await file.setLastModified(now.subtract(age));
+      return file;
+    }
+
+    String picked(String name) => p.join(temp.path, 'picked', name);
+    String staging(String name) =>
+        p.join(support.path, 'Submersion', 'media_cache', 'staging', name);
+    String transcode(String name) =>
+        p.join(support.path, 'Submersion', 'media_cache', 'transcode', name);
+    String videoThumb(String name) =>
+        p.join(support.path, 'Submersion', 'video_thumbnails', name);
+    String pdfThumb(String name) =>
+        p.join(support.path, 'Submersion', 'pdf_thumbnails', name);
+
+    test('removes stale picked imports and keeps a fresh one', () async {
+      final stale = await write(
+        picked('0/dives.zip'),
+        500,
+        const Duration(days: 2),
+      );
+      final fresh = await write(
+        picked('1/photos.zip'),
+        400,
+        const Duration(hours: 1),
+      );
+
+      final report = await build().run(now: now);
+
+      expect(stale.existsSync(), isFalse);
+      expect(fresh.existsSync(), isTrue, reason: 'an import may be in flight');
+      expect(report.filesDeleted, 1);
+      expect(report.bytesReclaimed, 500);
+    });
+
+    test('removes stale staging files and keeps a fresh one', () async {
+      final stale = await write(
+        staging('stage_1'),
+        70,
+        const Duration(days: 3),
+      );
+      final fresh = await write(
+        staging('stage_2'),
+        30,
+        const Duration(minutes: 5),
+      );
+
+      await build().run(now: now);
+
+      expect(stale.existsSync(), isFalse);
+      expect(fresh.existsSync(), isTrue, reason: 'a put() may be mid-flight');
+    });
+
+    test('keeps transcode artifacts for a week before reclaiming', () async {
+      final stale = await write(
+        transcode('a_high.mp4'),
+        900,
+        const Duration(days: 8),
+      );
+      final recent = await write(
+        transcode('b_high.mp4'),
+        900,
+        const Duration(days: 3),
+      );
+
+      await build().run(now: now);
+
+      expect(stale.existsSync(), isFalse);
+      expect(
+        recent.existsSync(),
+        isTrue,
+        reason: 'an upload retrying over days must keep its rendition',
+      );
+    });
+
+    test('reclaims thumbnails only after a month', () async {
+      final staleVideo = await write(
+        videoThumb('aa.img'),
+        12,
+        const Duration(days: 40),
+      );
+      final stalePdf = await write(
+        pdfThumb('bb.jpg'),
+        34,
+        const Duration(days: 40),
+      );
+      final freshVideo = await write(
+        videoThumb('cc.img'),
+        12,
+        const Duration(days: 5),
+      );
+
+      await build().run(now: now);
+
+      expect(staleVideo.existsSync(), isFalse);
+      expect(stalePdf.existsSync(), isFalse);
+      expect(freshVideo.existsSync(), isTrue);
+    });
+
+    test('prunes directories it emptied, but not ones still in use', () async {
+      await write(picked('0/dives.zip'), 10, const Duration(days: 2));
+      await write(picked('1/keep.zip'), 10, const Duration(hours: 1));
+
+      await build().run(now: now);
+
+      expect(Directory(p.join(temp.path, 'picked', '0')).existsSync(), isFalse);
+      expect(Directory(p.join(temp.path, 'picked', '1')).existsSync(), isTrue);
+    });
+
+    test('leaves an empty directory it did not empty alone', () async {
+      // A pick materializing right now creates its subdirectory before it
+      // opens the destination file, so an empty directory is not evidence of
+      // abandoned scratch. Only what this pass emptied is a prune candidate.
+      final inFlight = Directory(p.join(temp.path, 'picked', 'in_flight'));
+      await inFlight.create(recursive: true);
+      await write(picked('0/dives.zip'), 10, const Duration(days: 2));
+
+      await build().run(now: now);
+
+      expect(
+        inFlight.existsSync(),
+        isTrue,
+        reason: 'a writer may be about to create its file in there',
+      );
+      expect(Directory(p.join(temp.path, 'picked', '0')).existsSync(), isFalse);
+    });
+
+    test('prunes the whole chain a nested file left empty', () async {
+      await write(picked('0/inner/dives.zip'), 10, const Duration(days: 2));
+
+      await build().run(now: now);
+
+      expect(Directory(p.join(temp.path, 'picked', '0')).existsSync(), isFalse);
+    });
+
+    test('never touches anything outside the directories it owns', () async {
+      // The temp root holds files other plugins wrote, and share files whose
+      // names this app cannot distinguish from theirs. Documents holds the
+      // database and the user's exports. None of it is ours to delete.
+      final looseTemp = await write(
+        p.join(temp.path, 'someone_elses.tmp'),
+        99,
+        const Duration(days: 400),
+      );
+      final otherPlugin = await write(
+        p.join(temp.path, 'libCachedImageData', 'blob.bin'),
+        99,
+        const Duration(days: 400),
+      );
+      final appData = await write(
+        p.join(support.path, 'Submersion', 'submersion_local.db'),
+        99,
+        const Duration(days: 400),
+      );
+      final cachedOriginal = await write(
+        p.join(
+          support.path,
+          'Submersion',
+          'media_cache',
+          'originals',
+          'aa',
+          'x',
+        ),
+        99,
+        const Duration(days: 400),
+      );
+
+      final report = await build().run(now: now);
+
+      expect(looseTemp.existsSync(), isTrue);
+      expect(otherPlugin.existsSync(), isTrue);
+      expect(appData.existsSync(), isTrue);
+      expect(
+        cachedOriginal.existsSync(),
+        isTrue,
+        reason: 'the indexed pools are governed by their own LRU, not by age',
+      );
+      expect(report.filesDeleted, 0);
+    });
+
+    test('a missing directory is a no-op rather than a failure', () async {
+      final report = await build().run(now: now);
+
+      expect(report.filesDeleted, 0);
+      expect(report.bytesReclaimed, 0);
+    });
+
+    test('reports what it reclaimed across every target', () async {
+      await write(picked('0/a.zip'), 100, const Duration(days: 2));
+      await write(staging('stage_1'), 200, const Duration(days: 2));
+      await write(transcode('c_high.mp4'), 300, const Duration(days: 8));
+      await write(videoThumb('dd.img'), 400, const Duration(days: 40));
+
+      final report = await build().run(now: now);
+
+      expect(report.filesDeleted, 4);
+      expect(report.bytesReclaimed, 1000);
+    });
+
+    test('dry run counts without deleting', () async {
+      final stale = await write(
+        picked('0/dives.zip'),
+        500,
+        const Duration(days: 2),
+      );
+
+      final report = await build().run(now: now, dryRun: true);
+
+      expect(report.filesDeleted, 1);
+      expect(report.bytesReclaimed, 500);
+      expect(stale.existsSync(), isTrue);
+    });
+
+    test('a staging copy that kept an old modification time is kept', () async {
+      // The upload pipeline stages with File.copy, which keeps the source's
+      // modification time on Apple platforms; the copy is minutes old.
+      final staged = await write(
+        staging('photo.jpg'),
+        10,
+        const Duration(days: 30),
+      );
+
+      final report = await StorageScratchSweep(
+        temporaryDirectory: () async => temp,
+        cacheLocation: () async => location(),
+      ).run(now: DateTime.now());
+
+      expect(staged.existsSync(), isTrue);
+      expect(report.filesDeleted, 0);
+    });
+
+    group('on a phone', () {
+      String inOsCache(String directory, String name) =>
+          p.join(osCache.path, 'Submersion', directory, name);
+
+      test('sweeps old thumbnails in the OS cache directory', () async {
+        final oldVideo = await write(
+          inOsCache('video_thumbnails', 'old.img'),
+          10,
+          const Duration(days: 31),
+        );
+        final oldPdf = await write(
+          inOsCache('pdf_thumbnails', 'old.jpg'),
+          10,
+          const Duration(days: 31),
+        );
+        final fresh = await write(
+          inOsCache('video_thumbnails', 'fresh.img'),
+          10,
+          const Duration(days: 1),
+        );
+
+        await build(phone: true).run(now: now);
+
+        expect(oldVideo.existsSync(), isFalse);
+        expect(oldPdf.existsSync(), isFalse);
+        expect(fresh.existsSync(), isTrue);
+      });
+
+      test('sweeps staging and transcode in application support', () async {
+        final stagedFile = await write(
+          staging('stale.bin'),
+          10,
+          const Duration(days: 2),
+        );
+        final transcoded = await write(
+          transcode('stale.mp4'),
+          10,
+          const Duration(days: 8),
+        );
+
+        await build(phone: true).run(now: now);
+
+        expect(stagedFile.existsSync(), isFalse);
+        expect(transcoded.existsSync(), isFalse);
+      });
+    });
+  });
+}

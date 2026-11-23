@@ -1,20 +1,38 @@
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
+
+import 'package:submersion/core/constants/detail_section_order.dart'
+    as section_order;
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 /// Identifies each configurable section on the Dive Details page.
 ///
-/// Declaration order defines the default display order. The two fixed sections
-/// (Header and Dive Profile Chart) are not included — they always render first.
+/// Declaration order defines the default display order. The header block is
+/// the only fixed part of the page; every section below -- including the dive
+/// profile chart -- can be hidden and reordered.
+///
+/// Sections that pair side by side on a wide pane are declared adjacently, in
+/// left-then-right order (see `kDiveDetailSectionPairs`), so the default order
+/// already reads the way the paired layout renders.
 enum DiveDetailSectionId {
-  decoO2,
+  profile,
+  decoStatus,
+  tissueLoading,
+  safetyReview,
+  tanks,
   sacSegments,
   details,
   environment,
   altitude,
+
+  /// Heart rate, recovery and sleep from Apple Health (issue #637).
+  health,
+  surfaceGps,
   tide,
+  navTrack,
   weights,
-  tanks,
+  buoyancy,
   buddies,
   signatures,
   equipment,
@@ -22,28 +40,56 @@ enum DiveDetailSectionId {
   media,
   tags,
   notes,
+
+  /// Documents filed under the dive (issue #2613). After [notes], so an
+  /// order saved before it existed gains it there.
+  documents,
   customFields,
+  diveLab,
   dataSources;
+
+  /// The pre-split id that carried both [decoStatus] and [tissueLoading].
+  ///
+  /// Saved orders written before the split still name it, so
+  /// [DiveDetailSectionConfig.sectionsFromJson] expands it into the two
+  /// sections that replaced it.
+  static const String legacyDecoO2Id = 'decoO2';
+
+  /// The retired section that showed satellite water conditions on a card of
+  /// its own, before they moved into the [environment] card (issue #3282).
+  ///
+  /// Saved orders written before then still name it;
+  /// [DiveDetailSectionConfig.sectionsFromJson] drops it.
+  static const String legacyReefHealthId = 'reefHealth';
 
   /// Human-readable name shown in the settings UI (English fallback).
   String get displayName {
     return switch (this) {
-      decoO2 => 'Deco Status / Tissue Loading',
-      sacSegments => 'SAC Rate by Segment',
+      profile => 'Dive Profile',
+      decoStatus => 'Deco Status',
+      tissueLoading => 'Tissue Loading',
+      safetyReview => 'Safety Review',
+      sacSegments => 'Gas consumption by segment',
       details => 'Details',
       environment => 'Environment',
       altitude => 'Altitude',
+      health => 'Heart rate and recovery',
       tide => 'Tide',
+      surfaceGps => 'Location',
+      navTrack => 'Underwater Track',
       weights => 'Weights',
-      tanks => 'Tanks',
+      buoyancy => 'Buoyancy',
+      tanks => 'Cylinders',
       buddies => 'Buddies',
       signatures => 'Signatures',
       equipment => 'Equipment',
-      sightings => 'Marine Life Sightings',
+      sightings => 'Species Sightings',
       media => 'Media',
       tags => 'Tags',
       notes => 'Notes',
+      documents => 'Documents',
       customFields => 'Custom Fields',
+      diveLab => 'Compare',
       dataSources => 'Data Sources',
     };
   }
@@ -52,14 +98,24 @@ enum DiveDetailSectionId {
   /// (English fallback).
   String get description {
     return switch (this) {
-      decoO2 => 'NDL, ceiling, tissue heat map, O2 toxicity',
-      sacSegments => 'Phase/time segmentation, cylinder breakdown',
+      profile => 'Depth/time chart, playback, range selection',
+      decoStatus => 'NDL, ceiling, stops, O2 toxicity',
+      tissueLoading => 'Per-compartment saturation and heat map',
+      safetyReview => 'Automatic post-dive profile observations',
+      sacSegments => 'SAC and RMV by phase or time',
       details => 'Type, location, trip, dive center, interval',
       environment => 'Air/water temp, visibility, current',
       altitude => 'Altitude value, category, deco requirement',
+      health => 'Heart rate, recovery and sleep from Apple Health',
       tide => 'Tide cycle graph and timing',
+      surfaceGps =>
+        'Map of the dive site, GPS entry/exit points and surface drift',
+      navTrack => 'Measured underwater track from a navigation console',
       weights => 'Weight breakdown, total weight',
-      tanks => 'Tank list, gas mixes, pressures, per-tank SAC',
+      buoyancy =>
+        'Buoyancy through the dive, lead for next time, ditchable weight',
+      tanks =>
+        'Cylinder list, gas mixes, pressures, MOD/MND, per-tank consumption',
       buddies => 'Buddy list with roles',
       signatures => 'Buddy/instructor signature display and capture',
       equipment => 'Equipment used in dive',
@@ -67,21 +123,63 @@ enum DiveDetailSectionId {
       media => 'Photos/videos gallery',
       tags => 'Dive tags',
       notes => 'Dive notes/description',
+      documents => 'Permits, receipts and other papers filed under the dive',
       customFields => 'User-defined custom fields',
+      diveLab => 'Plan, dive and saved what-ifs side by side',
       dataSources => 'Connected dive computers, source management',
+    };
+  }
+
+  /// Icon standing in for the section in the properties menu and, in the list
+  /// layout, on the section's folded header row.
+  IconData get icon {
+    return switch (this) {
+      profile => Icons.show_chart,
+      decoStatus => Icons.timer_outlined,
+      tissueLoading => Icons.grid_view,
+      safetyReview => Icons.health_and_safety_outlined,
+      sacSegments => Icons.speed,
+      details => Icons.info_outline,
+      environment => Icons.thermostat,
+      altitude => Icons.terrain,
+      health => Icons.monitor_heart_outlined,
+      tide => Icons.waves,
+      surfaceGps => Icons.gps_fixed,
+      navTrack => Icons.route,
+      weights => Icons.fitness_center,
+      buoyancy => Icons.bubble_chart_outlined,
+      tanks => Icons.propane_tank_outlined,
+      buddies => Icons.group_outlined,
+      signatures => Icons.draw_outlined,
+      equipment => Icons.backpack_outlined,
+      sightings => Icons.pets,
+      media => Icons.photo_library_outlined,
+      tags => Icons.label_outline,
+      notes => Icons.notes,
+      documents => Icons.folder_copy_outlined,
+      customFields => Icons.tune,
+      diveLab => Icons.science_outlined,
+      dataSources => Icons.watch_outlined,
     };
   }
 
   /// Localized display name resolved via [AppLocalizations].
   String localizedDisplayName(AppLocalizations l10n) {
     return switch (this) {
-      decoO2 => l10n.diveDetailSection_decoO2_name,
+      profile => l10n.diveDetailSection_profile_name,
+      decoStatus => l10n.diveDetailSection_decoStatus_name,
+      tissueLoading => l10n.diveDetailSection_tissueLoading_name,
+      safetyReview => l10n.diveDetailSection_safetyReview_name,
       sacSegments => l10n.diveDetailSection_sacSegments_name,
       details => l10n.diveDetailSection_details_name,
       environment => l10n.diveDetailSection_environment_name,
       altitude => l10n.diveDetailSection_altitude_name,
+      health => l10n.diveLog_health_title,
       tide => l10n.diveDetailSection_tide_name,
+      surfaceGps => l10n.diveDetailSection_surfaceGps_name,
+      navTrack => l10n.diveDetailSection_navTrack_trackName,
       weights => l10n.diveDetailSection_weights_name,
+      buoyancy => l10n.diveDetailSection_buoyancy_name,
       tanks => l10n.diveDetailSection_tanks_name,
       buddies => l10n.diveDetailSection_buddies_name,
       signatures => l10n.diveDetailSection_signatures_name,
@@ -90,7 +188,9 @@ enum DiveDetailSectionId {
       media => l10n.diveDetailSection_media_name,
       tags => l10n.diveDetailSection_tags_name,
       notes => l10n.diveDetailSection_notes_name,
+      documents => l10n.documents_section_title,
       customFields => l10n.diveDetailSection_customFields_name,
+      diveLab => l10n.diveDetailSection_diveLab_name,
       dataSources => l10n.diveDetailSection_dataSources_name,
     };
   }
@@ -98,13 +198,20 @@ enum DiveDetailSectionId {
   /// Localized description resolved via [AppLocalizations].
   String localizedDescription(AppLocalizations l10n) {
     return switch (this) {
-      decoO2 => l10n.diveDetailSection_decoO2_description,
+      profile => l10n.diveDetailSection_profile_description,
+      decoStatus => l10n.diveDetailSection_decoStatus_description,
+      tissueLoading => l10n.diveDetailSection_tissueLoading_description,
+      safetyReview => l10n.diveDetailSection_safetyReview_description,
       sacSegments => l10n.diveDetailSection_sacSegments_description,
       details => l10n.diveDetailSection_details_description,
       environment => l10n.diveDetailSection_environment_description,
       altitude => l10n.diveDetailSection_altitude_description,
+      health => l10n.diveDetailSection_health_description,
       tide => l10n.diveDetailSection_tide_description,
+      surfaceGps => l10n.diveDetailSection_surfaceGps_description,
+      navTrack => l10n.diveDetailSection_navTrack_trackDescription,
       weights => l10n.diveDetailSection_weights_description,
+      buoyancy => l10n.diveDetailSection_buoyancy_description,
       tanks => l10n.diveDetailSection_tanks_description,
       buddies => l10n.diveDetailSection_buddies_description,
       signatures => l10n.diveDetailSection_signatures_description,
@@ -113,10 +220,31 @@ enum DiveDetailSectionId {
       media => l10n.diveDetailSection_media_description,
       tags => l10n.diveDetailSection_tags_description,
       notes => l10n.diveDetailSection_notes_description,
+      documents => l10n.diveDetailSection_documents_description,
       customFields => l10n.diveDetailSection_customFields_description,
+      diveLab => l10n.diveDetailSection_diveLab_description,
       dataSources => l10n.diveDetailSection_dataSources_description,
     };
   }
+
+  /// Whether this section is hidden for gauge (bottom-timer) dives, which log
+  /// depth and time only -- no gas, decompression, or O2-toxicity data.
+  ///
+  /// The profile chart itself stays: depth over time is exactly what a gauge
+  /// dive does record.
+  bool get hiddenInGaugeMode =>
+      this == DiveDetailSectionId.decoStatus ||
+      this == DiveDetailSectionId.tissueLoading ||
+      this == DiveDetailSectionId.sacSegments ||
+      this == DiveDetailSectionId.tanks;
+}
+
+/// Reading a saved section list.
+extension DiveDetailSectionsShown on List<DiveDetailSectionConfig> {
+  /// Whether [id] is on the detail page of a dive, or of a gauge dive with
+  /// [gauge]: not switched off, and not one gauge mode hides.
+  bool shows(DiveDetailSectionId id, {required bool gauge}) =>
+      any((s) => s.id == id && s.shownFor(gauge: gauge));
 }
 
 /// Visibility and ordering configuration for a single dive detail section.
@@ -124,13 +252,40 @@ class DiveDetailSectionConfig {
   final DiveDetailSectionId id;
   final bool visible;
 
-  const DiveDetailSectionConfig({required this.id, required this.visible});
+  /// Whether the list layout shows this section unfolded.
+  ///
+  /// Only the list layout folds sections, so this is ignored elsewhere. It
+  /// lives here rather than in page state so a dive reopens the way the
+  /// diver left it.
+  final bool expanded;
 
-  DiveDetailSectionConfig copyWith({bool? visible}) {
-    return DiveDetailSectionConfig(id: id, visible: visible ?? this.visible);
+  const DiveDetailSectionConfig({
+    required this.id,
+    required this.visible,
+    this.expanded = false,
+  });
+
+  /// Whether this section is on the detail page, for a gauge dive with
+  /// [gauge].
+  bool shownFor({required bool gauge}) =>
+      visible && !(gauge && id.hiddenInGaugeMode);
+
+  DiveDetailSectionConfig copyWith({bool? visible, bool? expanded}) {
+    return DiveDetailSectionConfig(
+      id: id,
+      visible: visible ?? this.visible,
+      expanded: expanded ?? this.expanded,
+    );
   }
 
-  Map<String, dynamic> toJson() => {'id': id.name, 'visible': visible};
+  /// Folded is the default, so the flag is written only when set: an order
+  /// saved by a diver who never unfolds anything stays byte-identical, and
+  /// syncs no changeset it would otherwise have to carry.
+  Map<String, dynamic> toJson() => {
+    'id': id.name,
+    'visible': visible,
+    if (expanded) 'expanded': true,
+  };
 
   factory DiveDetailSectionConfig.fromJson(Map<String, dynamic> json) {
     final idStr = json['id'] as String;
@@ -138,6 +293,7 @@ class DiveDetailSectionConfig {
     return DiveDetailSectionConfig(
       id: id,
       visible: json['visible'] as bool? ?? true,
+      expanded: json['expanded'] as bool? ?? false,
     );
   }
 
@@ -150,14 +306,27 @@ class DiveDetailSectionConfig {
   }
 
   static const List<DiveDetailSectionConfig> defaultSections = [
-    DiveDetailSectionConfig(id: DiveDetailSectionId.decoO2, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.profile, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.decoStatus, visible: true),
+    DiveDetailSectionConfig(
+      id: DiveDetailSectionId.tissueLoading,
+      visible: true,
+    ),
+    DiveDetailSectionConfig(
+      id: DiveDetailSectionId.safetyReview,
+      visible: true,
+    ),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.tanks, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.sacSegments, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.details, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.environment, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.altitude, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.health, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.surfaceGps, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.tide, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.navTrack, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.weights, visible: true),
-    DiveDetailSectionConfig(id: DiveDetailSectionId.tanks, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.buoyancy, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.buddies, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.signatures, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.equipment, visible: true),
@@ -165,12 +334,39 @@ class DiveDetailSectionConfig {
     DiveDetailSectionConfig(id: DiveDetailSectionId.media, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.tags, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.notes, visible: true),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.documents, visible: true),
     DiveDetailSectionConfig(
       id: DiveDetailSectionId.customFields,
       visible: true,
     ),
+    DiveDetailSectionConfig(id: DiveDetailSectionId.diveLab, visible: true),
     DiveDetailSectionConfig(id: DiveDetailSectionId.dataSources, visible: true),
   ];
+
+  /// [sections] reordered as if [rendered] had its [oldIndex] entry dropped
+  /// at [newIndex].
+  ///
+  /// The dive page renders only the sections that are visible and have
+  /// content, so a drop index in that subset is not an index into the saved
+  /// list. The moved section is re-anchored next to the rendered neighbour it
+  /// was dropped against, which leaves every section outside [rendered] --
+  /// hidden ones included -- where the diver left it.
+  ///
+  /// Indices follow [ReorderableListView.onReorderItem]: [newIndex] is the
+  /// final resting index, already adjusted for the removal.
+  static List<DiveDetailSectionConfig> moveRenderedSection(
+    List<DiveDetailSectionConfig> sections,
+    List<DiveDetailSectionId> rendered,
+    int oldIndex,
+    int newIndex,
+  ) => section_order
+      .moveRenderedSection<DiveDetailSectionConfig, DiveDetailSectionId>(
+        sections,
+        (s) => s.id,
+        rendered,
+        oldIndex,
+        newIndex,
+      );
 
   static String sectionsToJson(List<DiveDetailSectionConfig> sections) {
     return jsonEncode(sections.map((s) => s.toJson()).toList());
@@ -181,8 +377,8 @@ class DiveDetailSectionConfig {
     try {
       final decoded = jsonDecode(json) as List;
       final sections = decoded
-          .map((e) => e is Map<String, dynamic> ? tryFromJson(e) : null)
-          .whereType<DiveDetailSectionConfig>()
+          .whereType<Map<String, dynamic>>()
+          .expand(_configsForEntry)
           .toList();
       if (sections.isEmpty) return List.of(defaultSections);
       return ensureAllSections(sections);
@@ -191,14 +387,53 @@ class DiveDetailSectionConfig {
     }
   }
 
+  /// The configs one saved JSON entry stands for.
+  ///
+  /// One entry normally means one section. The retired ids are the
+  /// exceptions. `decoO2` covered the deco/tissue panel as a whole, so it
+  /// expands into both sections that replaced it, each inheriting the
+  /// visibility and fold state the diver had chosen for the combined panel.
+  /// `reefHealth` stands for nothing: its content now lives inside the
+  /// Environment card, which keeps its own entry.
+  static Iterable<DiveDetailSectionConfig> _configsForEntry(
+    Map<String, dynamic> json,
+  ) {
+    if (json['id'] == DiveDetailSectionId.legacyReefHealthId) return const [];
+    if (json['id'] == DiveDetailSectionId.legacyDecoO2Id) {
+      final visible = json['visible'] as bool? ?? true;
+      final expanded = json['expanded'] as bool? ?? false;
+      return [
+        DiveDetailSectionConfig(
+          id: DiveDetailSectionId.decoStatus,
+          visible: visible,
+          expanded: expanded,
+        ),
+        DiveDetailSectionConfig(
+          id: DiveDetailSectionId.tissueLoading,
+          visible: visible,
+          expanded: expanded,
+        ),
+      ];
+    }
+    final config = tryFromJson(json);
+    return config == null ? const [] : [config];
+  }
+
+  /// [sections] with every missing section added, visible, at the place the
+  /// default order puts it.
+  ///
+  /// A section added in a later release must not land at the bottom of an
+  /// order saved before it existed -- the dive profile chart, appended, would
+  /// follow the Data Sources card. Each missing id is instead inserted just
+  /// after its nearest preceding sibling in the default order, or at the top
+  /// when none of them is present.
   static List<DiveDetailSectionConfig> ensureAllSections(
     List<DiveDetailSectionConfig> sections,
-  ) {
-    final presentIds = sections.map((s) => s.id).toSet();
-    final missing = DiveDetailSectionId.values
-        .where((id) => !presentIds.contains(id))
-        .map((id) => DiveDetailSectionConfig(id: id, visible: true));
-    if (missing.isEmpty) return sections;
-    return [...sections, ...missing];
-  }
+  ) => section_order
+      .ensureAllSections<DiveDetailSectionConfig, DiveDetailSectionId>(
+        sections,
+        (s) => s.id,
+        DiveDetailSectionId.values,
+        (id) => DiveDetailSectionConfig(id: id, visible: true),
+      );
 }

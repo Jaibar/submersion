@@ -1,5 +1,8 @@
 import 'dart:typed_data';
 
+import 'package:submersion/features/media/domain/value_objects/media_source_metadata.dart';
+import 'package:submersion/features/media/domain/value_objects/taken_at_source.dart';
+
 /// Permission status for photo library access.
 enum PhotoPermissionStatus {
   /// User has granted access.
@@ -16,6 +19,28 @@ enum PhotoPermissionStatus {
 
   /// Access is restricted by device policy.
   restricted,
+}
+
+/// An album (Android: a device folder such as `DCIM/Camera`) that holds a
+/// gallery asset. Lets the picker narrow a time window's matches to one
+/// source, so a dive's camera photos are not buried among chat images and
+/// screenshots from the same hour (issue #189).
+class GalleryAlbum {
+  /// The platform's identifier for the album.
+  final String id;
+
+  /// The album's name as the platform shows it.
+  final String name;
+
+  const GalleryAlbum({required this.id, required this.name});
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GalleryAlbum && id == other.id && name == other.name;
+
+  @override
+  int get hashCode => Object.hash(id, name);
 }
 
 /// Information about a gallery asset (photo or video).
@@ -47,6 +72,30 @@ class AssetInfo {
   /// Original filename if available.
   final String? filename;
 
+  /// Absolute filesystem path, when the asset came from a file dialog rather
+  /// than a platform photo library.
+  ///
+  /// Null on iOS / Android / macOS, where [id] is a real photo_manager asset
+  /// ID and the library owns the file. Non-null on Windows / Linux, where
+  /// there is no platform gallery and [id] is only a synthetic key into an
+  /// in-memory map that dies with the process. Importers must persist this
+  /// path so the row survives a restart -- see [AssetInfo] usage in
+  /// `MediaImportService`.
+  final String? filePath;
+
+  /// Where [createDateTime] was read from, when the picker read the file
+  /// itself (Windows / Linux). Null for a platform photo library, whose own
+  /// creation date is the capture time.
+  ///
+  /// [TakenAtSource.fileModifiedTime] means the file carried no capture date
+  /// at all, so the review page can say that rather than a bare "no match".
+  final TakenAtSource? takenAtSource;
+
+  /// The albums this asset is in, excluding the library-wide "all photos"
+  /// album. Empty when the source has no albums (a file dialog) or the
+  /// caller did not ask for them.
+  final List<GalleryAlbum> albums;
+
   const AssetInfo({
     required this.id,
     required this.type,
@@ -57,10 +106,42 @@ class AssetInfo {
     this.latitude,
     this.longitude,
     this.filename,
+    this.filePath,
+    this.takenAtSource,
+    this.albums = const [],
   });
 
   /// Whether this asset is a video.
   bool get isVideo => type == AssetType.video;
+
+  /// A copy of this asset with the given fields replaced.
+  AssetInfo copyWith({
+    String? id,
+    AssetType? type,
+    DateTime? createDateTime,
+    int? width,
+    int? height,
+    int? durationSeconds,
+    double? latitude,
+    double? longitude,
+    String? filename,
+    String? filePath,
+    TakenAtSource? takenAtSource,
+    List<GalleryAlbum>? albums,
+  }) => AssetInfo(
+    id: id ?? this.id,
+    type: type ?? this.type,
+    createDateTime: createDateTime ?? this.createDateTime,
+    width: width ?? this.width,
+    height: height ?? this.height,
+    durationSeconds: durationSeconds ?? this.durationSeconds,
+    latitude: latitude ?? this.latitude,
+    longitude: longitude ?? this.longitude,
+    filename: filename ?? this.filename,
+    filePath: filePath ?? this.filePath,
+    takenAtSource: takenAtSource ?? this.takenAtSource,
+    albums: albums ?? this.albums,
+  );
 }
 
 /// Type of gallery asset.
@@ -97,7 +178,15 @@ abstract class PhotoPickerService {
   Future<Uint8List?> getFileBytes(String assetId);
 
   /// Check the current photo library permission status.
+  ///
+  /// On mobile this is a request: it shows the OS prompt when access was
+  /// never decided. Work the user did not start reads [currentPermission].
   Future<PhotoPermissionStatus> checkPermission();
+
+  /// The current photo library access, read without asking. What a tile
+  /// render or a background pass uses, so the OS prompt only ever appears
+  /// from something the user did (media sync program spec 6.3).
+  Future<PhotoPermissionStatus> currentPermission();
 
   /// Request photo library permission from the user.
   ///
@@ -117,4 +206,12 @@ abstract class PhotoPickerService {
   /// This is needed for video playback, which requires a file path rather
   /// than raw bytes. Returns null if the asset no longer exists.
   Future<String?> getFilePath(String assetId);
+
+  /// Get original metadata for an asset, including its capture wall-time.
+  ///
+  /// Platform implementations may use native gallery APIs for this, which on
+  /// iOS and macOS means fetching the full-size photo: a download when it is
+  /// held only in iCloud. Returns null when the platform cannot provide
+  /// metadata or the asset is missing.
+  Future<MediaSourceMetadata?> getAssetMetadata(String assetId);
 }

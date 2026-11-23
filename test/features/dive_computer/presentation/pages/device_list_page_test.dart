@@ -1,0 +1,447 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:go_router/go_router.dart';
+import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/dive_computer/presentation/pages/device_list_page.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
+import 'package:submersion/features/equipment/presentation/providers/device_item_providers.dart';
+
+import '../../../../helpers/computer_items_override.dart';
+import '../../../../helpers/bulk_delete_contract.dart';
+import '../../../../helpers/selection_contract.dart';
+import '../../../../helpers/test_app.dart';
+
+DiveComputer _makeComputer({required String id, required String name}) {
+  return DiveComputer(
+    id: id,
+    name: name,
+    createdAt: DateTime(2026),
+    updatedAt: DateTime(2026),
+  );
+}
+
+/// Mutable source for the contract test's filter step, so the visible list
+/// can be narrowed mid-test the way a real refresh would.
+final _visibleComputersProvider = StateProvider<List<DiveComputer>>(
+  (ref) => const [],
+);
+
+void main() {
+  group('DeviceListPage selection contract', () {
+    testWidgets('satisfies the shared selection contract', (tester) async {
+      final all = <DiveComputer>[
+        _makeComputer(id: 'c1', name: 'Aaa Perdix'),
+        _makeComputer(id: 'c2', name: 'Bbb Teric'),
+        _makeComputer(id: 'c3', name: 'Ccc Descent'),
+      ];
+
+      final overrides = <dynamic>[
+        computerItemsFromComputers,
+        _visibleComputersProvider.overrideWith((ref) => all),
+        allDiveComputersProvider.overrideWith(
+          (ref) async => ref.watch(_visibleComputersProvider),
+        ),
+      ];
+
+      await verifySelectionContract(
+        tester,
+        build: () => testApp(
+          overrides: overrides,
+          locale: const Locale('en'),
+          child: const DeviceListPage(),
+        ),
+        selectButton: find.byKey(const ValueKey('enter_selection')),
+        rowRoot: find.byType(Card).first,
+        // The card renders computer.displayName, not name, so target the
+        // row widget rather than a text string.
+        firstRow: find.byType(Card).first,
+        applyFilter: (tester) async {
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(DeviceListPage)),
+          );
+          container.read(_visibleComputersProvider.notifier).state = [
+            all.first,
+          ];
+        },
+        visibleAfterFilter: 1,
+      );
+    });
+
+    testWidgets('deletes every checked computer item and reports the count '
+        '(#3676)', (tester) async {
+      final deleted = <String>[];
+      final widget = testApp(
+        locale: const Locale('en'),
+        overrides: [
+          computerItemsFromComputers,
+          allDiveComputersProvider.overrideWith(
+            (ref) async => [
+              _makeComputer(id: 'c1', name: 'Aaa Perdix'),
+              _makeComputer(id: 'c2', name: 'Bbb Teric'),
+            ],
+          ),
+          // Deleting the item deletes the computer behind it.
+          deviceItemDeleterProvider.overrideWithValue((id) async {
+            deleted.add(id);
+            return true;
+          }),
+        ],
+        child: const DeviceListPage(),
+      );
+
+      await verifyBulkDelete(
+        tester,
+        build: () => widget,
+        selectButton: find.byKey(const ValueKey('enter_selection')),
+        expectedDeletedCount: 2,
+      );
+
+      expect(deleted, ['gear-c1', 'gear-c2']);
+      expect(find.text('2 deleted'), findsOneWidget);
+    });
+
+    testWidgets('a refused delete is not counted as deleted (review)', (
+      tester,
+    ) async {
+      final widget = testApp(
+        locale: const Locale('en'),
+        overrides: [
+          computerItemsFromComputers,
+          allDiveComputersProvider.overrideWith(
+            (ref) async => [
+              _makeComputer(id: 'c1', name: 'Aaa Perdix'),
+              _makeComputer(id: 'c2', name: 'Bbb Teric'),
+            ],
+          ),
+          // c2's item is shared from another profile: the owner check keeps it.
+          deviceItemDeleterProvider.overrideWithValue(
+            (id) async => id == 'gear-c1',
+          ),
+        ],
+        child: const DeviceListPage(),
+      );
+
+      await verifyBulkDelete(
+        tester,
+        build: () => widget,
+        selectButton: find.byKey(const ValueKey('enter_selection')),
+        expectedDeletedCount: 2,
+      );
+
+      expect(find.text('2 deleted'), findsNothing);
+    });
+
+    testWidgets('the Select button is visible without any hidden gesture', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            computerItemsFromComputers,
+            allDiveComputersProvider.overrideWith(
+              (ref) async => [_makeComputer(id: 'c1', name: 'Perdix')],
+            ),
+          ],
+          locale: const Locale('en'),
+          child: const DeviceListPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('enter_selection')), findsOneWidget);
+    });
+
+    // Selection mode puts the checkbox ahead of the connection icon rather
+    // than in its place (issue #1717), so the info column loses 40px. The
+    // stats line must still fit a phone-width card.
+    for (final selecting in [false, true]) {
+      testWidgets('fits a phone-width card '
+          '${selecting ? 'in' : 'outside'} selection mode', (tester) async {
+        tester.view.physicalSize = const Size(353, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: [
+              computerItemsFromComputers,
+              allDiveComputersProvider.overrideWith(
+                (ref) async => [
+                  DiveComputer(
+                    id: 'c1',
+                    name: 'Perdix',
+                    manufacturer: 'Shearwater',
+                    model: 'Perdix 2',
+                    diveCount: 1234,
+                    lastDownload: DateTime(2025, 12, 28, 18, 45),
+                    createdAt: DateTime(2026),
+                    updatedAt: DateTime(2026),
+                  ),
+                ],
+              ),
+            ],
+            locale: const Locale('en'),
+            child: const DeviceListPage(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (selecting) {
+          await tester.tap(find.byKey(const ValueKey('enter_selection')));
+          await tester.pumpAndSettle();
+          expect(find.byType(Checkbox), findsWidgets);
+        }
+
+        expect(tester.takeException(), isNull);
+        expect(find.text('1234 dives'), findsOneWidget);
+      });
+    }
+  });
+
+  group('DeviceListPage items (#3676)', () {
+    Widget listWith(List<ComputerItem> rows, {GoRouter? router}) {
+      final scope = ProviderScope(
+        overrides: [
+          computerItemsProvider.overrideWith((ref) async => rows),
+          allDiveComputersProvider.overrideWith((ref) async => const []),
+        ],
+        child: MaterialApp.router(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          routerConfig:
+              router ??
+              GoRouter(
+                routes: [
+                  GoRoute(path: '/', builder: (_, _) => const DeviceListPage()),
+                ],
+              ),
+        ),
+      );
+      return scope;
+    }
+
+    testWidgets('shows a hand-added computer item', (tester) async {
+      await tester.pumpWidget(
+        listWith(const [
+          (
+            item: EquipmentItem(
+              id: 'backup',
+              name: 'Backup gauge',
+              type: EquipmentType.computer,
+            ),
+            computers: <DiveComputer>[],
+          ),
+        ]),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Backup gauge'), findsOneWidget);
+      expect(find.text('Not connected yet'), findsOneWidget);
+      expect(find.byIcon(Icons.download), findsNothing);
+    });
+
+    testWidgets('a retired computer item says so (review)', (tester) async {
+      await tester.pumpWidget(
+        listWith(const [
+          (
+            item: EquipmentItem(
+              id: 'old',
+              name: 'Old Teric',
+              type: EquipmentType.computer,
+              status: EquipmentStatus.retired,
+            ),
+            computers: <DiveComputer>[],
+          ),
+        ]),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Retired'), findsOneWidget);
+    });
+
+    testWidgets('tapping a computer opens its Equipment page', (tester) async {
+      final router = GoRouter(
+        routes: [
+          GoRoute(path: '/', builder: (_, _) => const DeviceListPage()),
+          GoRoute(
+            path: '/equipment/:id',
+            builder: (_, s) =>
+                Scaffold(body: Text('ITEM ${s.pathParameters['id']}')),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        listWith([
+          (
+            item: const EquipmentItem(
+              id: 'gear-1',
+              name: 'Teric',
+              type: EquipmentType.computer,
+            ),
+            computers: [_makeComputer(id: 'c1', name: 'Teric')],
+          ),
+        ], router: router),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Teric').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('ITEM gear-1'), findsOneWidget);
+    });
+
+    GoRouter routerWithTargets() => GoRouter(
+      routes: [
+        GoRoute(path: '/', builder: (_, _) => const DeviceListPage()),
+        GoRoute(
+          path: '/equipment/new',
+          builder: (_, s) =>
+              Scaffold(body: Text('NEW ${s.uri.queryParameters['type']}')),
+        ),
+        GoRoute(
+          path: '/dive-computers/discover',
+          builder: (_, _) => const Scaffold(body: Text('DISCOVER')),
+        ),
+      ],
+    );
+
+    testWidgets('Add by hand starts a Dive Computer item', (tester) async {
+      await tester.pumpWidget(listWith(const [], router: routerWithTargets()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Add Computer'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add by hand'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('NEW computer'), findsOneWidget);
+    });
+
+    testWidgets('Find Computers in the add sheet opens discovery', (
+      tester,
+    ) async {
+      await tester.pumpWidget(listWith(const [], router: routerWithTargets()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Add Computer'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Find Computers').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('DISCOVER'), findsOneWidget);
+    });
+
+    testWidgets('a list that fails to load offers a retry', (tester) async {
+      var loads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            computerItemsProvider.overrideWith((ref) async {
+              loads++;
+              throw StateError('database closed');
+            }),
+            allDiveComputersProvider.overrideWith((ref) async => const []),
+          ],
+          child: MaterialApp.router(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            routerConfig: GoRouter(
+              routes: [
+                GoRoute(path: '/', builder: (_, _) => const DeviceListPage()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Failed to load dive computers'), findsOneWidget);
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(loads, 2);
+    });
+  });
+
+  group('DeviceListPage help dialog', () {
+    // Garmin has no libdivecomputer backend, so the help dialog must not list
+    // it among the brands downloaded over Bluetooth or USB, and must say
+    // where its dives come in instead (#2624).
+    Future<void> openHelp(WidgetTester tester, Locale locale) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            computerItemsFromComputers,
+            allDiveComputersProvider.overrideWith((ref) async => const []),
+          ],
+          locale: locale,
+          child: const DeviceListPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.help_outline));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('keeps Garmin out of the download brands and points at '
+        'the import paths', (tester) async {
+      await openHelp(tester, const Locale('en'));
+
+      expect(
+        find.text(
+          'Shearwater, Suunto, Mares, Scubapro, Oceanic, Aqualung, '
+          'Cressi, and 50+ more models.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Garmin watches are not downloaded here. Import their dives from '
+          'Transfer > File Import or Transfer > Cloud.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'on Windows points at the Garmin entry in the USB list (#4223)',
+      (tester) async {
+        await openHelp(tester, const Locale('en'));
+
+        expect(
+          find.text(
+            'Garmin watches are not downloaded over Bluetooth. Connect one '
+            'by cable and choose Garmin in the USB list, or import their '
+            'dives from Transfer > File Import or Transfer > Cloud.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            'Garmin watches are not downloaded here. Import their dives from '
+            'Transfer > File Import or Transfer > Cloud.',
+          ),
+          findsNothing,
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+    );
+
+    testWidgets('fills each import path into its own slot', (tester) async {
+      await openHelp(tester, const Locale('de'));
+
+      expect(
+        find.text(
+          'Garmin-Uhren werden hier nicht heruntergeladen. Importiere '
+          'ihre Tauchgänge über Übertragung > Dateiimport oder '
+          'Übertragung > Cloud.',
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+}

@@ -1,18 +1,37 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/map_style.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/services/trip_story_builder.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_story_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/story/trip_day_picker.dart';
+import 'package:submersion/features/trips/presentation/widgets/story/trip_story_trip_page.dart';
+import 'package:submersion/features/checklists/presentation/providers/checklist_providers.dart';
+import 'package:submersion/features/checklists/presentation/widgets/trip_checklists_panel.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
+import 'package:submersion/features/trips/domain/entities/scrubber_margin.dart';
+import 'package:submersion/features/trips/presentation/providers/scrubber_margin_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_cylinder_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_equipment_providers.dart';
+import 'package:submersion/features/trips/presentation/providers/trip_fill_forecast_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/gear/trip_gear_tab.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+import 'package:submersion/features/divers/presentation/providers/item_shares_providers.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/shared_items_fixture.dart';
 
 void _setMobileTestSurfaceSize(WidgetTester tester) {
   // The default widget test surface width is 800px, which trips the app's
@@ -25,6 +44,24 @@ void _setMobileTestSurfaceSize(WidgetTester tester) {
     tester.view.resetDevicePixelRatio();
   });
 }
+
+/// What the Gear and Checklist tabs read, empty, so a test can open them.
+List<Override> _tabOverrides(String tripId) => [
+  tripGearProvider(tripId).overrideWith((ref) async => const []),
+  tripCylinderStatesProvider(tripId).overrideWith((ref) async => const []),
+  tripServiceAlertsProvider(tripId).overrideWith((ref) async => const []),
+  tripScrubberMarginsProvider(
+    tripId,
+  ).overrideWith((ref) async => const <ScrubberMargin>[]),
+  tripFillForecastProvider(tripId).overrideWith((ref) async => null),
+  // A trip with no checklists yet (issue #3356): the panel renders its
+  // empty state, so no per-checklist item/section override is needed.
+  tripChecklistsProvider(tripId).overrideWith((ref) async => const []),
+  tripChecklistAllItemsProvider(tripId).overrideWith((ref) async => const []),
+  tripChecklistCombinedProgressProvider(
+    tripId,
+  ).overrideWith((ref) async => (done: 0, total: 0)),
+];
 
 void main() {
   group('TripDetailPage', () {
@@ -43,10 +80,82 @@ void main() {
     final testTripWithStats = TripWithStats(
       trip: testTrip,
       diveCount: 15,
-      totalBottomTime: 5400,
+      totalRuntime: 5400,
       maxDepth: 32.5,
       avgDepth: 18.3,
     );
+
+    Future<void> pumpTrip(WidgetTester tester, Trip trip) async {
+      _setMobileTestSurfaceSize(tester);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(trip.id).overrideWith(
+              (ref) async => TripWithStats(trip: trip, diveCount: 0),
+            ),
+            diveIdsForTripProvider(
+              trip.id,
+            ).overrideWith((ref) async => <String>[]),
+            divesForTripProvider(trip.id).overrideWith((ref) async => <Dive>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+            ..._tabOverrides(trip.id),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: trip.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    for (final type in TripType.values) {
+      testWidgets('a ${type.name} trip shows the six tabs in order', (
+        tester,
+      ) async {
+        await pumpTrip(tester, testTrip.copyWith(tripType: type));
+        final tabs = tester
+            .widgetList<Tab>(find.byType(Tab))
+            .map((t) => t.text)
+            .toList();
+        expect(tabs, [
+          'Overview',
+          'Itinerary',
+          'Gear',
+          'Checklist',
+          'Dives',
+          'Photos',
+        ]);
+      });
+    }
+
+    testWidgets('the Gear tab holds the gear list', (tester) async {
+      await pumpTrip(tester, testTrip);
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Gear'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Gear'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TripGearTab), findsOneWidget);
+    });
+
+    testWidgets('the Checklist tab offers the pre-dive checklist', (
+      tester,
+    ) async {
+      await pumpTrip(tester, testTrip);
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Checklist'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Checklist'));
+      await tester.pumpAndSettle();
+      expect(find.text('Pre-dive checklist'), findsOneWidget);
+      expect(find.byType(TripChecklistsPanel), findsOneWidget);
+    });
 
     testWidgets('should display trip name in app bar', (tester) async {
       _setMobileTestSurfaceSize(tester);
@@ -78,164 +187,24 @@ void main() {
       expect(find.text('Red Sea Safari'), findsWidgets);
     });
 
-    testWidgets('should display trip dates', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      // Check for duration
-      expect(find.text('8 days'), findsOneWidget);
-    });
-
-    testWidgets('should display Trip Statistics section', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      expect(find.text('Trip Statistics'), findsOneWidget);
-    });
-
-    testWidgets('should display dive count in statistics', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      expect(find.text('Total Dives'), findsOneWidget);
-      expect(find.text('15'), findsOneWidget);
-    });
-
-    testWidgets('should display total bottom time', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      expect(find.text('Total Bottom Time'), findsOneWidget);
-      expect(find.text('1h 30m'), findsOneWidget);
-    });
-
-    testWidgets('should display max depth', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      expect(find.text('Max Depth'), findsOneWidget);
-      expect(find.text('32.5m'), findsOneWidget);
-    });
-
-    testWidgets('should display Trip Details section with location', (
+    testWidgets('Open in Connections centres the map on the trip', (
       tester,
     ) async {
       _setMobileTestSurfaceSize(tester);
+      final router = GoRouter(
+        initialLocation: '/trips/${testTrip.id}',
+        routes: [
+          GoRoute(
+            path: '/trips/:id',
+            builder: (_, s) => TripDetailPage(tripId: s.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/insights/connections',
+            builder: (context, state) =>
+                Scaffold(body: Text('CONNECTIONS ${state.uri.query}')),
+          ),
+        ],
+      );
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -252,165 +221,45 @@ void main() {
               return _MockSettingsNotifier();
             }),
           ],
-          child: MaterialApp(
+          child: MaterialApp.router(
+            routerConfig: router,
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
           ),
         ),
       );
 
       await tester.pumpAndSettle();
-      expect(find.text('Trip Details'), findsOneWidget);
-      expect(find.text('Egypt'), findsOneWidget);
-    });
-
-    testWidgets('should display resort name', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
+      await tester.tap(find.byTooltip('More options'));
       await tester.pumpAndSettle();
-      expect(find.text('Resort'), findsOneWidget);
-      expect(find.text('Marsa Shagra'), findsOneWidget);
-    });
-
-    testWidgets('should display Notes section', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
+      await tester.tap(find.text('Open in Connections'));
       await tester.pumpAndSettle();
-
-      // Scroll to find Notes section
-      await tester.scrollUntilVisible(
-        find.text('Amazing trip with great visibility'),
-        50.0,
-        scrollable: find.byType(Scrollable).first,
+      expect(
+        find.text('CONNECTIONS mode=around&focus=trip:test-id'),
+        findsOneWidget,
       );
-      expect(find.text('Amazing trip with great visibility'), findsOneWidget);
     });
 
-    testWidgets('should display Dives section', (tester) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-
-      // Scroll to find Dives section
-      await tester.scrollUntilVisible(
-        find.text('Dives'),
-        50.0,
-        scrollable: find.byType(Scrollable).first,
-      );
-      expect(find.text('Dives'), findsOneWidget);
-    });
-
-    testWidgets('should show empty dives message when no dives', (
+    // The overview tab renders the interactive trip story. Its content is
+    // covered in depth by trip_overview_tab_test.dart and the story widget
+    // tests; here we only verify the page wires the story in.
+    testWidgets('overview renders the trip story, one day at a time', (
       tester,
     ) async {
       _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            divesForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value([]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final story = buildTripStory(
+        trip: testTrip,
+        dives: [
+          Dive(id: 'd1', dateTime: DateTime(2024, 1, 15, 9), maxDepth: 25),
+        ],
+        itineraryDays: [],
+        mediaByDiveId: {},
+        sightingsByDiveId: {},
+        checklistItems: [],
+        today: DateTime(2026, 6, 1),
       );
-
-      await tester.pumpAndSettle();
-
-      // Scroll to find empty message
-      await tester.scrollUntilVisible(
-        find.text('No dives in this trip yet'),
-        50.0,
-        scrollable: find.byType(Scrollable).first,
-      );
-      expect(find.text('No dives in this trip yet'), findsOneWidget);
-    });
-
-    testWidgets('should display edit icon button', (tester) async {
-      _setMobileTestSurfaceSize(tester);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -420,6 +269,8 @@ void main() {
             diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
               return Future.value(<String>[]);
             }),
+            tripStoryProvider(testTrip.id).overrideWith((ref) async => story),
+            sharedPreferencesProvider.overrideWithValue(prefs),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
@@ -435,8 +286,11 @@ void main() {
         ),
       );
 
-      await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.edit), findsOneWidget);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      // A finished trip opens on its Trip page, under the day picker.
+      expect(find.byType(TripDayPicker), findsOneWidget);
+      expect(find.byType(TripStoryTripPage), findsOneWidget);
     });
 
     testWidgets('should display popup menu with export and delete', (
@@ -446,6 +300,8 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            // No active profile, as before sharing: every action is the owner's.
+            validatedCurrentDiverIdProvider.overrideWith((_) async => null),
             tripWithStatsProvider(testTrip.id).overrideWith((ref) {
               return Future.value(testTripWithStats);
             }),
@@ -477,89 +333,7 @@ void main() {
       expect(find.text('Delete'), findsOneWidget);
     });
 
-    testWidgets('should display flight takeoff icon for regular trip', (
-      tester,
-    ) async {
-      _setMobileTestSurfaceSize(tester);
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
-            }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      // Regular trips show flight_takeoff icon
-      expect(find.byIcon(Icons.flight_takeoff), findsOneWidget);
-    });
-
-    testWidgets('should display sailing icon for liveaboard trip', (
-      tester,
-    ) async {
-      _setMobileTestSurfaceSize(tester);
-      final liveaboardTrip = Trip(
-        id: 'liveaboard-id',
-        name: 'Maldives Safari',
-        startDate: DateTime(2024, 3, 1),
-        endDate: DateTime(2024, 3, 10),
-        liveaboardName: 'MY Blue Force',
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
-
-      final liveaboardTripWithStats = TripWithStats(
-        trip: liveaboardTrip,
-        diveCount: 25,
-        totalBottomTime: 9000,
-      );
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            tripWithStatsProvider(liveaboardTrip.id).overrideWith((ref) {
-              return Future.value(liveaboardTripWithStats);
-            }),
-            diveIdsForTripProvider(liveaboardTrip.id).overrideWith((ref) {
-              return Future.value(<String>[]);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: liveaboardTrip.id),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-      // Sailing icon appears in header and in Trip Details section for liveaboard
-      expect(find.byIcon(Icons.sailing), findsWidgets);
-    });
-
-    testWidgets('liveaboard dives tab shows bottomTime', (tester) async {
+    testWidgets('liveaboard dives tab shows runtime', (tester) async {
       _setMobileTestSurfaceSize(tester);
       final liveaboardTrip = Trip(
         id: 'liveaboard-trip',
@@ -575,7 +349,7 @@ void main() {
       final liveaboardStats = TripWithStats(
         trip: liveaboardTrip,
         diveCount: 1,
-        totalBottomTime: 2700,
+        totalRuntime: 2700,
         maxDepth: 25.0,
       );
       final dives = [
@@ -584,10 +358,11 @@ void main() {
           diveNumber: 1,
           dateTime: DateTime(2024, 1, 16, 9, 0),
           bottomTime: const Duration(minutes: 45),
+          runtime: const Duration(minutes: 52),
           maxDepth: 25.0,
           tanks: const [],
           profile: const [],
-          equipment: const [],
+          gear: looseGear(const []),
           notes: '',
           photoIds: const [],
           sightings: const [],
@@ -627,75 +402,723 @@ void main() {
       // Tap the Dives tab in the liveaboard tabbed layout
       final divesTab = find.text('Dives');
       if (divesTab.evaluate().isNotEmpty) {
+        // The tab row scrolls on a phone: bring the tab into view.
+        await tester.ensureVisible(divesTab.first);
+        await tester.pumpAndSettle();
         await tester.tap(divesTab.first);
         await tester.pumpAndSettle();
       }
 
-      // Should show 45min in the dives list
-      expect(find.text('45min'), findsWidgets);
+      // The per-dive rows use the same measured runtime as the trip total, so
+      // the rows on this page add up to the total shown on the Overview tab
+      // (issue #889).
+      expect(find.text('52 min'), findsWidgets);
+      expect(find.text('45 min'), findsNothing);
     });
+  });
 
-    testWidgets('should display dive bottomTime in dives section', (
+  group('delete confirmation on shared trip', () {
+    testWidgets(
+      'shows strengthened dialog when deleting a shared trip with 2+ divers',
+      (tester) async {
+        _setMobileTestSurfaceSize(tester);
+
+        final sharedTrip = Trip(
+          id: 'shared-trip',
+          name: 'Salt Pier Getaway',
+          startDate: DateTime(2024, 1, 15),
+          endDate: DateTime(2024, 1, 22),
+          isShared: true,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        );
+        final sharedTripWithStats = TripWithStats(
+          trip: sharedTrip,
+          diveCount: 3,
+          totalRuntime: 3600,
+        );
+        final twoDivers = [
+          Diver(
+            id: 'd1',
+            name: 'Alice',
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+          Diver(
+            id: 'd2',
+            name: 'Bob',
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+        ];
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              // No active profile, as before sharing: every action is the owner's.
+              validatedCurrentDiverIdProvider.overrideWith((_) async => null),
+              itemSharesRepositoryProvider.overrideWithValue(
+                FakeItemShares.everyone([sharedTrip.id]),
+              ),
+              tripWithStatsProvider(sharedTrip.id).overrideWith((ref) {
+                return Future.value(sharedTripWithStats);
+              }),
+              diveIdsForTripProvider(sharedTrip.id).overrideWith((ref) {
+                return Future.value(<String>[]);
+              }),
+              tripListNotifierProvider.overrideWith((ref) {
+                return _MockTripListNotifier([]);
+              }),
+              settingsProvider.overrideWith((ref) {
+                return _MockSettingsNotifier();
+              }),
+              allDiversProvider.overrideWith((_) async => twoDivers),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: TripDetailPage(tripId: sharedTrip.id),
+            ),
+          ),
+        );
+
+        await tester.pumpAndSettle();
+
+        // Open the more menu and tap Delete.
+        // Delete is a whole-record operation, under the lock (issue #4527).
+        await tester.tap(find.byIcon(Icons.lock_outline));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.more_vert).last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete'));
+        await tester.pumpAndSettle();
+
+        // The strengthened shared-trip dialog title should appear.
+        expect(find.text('Delete shared trip?'), findsOneWidget);
+      },
+    );
+  });
+
+  group('TripDetailPage loading/error states', () {
+    final loadingTrip = Trip(
+      id: 'loading-trip',
+      name: 'Loading Trip',
+      startDate: DateTime(2024, 1, 15),
+      endDate: DateTime(2024, 1, 22),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+
+    testWidgets('shows full scaffold loading indicator when not embedded', (
       tester,
     ) async {
       _setMobileTestSurfaceSize(tester);
-      final divesWithBottomTime = [
-        Dive(
-          id: 'dive-trip-1',
-          diveNumber: 1,
-          dateTime: DateTime(2024, 1, 16, 9, 0),
-          bottomTime: const Duration(minutes: 45),
-          maxDepth: 25.0,
-          tanks: const [],
-          profile: const [],
-          equipment: const [],
-          notes: '',
-          photoIds: const [],
-          sightings: const [],
-          weights: const [],
-          tags: const [],
-        ),
-      ];
-
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            tripWithStatsProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(testTripWithStats);
+            tripWithStatsProvider(loadingTrip.id).overrideWith((ref) {
+              // Return a future that never completes to keep loading state.
+              return Future<TripWithStats>.delayed(
+                const Duration(seconds: 10),
+                () => TripWithStats(trip: loadingTrip),
+              );
             }),
-            diveIdsForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(['dive-trip-1']);
-            }),
-            divesForTripProvider(testTrip.id).overrideWith((ref) {
-              return Future.value(divesWithBottomTime);
-            }),
-            tripListNotifierProvider.overrideWith((ref) {
-              return _MockTripListNotifier([]);
-            }),
-            settingsProvider.overrideWith((ref) {
-              return _MockSettingsNotifier();
-            }),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
-            home: TripDetailPage(tripId: testTrip.id),
+            home: TripDetailPage(tripId: loadingTrip.id),
           ),
         ),
       );
+      // pump once (no settle) - loading state should render.
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Trip'), findsWidgets);
+      // Force settle by ending microtasks.
+      await tester.pump(const Duration(seconds: 11));
+    });
 
-      await tester.pumpAndSettle();
+    testWidgets('shows embedded loading indicator when embedded', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(loadingTrip.id).overrideWith((ref) {
+              return Future<TripWithStats>.delayed(
+                const Duration(seconds: 10),
+                () => TripWithStats(trip: loadingTrip),
+              );
+            }),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: TripDetailPage(tripId: loadingTrip.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      await tester.pump(const Duration(seconds: 11));
+    });
 
-      // Scroll down to make the dives section visible
-      await tester.scrollUntilVisible(
-        find.text('45min'),
-        200,
-        scrollable: find.byType(Scrollable).first,
+    testWidgets('shows non-embedded error scaffold on error', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(loadingTrip.id).overrideWith((ref) {
+              return Future<TripWithStats>.error(
+                Exception('boom'),
+                StackTrace.current,
+              );
+            }),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: loadingTrip.id),
+          ),
+        ),
       );
       await tester.pumpAndSettle();
+      expect(find.text("Couldn't load the trip."), findsOneWidget);
+      expect(find.textContaining('boom'), findsNothing);
+    });
 
-      // Should show bottomTime formatted as minutes
-      expect(find.text('45min'), findsOneWidget);
+    testWidgets('shows embedded error text on error when embedded', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(loadingTrip.id).overrideWith((ref) {
+              return Future<TripWithStats>.error(
+                Exception('embedded-boom'),
+                StackTrace.current,
+              );
+            }),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            locale: const Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: TripDetailPage(tripId: loadingTrip.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text("Couldn't load the trip."), findsOneWidget);
+      expect(find.textContaining('embedded-boom'), findsNothing);
+    });
+  });
+
+  group('TripDetailPage embedded layouts', () {
+    final embeddedTrip = Trip(
+      id: 'embedded-trip',
+      name: 'Embedded Trip',
+      startDate: DateTime(2024, 5, 1),
+      endDate: DateTime(2024, 5, 5),
+      location: 'Somewhere',
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    final embeddedStats = TripWithStats(
+      trip: embeddedTrip,
+      diveCount: 3,
+      totalRuntime: 1800,
+      maxDepth: 18.0,
+    );
+
+    testWidgets('renders embedded header for standard trip', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => embeddedStats),
+            diveIdsForTripProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: TripDetailPage(tripId: embeddedTrip.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Embedded header shows the trip name and date range.
+      expect(find.text('Embedded Trip'), findsWidgets);
+      // Flight takeoff icon appears in embedded header avatar
+      // (may also appear elsewhere in the overview tab).
+      expect(find.byIcon(Icons.flight_takeoff), findsWidgets);
+      // Compact map/lock/more-options icons should be present in embedded
+      // header (along with potentially more on other sections).
+      expect(find.byIcon(Icons.map_outlined), findsWidgets);
+      expect(find.byIcon(Icons.lock_outline), findsWidgets);
+      expect(find.byIcon(Icons.more_vert), findsOneWidget);
+    });
+
+    testWidgets('renders embedded header for liveaboard trip', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final liveaboardTrip = Trip(
+        id: 'embedded-lb',
+        name: 'LB Trip',
+        startDate: DateTime(2024, 6, 1),
+        endDate: DateTime(2024, 6, 7),
+        tripType: TripType.liveaboard,
+        liveaboardName: 'MV Test',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      final stats = TripWithStats(trip: liveaboardTrip, diveCount: 0);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(
+              liveaboardTrip.id,
+            ).overrideWith((ref) async => stats),
+            diveIdsForTripProvider(
+              liveaboardTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            divesForTripProvider(
+              liveaboardTrip.id,
+            ).overrideWith((ref) async => []),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: TripDetailPage(tripId: liveaboardTrip.id, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Embedded liveaboard header has sailing icon on the left avatar.
+      expect(find.byIcon(Icons.sailing), findsWidgets);
+      // Tabbed layout should be visible.
+      expect(find.text('Overview'), findsOneWidget);
+      expect(find.widgetWithText(Tab, 'Dives'), findsOneWidget);
+      // Switch to Dives tab and verify the empty message renders.
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      expect(find.text('No dives in this trip yet'), findsOneWidget);
+    });
+
+    testWidgets('embedded map button triggers dive filter and navigation', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final routerSpy = GoRouter(
+        initialLocation: '/embedded',
+        routes: [
+          GoRoute(
+            path: '/embedded',
+            builder: (context, state) => Scaffold(
+              body: TripDetailPage(tripId: embeddedTrip.id, embedded: true),
+            ),
+          ),
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) =>
+                Scaffold(body: Text('DIVES_${state.uri.query}')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => embeddedStats),
+            diveIdsForTripProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: routerSpy,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.map_outlined));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('DIVES_view=map'), findsOneWidget);
+    });
+
+    testWidgets('delete action on embedded trip calls onDeleted callback', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      bool onDeletedCalled = false;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            // No active profile, as before sharing: every action is the owner's.
+            validatedCurrentDiverIdProvider.overrideWith((_) async => null),
+            tripWithStatsProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => embeddedStats),
+            diveIdsForTripProvider(
+              embeddedTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+            allDiversProvider.overrideWith((_) async => <Diver>[]),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: TripDetailPage(
+                tripId: embeddedTrip.id,
+                embedded: true,
+                onDeleted: () => onDeletedCalled = true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Delete is a whole-record operation, under the lock (issue #4527).
+      await tester.tap(find.byIcon(Icons.lock_outline));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      // Confirm deletion via FilledButton.
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(onDeletedCalled, isTrue);
+      expect(find.text('Trip deleted'), findsOneWidget);
+    });
+  });
+
+  group('TripDetailPage app bar map button', () {
+    final mapTrip = Trip(
+      id: 'map-trip',
+      name: 'Map Trip',
+      startDate: DateTime(2024, 5, 1),
+      endDate: DateTime(2024, 5, 5),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    final mapStats = TripWithStats(trip: mapTrip, diveCount: 2);
+
+    testWidgets('app bar map button navigates to /dives with view=map', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final router = GoRouter(
+        initialLocation: '/trips/map-trip',
+        routes: [
+          GoRoute(
+            path: '/trips/:id',
+            builder: (context, state) =>
+                TripDetailPage(tripId: state.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: '/dives',
+            builder: (context, state) =>
+                Scaffold(body: Text('DIVES_${state.uri.query}')),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(
+              mapTrip.id,
+            ).overrideWith((ref) async => mapStats),
+            diveIdsForTripProvider(
+              mapTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.map_outlined));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('DIVES_view=map'), findsOneWidget);
+    });
+  });
+
+  group('TripDetailPage export sheet', () {
+    final exportTrip = Trip(
+      id: 'export-trip',
+      name: 'Export Trip',
+      startDate: DateTime(2024, 5, 1),
+      endDate: DateTime(2024, 5, 5),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    final exportStats = TripWithStats(trip: exportTrip, diveCount: 0);
+
+    Future<void> pumpExportPage(WidgetTester tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(
+              exportTrip.id,
+            ).overrideWith((ref) async => exportStats),
+            diveIdsForTripProvider(
+              exportTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: exportTrip.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('tapping CSV export shows coming-soon snackbar', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await pumpExportPage(tester);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export'));
+      await tester.pumpAndSettle();
+      expect(find.text('Export to CSV'), findsOneWidget);
+      expect(find.text('Export to PDF'), findsOneWidget);
+      await tester.tap(find.text('Export to CSV'));
+      await tester.pumpAndSettle();
+      expect(find.text('CSV export coming soon'), findsOneWidget);
+    });
+
+    testWidgets('tapping PDF export shows coming-soon snackbar', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      await pumpExportPage(tester);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export to PDF'));
+      await tester.pumpAndSettle();
+      expect(find.text('PDF export coming soon'), findsOneWidget);
+    });
+  });
+
+  group('TripDetailPage dives section edge cases', () {
+    testWidgets('liveaboard dives tab shows empty message', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final lbTrip = Trip(
+        id: 'empty-lb',
+        name: 'Empty LB',
+        startDate: DateTime(2024, 5, 1),
+        endDate: DateTime(2024, 5, 7),
+        tripType: TripType.liveaboard,
+        liveaboardName: 'MV Empty',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      final stats = TripWithStats(trip: lbTrip, diveCount: 0);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(lbTrip.id).overrideWith((ref) async => stats),
+            diveIdsForTripProvider(
+              lbTrip.id,
+            ).overrideWith((ref) async => <String>[]),
+            divesForTripProvider(lbTrip.id).overrideWith((ref) async => []),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: lbTrip.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      expect(find.text('No dives in this trip yet'), findsOneWidget);
+    });
+
+    testWidgets('liveaboard dives tab shows dive with unknown site', (
+      tester,
+    ) async {
+      _setMobileTestSurfaceSize(tester);
+      final lbTrip = Trip(
+        id: 'unknown-site-lb',
+        name: 'Unknown Site LB',
+        startDate: DateTime(2024, 5, 1),
+        endDate: DateTime(2024, 5, 7),
+        tripType: TripType.liveaboard,
+        liveaboardName: 'MV Unknown',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      final stats = TripWithStats(trip: lbTrip, diveCount: 1);
+      final dive = Dive(
+        id: 'unknown-dive',
+        diveNumber: 42,
+        dateTime: DateTime(2024, 5, 2, 10),
+        bottomTime: const Duration(minutes: 30),
+        maxDepth: 20.0,
+        tanks: const [],
+        profile: const [],
+        gear: looseGear(const []),
+        notes: '',
+        photoIds: const [],
+        sightings: const [],
+        weights: const [],
+        tags: const [],
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(lbTrip.id).overrideWith((ref) async => stats),
+            diveIdsForTripProvider(
+              lbTrip.id,
+            ).overrideWith((ref) async => <String>['unknown-dive']),
+            divesForTripProvider(lbTrip.id).overrideWith((ref) async => [dive]),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: lbTrip.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      expect(find.text('Unknown Site'), findsWidgets);
+      // Dive number badge.
+      expect(find.text('#42'), findsOneWidget);
+    });
+
+    testWidgets('liveaboard dives tab shows error state', (tester) async {
+      _setMobileTestSurfaceSize(tester);
+      final lbTrip = Trip(
+        id: 'err-lb',
+        name: 'Err LB',
+        startDate: DateTime(2024, 5, 1),
+        endDate: DateTime(2024, 5, 7),
+        tripType: TripType.liveaboard,
+        liveaboardName: 'MV Err',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      final stats = TripWithStats(trip: lbTrip, diveCount: 1);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tripWithStatsProvider(lbTrip.id).overrideWith((ref) async => stats),
+            diveIdsForTripProvider(
+              lbTrip.id,
+            ).overrideWith((ref) async => <String>['x']),
+            divesForTripProvider(
+              lbTrip.id,
+            ).overrideWith((ref) => Future.error(Exception('dives-err'))),
+            tripListNotifierProvider.overrideWith(
+              (ref) => _MockTripListNotifier([]),
+            ),
+            settingsProvider.overrideWith((ref) => _MockSettingsNotifier()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: TripDetailPage(tripId: lbTrip.id),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The tab row scrolls on a phone: bring the tab into view.
+      await tester.ensureVisible(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(Tab, 'Dives'));
+      await tester.pumpAndSettle();
+      expect(find.text('Unable to load dives'), findsOneWidget);
     });
   });
 
@@ -851,13 +1274,16 @@ class _MockTripListNotifier
   Future<void> refresh() async {}
 
   @override
-  Future<Trip> addTrip(Trip trip) async => trip;
+  Future<bool> deleteTrip(String id) async => true;
 
   @override
-  Future<void> updateTrip(Trip trip) async {}
+  Future<bool> hideTrip(String id) async => true;
 
   @override
-  Future<void> deleteTrip(String id) async {}
+  Future<int> hideTrips(List<String> ids) async => ids.length;
+
+  @override
+  Future<void> unhideTrip(String id) async {}
 
   @override
   Future<void> assignDiveToTrip(String diveId, String tripId) async {}

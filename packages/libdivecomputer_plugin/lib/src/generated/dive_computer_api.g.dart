@@ -37,6 +37,7 @@ class DeviceDescriptor {
     required this.product,
     required this.model,
     required this.transports,
+    this.deliversOldestFirst = false,
   });
 
   String vendor;
@@ -47,8 +48,14 @@ class DeviceDescriptor {
 
   List<TransportType> transports;
 
+  /// Whether this backend hands dives over oldest-first. libdivecomputer is
+  /// newest-first except where the fork reversed a driver (Shearwater
+  /// Petrel, issue #480). Only for such a backend is an interrupted
+  /// download's newest dive a safe resume point (issue #2902).
+  bool deliversOldestFirst;
+
   Object encode() {
-    return <Object?>[vendor, product, model, transports];
+    return <Object?>[vendor, product, model, transports, deliversOldestFirst];
   }
 
   static DeviceDescriptor decode(Object result) {
@@ -58,6 +65,7 @@ class DeviceDescriptor {
       product: result[1]! as String,
       model: result[2]! as int,
       transports: (result[3] as List<Object?>?)!.cast<TransportType>(),
+      deliversOldestFirst: result[4]! as bool,
     );
   }
 }
@@ -108,7 +116,9 @@ class ProfileSample {
     this.temperatureCelsius,
     this.pressureBar,
     this.tankIndex,
+    this.tankPressuresBar,
     this.heartRate,
+    this.heading,
     this.setpoint,
     this.ppo2,
     this.cns,
@@ -117,6 +127,22 @@ class ProfileSample {
     this.decoTime,
     this.decoDepth,
     this.tts,
+    this.o2Sensor1,
+    this.o2Sensor2,
+    this.o2Sensor3,
+    this.o2Sensor4,
+    this.o2Sensor5,
+    this.o2Sensor6,
+    this.o2SensorMv1,
+    this.o2SensorMv2,
+    this.o2SensorMv3,
+    this.o2SensorMv4,
+    this.o2SensorMv5,
+    this.o2SensorMv6,
+    this.aveloBuoyancy,
+    this.aveloGasRemaining,
+    this.computerRmv,
+    this.gasMixIndex,
   });
 
   int timeSeconds;
@@ -129,7 +155,20 @@ class ProfileSample {
 
   int? tankIndex;
 
+  /// Every tank's pressure in bar at this sample, indexed by tank index, with
+  /// null where that tank reported nothing. libdivecomputer fires one pressure
+  /// reading per air-integrated transmitter, so a single sample can carry
+  /// several; [pressureBar]/[tankIndex] hold only the last of them and lose the
+  /// rest (issue #1223). Null when the sample carries no pressure at all, and
+  /// trimmed of trailing nulls, so an ordinary single-transmitter dive costs one
+  /// short list per sample.
+  List<double?>? tankPressuresBar;
+
   int? heartRate;
+
+  /// Compass heading in degrees (0-359) from DC_SAMPLE_BEARING; null when the
+  /// computer does not report bearing samples.
+  double? heading;
 
   double? setpoint;
 
@@ -147,6 +186,51 @@ class ProfileSample {
 
   int? tts;
 
+  /// Individual CCR O2 cell ppO2 readings in bar (sensor 1..6), null when that
+  /// cell has no reading. libdivecomputer reports these per-sensor via
+  /// DC_SAMPLE_PPO2; [ppo2] holds the aggregate/computed value.
+  double? o2Sensor1;
+
+  double? o2Sensor2;
+
+  double? o2Sensor3;
+
+  double? o2Sensor4;
+
+  double? o2Sensor5;
+
+  double? o2Sensor6;
+
+  /// Raw O2 cell output in millivolts (sensor 1..6), null when that cell
+  /// reports none. Present even when the cell's ppO2 is unavailable because the
+  /// logged calibration could not be trusted (issue #810).
+  int? o2SensorMv1;
+
+  int? o2SensorMv2;
+
+  int? o2SensorMv3;
+
+  int? o2SensorMv4;
+
+  int? o2SensorMv5;
+
+  int? o2SensorMv6;
+
+  /// Shearwater Avelo mode (issue #4664): the computer's buoyancy figure in
+  /// kilograms (negative is heavy), the Hydrotank's gas remaining in percent,
+  /// and the computer's own respiratory minute volume in litres per minute.
+  /// Null on every sample outside Avelo mode and where the computer logged a
+  /// code instead of a value.
+  double? aveloBuoyancy;
+
+  int? aveloGasRemaining;
+
+  double? computerRmv;
+
+  /// Active gas mix index at this sample (from DC_SAMPLE_GASMIX), carried forward
+  /// from the most recent gas switch; null if the computer reported no gas.
+  int? gasMixIndex;
+
   Object encode() {
     return <Object?>[
       timeSeconds,
@@ -154,7 +238,9 @@ class ProfileSample {
       temperatureCelsius,
       pressureBar,
       tankIndex,
+      tankPressuresBar,
       heartRate,
+      heading,
       setpoint,
       ppo2,
       cns,
@@ -163,6 +249,22 @@ class ProfileSample {
       decoTime,
       decoDepth,
       tts,
+      o2Sensor1,
+      o2Sensor2,
+      o2Sensor3,
+      o2Sensor4,
+      o2Sensor5,
+      o2Sensor6,
+      o2SensorMv1,
+      o2SensorMv2,
+      o2SensorMv3,
+      o2SensorMv4,
+      o2SensorMv5,
+      o2SensorMv6,
+      aveloBuoyancy,
+      aveloGasRemaining,
+      computerRmv,
+      gasMixIndex,
     ];
   }
 
@@ -174,15 +276,33 @@ class ProfileSample {
       temperatureCelsius: result[2] as double?,
       pressureBar: result[3] as double?,
       tankIndex: result[4] as int?,
-      heartRate: result[5] as int?,
-      setpoint: result[6] as double?,
-      ppo2: result[7] as double?,
-      cns: result[8] as double?,
-      rbt: result[9] as int?,
-      decoType: result[10] as int?,
-      decoTime: result[11] as int?,
-      decoDepth: result[12] as double?,
-      tts: result[13] as int?,
+      tankPressuresBar: (result[5] as List<Object?>?)?.cast<double?>(),
+      heartRate: result[6] as int?,
+      heading: result[7] as double?,
+      setpoint: result[8] as double?,
+      ppo2: result[9] as double?,
+      cns: result[10] as double?,
+      rbt: result[11] as int?,
+      decoType: result[12] as int?,
+      decoTime: result[13] as int?,
+      decoDepth: result[14] as double?,
+      tts: result[15] as int?,
+      o2Sensor1: result[16] as double?,
+      o2Sensor2: result[17] as double?,
+      o2Sensor3: result[18] as double?,
+      o2Sensor4: result[19] as double?,
+      o2Sensor5: result[20] as double?,
+      o2Sensor6: result[21] as double?,
+      o2SensorMv1: result[22] as int?,
+      o2SensorMv2: result[23] as int?,
+      o2SensorMv3: result[24] as int?,
+      o2SensorMv4: result[25] as int?,
+      o2SensorMv5: result[26] as int?,
+      o2SensorMv6: result[27] as int?,
+      aveloBuoyancy: result[28] as double?,
+      aveloGasRemaining: result[29] as int?,
+      computerRmv: result[30] as double?,
+      gasMixIndex: result[31] as int?,
     );
   }
 }
@@ -192,6 +312,7 @@ class GasMix {
     required this.index,
     required this.o2Percent,
     required this.hePercent,
+    this.usage,
   });
 
   int index;
@@ -200,8 +321,14 @@ class GasMix {
 
   double hePercent;
 
+  /// Gas usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount); null when the computer reported no usage (DC_USAGE_NONE).
+  /// Set on the gas mix itself, so it is available even when the mix has no
+  /// tank/transmitter record.
+  int? usage;
+
   Object encode() {
-    return <Object?>[index, o2Percent, hePercent];
+    return <Object?>[index, o2Percent, hePercent, usage];
   }
 
   static GasMix decode(Object result) {
@@ -210,6 +337,7 @@ class GasMix {
       index: result[0]! as int,
       o2Percent: result[1]! as double,
       hePercent: result[2]! as double,
+      usage: result[3] as int?,
     );
   }
 }
@@ -221,6 +349,8 @@ class TankInfo {
     this.volumeLiters,
     this.startPressureBar,
     this.endPressureBar,
+    this.usage,
+    this.transmitterSerial,
   });
 
   int index;
@@ -233,6 +363,17 @@ class TankInfo {
 
   double? endPressureBar;
 
+  /// Tank usage from libdivecomputer's `dc_usage_t` (1=oxygen, 2=diluent,
+  /// 3=sidemount, 4=the Avelo Hydrotank, a fork extension); null when the
+  /// computer reported no usage (DC_USAGE_NONE).
+  int? usage;
+
+  /// Serial number of the air-integration transmitter that reported this
+  /// tank's pressures (`dc_tank_t.serial`, a fork extension); null when the
+  /// computer reported none. Identifies the physical cylinder across
+  /// computers paired to the same transmitter.
+  int? transmitterSerial;
+
   Object encode() {
     return <Object?>[
       index,
@@ -240,6 +381,8 @@ class TankInfo {
       volumeLiters,
       startPressureBar,
       endPressureBar,
+      usage,
+      transmitterSerial,
     ];
   }
 
@@ -251,6 +394,8 @@ class TankInfo {
       volumeLiters: result[2] as double?,
       startPressureBar: result[3] as double?,
       endPressureBar: result[4] as double?,
+      usage: result[5] as int?,
+      transmitterSerial: result[6] as int?,
     );
   }
 }
@@ -304,6 +449,11 @@ class ParsedDive {
     this.decoConservatism,
     this.rawData,
     this.rawFingerprint,
+    this.entryLatitude,
+    this.entryLongitude,
+    this.exitLatitude,
+    this.exitLongitude,
+    this.surfacePressureBar,
   });
 
   String fingerprint;
@@ -354,6 +504,16 @@ class ParsedDive {
 
   Uint8List? rawFingerprint;
 
+  double? entryLatitude;
+
+  double? entryLongitude;
+
+  double? exitLatitude;
+
+  double? exitLongitude;
+
+  double? surfacePressureBar;
+
   Object encode() {
     return <Object?>[
       fingerprint,
@@ -380,6 +540,11 @@ class ParsedDive {
       decoConservatism,
       rawData,
       rawFingerprint,
+      entryLatitude,
+      entryLongitude,
+      exitLatitude,
+      exitLongitude,
+      surfacePressureBar,
     ];
   }
 
@@ -410,6 +575,11 @@ class ParsedDive {
       decoConservatism: result[21] as int?,
       rawData: result[22] as Uint8List?,
       rawFingerprint: result[23] as Uint8List?,
+      entryLatitude: result[24] as double?,
+      entryLongitude: result[25] as double?,
+      exitLatitude: result[26] as double?,
+      exitLongitude: result[27] as double?,
+      surfacePressureBar: result[28] as double?,
     );
   }
 }
@@ -631,6 +801,7 @@ class DiveComputerHostApi {
   Future<void> startDownload(
     DiscoveredDevice device,
     String? fingerprint,
+    bool syncClock,
   ) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.startDownload$pigeonVar_messageChannelSuffix';
@@ -641,7 +812,7 @@ class DiveComputerHostApi {
           binaryMessenger: pigeonVar_binaryMessenger,
         );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[device, fingerprint])
+        await pigeonVar_channel.send(<Object?>[device, fingerprint, syncClock])
             as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
@@ -784,6 +955,9 @@ abstract class DiveComputerFlutterApi {
     int totalDives,
     String? serialNumber,
     String? firmwareVersion,
+    String? clockSyncStatus,
+    String? reportedProduct,
+    int? reportedModel,
   );
 
   void onError(DiveComputerError error);
@@ -949,11 +1123,17 @@ abstract class DiveComputerFlutterApi {
           );
           final String? arg_serialNumber = (args[1] as String?);
           final String? arg_firmwareVersion = (args[2] as String?);
+          final String? arg_clockSyncStatus = (args[3] as String?);
+          final String? arg_reportedProduct = (args[4] as String?);
+          final int? arg_reportedModel = (args[5] as int?);
           try {
             api.onDownloadComplete(
               arg_totalDives!,
               arg_serialNumber,
               arg_firmwareVersion,
+              arg_clockSyncStatus,
+              arg_reportedProduct,
+              arg_reportedModel,
             );
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {

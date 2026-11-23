@@ -6,7 +6,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
-import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
+import 'package:submersion/features/tags/presentation/widgets/tag_color_picker.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_merge_sheet.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
@@ -39,12 +39,24 @@ class MockTagListNotifier extends StateNotifier<AsyncValue<List<Tag>>>
   }
 
   @override
-  Future<Tag> addTag(Tag tag) async => tag;
+  Future<Tag> addTag(Tag tag, {Set<TagScope>? widenExistingTo}) async => tag;
   @override
-  Future<Tag> getOrCreateTag(String name, {String? colorHex}) async =>
-      Tag.create(id: 'new', name: name, colorHex: colorHex);
+  Future<Tag> getOrCreateTag(
+    String name, {
+    String? colorHex,
+    TagScope scope = TagScope.dives,
+  }) async =>
+      // As the real one: a new tag is offered everywhere (#4407).
+      Tag.create(
+        id: 'new',
+        name: name,
+        colorHex: colorHex,
+        scopes: TagScope.everywhere,
+      );
   @override
   Future<void> updateTag(Tag tag) async {}
+  @override
+  Future<void> setTagColor(String id, String? colorHex) async {}
   @override
   Future<void> deleteTag(String id) async {}
   @override
@@ -73,7 +85,7 @@ void main() {
         createdAt: DateTime(2024),
         updatedAt: DateTime(2024),
       ),
-      diveCount: 12,
+      counts: const {TagScope.dives: 12},
     ),
     TagStatistic(
       tag: Tag(
@@ -84,7 +96,7 @@ void main() {
         createdAt: DateTime(2024),
         updatedAt: DateTime(2024),
       ),
-      diveCount: 3,
+      counts: const {TagScope.dives: 3},
     ),
     TagStatistic(
       tag: Tag(
@@ -95,7 +107,7 @@ void main() {
         createdAt: DateTime(2024),
         updatedAt: DateTime(2024),
       ),
-      diveCount: 1,
+      counts: const {TagScope.dives: 1},
     ),
   ];
 
@@ -103,7 +115,9 @@ void main() {
     mockRepository = MockTagRepository();
     mockNotifier = MockTagListNotifier();
 
-    when(mockRepository.getMergedDiveCount(any)).thenAnswer((_) async => 14);
+    when(
+      mockRepository.getMergedUsage(any),
+    ).thenAnswer((_) async => const {TagScope.dives: 14, TagScope.sites: 0});
   });
 
   Widget buildTestWidget({List<TagStatistic>? stats}) {
@@ -113,6 +127,10 @@ void main() {
         tagListNotifierProvider.overrideWith((ref) => mockNotifier),
       ],
       child: MaterialApp(
+        // flutter_test resolves against the host machine's locale list, so an
+        // unpinned app renders translated on a non-English machine and the
+        // English assertions here stop matching.
+        locale: const Locale('en'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(body: TagMergeSheet(selectedStats: stats ?? testStats)),
@@ -170,6 +188,10 @@ void main() {
       // Tap the Merge button
       final mergeButton = find.widgetWithText(FilledButton, 'Merge');
       expect(mergeButton, findsOneWidget);
+      // Scrolled into view first. This assertion is a negative one, so a tap
+      // that missed would pass it without ever exercising the empty-name
+      // guard, and the swatches above the button grew in issue #2269.
+      await tester.ensureVisible(mergeButton);
       await tester.tap(mergeButton);
       await tester.pumpAndSettle();
 
@@ -181,8 +203,154 @@ void main() {
       await tester.pumpWidget(buildTestWidget());
       await tester.pumpAndSettle();
 
-      // The mock returns 14 for getMergedDiveCount
-      expect(find.textContaining('14 dives'), findsOneWidget);
+      // The mock reports 14 dives and no sites.
+      expect(find.text('This will affect 14 dives total.'), findsOneWidget);
+    });
+
+    testWidgets('the preview names sites too (#1902)', (tester) async {
+      // mergeTags relinks site_tags as well as dive_tags, so a preview that
+      // counted only dives understated what a merge of site tags rewrites.
+      when(
+        mockRepository.getMergedUsage(any),
+      ).thenAnswer((_) async => const {TagScope.dives: 3, TagScope.sites: 2});
+
+      await tester.pumpWidget(buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('This will affect:\n• 3 dives\n• 2 sites'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a sites-only tag row shows its sites (#1902)', (tester) async {
+      final stats = [
+        ...testStats,
+        TagStatistic(
+          tag: Tag(
+            id: 'tag4',
+            diverId: 'diver1',
+            name: 'To try',
+            colorHex: '#F97316',
+            scopes: const {TagScope.sites},
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+          counts: const {TagScope.dives: 0, TagScope.sites: 4},
+        ),
+      ];
+      await tester.pumpWidget(buildTestWidget(stats: stats));
+      await tester.pumpAndSettle();
+
+      // The same wording as the Manage Tags list.
+      expect(find.text('4 sites'), findsOneWidget);
+    });
+
+    TagStatistic equipmentStat(String id, String name, int items) =>
+        TagStatistic(
+          tag: Tag(
+            id: id,
+            diverId: 'diver1',
+            name: name,
+            colorHex: '#F97316',
+            scopes: const {TagScope.equipment},
+            createdAt: DateTime(2024),
+            updatedAt: DateTime(2024),
+          ),
+          counts: {TagScope.equipment: items},
+        );
+
+    testWidgets('the preview names equipment too (#1942)', (tester) async {
+      // mergeTags relinks equipment_tags as well, so the preview counts it.
+      when(mockRepository.getMergedUsage(any)).thenAnswer(
+        (_) async => const {TagScope.dives: 3, TagScope.equipment: 2},
+      );
+
+      await tester.pumpWidget(buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('This will affect:\n• 3 dives\n• 2 equipment items'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an equipment-only tag row shows its equipment (#1942)', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildTestWidget(
+          stats: [...testStats, equipmentStat('tag4', 'Travel kit', 4)],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('4 equipment items'), findsOneWidget);
+    });
+
+    group('keeps the stored color (#4384)', () {
+      TagStatistic coloured(String id, String name, String? hex, int dives) =>
+          TagStatistic(
+            tag: Tag(
+              id: id,
+              diverId: 'diver1',
+              name: name,
+              colorHex: hex,
+              createdAt: DateTime(2024),
+              updatedAt: DateTime(2024),
+            ),
+            counts: {TagScope.dives: dives},
+          );
+
+      final stats = [
+        coloured('imported', 'Imported', null, 9),
+        coloured('custom', 'Custom', '#123456', 2),
+      ];
+
+      Future<void> merge(WidgetTester tester) async {
+        final button = find.widgetWithText(FilledButton, 'Merge');
+        await tester.ensureVisible(button);
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('a kept tag with no color merges with none', (tester) async {
+        await tester.pumpWidget(buildTestWidget(stats: stats));
+        await tester.pumpAndSettle();
+        await merge(tester);
+        expect(mockNotifier.mergeTagsCalled, isTrue);
+        expect(mockNotifier.lastColorHex, isNull);
+      });
+
+      testWidgets('keeping a tag off the palette keeps its color', (
+        tester,
+      ) async {
+        await tester.pumpWidget(buildTestWidget(stats: stats));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Custom'));
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Current color, #123456'), findsOne);
+        await merge(tester);
+        expect(mockNotifier.lastColorHex, '#123456');
+      });
+    });
+
+    testWidgets('merging equipment-only tags starts from the one on the '
+        'most items', (tester) async {
+      // The less used tag comes first, so keeping the selection's order
+      // (every dive count is 0) would seed the wrong name.
+      await tester.pumpWidget(
+        buildTestWidget(
+          stats: [
+            equipmentStat('rental', 'Rental', 1),
+            equipmentStat('kit', 'Travel kit', 4),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.controller!.text, 'Travel kit');
     });
   });
 }

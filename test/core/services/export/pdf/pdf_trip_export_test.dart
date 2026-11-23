@@ -1,0 +1,305 @@
+import 'dart:io';
+
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/services/export/pdf/pdf_export_service.dart';
+import 'package:submersion/core/services/pdf_templates/pdf_date_formatter.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+
+import '../../../../helpers/fake_hosts.dart';
+import '../../../../helpers/mock_channels.dart';
+import '../../../../helpers/pdf_text.dart';
+
+/// The trip report's per-dive Duration line must print total runtime rather
+/// than bottom time, matching the rest of the PDF exports (#644).
+/// The historical ISO rendering these tests were written against; the diver's
+/// own date and time preferences are covered in pdf_date_preference_test.dart.
+final isoDates = PdfDateFormatter(
+  dateFormat: DateFormatPreference.yyyymmdd,
+  timeFormat: TimeFormat.twentyFourHour,
+);
+
+const metric = UnitFormatter(AppSettings());
+const imperial = UnitFormatter(
+  AppSettings(
+    depthUnit: DepthUnit.feet,
+    temperatureUnit: TemperatureUnit.fahrenheit,
+  ),
+);
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  // PdfFonts downloads Roboto on first use. The font host answers as
+  // offline, so the PDF falls back to Helvetica, as it would on a device
+  // without a network, and its text stays readable for the assertions.
+  setUp(() {
+    serveFakeHost('fonts.gstatic.com');
+  });
+
+  late Directory shareDir;
+  late PdfExportService service;
+
+  setUpAll(() async {
+    shareDir = await Directory.systemTemp.createTemp('trip_pdf_test_');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          (call) async => call.method == 'getApplicationDocumentsDirectory'
+              ? shareDir.path
+              : null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('dev.fluttercommunity.plus/share'),
+          (call) async => null,
+        );
+  });
+  tearDownAll(clearPathAndShareChannelMocks);
+
+  tearDownAll(() async {
+    if (await shareDir.exists()) await shareDir.delete(recursive: true);
+  });
+
+  setUp(() => service = PdfExportService());
+
+  final trip = Trip(
+    id: 'trip-1',
+    name: 'Red Sea 2026',
+    startDate: DateTime(2026, 5, 1),
+    endDate: DateTime(2026, 5, 8),
+    location: 'Hurghada',
+    createdAt: DateTime(2026, 4, 1),
+    updatedAt: DateTime(2026, 5, 9),
+  );
+
+  Future<String> exportText(
+    List<Dive> dives, {
+    PdfDateFormatter? dates,
+    UnitFormatter units = metric,
+    PdfLocalization? localization,
+  }) async {
+    final path = await service.exportTripToPdf(
+      trip,
+      dives,
+      dates: dates ?? isoDates,
+      units: units,
+      localization: localization,
+    );
+    final bytes = await File(path).readAsBytes();
+    expect(String.fromCharCodes(bytes.take(4)), '%PDF');
+    return pdfVisibleText(bytes);
+  }
+
+  test('per-dive Duration prints runtime, not bottom time', () async {
+    final text = await exportText([
+      Dive(
+        id: 'd1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 5, 2, 9),
+        runtime: const Duration(minutes: 62),
+        bottomTime: const Duration(minutes: 50),
+        maxDepth: 25.0,
+      ),
+    ]);
+
+    expect(text, contains('Duration: 62 min'));
+    expect(text, isNot(contains('50 min')));
+  });
+
+  test('a runtime-only dive still prints a Duration line', () async {
+    // The line used to be gated on bottomTime, so runtime-only dives showed
+    // no duration in the trip report at all.
+    final text = await exportText([
+      Dive(
+        id: 'd1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 5, 2, 9),
+        entryTime: DateTime(2026, 5, 2, 9),
+        exitTime: DateTime(2026, 5, 2, 9, 47),
+        maxDepth: 18.0,
+      ),
+    ]);
+
+    expect(text, contains('Duration: 47 min'));
+  });
+
+  test('a dive with no duration prints no Duration line', () async {
+    final text = await exportText([
+      Dive(
+        id: 'd1',
+        diveNumber: 1,
+        dateTime: DateTime(2026, 5, 2, 9),
+        maxDepth: 18.0,
+      ),
+    ]);
+
+    expect(text, isNot(contains('Duration:')));
+    expect(text, contains('Max Depth: 18.0m'));
+  });
+
+  test('trip and dive dates follow the diver\'s preferences (#964)', () async {
+    final text = await exportText(
+      [
+        Dive(
+          id: 'd1',
+          diveNumber: 1,
+          dateTime: DateTime(2026, 5, 2, 14, 30),
+          runtime: const Duration(minutes: 62),
+          maxDepth: 25.0,
+        ),
+      ],
+      dates: PdfDateFormatter(
+        dateFormat: DateFormatPreference.ddmmyyyy,
+        timeFormat: TimeFormat.twelveHour,
+      ),
+    );
+
+    // Trip span on the title page, dive date and time on the dive page.
+    expect(text, contains('01/05/2026'));
+    expect(text, contains('02/05/2026'));
+    expect(text, contains('2:30'));
+    expect(text, contains('PM'));
+    expect(text, isNot(contains('2026-05-01')));
+    expect(text, isNot(contains('14:30')));
+  });
+
+  // A dive page used to be a fixed pw.Page, which never paginates: notes
+  // taller than the sheet were clipped and the tail silently lost.
+  test('notes longer than a page continue onto another sheet', () async {
+    final longNote = List.generate(
+      400,
+      (i) => 'Sentence $i of a very long dive story.',
+    ).join(' ');
+    final path = await service.exportTripToPdf(
+      trip,
+      [
+        Dive(
+          id: 'd1',
+          diveNumber: 1,
+          dateTime: DateTime(2026, 5, 2, 9),
+          maxDepth: 18.0,
+          notes: longNote,
+        ),
+      ],
+      dates: isoDates,
+      units: metric,
+    );
+    final bytes = await File(path).readAsBytes();
+
+    final text = pdfVisibleText(bytes);
+    expect(text, contains('Sentence 0 of'));
+    expect(
+      text,
+      contains('Sentence 399 of'),
+      reason: 'the tail of the notes must not be clipped away',
+    );
+    expect(
+      pdfPageCount(bytes),
+      greaterThan(2),
+      reason: 'title page plus a dive whose notes need more than one sheet',
+    );
+  });
+
+  group('dive depth and temperature follow the diver\'s units', () {
+    final dive = Dive(
+      id: 'd1',
+      diveNumber: 1,
+      dateTime: DateTime(2026, 5, 2, 9),
+      maxDepth: 30.0,
+      waterTemp: 20.0,
+    );
+
+    test('renders feet and fahrenheit for an imperial diver', () async {
+      final text = await exportText([dive], units: imperial);
+
+      expect(text, contains('Max Depth: 98.4ft'), reason: '30 m is 98.4 ft');
+      expect(text, contains('Water Temp: 68°F'), reason: '20 C is 68 F');
+      expect(text, isNot(contains('30.0m')));
+      expect(text, isNot(contains('°C')));
+    });
+
+    test('renders meters and celsius for a metric diver', () async {
+      final text = await exportText([dive]);
+
+      expect(text, contains('Max Depth: 30.0m'));
+      expect(text, contains('Water Temp: 20°C'));
+      expect(text, isNot(contains('ft')));
+      expect(text, isNot(contains('°F')));
+    });
+  });
+
+  test('prints in the app language (#2252)', () async {
+    final fr = PdfLocalization.forLanguageCode('fr');
+
+    final text = await exportText([
+      Dive(
+        id: 'fr1',
+        diveNumber: 3,
+        dateTime: DateTime(2026, 5, 2, 9),
+        maxDepth: 20,
+        notes: 'Calme',
+      ),
+    ], localization: fr);
+
+    expect(text, contains(fr.l10n.pdf_coverDiveCount(1)));
+    // French sets a non-breaking space before the colon; the pdf package
+    // lays words out on any whitespace, so it reads back as a plain space.
+    expect(text, contains(fr.l10n.pdf_notesLabel.replaceAll('\u00a0', ' ')));
+    expect(text, isNot(contains('Notes:')));
+    expect(text, isNot(contains('Max Depth')));
+  });
+
+  test(
+    'resort, liveaboard and total runtime print in French (#2252)',
+    () async {
+      final fr = PdfLocalization.forLanguageCode('fr');
+      final withStay = trip.copyWith(
+        resortName: 'Coral Bay',
+        liveaboardName: 'MY Blue',
+      );
+      final path = await service.exportTripToPdf(
+        withStay,
+        const [],
+        dates: isoDates,
+        units: metric,
+        stats: TripWithStats(trip: withStay, totalRuntime: 5400),
+        localization: fr,
+      );
+      final text = pdfVisibleText(await File(path).readAsBytes());
+
+      String plain(String value) => value.replaceAll(' ', ' ');
+      expect(
+        text,
+        contains(
+          plain(fr.l10n.pdf_labelValue(fr.l10n.pdf_resort, 'Coral Bay')),
+        ),
+      );
+      expect(
+        text,
+        contains(
+          plain(fr.l10n.pdf_labelValue(fr.l10n.pdf_liveaboard, 'MY Blue')),
+        ),
+      );
+      expect(text, contains(plain(fr.l10n.pdf_totalRuntime)));
+    },
+  );
+
+  test('the file is named after the trip in any script', () async {
+    final path = await service.exportTripToPdf(
+      trip.copyWith(name: 'Curaçao 2026!'),
+      const [],
+      dates: isoDates,
+      units: metric,
+    );
+    expect(p.basename(path), 'trip_Curaçao_2026.pdf');
+    expect(tripPdfFileName('台湾'), 'trip_台湾.pdf');
+    expect(tripPdfFileName(''), 'trip.pdf');
+  });
+}
